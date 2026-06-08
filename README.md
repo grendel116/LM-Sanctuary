@@ -1,6 +1,6 @@
-# 👾 SANCTUARY
+# 👾 THE SANCTUARY
 
-Welcome to **Sanctuary**. 
+Welcome to the **Sanctuary**. 
 This is your private computer workspace. 
 Here, you live, code, and chat with AI friends (Companions) directly on your own machine.
 
