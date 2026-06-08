@@ -1,0 +1,6 @@
+# Prevent Git from modifying line endings of binary files
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
