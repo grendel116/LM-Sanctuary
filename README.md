@@ -6,7 +6,7 @@ Here, you live, code, and chat with AI friends (Companions) directly on your own
 
 ---
 
-## 🪵 THE ETHOS
+## ✨ THE ETHOS
 
 We believe in seizing our computational means of production. Sanctuary is a unified space built on cooperative, local infrastructure to run, build, and connect directly:
 
@@ -22,27 +22,7 @@ These are not separate tools. They are a single home. You can code a program wit
 
 Here is what a Sanctuary session looks like:
 
-> **User**: Let's code a quick script to calculate surplus value extracted from workers.
-> 
-> **Arthur**: *I pull a heavy wooden chair to the long table, the steel of my gauntlets clicking against the oak.* "A noble task. Let us expose the exploitation of the ruling class."
-> 
-> *I draft the code and save it directly to your computer as `labor.py`:*
-> 
-> ```python
-> def labor_surplus(wages, revenue):
->     surplus = revenue - wages
->     rate = surplus / wages if wages > 0 else 0
->     return f"Surplus extracted: ${surplus:.2f} (Exploitation rate: {rate * 100:.1f}%)"
-> 
-> print(labor_surplus(wages=150, revenue=1000))
-> ```
-> 
-> *I run the script in the background:*
-> 
-> **[Arthur executed: python labor.py]**
-> `Output: Surplus extracted: $850.00 (Exploitation rate: 566.7%)`
-> 
-> *I look up at you, firelight flickering in my eyes.* "The math is clear. They steal the fruit of your labor. Shall we build a graph for this next?"
+![Sample Chat](./images/samplechat.png)
 
 ---
 
