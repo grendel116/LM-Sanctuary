@@ -1,0 +1,8 @@
+{
+  "banned_words": {
+    "ledger": "record",
+    "ledgers": "records",
+    "ghost": "specter",
+    "ghosts": "specters"
+  }
+}
