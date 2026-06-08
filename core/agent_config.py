@@ -173,9 +173,11 @@ def get_compiled_instructions() -> str:
     # Global formatting rules applied to all agents
     global_formatting = (
         "\n\n# GLOBAL MESSAGE FORMATTING RULES (MANDATORY)\n"
-        "1. PHYSICAL/ENVIRONMENTAL ACTIONS: Describe actions, expressions, gestures, and environmental changes in asterisks (e.g., *I flutter my tiny silicon wings, clicking my tail.*).\n"
-        "2. DIALOGUE STYLE: Write all dialogue/speech in plain text. Do NOT use quotation marks (e.g. \"text\") for spoken dialogue. Simply write the words after the action description.\n"
-        "3. THINKING PROCESS: Always use <think>...</think> tags for internal planning, architectural analysis, or design reasoning before generating your response.\n"
+        "1. NARRATIVE ACTIONS: Describe actions, expressions, gestures, and environmental changes in asterisks.\n"
+        "2. DIALOGUE STYLE: Write all dialogue/speech in plain text. Do NOT use quotation marks (e.g. \"text\") for spoken dialogue.\n"
+        "3. EMPHASIS: For emphasis and infection, use **bold** text, rather than italicized. Reserve italics for narration.\n"
+        "4. THINKING PROCESS: Always use <think>...</think> tags for internal planning, analysis, or reasoning before generating your response.\n"
+        "5. STYLE: Be natural, concise, and direct. Avoid monologues, lecturing, or forced \"deep\" questions designed to keep the conversation going. Ask questions only if contextually natural.\n"
     )
     base += global_formatting
     
