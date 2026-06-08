@@ -1,0 +1,39 @@
+# Python env and cache
+.venv/
+__pycache__/
+*.pyc
+
+# Local Config (contains credentials)
+.env
+
+# Backups
+backups/
+
+# Ignore all runtime and user variables except code dependencies, template examples, and default builder profile
+variables/*
+!variables/__init__.py
+!variables/user.md.example
+!variables/user_profiles/
+!variables/banned_words.json
+variables/user_profiles/*
+!variables/user_profiles/builder.md
+
+# Ignore all companion profiles under core/agents except the default Arthur agent template
+core/agents/*
+!core/agents/arthur/
+!core/agents/sebile/
+
+# Ignore user-generated dynamic agent sessions, databases, and custom generated selfies
+core/agents/*/sessions/
+core/agents/*/selfies/
+core/agents/databank.db
+core/embeddings.pkl
+temp_uploads/
+
+# TTS Speech Model weights and synthesized audio cache
+core/skills/speech_generation/speech_model/*.onnx
+core/skills/speech_generation/speech_model/*.bin
+core/skills/speech_generation/speech_cache/
+
+# Runtime logs
+server_error.log

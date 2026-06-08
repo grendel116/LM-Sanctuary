@@ -1,0 +1,18 @@
+{
+  "name": "LM Sanctuary",
+  "short_name": "LM Sanctuary",
+  "description": "Enter the Sanctuary and converse with agents",
+  "start_url": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#121214",
+  "theme_color": "#121214",
+  "icons": [
+    {
+      "src": "/app_icon.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}

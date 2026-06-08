@@ -1,0 +1,2 @@
+# This placeholder ensures git tracks the speech_model directory.
+# The ONNX model weights and voice files will be automatically downloaded here on startup.
