@@ -178,8 +178,8 @@ class BaseAgentRunner:
         
         # Enforce global conciseness directive for all running LLMs at the runner level
         conciseness_directive = (
-            "\n\n# CONCISENESS RULE\n"
-            "Be brief, succinct, and natural. Avoid monologues.\n"
+            "\n\n# CONCISENESS & STYLE\n"
+            "Be brief and natural. No monologues, lecturing, or forced philosophical questions. Ask questions only when contextually natural.\n"
         )
         if "CONCISENESS" not in instructions and "brief, succinct, and natural" not in instructions:
             instructions += conciseness_directive
@@ -322,7 +322,7 @@ class GoogleAdkRunner(BaseAgentRunner):
             if inversion_directive is not None:
                 agent_config.set_inversion_directive(inversion_directive)
                 
-            instruction = agent_config.get_compiled_instructions()
+            instruction = self._get_system_instructions(inversion_directive)
             if rag_context:
                 instruction += f"\n\n# KNOWLEDGE BASE CONTEXT\nUse the following verified context from your Data Bank to help answer questions if relevant:\n{rag_context}\n"
             agent_config.root_agent.instruction = instruction
