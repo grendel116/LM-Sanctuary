@@ -27,6 +27,7 @@ core/agents/*
 core/agents/*/sessions/
 core/agents/*/portraits/
 core/agents/*/media/
+core/agents/*/uploads/
 core/agents/databank.db
 core/embeddings.pkl
 temp_uploads/

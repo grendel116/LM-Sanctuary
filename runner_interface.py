@@ -46,6 +46,35 @@ def _is_local_model(model: str) -> bool:
     return is_local_model(model)
 
 
+def _format_thinking_and_text(thoughts_list: list, texts_list: list) -> str:
+    """Combines lists of thoughts and texts, merging any existing <think> tags."""
+    import re
+    
+    thoughts_str = "".join(thoughts_list)
+    text_str = "".join(texts_list)
+    
+    # Extract any <think>...</think> blocks from text_str and move them to thoughts_str
+    # to avoid nested or multiple think blocks in the final message.
+    think_pattern = re.compile(r'<think>([\s\S]*?)</think>')
+    matches = think_pattern.findall(text_str)
+    if matches:
+        additional_thoughts = "\n".join(m.strip() for m in matches if m.strip())
+        if additional_thoughts:
+            if thoughts_str.strip():
+                thoughts_str += "\n" + additional_thoughts
+            else:
+                thoughts_str = additional_thoughts
+        # Remove the <think> blocks from the response text
+        text_str = think_pattern.sub('', text_str).strip()
+        
+    thoughts_str = thoughts_str.strip()
+    text_str = text_str.strip()
+    
+    if thoughts_str:
+        return f"<think>{thoughts_str}</think>\n{text_str}"
+    return text_str
+
+
 class BaseAgentRunner:
     def __init__(self, app_name="Sanctuary"):
         self.app_name = app_name
@@ -357,13 +386,20 @@ class GoogleAdkRunner(BaseAgentRunner):
         
         chat_history = []
         current_companion_msg = None
+        current_companion_thoughts = []
+        current_companion_texts = []
         
         for ev in adk_session.events:
             role = ev.author.lower()
             if role == 'user':
                 if current_companion_msg:
+                    current_companion_msg['text'] = _format_thinking_and_text(
+                        current_companion_thoughts, current_companion_texts
+                    )
                     chat_history.append(current_companion_msg)
                     current_companion_msg = None
+                    current_companion_thoughts = []
+                    current_companion_texts = []
                 
                 text = ""
                 image_url = None
@@ -391,11 +427,22 @@ class GoogleAdkRunner(BaseAgentRunner):
                         'text': '',
                         'tool_calls': []
                     }
+                    current_companion_thoughts = []
+                    current_companion_texts = []
                 
                 if ev.content and ev.content.parts:
                     for part in ev.content.parts:
                         if part.text:
-                            current_companion_msg['text'] += part.text
+                            is_thought = getattr(part, 'thought', False)
+                            if not is_thought and getattr(part, 'metadata', None):
+                                metadata = part.metadata
+                                if isinstance(metadata, dict) and (metadata.get('thought') or metadata.get('adk_thought')):
+                                    is_thought = True
+                            
+                            if is_thought:
+                                current_companion_thoughts.append(part.text)
+                            else:
+                                current_companion_texts.append(part.text)
                         elif getattr(part, 'function_call', None):
                             fc = part.function_call
                             current_companion_msg['tool_calls'].append({
@@ -423,6 +470,8 @@ class GoogleAdkRunner(BaseAgentRunner):
                         'text': '',
                         'tool_calls': []
                     }
+                    current_companion_thoughts = []
+                    current_companion_texts = []
                 if ev.content and ev.content.parts:
                     for part in ev.content.parts:
                         if getattr(part, 'function_response', None):
@@ -437,11 +486,15 @@ class GoogleAdkRunner(BaseAgentRunner):
                                 'id': fr.id
                             })
         if current_companion_msg:
+            current_companion_msg['text'] = _format_thinking_and_text(
+                current_companion_thoughts, current_companion_texts
+            )
             chat_history.append(current_companion_msg)
         return chat_history
 
     async def _execute_runner_and_collect(self, session_id, content):
-        full_text = ""
+        thoughts = []
+        texts = []
         tool_calls = []
         
         async for event in self.runner.run_async(
@@ -452,7 +505,16 @@ class GoogleAdkRunner(BaseAgentRunner):
             if event.content and event.content.parts:
                 for part in event.content.parts:
                     if part.text:
-                        full_text += part.text
+                        is_thought = getattr(part, 'thought', False)
+                        if not is_thought and getattr(part, 'metadata', None):
+                            metadata = part.metadata
+                            if isinstance(metadata, dict) and (metadata.get('thought') or metadata.get('adk_thought')):
+                                is_thought = True
+                        
+                        if is_thought:
+                            thoughts.append(part.text)
+                        else:
+                            texts.append(part.text)
                     elif getattr(part, 'function_call', None):
                         fc = part.function_call
                         tool_calls.append({
@@ -472,6 +534,9 @@ class GoogleAdkRunner(BaseAgentRunner):
                             'response': resp_str,
                             'id': fr.id
                         })
+                        
+        full_text = _format_thinking_and_text(thoughts, texts)
+        
         # Ensure images are embedded
         full_text = self._ensure_images_are_embedded(full_text)
         
