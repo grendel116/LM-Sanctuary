@@ -782,31 +782,37 @@ def multi_platform_research(topic: str) -> str:
 
     # 4. arXiv Papers (via arXiv API)
     try:
-        url = "http://export.arxiv.org/api/query"
-        params = {
-            "search_query": f"all:{topic}",
-            "max_results": 5,
-            "sortBy": "lastUpdatedDate",
-            "sortOrder": "descending"
-        }
-        res = requests.get(url, params=params, timeout=5)
-        if res.status_code == 200:
-            root = ET.fromstring(res.text)
-            ns = {'atom': 'http://www.w3.org/2005/Atom'}
-            entries = root.findall('atom:entry', ns)
-            arxiv_sec = ["## arXiv Recent Research Papers"]
-            if entries:
-                for entry in entries[:5]:
-                    title = entry.find('atom:title', ns).text.strip().replace("\n", " ")
-                    published = entry.find('atom:published', ns).text[:10]
-                    summary = entry.find('atom:summary', ns).text.strip().replace("\n", " ")
-                    if len(summary) > 250:
-                        summary = summary[:247] + "..."
-                    link = entry.find('atom:id', ns).text
-                    arxiv_sec.append(f"- [{title}]({link}) (Published: {published})\n  - Summary: {summary}")
-            else:
-                arxiv_sec.append("No papers found.")
-            results.append("\n".join(arxiv_sec))
+        import re
+        search_words = re.findall(r'\w+', topic)
+        entries = []
+        ns = {'atom': 'http://www.w3.org/2005/Atom'}
+        if search_words:
+            arxiv_query = " AND ".join(f"all:{word}" for word in search_words)
+            url = "http://export.arxiv.org/api/query"
+            params = {
+                "search_query": arxiv_query,
+                "max_results": 5,
+                "sortBy": "lastUpdatedDate",
+                "sortOrder": "descending"
+            }
+            res = requests.get(url, params=params, timeout=5)
+            if res.status_code == 200:
+                root = ET.fromstring(res.text)
+                entries = root.findall('atom:entry', ns)
+                
+        arxiv_sec = ["## arXiv Recent Research Papers"]
+        if entries:
+            for entry in entries[:5]:
+                title = entry.find('atom:title', ns).text.strip().replace("\n", " ")
+                published = entry.find('atom:published', ns).text[:10]
+                summary = entry.find('atom:summary', ns).text.strip().replace("\n", " ")
+                if len(summary) > 250:
+                    summary = summary[:247] + "..."
+                link = entry.find('atom:id', ns).text
+                arxiv_sec.append(f"- [{title}]({link}) (Published: {published})\n  - Summary: {summary}")
+        else:
+            arxiv_sec.append("No papers found.")
+        results.append("\n".join(arxiv_sec))
     except Exception as e:
         results.append(f"## arXiv Papers\nError fetching arXiv data: {e}")
 
