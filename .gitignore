@@ -23,9 +23,10 @@ core/agents/*
 !core/agents/arthur/
 !core/agents/sebile/
 
-# Ignore user-generated dynamic agent sessions, databases, and custom generated selfies
+# Ignore user-generated dynamic agent sessions, databases, and custom generated portraits
 core/agents/*/sessions/
-core/agents/*/selfies/
+core/agents/*/portraits/
+core/agents/*/media/
 core/agents/databank.db
 core/embeddings.pkl
 temp_uploads/
@@ -36,4 +37,7 @@ core/skills/speech_generation/speech_model/*.bin
 core/skills/speech_generation/speech_cache/
 
 # Runtime logs
-server_error.log
+*.log
+
+# Temporary test files
+scratch_veo_test.mp4

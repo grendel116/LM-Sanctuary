@@ -1,4 +1,4 @@
-const CACHE_NAME = 'agent-sanctuary-v2';
+const CACHE_NAME = 'agent-sanctuary-v3';
 const ASSETS = [
   '/profile.svg',
   '/app_icon.png',
@@ -39,11 +39,13 @@ self.addEventListener('fetch', (event) => {
 
   // Bypass cache for standard app API requests, profiles, and app icons
   const url = new URL(event.request.url);
-  if (url.pathname.startsWith('/chat') || 
+  if (url.pathname === '/' ||
+      url.pathname.startsWith('/chat') || 
       url.pathname.startsWith('/history') || 
       url.pathname.startsWith('/models') || 
       url.pathname.startsWith('/api/') ||
       url.pathname.startsWith('/agents/') ||
+      url.pathname.startsWith('/images/') ||
       url.pathname === '/profile.svg' ||
       url.pathname === '/app_icon.png') {
     return;

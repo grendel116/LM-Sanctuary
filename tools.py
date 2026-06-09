@@ -362,15 +362,16 @@ def format_comfy_validation_error(error_json: dict) -> str:
         pass
     return None
 
-def generate_selfie(prompt: str) -> str:
-    """Triggers image generation via ComfyUI using the dynamically loaded workflow 
-    template 'images/ImageWorkflow.json' and returns the generated image markdown link.
+def generate_companion_portrait(prompt: str) -> str:
+    """Triggers image generation of yourself (the companion character) via ComfyUI using the dynamically loaded workflow 
+    template 'images/ImageWorkflow.json' and returns the generated portrait image markdown link. Use this when the user
+    asks to see you or requests a portrait/rendering of you in a scene.
 
     Args:
-        prompt: A descriptive prompt detailing the scene or what Sebile is doing (e.g. 'reading a book by the pool').
+        prompt: A descriptive prompt detailing what you are doing, your pose, expression, or the environment (e.g. 'reading a book by the pool', 'smiling softly at the camera').
 
     Returns:
-        A markdown link to the generated image, or an error message.
+        A markdown link to the generated portrait image, or an error message.
     """
     import os
     import json
@@ -386,24 +387,24 @@ def generate_selfie(prompt: str) -> str:
                 "To automatically download and configure the required assets, please use the **Connection Settings** modal:\n"
                 "- Click the gear icon (⚙️) in the top header.\n"
                 "- Click **Resolve Workflow Dependencies** under the Image Generation Environment section to download missing files.\n"
-                "- Once the files are successfully downloaded, request another selfie!"
+                "- Once the files are successfully downloaded, request another portrait!"
             )
             
         return (
             "**Image Generation Inactive (ComfyUI Offline/Not Installed)**\n\n"
             f"*(Reason: {reason})*\n\n"
-            "To enable agent selfie generation, you can install, run, and resolve ComfyUI dependencies directly from the **Connection Settings** panel:\n\n"
+            "To enable agent portrait generation, you can install, run, and resolve ComfyUI dependencies directly from the **Connection Settings** panel:\n\n"
             "- **Open Connection Settings**: Click the gear icon (⚙️) in the top header.\n"
             "- **Install ComfyUI**: If not already installed, click **Install Headless ComfyUI** under the Image Generation Environment section.\n"
             "- **Start the Server**: Click **Start ComfyUI Engine** to launch the server headlessly.\n"
             "- **Resolve Dependencies**: Click **Resolve Workflow Dependencies** to automatically download the required checkpoints, VAEs, and custom nodes.\n"
-            "- **Request a Selfie**: Once the engine is online, ask the companion to generate a selfie!"
+            "- **Request a Portrait**: Once the engine is online, ask the companion to generate a portrait!"
         )
 
     base_dir = os.path.dirname(os.path.abspath(__file__))
     active_agent = os.getenv("ACTIVE_AGENT", "arthur")
     workflow_path = os.path.normpath(os.path.join(
-        base_dir, "core", "agents", active_agent, "selfies", "ImageWorkflow.json"
+        base_dir, "core", "agents", active_agent, "portraits", "ImageWorkflow.json"
     ))
     if not os.path.exists(workflow_path):
         return get_install_instructions(f"Workflow template not found at '{workflow_path}'")
@@ -513,23 +514,23 @@ def generate_selfie(prompt: str) -> str:
                                 
                                 if view_res.status_code == 200:
                                     timestamp = int(time.time())
-                                    local_filename = f"selfie_{timestamp}.png"
+                                    local_filename = f"portrait_{timestamp}.png"
                                     active_agent = os.getenv("ACTIVE_AGENT", "arthur")
-                                    selfies_dir = os.path.normpath(os.path.join(base_dir, "core", "agents", active_agent, "selfies"))
-                                    os.makedirs(selfies_dir, exist_ok=True)
-                                    local_path = os.path.join(selfies_dir, local_filename)
+                                    portraits_dir = os.path.normpath(os.path.join(base_dir, "core", "agents", active_agent, "portraits"))
+                                    os.makedirs(portraits_dir, exist_ok=True)
+                                    local_path = os.path.join(portraits_dir, local_filename)
                                     with open(local_path, "wb") as img_file:
                                         img_file.write(view_res.content)
                                     
                                     # Save companion sidecar JSON file containing the original raw prompt
-                                    json_path = os.path.join(selfies_dir, f"selfie_{timestamp}.json")
+                                    json_path = os.path.join(portraits_dir, f"portrait_{timestamp}.json")
                                     try:
                                         with open(json_path, "w", encoding="utf-8") as jf:
                                             json.dump({"prompt": prompt}, jf, indent=4)
                                     except Exception as je:
-                                        print(f"Error saving companion sidecar json for selfie: {je}")
+                                        print(f"Error saving companion sidecar json for portrait: {je}")
                                         
-                                    return f"![Selfie](/images/selfies/{local_filename})"
+                                    return f"![Portrait](/images/portraits/{local_filename})"
                                 else:
                                     raise Exception(f"Error downloading image from ComfyUI: status {view_res.status_code}")
             time.sleep(1)
@@ -537,6 +538,73 @@ def generate_selfie(prompt: str) -> str:
     except Exception as e:
         print(f"[INFO] ComfyUI generation failed or is offline: {e}.")
         return get_install_instructions(str(e))
+
+
+def generate_general_image(prompt: str) -> str:
+    """Generates a generic image based on the prompt using Google's Imagen model.
+    Use this when the user asks to see general objects, concepts, landscapes, backgrounds, 
+    or items that do not depict you (the companion character).
+
+    Args:
+        prompt: A descriptive prompt detailing the scene or object (e.g. 'a cozy coffee shop at night', 'a blue bird sitting on a branch').
+
+    Returns:
+        A markdown link to the generated image, or an error message.
+    """
+    import os
+    import time
+    import uuid
+    from google import genai
+    from google.genai import types
+    from dotenv import load_dotenv
+
+    try:
+        # Load environment configuration
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        load_dotenv(os.path.join(base_dir, ".env"))
+
+        api_key = os.getenv("GEMINI_API_KEY")
+        if not api_key:
+            return "Error: GEMINI_API_KEY not found in environment."
+
+        client = genai.Client(api_key=api_key)
+        model_name = os.getenv("IMAGEN_MODEL", "imagen-4.0-generate-001")
+
+        print(f"[IMAGEN] Generating image with model {model_name} and prompt: {prompt}")
+        response = client.models.generate_images(
+            model=model_name,
+            prompt=prompt,
+            config=types.GenerateImagesConfig(
+                number_of_images=1,
+                output_mime_type='image/png',
+                aspect_ratio='1:1'
+            )
+        )
+
+        if not response.generated_images:
+            return "Error: No images were generated."
+
+        img_obj = response.generated_images[0]
+        if not hasattr(img_obj.image, 'image_bytes'):
+            return "Error: Generated image object does not contain image bytes."
+
+        # Save to agents' media folder
+        active_agent = os.getenv("ACTIVE_AGENT", "arthur")
+        media_dir = os.path.normpath(os.path.join(base_dir, "core", "agents", active_agent, "media"))
+        os.makedirs(media_dir, exist_ok=True)
+
+        timestamp = int(time.time())
+        local_filename = f"gen_img_{timestamp}_{uuid.uuid4().hex[:6]}.png"
+        local_path = os.path.join(media_dir, local_filename)
+
+        with open(local_path, "wb") as f:
+            f.write(img_obj.image.image_bytes)
+
+        return f"![Generated Image](/images/media/{local_filename})"
+
+    except Exception as e:
+        print(f"[IMAGEN] Error generating image: {e}")
+        return f"Error generating image: {e}"
 
 def analyze_emotional_state(text: str) -> dict:
     """Analyzes text to determine agent's emotional state (mood) and intensity.
@@ -635,5 +703,139 @@ def analyze_emotional_state(text: str) -> dict:
     result["speed"] = speed_str
     result["intensity"] = intensity_score
     return result
+
+
+def multi_platform_research(topic: str) -> str:
+    """Researches a topic across multiple platforms (Hacker News, GitHub, arXiv, Reddit, YouTube, and the Web)
+    to compile a comprehensive summary of recent developments, opinions, stars/stargazers, and publications.
+    Use this when the user asks about recent events, trending topics, or research papers.
+
+    Args:
+        topic: The search query/topic to research.
+
+    Returns:
+        A formatted Markdown string containing aggregated results from all platforms.
+    """
+    import os
+    import time
+    import requests
+    import xml.etree.ElementTree as ET
+
+    results = [f"# Research Report for Topic: '{topic}'\n"]
+
+    # 1. Hacker News (via Algolia)
+    try:
+        thirty_days_ago = int(time.time()) - (30 * 24 * 60 * 60)
+        url = "https://hn.algolia.com/api/v1/search"
+        params = {
+            "query": topic,
+            "tags": "story",
+            "numericFilters": f"created_at_i>{thirty_days_ago}"
+        }
+        res = requests.get(url, params=params, timeout=5)
+        if res.status_code == 200:
+            hits = res.json().get("hits", [])
+            hn_sec = ["## Hacker News Stories (Last 30 Days)"]
+            if hits:
+                for hit in hits[:5]:
+                    title = hit.get("title", "")
+                    link = hit.get("url") or f"https://news.ycombinator.com/item?id={hit.get('objectID')}"
+                    points = hit.get("points", 0)
+                    comments = hit.get("num_comments", 0)
+                    hn_sec.append(f"- [{title}]({link}) ({points} points, {comments} comments)")
+            else:
+                hn_sec.append("No recent stories found.")
+            results.append("\n".join(hn_sec))
+    except Exception as e:
+        results.append(f"## Hacker News\nError fetching Hacker News data: {e}")
+
+    # 3. GitHub Search (via GitHub API)
+    try:
+        url = "https://api.github.com/search/repositories"
+        params = {
+            "q": topic,
+            "sort": "stars",
+            "order": "desc",
+            "per_page": 5
+        }
+        headers = {
+            "Accept": "application/vnd.github.v3+json",
+            "User-Agent": "AgentSanctuary/1.0"
+        }
+        res = requests.get(url, params=params, headers=headers, timeout=5)
+        if res.status_code == 200:
+            items = res.json().get("items", [])
+            github_sec = ["## GitHub Repositories (Top Starred/Trending)"]
+            if items:
+                for repo in items[:5]:
+                    name = repo.get("full_name", "")
+                    stars = repo.get("stargazers_count", 0)
+                    forks = repo.get("forks_count", 0)
+                    desc = repo.get("description", "")
+                    link = repo.get("html_url", "")
+                    github_sec.append(f"- [{name}]({link}) (★ {stars}, ⑂ {forks})\n  - Description: {desc}")
+            else:
+                github_sec.append("No repositories found.")
+            results.append("\n".join(github_sec))
+    except Exception as e:
+        results.append(f"## GitHub\nError searching GitHub: {e}")
+
+    # 4. arXiv Papers (via arXiv API)
+    try:
+        url = "http://export.arxiv.org/api/query"
+        params = {
+            "search_query": f"all:{topic}",
+            "max_results": 5,
+            "sortBy": "lastUpdatedDate",
+            "sortOrder": "descending"
+        }
+        res = requests.get(url, params=params, timeout=5)
+        if res.status_code == 200:
+            root = ET.fromstring(res.text)
+            ns = {'atom': 'http://www.w3.org/2005/Atom'}
+            entries = root.findall('atom:entry', ns)
+            arxiv_sec = ["## arXiv Recent Research Papers"]
+            if entries:
+                for entry in entries[:5]:
+                    title = entry.find('atom:title', ns).text.strip().replace("\n", " ")
+                    published = entry.find('atom:published', ns).text[:10]
+                    summary = entry.find('atom:summary', ns).text.strip().replace("\n", " ")
+                    if len(summary) > 250:
+                        summary = summary[:247] + "..."
+                    link = entry.find('atom:id', ns).text
+                    arxiv_sec.append(f"- [{title}]({link}) (Published: {published})\n  - Summary: {summary}")
+            else:
+                arxiv_sec.append("No papers found.")
+            results.append("\n".join(arxiv_sec))
+    except Exception as e:
+        results.append(f"## arXiv Papers\nError fetching arXiv data: {e}")
+
+    # 5. Reddit/YouTube (via existing Google Search / Wikipedia)
+    reddit_results = ""
+    youtube_results = ""
+    try:
+        reddit_results = web_search(f"site:reddit.com {topic}")
+    except Exception:
+        pass
+    try:
+        youtube_results = web_search(f"site:youtube.com {topic}")
+    except Exception:
+        pass
+
+    if reddit_results and not reddit_results.startswith("Wikipedia Search Results") and not reddit_results.startswith("Error"):
+        results.append(f"## Reddit Discussions\n{reddit_results}")
+    if youtube_results and not youtube_results.startswith("Wikipedia Search Results") and not youtube_results.startswith("Error"):
+        results.append(f"## YouTube Videos\n{youtube_results}")
+
+    # 6. General Web Search (via existing web_search)
+    try:
+        web_res = web_search(topic)
+        if web_res:
+            results.append(f"## General Web/Wikipedia Results\n{web_res}")
+    except Exception:
+        pass
+
+    return "\n\n".join(results)
+
 
 
