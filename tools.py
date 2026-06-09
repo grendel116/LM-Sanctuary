@@ -37,7 +37,60 @@ def confirm_tool_execution(tool_name: str, details: str) -> bool:
     if call_id in pending_tool_calls:
         del pending_tool_calls[call_id]
     return False
+def read_webpage(url: str) -> str:
+    """Fetches and extracts the readable text content of a specific webpage URL.
+    Use this when the user shares a URL/link in the chat and asks you to read, review, or analyze it.
 
+    Args:
+        url: The web address (HTTP/HTTPS URL) to fetch and read.
+
+    Returns:
+        The extracted clean text content of the webpage, or an error message.
+    """
+    import requests
+    from bs4 import BeautifulSoup
+    import urllib3
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+    if not url.startswith(("http://", "https://")):
+        return "Error: Invalid URL. The URL must start with http:// or https://"
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
+    }
+
+    try:
+        response = requests.get(url, headers=headers, timeout=15, verify=False)
+        if response.status_code != 200:
+            return f"Error: Failed to fetch webpage. HTTP status code: {response.status_code}"
+
+        encoding = response.encoding if response.encoding else 'utf-8'
+        html_content = response.content.decode(encoding, errors='replace')
+
+        soup = BeautifulSoup(html_content, 'html.parser')
+
+        for element in soup(["script", "style", "nav", "header", "footer", "meta", "noscript", "svg", "iframe"]):
+            element.decompose()
+
+        text = soup.get_text(separator='\n')
+
+        lines = (line.strip() for line in text.splitlines())
+        chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
+        clean_text = '\n'.join(chunk for chunk in chunks if chunk)
+
+        limit = 12000
+        if len(clean_text) > limit:
+            return clean_text[:limit] + f"\n\n... [Content truncated, total length: {len(clean_text)} characters] ..."
+
+        if not clean_text.strip():
+            return "Error: Webpage loaded, but no readable text content could be extracted."
+
+        return clean_text
+
+    except requests.exceptions.Timeout:
+        return "Error: Connection timed out while attempting to load the webpage."
+    except Exception as e:
+        return f"Error loading webpage: {e}"
 
 
 def web_search(query: str) -> str:
