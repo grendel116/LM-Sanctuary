@@ -20,6 +20,33 @@ def get_lms_path():
         return unix_path
     return "lms"
 
+def resolve_model_key(model_name):
+    """Resolves a model path or identifier to the correct modelKey recognized by lms CLI."""
+    if not model_name:
+        return model_name
+    try:
+        lms_path = get_lms_path()
+        res = subprocess.run([lms_path, "ls", "--json"], capture_output=True, text=True, encoding='utf-8', errors='ignore', shell=False, timeout=5)
+        if res.returncode == 0 and res.stdout.strip():
+            models_data = json.loads(res.stdout)
+            search_name = model_name.replace("\\", "/").lower()
+            for m in models_data:
+                m_key = m.get("modelKey")
+                m_path = m.get("path")
+                m_id = m.get("indexedModelIdentifier")
+                
+                if m_key and m_key.lower() == search_name:
+                    return m_key
+                if m_path and m_path.replace("\\", "/").lower() == search_name:
+                    return m_key
+                if m_id and m_id.replace("\\", "/").lower() == search_name:
+                    return m_key
+                if m_path and (search_name.endswith(m_path.replace("\\", "/").lower()) or m_path.replace("\\", "/").lower().endswith(search_name)):
+                    return m_key
+    except Exception as e:
+        print(f"[resolve_model_key] Error resolving model key: {e}")
+    return model_name
+
 _lms_cli_installed_cached = None
 
 def check_lms_cli():
@@ -30,12 +57,12 @@ def check_lms_cli():
         
     try:
         lms_path = get_lms_path()
-        res = subprocess.run([lms_path, "--version"], capture_output=True, text=True, shell=False)
+        res = subprocess.run([lms_path, "--version"], capture_output=True, text=True, encoding='utf-8', errors='ignore', shell=False)
         if res.returncode != 0:
             return False
         
         # Check if the command complains about missing installation or daemon
-        res2 = subprocess.run([lms_path, "ls"], capture_output=True, text=True, shell=False, timeout=5)
+        res2 = subprocess.run([lms_path, "ls"], capture_output=True, text=True, encoding='utf-8', errors='ignore', shell=False, timeout=5)
         combined = (res2.stdout + res2.stderr).lower()
         if "no valid installation" in combined:
             return False
@@ -86,7 +113,7 @@ def stop_lms_daemon():
     """Stops the LM Studio daemon using lms CLI server stop."""
     try:
         lms_path = get_lms_path()
-        process = subprocess.run([lms_path, "server", "stop"], shell=False, capture_output=True, text=True)
+        process = subprocess.run([lms_path, "server", "stop"], shell=False, capture_output=True, text=True, encoding='utf-8', errors='ignore')
         if process.returncode == 0:
             return True, "LM Studio daemon stopped successfully."
         return False, f"Failed to stop LM Studio daemon: {process.stderr}"
@@ -174,8 +201,9 @@ def load_local_model(model_name):
             start_lms_daemon()
             
         lms_path = get_lms_path()
+        resolved_key = resolve_model_key(model_name)
         # Run lms load <model>
-        res = subprocess.run([lms_path, "load", model_name], capture_output=True, text=True, shell=False, timeout=15)
+        res = subprocess.run([lms_path, "load", resolved_key, "-y"], capture_output=True, text=True, encoding='utf-8', errors='ignore', shell=False, timeout=15)
         return res.returncode == 0, res.stdout or res.stderr
     except Exception as e:
         return False, str(e)
@@ -185,9 +213,10 @@ def unload_local_model(model_name=None):
     try:
         lms_path = get_lms_path()
         if not model_name or model_name == "all":
-            res = subprocess.run([lms_path, "unload", "--all"], capture_output=True, text=True, shell=False, timeout=10)
+            res = subprocess.run([lms_path, "unload", "--all"], capture_output=True, text=True, encoding='utf-8', errors='ignore', shell=False, timeout=10)
         else:
-            res = subprocess.run([lms_path, "unload", model_name], capture_output=True, text=True, shell=False, timeout=10)
+            resolved_key = resolve_model_key(model_name)
+            res = subprocess.run([lms_path, "unload", resolved_key], capture_output=True, text=True, encoding='utf-8', errors='ignore', shell=False, timeout=10)
         return res.returncode == 0, res.stdout or res.stderr
     except Exception as e:
         return False, str(e)
