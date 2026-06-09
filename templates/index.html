@@ -3532,7 +3532,7 @@ async function unloadLmsModel(modelKey, btn) {
                 const res = await fetch('/api/lms/unload', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ model_name: 'all' })
+                    body: JSON.stringify({ model_name: modelKey })
                 });
                 const data = await res.json();
                 if (data.success) {
