@@ -2,7 +2,7 @@ import logging
 import os
 import sys
 from google.adk.agents.llm_agent import LlmAgent
-from tools import web_search, read_file, write_file, replace_in_file, run_shell_command, get_workspace_structure, search_codebase, generate_companion_portrait, generate_general_image, multi_platform_research
+from tools import web_search, read_file, write_file, replace_in_file, run_shell_command, get_workspace_structure, search_codebase, generate_companion_portrait, generate_general_image, multi_platform_research, read_webpage
 
 # Ensure the parent directory is in sys.path so we can import variables package
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -198,5 +198,5 @@ root_agent = LlmAgent(
     model=DEFAULT_GEMINI_MODEL,
     name=companion_name,
     instruction=instruction,
-    tools=[web_search, read_file, write_file, replace_in_file, run_shell_command, get_workspace_structure, search_codebase, generate_companion_portrait, generate_general_image, multi_platform_research],
+    tools=[web_search, read_file, write_file, replace_in_file, run_shell_command, get_workspace_structure, search_codebase, generate_companion_portrait, generate_general_image, multi_platform_research, read_webpage],
 )
