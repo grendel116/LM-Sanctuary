@@ -304,7 +304,7 @@ def start_comfy_daemon():
         cuda_supported = False
         try:
             check_cmd = [venv_python, "-c", "import torch; print(torch.cuda.is_available())"]
-            res = subprocess.run(check_cmd, capture_output=True, text=True, timeout=5.0)
+            res = subprocess.run(check_cmd, capture_output=True, text=True, timeout=30.0)
             if "True" in res.stdout:
                 cuda_supported = True
         except Exception:
@@ -314,7 +314,7 @@ def start_comfy_daemon():
         dml_supported = False
         try:
             check_cmd = [venv_python, "-c", "import torch_directml; print(torch_directml.is_available())"]
-            res = subprocess.run(check_cmd, capture_output=True, text=True, timeout=5.0)
+            res = subprocess.run(check_cmd, capture_output=True, text=True, timeout=30.0)
             if "True" in res.stdout:
                 dml_supported = True
         except Exception:
