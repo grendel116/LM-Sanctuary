@@ -75,8 +75,9 @@ def check_lms_cli():
 def check_daemon_status():
     """Checks if the LM Studio daemon is running and responsive."""
     try:
-        # Check standard endpoint or see if API server port 1234 is up
-        response = requests.get("http://127.0.0.1:1234/v1/models", timeout=0.5)
+        from variables import LOCAL_MODELS_URL
+        # Check dynamic models URL
+        response = requests.get(LOCAL_MODELS_URL, timeout=0.5)
         if response.status_code == 200:
             return True
     except Exception:
