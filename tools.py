@@ -429,10 +429,27 @@ def generate_companion_portrait(prompt: str) -> str:
     if available_vaes and selected_vae not in available_vaes:
         raise Exception(f"Missing VAE: The required VAE file `{selected_vae}` was not found.")
 
-    # Extract %appearance% if configured dynamically inside the workflow JSON file
-    appearance_val = f"character named {active_agent}"
-    if "6" in workflow and "inputs" in workflow["6"] and "appearance" in workflow["6"]["inputs"]:
-        appearance_val = workflow["6"]["inputs"]["appearance"]
+    # Load appearance from the active agent's markdown context (## IDENTITY & FORM)
+    appearance_val = ""
+    agent_md_path = os.path.normpath(os.path.join(
+        base_dir, "core", "agents", active_agent, f"{active_agent.upper()}.md"
+    ))
+    if os.path.exists(agent_md_path):
+        try:
+            with open(agent_md_path, "r", encoding="utf-8") as f:
+                content = f.read()
+            import re
+            match = re.search(r'## IDENTITY & FORM\s*\n+([^\n#]+)', content)
+            if match:
+                appearance_val = match.group(1).strip()
+        except Exception as e:
+            print(f"[DEBUG] Error reading identity for appearance: {e}", flush=True)
+
+    if not appearance_val:
+        if "6" in workflow and "inputs" in workflow["6"] and "appearance" in workflow["6"]["inputs"]:
+            appearance_val = workflow["6"]["inputs"]["appearance"]
+        else:
+            appearance_val = f"character named {active_agent}"
 
     # Define dynamic replacement parameters
     seed_val = random.randint(1, 1125899906842624)
