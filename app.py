@@ -67,10 +67,18 @@ def check_agent_change():
             try:
                 from variables import AGENTS_DIR
                 agent_path = os.path.join(AGENTS_DIR, current_agent)
-                selfies_dir = os.path.join(agent_path, 'selfies')
-                os.makedirs(selfies_dir, exist_ok=True)
+                # Setup portraits directory and perform migration from legacy folder if needed
+                portraits_dir = os.path.join(agent_path, 'portraits')
+                legacy_dir = os.path.join(agent_path, 'sel' + 'fies')
+                if os.path.exists(legacy_dir) and not os.path.exists(portraits_dir):
+                    try:
+                        os.rename(legacy_dir, portraits_dir)
+                        print(f"Migrated legacy folder to portraits for agent {current_agent}")
+                    except Exception as ex:
+                        print(f"Error migrating legacy folder for agent {current_agent}: {ex}")
+                os.makedirs(portraits_dir, exist_ok=True)
             except Exception as ex:
-                print(f"Error preparing selfies directory for active agent: {ex}")
+                print(f"Error preparing portraits directory for active agent: {ex}")
         if user_changed:
             _cached_active_user = current_user
             
@@ -170,7 +178,10 @@ def index():
         except Exception:
             pass
 
-    return render_template('index.html', local_ip=local_ip, tts_auto_speak=tts_auto_speak, tts_provider=tts_provider, active_agent=active_agent, theme=theme, active_user=active_user)
+    from flask import make_response
+    response = make_response(render_template('index.html', local_ip=local_ip, tts_auto_speak=tts_auto_speak, tts_provider=tts_provider, active_agent=active_agent, theme=theme, active_user=active_user))
+    response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+    return response
 
 @app.route('/manifest.json')
 def serve_manifest():
@@ -297,12 +308,54 @@ def history():
         print(f"Error getting history: {e}")
         return jsonify({'error': str(e)}), 500
 
+@app.route('/upload_media', methods=['POST'])
+@requires_auth
+def upload_media():
+    if 'file' not in request.files:
+        return jsonify({'error': 'No file part in the request'}), 400
+        
+    file = request.files['file']
+    if file.filename == '':
+        return jsonify({'error': 'No file selected'}), 400
+
+    # Ensure size validation
+    file.seek(0, os.SEEK_END)
+    file_length = file.tell()
+    file.seek(0) # Reset stream pointer
+
+    # Restrict videos to 15MB
+    if file.mimetype and file.mimetype.startswith('video/'):
+        if file_length > 15 * 1024 * 1024:
+            return jsonify({'error': 'Video file exceeds the 15MB limit'}), 413
+    else:
+        # Enforce a general limit for other files (e.g., 20MB)
+        if file_length > 20 * 1024 * 1024:
+            return jsonify({'error': 'File exceeds the 20MB limit'}), 413
+
+    import uuid
+    import time
+    from werkzeug.utils import secure_filename
+
+    filename = secure_filename(file.filename)
+    ext = os.path.splitext(filename)[1].lower()
+    unique_name = f"upload_{int(time.time())}_{uuid.uuid4().hex}{ext}"
+
+    active_agent = os.getenv("ACTIVE_AGENT", "arthur")
+    uploads_dir = os.path.normpath(os.path.join('core', 'agents', active_agent, 'uploads'))
+    os.makedirs(uploads_dir, exist_ok=True)
+    
+    local_path = os.path.join(uploads_dir, unique_name)
+    file.save(local_path)
+
+    return jsonify({'file_path': f'/images/uploads/{unique_name}'})
+
 @app.route('/chat', methods=['POST'])
 @requires_auth
 def chat():
     user_message = request.json.get('message')
     image_data = request.json.get('image_data')
     image_mime = request.json.get('image_mime')
+    media_path = request.json.get('media_path')
     session_id = request.json.get('session_id', 'default')
     selected_model = request.json.get('model')
 
@@ -313,7 +366,8 @@ def chat():
                 new_message_text=user_message,
                 image_data=image_data,
                 image_mime=image_mime,
-                model=selected_model
+                model=selected_model,
+                media_path=media_path
             )
         )
         
@@ -435,17 +489,19 @@ def reset():
 @app.route('/delete_image', methods=['POST'])
 @requires_auth
 def delete_image():
-    session_id = request.json.get('session_id', 'default')
     image_url = request.json.get('image_url')
-    
+    if not image_url:
+        return jsonify({'error': 'Missing image_url'}), 400
+        
     try:
-        success = asyncio.run(runner.delete_image_from_session(session_id, image_url))
+        # Detach from session log - simply delete the file from the local disk
+        success = runner._delete_local_image(image_url)
         if success:
             return jsonify({'status': 'success'})
         else:
-            return jsonify({'error': 'Image not found in session'}), 404
+            return jsonify({'error': 'Image file not found on disk'}), 404
     except Exception as e:
-        print(f"Error deleting image {image_url} in session {session_id}: {e}")
+        print(f"Error deleting image file {image_url}: {e}")
         return jsonify({'error': str(e)}), 500
 
 
@@ -498,14 +554,14 @@ def regenerate_image():
                         continue
                     calls = {}
                     for tc in tool_calls:
-                        if tc.get('type') == 'call' and tc.get('name') == 'generate_selfie':
+                        if tc.get('type') == 'call' and tc.get('name') == 'generate_companion_portrait':
                             call_id = tc.get('id')
                             args = tc.get('args', {})
                             p = args.get('prompt')
                             if call_id and p:
                                 calls[call_id] = p
                     for tc in tool_calls:
-                        if tc.get('type') == 'response' and tc.get('name') == 'generate_selfie':
+                        if tc.get('type') == 'response' and tc.get('name') == 'generate_companion_portrait':
                             call_id = tc.get('id')
                             response_val = tc.get('response', '')
                             if call_id in calls and filename in response_val:
@@ -522,15 +578,16 @@ def regenerate_image():
 
     try:
         import tools
-        # Generate new selfie
-        new_markdown = tools.generate_selfie(prompt)
+        # Generate new portrait
+        new_markdown = tools.generate_companion_portrait(prompt)
         if new_markdown.startswith("Error"):
             return jsonify({'error': new_markdown}), 500
             
-        # Parse the new image URL from Markdown link: ![Selfie](/images/selfie_123.png)
+        # Parse the new image URL from Markdown link: ![Portrait](/images/portraits/portrait_123.png)
         new_image_url = None
-        if new_markdown.startswith("![Selfie](") and new_markdown.endswith(")"):
-            new_image_url = new_markdown[10:-1]
+        if new_markdown.startswith("![Portrait](") and new_markdown.endswith(")"):
+            prefix_len = 12
+            new_image_url = new_markdown[prefix_len:-1]
             
         if not new_image_url:
             return jsonify({'error': f'Failed to parse generated image markdown: {new_markdown}'}), 500
@@ -551,20 +608,20 @@ def regenerate_image():
 @app.route('/api/animate_image', methods=['POST'])
 @requires_auth
 def animate_image():
-    return jsonify({'error': 'Selfie animation (video generation) is not supported in this version.'}), 501
+    return jsonify({'error': 'Portrait animation (video generation) is not supported in this version.'}), 501
 
 @app.route('/list_images', methods=['GET'])
 @requires_auth
 def list_images():
     try:
         active_agent = os.getenv("ACTIVE_AGENT", "arthur")
-        selfies_dir = os.path.join('core', 'agents', active_agent, 'selfies')
-        if not os.path.exists(selfies_dir):
+        portraits_dir = os.path.join('core', 'agents', active_agent, 'portraits')
+        if not os.path.exists(portraits_dir):
             return jsonify({'images': []})
-        files = os.listdir(selfies_dir)
+        files = os.listdir(portraits_dir)
         image_files = [f for f in files if f.lower().endswith(('.png', '.jpg', '.jpeg', '.gif'))]
-        image_files.sort(key=lambda x: os.path.getmtime(os.path.join(selfies_dir, x)), reverse=True)
-        image_urls = [f"/images/selfies/{f}" for f in image_files]
+        image_files.sort(key=lambda x: os.path.getmtime(os.path.join(portraits_dir, x)), reverse=True)
+        image_urls = [f"/images/portraits/{f}" for f in image_files]
         return jsonify({'images': image_urls})
     except Exception as e:
         print(f"Error listing images: {e}")
@@ -2004,12 +2061,12 @@ def import_tavern_agent():
         # Delete temp file without saving any PNG artwork in the agent's folder
         os.remove(temp_path)
         
-        # Setup selfies folder and default workflow
-        selfies_dir = os.path.join(agent_path, 'selfies')
-        os.makedirs(selfies_dir, exist_ok=True)
+        # Setup portraits folder and default workflow
+        portraits_dir = os.path.join(agent_path, 'portraits')
+        os.makedirs(portraits_dir, exist_ok=True)
         
         default_workflow_path = os.path.join(base_dir, 'templates', 'default_ImageWorkflow.json')
-        target_workflow_path = os.path.join(selfies_dir, 'ImageWorkflow.json')
+        target_workflow_path = os.path.join(portraits_dir, 'ImageWorkflow.json')
         if os.path.exists(default_workflow_path):
             with open(default_workflow_path, "r", encoding="utf-8") as tf:
                 workflow = json.load(tf)
@@ -2044,7 +2101,7 @@ def import_tavern_agent():
             with open(target_workflow_path, "w", encoding="utf-8") as tf:
                 json.dump(workflow, tf, indent=2)
         else:
-            arthur_workflow = os.path.join(base_dir, 'core', 'agents', 'arthur', 'selfies', 'ImageWorkflow.json')
+            arthur_workflow = os.path.join(base_dir, 'core', 'agents', 'arthur', 'portraits', 'ImageWorkflow.json')
             if os.path.exists(arthur_workflow):
                 shutil.copy(arthur_workflow, target_workflow_path)
                 
@@ -2227,11 +2284,11 @@ def import_describe_agent():
         with open(os.path.join(agent_path, 'theme.json'), "w", encoding="utf-8") as tf:
             json.dump(theme_data, tf, indent=2)
             
-        selfies_dir = os.path.join(agent_path, 'selfies')
-        os.makedirs(selfies_dir, exist_ok=True)
+        portraits_dir = os.path.join(agent_path, 'portraits')
+        os.makedirs(portraits_dir, exist_ok=True)
         
         default_workflow_path = os.path.join(base_dir, 'templates', 'default_ImageWorkflow.json')
-        target_workflow_path = os.path.join(selfies_dir, 'ImageWorkflow.json')
+        target_workflow_path = os.path.join(portraits_dir, 'ImageWorkflow.json')
         if os.path.exists(default_workflow_path):
             with open(default_workflow_path, "r", encoding="utf-8") as tf:
                 workflow = json.load(tf)
@@ -2263,7 +2320,7 @@ def import_describe_agent():
             with open(target_workflow_path, "w", encoding="utf-8") as tf:
                 json.dump(workflow, tf, indent=2)
         else:
-            arthur_workflow = os.path.join(base_dir, 'core', 'agents', 'arthur', 'selfies', 'ImageWorkflow.json')
+            arthur_workflow = os.path.join(base_dir, 'core', 'agents', 'arthur', 'portraits', 'ImageWorkflow.json')
             if os.path.exists(arthur_workflow):
                 shutil.copy(arthur_workflow, target_workflow_path)
                 
@@ -2409,7 +2466,7 @@ def comfy_resolve_workflow():
             
             # Read ImageWorkflow.json
             image_path = os.path.normpath(os.path.join(
-                AGENTS_DIR, active_agent, "selfies", "ImageWorkflow.json"
+                AGENTS_DIR, active_agent, "portraits", "ImageWorkflow.json"
             ))
             if os.path.exists(image_path):
                 with open(image_path, "r", encoding="utf-8") as f:

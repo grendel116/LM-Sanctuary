@@ -32,7 +32,7 @@ with zipfile.ZipFile(user_zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
             zipf.write(abs_path, f)
 
 # 2. backup_agents.zip
-# Everything specific to all agents (profile cards, databases, chat sessions, images, and selfies)
+# Everything specific to all agents (profile cards, databases, chat sessions, images, and portraits)
 agents_zip_path = os.path.join(backups_dir, "backup_agents.zip")
 agents_dir = os.path.normpath(os.path.join(workspace_dir, "core", "agents"))
 
