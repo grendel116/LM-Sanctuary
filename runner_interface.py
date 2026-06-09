@@ -1120,29 +1120,74 @@ class GoogleAdkRunner(BaseAgentRunner):
         events = storage_session.events
         
         target_role = 'user' if role == 'user' else 'companion'
-        match_count = 0
-        target_event = None
-        for ev in events:
-            author_lower = ev.author.lower()
-            ev_role = 'user' if author_lower == 'user' else 'companion'
-            if ev_role == target_role:
-                has_text = False
-                if ev.content and ev.content.parts:
-                    for part in ev.content.parts:
-                        if part.text:
-                            has_text = True
-                if has_text:
-                    if match_count == index:
-                        target_event = ev
-                        break
-                    match_count += 1
-                    
-        if target_event:
-            for part in target_event.content.parts:
-                if part.text:
-                    part.text = new_text
-            self._save_session_to_disk(session_id)
-            return True
+        
+        if target_role == 'user':
+            user_events = [ev for ev in events if ev.author.lower() == 'user']
+            if index < len(user_events):
+                target_event = user_events[index]
+                updated = False
+                if target_event.content and target_event.content.parts:
+                    for part in target_event.content.parts:
+                        if part.text is not None:
+                            part.text = new_text
+                            updated = True
+                            break
+                    if not updated:
+                        target_event.content.parts.append(types.Part.from_text(text=new_text))
+                else:
+                    target_event.content = types.Content(role="user", parts=[types.Part.from_text(text=new_text)])
+                
+                self._save_session_to_disk(session_id)
+                return True
+        else:
+            # Group events into companion turns corresponding to companion messages in history
+            companion_turns = []
+            current_turn = []
+            for ev in events:
+                if ev.author.lower() == 'user':
+                    if current_turn:
+                        companion_turns.append(current_turn)
+                        current_turn = []
+                else:
+                    current_turn.append(ev)
+            if current_turn:
+                companion_turns.append(current_turn)
+                
+            if index < len(companion_turns):
+                turn_events = companion_turns[index]
+                first_text_updated = False
+                for ev in turn_events:
+                    if ev.content and ev.content.parts:
+                        for part in ev.content.parts:
+                            if part.text is not None:
+                                if not first_text_updated:
+                                    part.text = new_text
+                                    first_text_updated = True
+                                else:
+                                    part.text = ""
+                
+                if not first_text_updated:
+                    model_events = [ev for ev in turn_events if ev.content]
+                    if model_events:
+                        target_ev = model_events[-1]
+                        if target_ev.content.parts:
+                            target_ev.content.parts.append(types.Part.from_text(text=new_text))
+                        else:
+                            target_ev.content.parts = [types.Part.from_text(text=new_text)]
+                    else:
+                        from google.adk.events.event import Event
+                        import time
+                        fallback_ev = Event(
+                            author="Companion",
+                            content=types.Content(role="model", parts=[types.Part.from_text(text=new_text)]),
+                            invocation_id=f"e-{int(time.time())}",
+                            id=f"companion-{int(time.time())}",
+                            timestamp=time.time()
+                        )
+                        events.append(fallback_ev)
+                
+                self._save_session_to_disk(session_id)
+                return True
         return False
 
 
