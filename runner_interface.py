@@ -641,7 +641,7 @@ class GoogleAdkRunner(BaseAgentRunner):
             headers = {"Content-Type": "application/json"}
             payload = {
                 "messages": openai_messages,
-                "temperature": 1.0,
+                "temperature": 0.7,
                 "max_tokens": 2048
             }
             target_model = model if (model and model != 'local-lm-studio') else os.getenv("LOCAL_MODEL_NAME")
@@ -1213,7 +1213,7 @@ class OpenSourceRunner(BaseAgentRunner):
         headers = {"Content-Type": "application/json"}
         payload = {
             "messages": openai_messages,
-            "temperature": 1.0,
+            "temperature": 0.7,
             "max_tokens": 2048
         }
         target_model = model if (model and model != 'local-lm-studio') else os.getenv("LOCAL_MODEL_NAME")
