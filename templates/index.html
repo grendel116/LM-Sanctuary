@@ -1949,6 +1949,20 @@
             background: rgba(255,255,255,0.06);
             box-shadow: 0 0 5px rgba(255,255,255,0.05);
         }
+        
+        .reconnect-spinner {
+            width: 36px;
+            height: 36px;
+            border: 3px solid rgba(255, 255, 255, 0.05);
+            border-top: 3px solid var(--primary-accent);
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 16px;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
     </style>
 </head>
 <body class="{{ active_agent | default('arthur') }}">
@@ -2420,6 +2434,15 @@
         </div>
     </div>
 
+    <!-- Reconnection Status Modal (Centered overlay) -->
+    <div id="reconnect-modal" class="modal" style="display: none; background: rgba(5, 6, 8, 0.6); backdrop-filter: blur(4px); z-index: 10000; align-items: center; justify-content: center; color: var(--text-main);">
+        <div style="background: rgba(30, 32, 40, 0.75); border: 1px solid rgba(255, 255, 255, 0.08); padding: 30px; border-radius: 16px; text-align: center; backdrop-filter: blur(12px); box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4); max-width: 280px; width: 80%;">
+            <div class="reconnect-spinner"></div>
+            <h4 style="margin: 0 0 8px; font-weight: 600; font-size: 1rem;">Reconnecting...</h4>
+            <p style="color: var(--text-muted); font-size: 0.78rem; margin: 0; line-height: 1.4;">The Sanctuary is restarting after tool execution. Reconnecting...</p>
+        </div>
+    </div>
+
     <script>
         // Global error catcher for mobile debugging
         window.onerror = function(message, source, lineno, colno, error) {
@@ -2471,6 +2494,19 @@
         const localIp = "{{ local_ip }}";
         const chatContainer = document.getElementById('chat-container');
         const userInput = document.getElementById('user-input');
+
+        // Restore drafted/unsent message if preserved in sessionStorage
+        if (userInput) {
+            const stagedMessage = sessionStorage.getItem('staged_message');
+            if (stagedMessage) {
+                userInput.value = stagedMessage;
+                // Auto-resize once browser is ready
+                setTimeout(() => {
+                    userInput.style.height = 'auto';
+                    userInput.style.height = (userInput.scrollHeight) + 'px';
+                }, 100);
+            }
+        }
 
         // TTS Configuration and State
         let ttsAutoSpeak = {{ tts_auto_speak|tojson }};
@@ -5479,11 +5515,46 @@ function triggerFileInput() {
             }
         }
 
+        // --- handleSuccessReload ---
+        function handleSuccessReload(data) {
+            const executedTools = data && data.tool_calls && data.tool_calls.length > 0;
+            if (hasApprovedToolThisTurn || executedTools) {
+                setTimeout(() => {
+                    location.reload();
+                }, 1500);
+            }
+        }
+
+        // --- handleToolReloadOrRecovery ---
+        function handleToolReloadOrRecovery() {
+            if (hasApprovedToolThisTurn) {
+                document.getElementById('reconnect-modal').style.display = 'flex';
+                let checkAttempts = 0;
+                const checkInterval = setInterval(async () => {
+                    checkAttempts++;
+                    try {
+                        const testRes = await fetch(`/manifest.json?t=${Date.now()}`);
+                        if (testRes.ok) {
+                            clearInterval(checkInterval);
+                            location.reload();
+                        }
+                    } catch (e) {
+                        if (checkAttempts > 20) {
+                            clearInterval(checkInterval);
+                            document.getElementById('reconnect-modal').style.display = 'none';
+                            appendMessage('companion', 'The Sanctuary is taking a while to restart. Please refresh manually.');
+                        }
+                    }
+                }, 2000);
+            }
+        }
+
         // --- sendMessage ---
         async function sendMessage() {
             const text = userInput.value.trim();
             if (!text && !attachedBase64 && !attachedMediaPath) return;
 
+            hasApprovedToolThisTurn = false;
             isGenerating = true;
             updateInputGlow();
 
@@ -5512,6 +5583,7 @@ function triggerFileInput() {
 
             userInput.value = '';
             userInput.style.height = '24px';
+            sessionStorage.removeItem('staged_message');
             clearAttachment();
             updateInputGlow();
 
@@ -5558,11 +5630,13 @@ function triggerFileInput() {
                     triggerHeartBurst();
                 }
                 inversionActive = data.inversion_active || "";
+                handleSuccessReload(data);
             } catch (error) {
                 if (chatContainer.contains(typingIndicatorRow)) {
                     chatContainer.removeChild(typingIndicatorRow);
                 }
                 appendMessage('companion', 'Error connecting to the Sanctuary.');
+                handleToolReloadOrRecovery();
             } finally {
                 isGenerating = false;
                 updateInputGlow();
@@ -5721,7 +5795,7 @@ async function saveMessageEdit(bubble, newText) {
         }
 
         // --- resendUserMessage ---
-async function resendUserMessage(bubble) {
+        async function resendUserMessage(bubble) {
             const row = bubble.closest('.message-row.user-row');
             if (!row) return;
             
@@ -5731,6 +5805,7 @@ async function resendUserMessage(bubble) {
             
             truncateChatAfter(row);
             
+            hasApprovedToolThisTurn = false;
             const heartElement = document.querySelector('.heart-pulse');
             if (heartElement) {
                 heartElement.classList.add('jiggling');
@@ -5786,11 +5861,13 @@ async function resendUserMessage(bubble) {
                     triggerHeartBurst();
                 }
                 inversionActive = data.inversion_active || "";
+                handleSuccessReload(data);
             } catch (error) {
                 if (chatContainer.contains(typingIndicatorRow)) {
                     chatContainer.removeChild(typingIndicatorRow);
                 }
                 appendMessage('companion', 'Error connecting to the Sanctuary.');
+                handleToolReloadOrRecovery();
             } finally {
                 stopToolPolling();
                 if (heartElement) {
@@ -5800,7 +5877,7 @@ async function resendUserMessage(bubble) {
         }
 
         // --- rerollFromMessage ---
-async function rerollFromMessage(button) {
+        async function rerollFromMessage(button) {
             const bubble = button.closest('.message');
             const row = bubble.closest('.message-row.companion-row');
             if (!row) return;
@@ -5821,6 +5898,7 @@ async function rerollFromMessage(button) {
             
             truncateChatAfter(prevRow);
             
+            hasApprovedToolThisTurn = false;
             const heartElement = document.querySelector('.heart-pulse');
             if (heartElement) {
                 heartElement.classList.add('jiggling');
@@ -5876,11 +5954,13 @@ async function rerollFromMessage(button) {
                     triggerHeartBurst();
                 }
                 inversionActive = data.inversion_active || "";
+                handleSuccessReload(data);
             } catch (error) {
                 if (chatContainer.contains(typingIndicatorRow)) {
                     chatContainer.removeChild(typingIndicatorRow);
                 }
                 appendMessage('companion', 'Error connecting to the Sanctuary.');
+                handleToolReloadOrRecovery();
             } finally {
                 stopToolPolling();
                 if (heartElement) {
@@ -5928,9 +6008,33 @@ async function deleteTurnFromMessage(button) {
                     });
                     const data = await response.json();
                     if (data.status === 'success') {
-                        // Reload the history to show the clean state
-                        chatContainer.innerHTML = '';
-                        await loadHistory();
+                        // Smoothly fade out and remove the deleted turn from DOM without clearing/reloading all history
+                        let current = userRow;
+                        const rowsToRemove = [];
+                        while (current) {
+                            rowsToRemove.push(current);
+                            current = current.nextElementSibling;
+                            // Stop if we hit the next user message row
+                            if (current && current.classList.contains('user-row')) {
+                                break;
+                            }
+                        }
+                        
+                        // Apply transition styles
+                        rowsToRemove.forEach(row => {
+                            row.style.transition = 'all 0.3s ease';
+                            row.style.opacity = '0';
+                            row.style.transform = 'translateY(-10px)';
+                        });
+                        
+                        // Remove from DOM after transition finishes
+                        setTimeout(() => {
+                            rowsToRemove.forEach(row => row.remove());
+                            // If chat is completely empty now, restore welcome card
+                            if (chatContainer.querySelectorAll('.message-row').length === 0) {
+                                showWelcomeMessage();
+                            }
+                        }, 300);
                     } else {
                         showCustomAlert("Error Deleting Message", "Error deleting message: " + (data.error || "Unknown error"));
                     }
@@ -6383,13 +6487,17 @@ function showToolConfirmModal(callId, toolName, details) {
         }
 
         // --- respondToToolCall ---
-async function respondToToolCall(status) {
+        async function respondToToolCall(status) {
             if (!currentPendingCallId) return;
             const callId = currentPendingCallId;
             currentPendingCallId = null;
             
             // Hide modal immediately
             document.getElementById('tool-confirm-modal').style.display = 'none';
+
+            if (status === 'approved') {
+                hasApprovedToolThisTurn = true;
+            }
             
             try {
                 await fetch('/approve_tool', {
@@ -6897,6 +7005,7 @@ function purgeDataBank() {
             this.style.height = 'auto';
             this.style.height = (this.scrollHeight) + 'px';
             updateInputGlow();
+            sessionStorage.setItem('staged_message', this.value);
         });
 
         userInput.addEventListener('focus', updateInputGlow);
@@ -6919,6 +7028,7 @@ function purgeDataBank() {
         let attachedMime = null;
         let attachedMediaPath = null;
         let inversionActive = "";
+        let hasApprovedToolThisTurn = false;
 
         let profileCacheBuster = Date.now();
 
