@@ -23,8 +23,17 @@ def resolve_comfy_dir():
 
 resolve_comfy_dir()
 
-COMFYUI_PORT = 8188
-COMFYUI_URL = f"http://127.0.0.1:{COMFYUI_PORT}"
+from urllib.parse import urlparse
+from variables import COMFYUI_SERVER_URL
+
+try:
+    _url = urlparse(COMFYUI_SERVER_URL)
+    COMFYUI_PORT = _url.port or 8188
+    COMFYUI_URL = COMFYUI_SERVER_URL.rstrip('/')
+except Exception:
+    COMFYUI_PORT = 8188
+    COMFYUI_URL = f"http://127.0.0.1:{COMFYUI_PORT}"
+
 
 # Global download/resolution status log
 resolution_status = {
@@ -311,7 +320,15 @@ def start_comfy_daemon():
         except Exception:
             pass
             
-        cmd = [venv_python, main_py, "--listen", "127.0.0.1", "--port", str(COMFYUI_PORT)]
+        try:
+            _url = urlparse(COMFYUI_SERVER_URL)
+            listen_ip = _url.hostname or "127.0.0.1"
+            if listen_ip.lower() == "localhost":
+                listen_ip = "127.0.0.1"
+        except Exception:
+            listen_ip = "127.0.0.1"
+
+        cmd = [venv_python, main_py, "--listen", listen_ip, "--port", str(COMFYUI_PORT)]
         
         if cuda_supported:
             pass
