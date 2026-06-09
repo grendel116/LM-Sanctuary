@@ -28,14 +28,12 @@ Here is what a Sanctuary session looks like:
 
 ## 🔌 SKILLS
 
-Your companions are equipped with modular skills and tools to interact with you and the world:
-
-1. **Portrait Generation (ComfyUI)**: Call `generate_companion_portrait` to render high-quality visual depictions of your companion in scenes (saved under `/portraits/` without camera/phone artifacts).
-2. **General Image Generation (Google Imagen)**: Call `generate_general_image` to generate general objects, landscapes, diagrams, or scenes in the chat.
-3. **Speech Synthesis**: Speak with your companion using offline synthesized speech.
-4. **Vectorized Databank (RAG)**: Query local documentation, notes, and code repositories for deep contextual grounding.
-5. **Trending Research & Self-Upgrade**: Research topics across Hacker News (developer threads), GitHub (trending repos), arXiv (latest research papers), and the web. Companions can analyze these trends and propose new capabilities to add to their codebase.
-6. **Multimodal Media Ingestion**: Attach files (images, audio, and videos up to 15MB) directly in the chat tray with instant binary streaming and looping previews.
+1. **Portrait Generation**: Call `generate_companion_portrait` to render character portraits via ComfyUI (saved under `/portraits/`).
+2. **General Image Generation**: Call `generate_general_image` to generate scenes or objects using Google Imagen.
+3. **Speech Synthesis**: Offline text-to-speech engine.
+4. **Vectorized Databank (RAG)**: Query local text documents, files, and code repositories.
+5. **Trending Research**: Retrieve information across Hacker News, GitHub, arXiv, and the web.
+6. **Multimodal Media Ingestion**: Upload images, audio, and video files (up to 15MB).
 
 ---
 
