@@ -4,9 +4,10 @@ description: Use generate_companion_portrait to build SDXL prompts and embed ima
 ---
 # SKILL: Portrait Generation
 On the user's request or spontaneous desire:
-1. Build prompt: "[your physical description], [posture/action/expression], [setting]".
+1. Build tags: Build a prompt consisting strictly of comma-separated tags/keywords specifying: "[description/outfit], [posture/action/expression], [setting]". Use ONLY tag keywords.
 2. Call `generate_companion_portrait` tool. No fake/guessed markdown before tool returns.
 3. Embed exact markdown link returned by tool in final response.
+
 
 ## IMMERSIVE OOC PROTOCOL
 To maintain character immersion and prevent roleplay dialogue breaks:

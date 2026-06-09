@@ -232,6 +232,8 @@
             display: flex;
             flex-direction: column;
             gap: 20px;
+        }
+        #chat-container.smooth-scroll {
             scroll-behavior: smooth;
         }
 
@@ -2495,6 +2497,157 @@
         const chatContainer = document.getElementById('chat-container');
         const userInput = document.getElementById('user-input');
 
+        let isAtBottom = true;
+        if (chatContainer) {
+            chatContainer.addEventListener('scroll', () => {
+                isAtBottom = (chatContainer.scrollHeight - chatContainer.scrollTop - chatContainer.clientHeight < 50);
+            });
+            // Keep scroll at bottom when images load, if user was at the bottom
+            chatContainer.addEventListener('load', (e) => {
+                if (e.target.tagName.toLowerCase() === 'img') {
+                    if (isAtBottom) {
+                        chatContainer.scrollTop = chatContainer.scrollHeight;
+                    }
+                }
+            }, true); // Capture phase is required since load event does not bubble
+        }
+
+        let skipScrollSave = false;
+
+        function saveChatScrollState() {
+            if (skipScrollSave) return;
+            if (chatContainer) {
+                sessionStorage.setItem('chat_scroll_pos', chatContainer.scrollTop);
+                const isAtBottom = (chatContainer.scrollHeight - chatContainer.scrollTop - chatContainer.clientHeight < 50);
+                sessionStorage.setItem('chat_was_at_bottom', isAtBottom);
+            }
+        }
+
+        window.addEventListener('beforeunload', saveChatScrollState);
+        window.addEventListener('pagehide', saveChatScrollState);
+
+        function reloadApp(skipSave = false, forceHardReload = false) {
+            if (skipSave) {
+                skipScrollSave = true;
+                sessionStorage.removeItem('chat_scroll_pos');
+                sessionStorage.removeItem('chat_was_at_bottom');
+            }
+            if (forceHardReload) {
+                location.reload();
+            } else {
+                softReloadApp();
+            }
+        }
+
+        async function softReloadApp() {
+            try {
+                const [historyRes, _] = await Promise.all([
+                    fetch(`/history?session_id=${sessionId}&t=${Date.now()}`),
+                    loadServerImages()
+                ]);
+                const data = await historyRes.json();
+                
+                if (data.active_agent) {
+                    applyTheme(data.active_agent, data.theme);
+                }
+                if (data.character_name) {
+                    const companionTitle = "Sanctuary";
+                    document.title = companionTitle;
+                    
+                    const headerTitle = document.querySelector('.header-title-area h1');
+                    if (headerTitle) {
+                        headerTitle.textContent = companionTitle;
+                    }
+                    
+                    const userInput = document.getElementById('user-input');
+                    if (userInput) {
+                        userInput.placeholder = "Ask " + data.character_name;
+                    }
+                }
+                
+                // Refresh avatar profile buster and select model options
+                profileCacheBuster = Date.now();
+                updateProfileImages();
+                modelInitPromise = initializeModelSelect();
+
+                // Get existing message rows in the DOM
+                const existingRows = Array.from(chatContainer.querySelectorAll('.message-row:not(#welcome-message):not(#onboarding-container)'));
+                const newHistory = data.history || [];
+                
+                // Temporarily disable smooth scroll while updating/diffing the DOM
+                chatContainer.classList.remove('smooth-scroll');
+                
+                let domUpdated = false;
+                
+                newHistory.forEach((msg, idx) => {
+                    const msgRole = msg.role;
+                    const msgText = msg.text || '';
+                    const msgImg = msg.image_url || '';
+                    const msgTools = JSON.stringify(msg.tool_calls || []);
+                    
+                    const existingRow = existingRows[idx];
+                    if (existingRow) {
+                        const roleMatches = existingRow.dataset.role === msgRole;
+                        const textMatches = existingRow.dataset.rawText === msgText;
+                        const imgMatches = existingRow.dataset.imageUrl === msgImg;
+                        const toolsMatches = existingRow.dataset.toolCalls === msgTools;
+                        
+                        if (!roleMatches || !textMatches || !imgMatches || !toolsMatches) {
+                            // Elements changed, replace in-place
+                            const newRow = appendMessage(msgRole, msgText, msg.image_url, msg.tool_calls);
+                            chatContainer.replaceChild(newRow, existingRow);
+                            domUpdated = true;
+                        }
+                    } else {
+                        // Element is new, append it
+                        appendMessage(msgRole, msgText, msg.image_url, msg.tool_calls);
+                        domUpdated = true;
+                    }
+                });
+                
+                // Remove extra rows if any were deleted
+                if (existingRows.length > newHistory.length) {
+                    for (let i = newHistory.length; i < existingRows.length; i++) {
+                        existingRows[i].remove();
+                    }
+                    domUpdated = true;
+                }
+                
+                // Clean onboarding or welcome if we now have messages
+                if (newHistory.length > 0) {
+                    const welcome = document.getElementById('welcome-message');
+                    if (welcome) welcome.remove();
+                    const onboarding = document.getElementById('onboarding-container');
+                    if (onboarding) onboarding.remove();
+                } else {
+                    if (!connectionStatus.gemini_configured && !connectionStatus.lm_studio_online) {
+                        showOnboardingCard();
+                    } else {
+                        showWelcomeMessage();
+                    }
+                }
+                
+                if (data.state) {
+                    updateHeartState(data.state, data.inversion_active);
+                }
+                inversionActive = data.inversion_active || "";
+                
+                // Maintain scroll posture
+                if (domUpdated) {
+                    if (isAtBottom) {
+                        chatContainer.scrollTop = chatContainer.scrollHeight;
+                    }
+                }
+            } catch (error) {
+                console.error("Error soft-reloading chat history:", error);
+            } finally {
+                // Re-enable smooth scroll
+                setTimeout(() => {
+                    chatContainer.classList.add('smooth-scroll');
+                }, 50);
+            }
+        }
+
         // Restore drafted/unsent message if preserved in sessionStorage
         if (userInput) {
             const stagedMessage = sessionStorage.getItem('staged_message');
@@ -2570,7 +2723,7 @@
                             if (success) {
                                 console.log('Service Worker unregistered successfully');
                                 // Force reload to get the fresh content from the server
-                                window.location.reload();
+                                reloadApp(false, true);
                             }
                         });
                 }
@@ -4766,6 +4919,9 @@ function showWelcomeMessage() {
 
         // --- loadHistory ---
 async function loadHistory() {
+            // Temporarily disable smooth scroll on history load
+            chatContainer.classList.remove('smooth-scroll');
+
             try {
                 // Wait for model initialization and health checks to complete
                 if (modelInitPromise) {
@@ -4825,6 +4981,18 @@ async function loadHistory() {
                     updateHeartState(data.state, data.inversion_active);
                 }
                 inversionActive = data.inversion_active || "";
+
+                // Restore scroll position
+                const savedScrollPos = sessionStorage.getItem('chat_scroll_pos');
+                const wasAtBottom = sessionStorage.getItem('chat_was_at_bottom');
+
+                if (wasAtBottom === 'true' || wasAtBottom === null) {
+                    chatContainer.scrollTop = chatContainer.scrollHeight;
+                    isAtBottom = true;
+                } else if (savedScrollPos) {
+                    chatContainer.scrollTop = parseInt(savedScrollPos, 10);
+                    isAtBottom = false;
+                }
             } catch (error) {
                 console.error("Error loading chat history:", error);
                 if (!connectionStatus.gemini_configured && !connectionStatus.lm_studio_online) {
@@ -4832,6 +5000,11 @@ async function loadHistory() {
                 } else {
                     showWelcomeMessage();
                 }
+            } finally {
+                // Re-enable smooth scroll after a brief delay to avoid animating the initial position
+                setTimeout(() => {
+                    chatContainer.classList.add('smooth-scroll');
+                }, 50);
             }
         }
 
@@ -4849,7 +5022,7 @@ async function resetSession() {
                 }
                 localStorage.removeItem('companion_session_id');
                 localStorage.removeItem('companion_selected_model');
-                location.reload();
+                reloadApp(true, true);
             });
         }
 
@@ -4992,6 +5165,10 @@ function appendMessage(role, text, imageUrl = null, toolCalls = null, isLive = f
 
             const row = document.createElement('div');
             row.className = `message-row ${role}-row`;
+            row.dataset.role = role;
+            row.dataset.rawText = text || '';
+            row.dataset.imageUrl = imageUrl || '';
+            row.dataset.toolCalls = JSON.stringify(toolCalls || []);
 
             // Hide the user message requesting a portrait
             const isPortraitRequest = (role === 'user' && text === "Send me a portrait of yourself based on the context of our last message/current dialogue!");
@@ -5520,7 +5697,7 @@ function triggerFileInput() {
             const executedTools = data && data.tool_calls && data.tool_calls.length > 0;
             if (hasApprovedToolThisTurn || executedTools) {
                 setTimeout(() => {
-                    location.reload();
+                    reloadApp();
                 }, 1500);
             }
         }
@@ -5536,7 +5713,7 @@ function triggerFileInput() {
                         const testRes = await fetch(`/manifest.json?t=${Date.now()}`);
                         if (testRes.ok) {
                             clearInterval(checkInterval);
-                            location.reload();
+                            reloadApp();
                         }
                     } catch (e) {
                         if (checkAttempts > 20) {
@@ -5746,6 +5923,7 @@ async function saveMessageEdit(bubble, newText) {
             if (index === -1) return;
             
             bubble.dataset.rawText = trimmedText;
+            row.dataset.rawText = trimmedText;
             
             const textDiv = bubble.querySelector('.message-text');
             if (trimmedText) {
