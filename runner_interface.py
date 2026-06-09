@@ -79,7 +79,7 @@ _LOCAL_DIRECTIVE_PROMPT = (
     "\n\n# LOCAL MODEL ENGINE DIRECTIVE (EMULATED TOOLS)\n"
     "You are running on a local engine that does not support native function calling. However, you can call tools by outputting specific text tags in your response. The system will intercept the tag, execute the tool, and feed the output back to you.\n\n"
     "Available Tools:\n"
-    "1. **web_search(query: str)**: Search the web using Google/Wikipedia. Example: `[web_search(query=\"latest space exploration news\")]`\n"
+    "1. **web_search(query: str)**: Search the web using Google/Wikipedia. Example: `[web_search(query=\"sputnik space exploration history\")]`\n"
     "2. **read_webpage(url: str)**: Fetch and read the text content of a specific webpage URL. Example: `[read_webpage(url=\"https://en.wikipedia.org/wiki/Luddite\")]`\n"
     "3. **read_file(path: str)**: Read the contents of a file in the workspace. Example: `[read_file(path=\"core/agent_config.py\")]`\n"
     "4. **write_file(path: str, content: str)**: Create or overwrite a workspace file. Example: `[write_file(path=\"notes.txt\", content=\"your notes content here\")]`\n"
