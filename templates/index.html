@@ -68,19 +68,29 @@
         #app-container {
             width: 100%;
             max-width: 900px;
-            height: 90vh;
+            height: 100vh;
             display: flex;
             flex-direction: column;
             background: var(--panel-bg);
             backdrop-filter: blur(16px);
             -webkit-backdrop-filter: blur(16px);
-            border: 1px solid var(--border-color);
-            border-radius: 24px;
+            border-left: 1px solid var(--border-color);
+            border-right: 1px solid var(--border-color);
+            border-top: none;
+            border-bottom: none;
+            border-radius: 0;
             box-shadow: 0 16px 40px rgba(0, 0, 0, 0.6);
             overflow: hidden;
             transition: all 0.3s ease;
             min-width: 0;
             box-sizing: border-box;
+        }
+
+        @media (max-width: 900px) {
+            #app-container {
+                border-left: none;
+                border-right: none;
+            }
         }
 
         /* Header design */
@@ -942,36 +952,6 @@
             opacity: 1;
         }
         .image-recycle-btn:hover {
-            color: var(--text-main);
-            border-color: rgba(255, 255, 255, 0.35);
-            background: color-mix(in srgb, var(--primary-accent) 45%, transparent);
-            transform: scale(1.08);
-        }
-        .image-animate-btn {
-            position: absolute;
-            bottom: 8px;
-            right: 8px;
-            background: rgba(18, 18, 22, 0.75);
-            border: 1px solid rgba(255, 255, 255, 0.15);
-            backdrop-filter: blur(8px);
-            -webkit-backdrop-filter: blur(8px);
-            color: var(--text-muted);
-            border-radius: 8px;
-            width: 28px;
-            height: 28px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            cursor: pointer;
-            opacity: 0;
-            transition: all 0.2s ease;
-            box-shadow: 0 4px 10px rgba(0,0,0,0.35);
-            z-index: 5;
-        }
-        .message-image-container:hover .image-animate-btn {
-            opacity: 1;
-        }
-        .image-animate-btn:hover {
             color: var(--text-main);
             border-color: rgba(255, 255, 255, 0.35);
             background: color-mix(in srgb, var(--primary-accent) 45%, transparent);
@@ -2046,31 +2026,32 @@
             </div>
         </div>
 
-        <!-- Live image upload preview area -->
+        <!-- Live media upload preview area -->
         <div id="preview-area">
             <div class="preview-thumbnail-wrapper">
                 <img id="preview-img" src="" alt="preview">
+                <video id="preview-video" src="" style="display: none; max-width: 80px; max-height: 80px; border-radius: 6px;" muted autoplay loop></video>
                 <button class="remove-preview-btn" onclick="clearAttachment()">&times;</button>
             </div>
             <div class="preview-details">
-                <span id="preview-filename">image.png</span>
+                <span id="preview-filename">media.png</span>
             </div>
         </div>
         
         <div id="input-area">
             <div class="input-wrapper">
                 <!-- Attach button -->
-                <button class="attach-btn" onclick="document.getElementById('image-input').click()" title="Attach image">
+                <button class="attach-btn" onclick="document.getElementById('image-input').click()" title="Attach file">
                     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                         <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"></path>
                     </svg>
                 </button>
-                <input type="file" id="image-input" accept="image/*" onchange="handleFileSelect(event)" style="display: none;">
+                <input type="file" id="image-input" accept="image/*,video/*,audio/*" onchange="handleFileSelect(event)" style="display: none;">
 
                 <textarea id="user-input" placeholder="Ask Companion" rows="1"></textarea>
                 
                 <div class="input-controls">
-                    <button class="icon-btn" onclick="generateSelfiePrompt()" title="Generate Selfie">
+                    <button class="icon-btn" onclick="generatePortraitPrompt()" title="Generate Portrait">
                         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                             <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"></path>
                             <circle cx="12" cy="13" r="4"></circle>
@@ -2367,10 +2348,10 @@
                 <!-- ComfyUI Panel -->
                 <div class="onboarding-option-box comfy-box" id="modal-comfy-box-container">
                     <div class="option-header">
-                        <h4 style="margin: 0; font-size: 1.05rem; font-weight: 600;">ComfyUI (Selfies)</h4>
+                        <h4 style="margin: 0; font-size: 1.05rem; font-weight: 600;">ComfyUI (Portraits)</h4>
                         <span id="modal-comfy-status" class="status-badge status-offline">Offline</span>
                     </div>
-                    <p class="option-desc" style="font-size: 0.8rem; margin: 8px 0 15px 0;">Generate agent selfies locally using ComfyUI.</p>
+                    <p class="option-desc" style="font-size: 0.8rem; margin: 8px 0 15px 0;">Generate agent portraits locally using ComfyUI.</p>
                     
                     <button onclick="updateComfyModalStatus()" class="onboarding-btn" style="width: 100%; font-size: 0.85rem; padding: 10px; margin-top: 20px;">Check ComfyUI Connection</button>
                 </div>
@@ -2544,12 +2525,19 @@
             }
         });
 
-        // Register Service Worker for PWA support
+        // Unregister Service Workers to prevent aggressive caching of templates/static assets
         if ('serviceWorker' in navigator) {
-            window.addEventListener('load', () => {
-                navigator.serviceWorker.register('/service-worker.js')
-                    .then(reg => console.log('Service Worker registered with scope:', reg.scope))
-                    .catch(err => console.error('Service Worker registration failed:', err));
+            navigator.serviceWorker.getRegistrations().then(registrations => {
+                for (let registration of registrations) {
+                    registration.unregister()
+                        .then(success => {
+                            if (success) {
+                                console.log('Service Worker unregistered successfully');
+                                // Force reload to get the fresh content from the server
+                                window.location.reload();
+                            }
+                        });
+                }
             });
         }
 
@@ -3866,7 +3854,7 @@ async function updateComfyModalStatus() {
                             
                             comfyBox.innerHTML = `
                                 <div class="option-header">
-                                    <h4 style="margin: 0; font-size: 1.05rem; font-weight: 600;">ComfyUI (Selfies)</h4>
+                                    <h4 style="margin: 0; font-size: 1.05rem; font-weight: 600;">ComfyUI (Portraits)</h4>
                                     <span class="status-badge status-offline">Installing...</span>
                                 </div>
                                 <p class="option-desc" style="font-size: 0.8rem; margin: 8px 0 15px 0;">ComfyUI is installing in the background.</p>
@@ -3882,7 +3870,7 @@ async function updateComfyModalStatus() {
                         } else {
                             comfyBox.innerHTML = `
                                 <div class="option-header">
-                                    <h4 style="margin: 0; font-size: 1.05rem; font-weight: 600;">ComfyUI (Selfies)</h4>
+                                    <h4 style="margin: 0; font-size: 1.05rem; font-weight: 600;">ComfyUI (Portraits)</h4>
                                     <span id="modal-comfy-status" class="status-badge status-offline">Uninstalled</span>
                                 </div>
                                 <p class="option-desc" style="font-size: 0.8rem; margin: 8px 0 15px 0;">ComfyUI is not detected in your workspace or destination directory.</p>
@@ -3945,12 +3933,12 @@ async function updateComfyModalStatus() {
                             // Render full ComfyUI installed view (including Checkpoint Manager)
                             comfyBox.innerHTML = `
                                 <div class="option-header">
-                                    <h4 style="margin: 0; font-size: 1.05rem; font-weight: 600;">ComfyUI (Selfies)</h4>
+                                    <h4 style="margin: 0; font-size: 1.05rem; font-weight: 600;">ComfyUI (Portraits)</h4>
                                     <span id="modal-comfy-status" class="status-badge ${comfyStatus.running ? 'status-online' : 'status-offline'}">
                                         ${comfyStatus.running ? 'Running' : 'Offline'}
                                     </span>
                                 </div>
-                                <p class="option-desc" style="font-size: 0.8rem; margin: 8px 0 10px 0;">Generate agent selfies locally using ComfyUI.</p>
+                                <p class="option-desc" style="font-size: 0.8rem; margin: 8px 0 10px 0;">Generate agent portraits locally using ComfyUI.</p>
                                 
                                 <div id="comfy-engine-controls">
                                     ${comfyStatus.running ? `
@@ -4661,7 +4649,7 @@ async function selectAssistant(assistantId) {
 async function deleteAssistant(assistantId, name) {
             showCustomConfirm(
                 "Delete Companion",
-                `Are you sure you want to permanently delete companion <strong>${name}</strong>? This will remove all their configs, databank documents, and selfies.`,
+                `Are you sure you want to permanently delete companion <strong>${name}</strong>? This will remove all their configs, databank documents, and portraits.`,
                 async () => {
                     try {
                         const res = await fetch('/api/agents/delete', {
@@ -4958,20 +4946,20 @@ function appendMessage(role, text, imageUrl = null, toolCalls = null, isLive = f
             text = text || '';
             
             // Extract ComfyUI prompt if present in toolCalls
-            let selfiePrompt = null;
+            let portraitPrompt = null;
             if (toolCalls && toolCalls.length > 0) {
-                const call = toolCalls.find(tc => tc.type === 'call' && tc.name === 'generate_selfie');
+                const call = toolCalls.find(tc => tc.type === 'call' && tc.name === 'generate_companion_portrait');
                 if (call && call.args && call.args.prompt) {
-                    selfiePrompt = call.args.prompt;
+                    portraitPrompt = call.args.prompt;
                 }
             }
 
             const row = document.createElement('div');
             row.className = `message-row ${role}-row`;
 
-            // Hide the user message requesting a selfie
-            const isSelfieRequest = (role === 'user' && text === "Send me a selfie of yourself based on the context of our last message/current dialogue!");
-            if (isSelfieRequest) {
+            // Hide the user message requesting a portrait
+            const isPortraitRequest = (role === 'user' && text === "Send me a portrait of yourself based on the context of our last message/current dialogue!");
+            if (isPortraitRequest) {
                 row.style.display = 'none';
             }
 
@@ -5124,56 +5112,59 @@ function appendMessage(role, text, imageUrl = null, toolCalls = null, isLive = f
             // --- END NEW THINKING BLOCK LOGIC ---
 
             if (imageUrl) {
-                const imgContainer = document.createElement('div');
-                imgContainer.className = 'message-image-container';
+                const isVideo = imageUrl.toLowerCase().endsWith('.mp4') || imageUrl.toLowerCase().includes('video');
                 
-                const img = document.createElement('img');
-                img.src = imageUrl;
-                img.style.cursor = 'pointer';
-                img.title = 'Click to expand';
-                img.onclick = () => expandImage(imageUrl);
-                
-                if (imageUrl.includes('/images/')) {
-                    const recycleBtn = document.createElement('button');
-                    recycleBtn.className = 'image-recycle-btn';
-                    recycleBtn.title = 'Regenerate / reroll this selfie in-place using ComfyUI';
-                    recycleBtn.innerHTML = `
-                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-                            <polyline points="23 4 23 10 17 10"></polyline>
-                            <polyline points="1 20 1 14 7 14"></polyline>
-                            <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>
-                        </svg>
-                    `;
-                    recycleBtn.onclick = (e) => {
-                        e.stopPropagation();
-                        try {
-                            regenerateImage(recycleBtn, imageUrl, selfiePrompt);
-                        } catch (err) {
-                            showCustomAlert("Error", "Click handler error: " + err.message);
-                        }
-                    };
-                    imgContainer.appendChild(recycleBtn);
-
-                    const isAnimated = imageUrl.toLowerCase().includes('_anim.webp') || imageUrl.toLowerCase().includes('_anim.gif');
-                    if (!isAnimated) {
-                        const animateBtn = document.createElement('button');
-                        animateBtn.className = 'image-animate-btn';
-                        animateBtn.title = 'Selfie Animation (Future Implementation)';
-                        animateBtn.innerHTML = `
-                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                                <path d="M23 7a2 2 0 0 0-2.45-1.45L16 7V5a2 2 0 0 0-2-2H2a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2l4.55 1.45A2 2 0 0 0 23 17V7z"></path>
+                if (isVideo) {
+                    const videoContainer = document.createElement('div');
+                    videoContainer.className = 'message-video-container';
+                    videoContainer.style.marginTop = '8px';
+                    
+                    const video = document.createElement('video');
+                    video.src = imageUrl;
+                    video.controls = true;
+                    video.style.maxWidth = '100%';
+                    video.style.maxHeight = '300px';
+                    video.style.borderRadius = '12px';
+                    
+                    videoContainer.appendChild(video);
+                    bubble.appendChild(videoContainer);
+                } else {
+                    const imgContainer = document.createElement('div');
+                    imgContainer.className = 'message-image-container';
+                    
+                    const img = document.createElement('img');
+                    img.src = imageUrl;
+                    img.style.cursor = 'pointer';
+                    img.title = 'Click to expand';
+                    img.onclick = () => expandImage(imageUrl);
+                    
+                    if (imageUrl.includes('/images/')) {
+                        const recycleBtn = document.createElement('button');
+                        recycleBtn.className = 'image-recycle-btn';
+                        recycleBtn.title = 'Regenerate / reroll this portrait in-place using ComfyUI';
+                        recycleBtn.innerHTML = `
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                                <polyline points="23 4 23 10 17 10"></polyline>
+                                <polyline points="1 20 1 14 7 14"></polyline>
+                                <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>
                             </svg>
                         `;
-                        animateBtn.onclick = (e) => {
+                        recycleBtn.onclick = (e) => {
                             e.stopPropagation();
-                            animateImage(animateBtn, imageUrl);
+                            try {
+                                regenerateImage(recycleBtn, imageUrl, portraitPrompt);
+                            } catch (err) {
+                                showCustomAlert("Error", "Click handler error: " + err.message);
+                            }
                         };
-                        imgContainer.appendChild(animateBtn);
+                        imgContainer.appendChild(recycleBtn);
+
+
                     }
+                    
+                    imgContainer.appendChild(img);
+                    bubble.appendChild(imgContainer);
                 }
-                
-                imgContainer.appendChild(img);
-                bubble.appendChild(imgContainer);
             }
 
             if (actualResponse) { // Use actualResponse here
@@ -5215,7 +5206,7 @@ function appendMessage(role, text, imageUrl = null, toolCalls = null, isLive = f
                         if (img.src && img.src.includes('/images/')) {
                             const recycleBtn = document.createElement('button');
                             recycleBtn.className = 'image-recycle-btn';
-                            recycleBtn.title = 'Regenerate / reroll this selfie in-place using ComfyUI';
+                            recycleBtn.title = 'Regenerate / reroll this portrait in-place using ComfyUI';
                             recycleBtn.innerHTML = `
                                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
                                     <polyline points="23 4 23 10 17 10"></polyline>
@@ -5226,29 +5217,14 @@ function appendMessage(role, text, imageUrl = null, toolCalls = null, isLive = f
                             recycleBtn.onclick = (e) => {
                                 e.stopPropagation();
                                 try {
-                                    regenerateImage(recycleBtn, img.src, selfiePrompt);
+                                    regenerateImage(recycleBtn, img.src, portraitPrompt);
                                 } catch (err) {
                                     showCustomAlert("Error", "Click handler error: " + err.message);
                                 }
                             };
                             imgContainer.appendChild(recycleBtn);
 
-                            const isAnimated = img.src.toLowerCase().includes('_anim.webp') || img.src.toLowerCase().includes('_anim.gif');
-                            if (!isAnimated) {
-                                const animateBtn = document.createElement('button');
-                                animateBtn.className = 'image-animate-btn';
-                                animateBtn.title = 'Selfie Animation (Future Implementation)';
-                                animateBtn.innerHTML = `
-                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                                        <path d="M23 7a2 2 0 0 0-2.45-1.45L16 7V5a2 2 0 0 0-2-2H2a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2l4.55 1.45A2 2 0 0 0 23 17V7z"></path>
-                                    </svg>
-                                `;
-                                animateBtn.onclick = (e) => {
-                                    e.stopPropagation();
-                                    animateImage(animateBtn, img.src);
-                                };
-                                imgContainer.appendChild(animateBtn);
-                            }
+
                         }
                         
                         imgContainer.appendChild(img);
@@ -5433,42 +5409,88 @@ function triggerFileInput() {
         }
 
         // --- handleFileSelect ---
-function handleFileSelect(event) {
+        async function handleFileSelect(event) {
             const file = event.target.files[0];
             if (!file) return;
 
-            previewFilename.textContent = file.name + " (loading...)";
+            const isVideo = file.type.startsWith('video/');
+            const MAX_VIDEO_SIZE = 15 * 1024 * 1024; // 15MB
+            if (isVideo && file.size > MAX_VIDEO_SIZE) {
+                showCustomAlert("File Too Large", "Videos must be under 15MB. Please select a smaller file.");
+                event.target.value = '';
+                return;
+            }
 
-            const reader = new FileReader();
-            reader.onload = function(e) {
-                attachedMime = file.type || "image/jpeg";
-                previewImg.src = e.target.result;
-                previewArea.style.display = 'flex';
-                attachedBase64 = e.target.result.split(',')[1];
+            previewFilename.textContent = file.name + " (uploading...)";
+            previewArea.style.display = 'flex';
+            
+            // Hide preview elements until loaded
+            previewImg.style.display = 'none';
+            const previewVideo = document.getElementById('preview-video');
+            if (previewVideo) previewVideo.style.display = 'none';
+
+            const formData = new FormData();
+            formData.append('file', file);
+
+            try {
+                const response = await fetch('/upload_media', {
+                    method: 'POST',
+                    body: formData
+                });
+                if (!response.ok) {
+                    const errData = await response.json();
+                    throw new Error(errData.error || ("Upload failed: status " + response.status));
+                }
+                const data = await response.json();
+                attachedMediaPath = data.file_path;
+                attachedMime = file.type || (isVideo ? "video/mp4" : "image/jpeg");
                 previewFilename.textContent = file.name + " (ready)";
-            };
-            reader.readAsDataURL(file);
+
+                if (isVideo) {
+                    if (previewVideo) {
+                        previewVideo.src = attachedMediaPath;
+                        previewVideo.style.display = 'block';
+                    }
+                } else {
+                    previewImg.src = attachedMediaPath;
+                    previewImg.style.display = 'block';
+                }
+            } catch (error) {
+                console.error("Upload error:", error);
+                previewFilename.textContent = file.name + " (upload failed)";
+                showCustomAlert("Upload Error", error.message || "Failed to upload file to the server.");
+                clearAttachment();
+            }
         }
 
         // --- clearAttachment ---
-function clearAttachment() {
+        function clearAttachment() {
             attachedBase64 = null;
             attachedMime = null;
+            attachedMediaPath = null;
             imageInput.value = '';
             previewArea.style.display = 'none';
             previewImg.src = '';
+            previewImg.style.display = 'none';
+            const previewVideo = document.getElementById('preview-video');
+            if (previewVideo) {
+                previewVideo.src = '';
+                previewVideo.style.display = 'none';
+            }
         }
 
         // --- sendMessage ---
-async function sendMessage() {
+        async function sendMessage() {
             const text = userInput.value.trim();
-            if (!text && !attachedBase64) return;
+            if (!text && !attachedBase64 && !attachedMediaPath) return;
 
             isGenerating = true;
             updateInputGlow();
 
             let userImageUrl = null;
-            if (attachedBase64) {
+            if (attachedMediaPath) {
+                userImageUrl = attachedMediaPath;
+            } else if (attachedBase64) {
                 userImageUrl = `data:${attachedMime};base64,${attachedBase64}`;
             }
             appendMessage('user', text, userImageUrl);
@@ -5483,6 +5505,7 @@ async function sendMessage() {
                 message: text || "",
                 image_data: attachedBase64,
                 image_mime: attachedMime,
+                media_path: attachedMediaPath,
                 session_id: sessionId,
                 model: selectedModel
             };
@@ -5927,7 +5950,7 @@ function reusePromptFromMessage(button) {
         }
 
         /* ==========================================================================
-           XI. 10. TOOL INVOCATION & SELFIES
+           XI. 10. TOOL INVOCATION & PORTRAITS
            ========================================================================== */
 
         // --- fetchComfyCheckpoints ---
@@ -6038,13 +6061,13 @@ async function loadServerImages() {
         }
 
         // --- getGalleryImages ---
-function getGalleryImages() {
+        function getGalleryImages() {
             const imgs = [];
             
-            // Add server-side generated selfies
+            // Add server-side generated portraits
             serverImages.forEach(img => {
                 const rel = getRelativePath(img);
-                if (!imgs.includes(rel)) {
+                if (!rel.includes('profile.svg') && !imgs.includes(rel)) {
                     imgs.push(rel);
                 }
             });
@@ -6059,7 +6082,7 @@ function getGalleryImages() {
                         if (img.src && !img.classList.contains('avatar')) {
                             const src = img.getAttribute('src') || img.src;
                             const rel = getRelativePath(src);
-                            if (!imgs.includes(rel)) {
+                            if (!rel.includes('profile.svg') && !imgs.includes(rel)) {
                                 imgs.push(rel);
                             }
                         }
@@ -6074,11 +6097,11 @@ function expandImage(src) {
             galleryImages = getGalleryImages();
             const pathOnly = getRelativePath(src);
             
-            // If the user clicked a profile avatar picture, show the first available selfie/media image
+            // If the user clicked a profile avatar picture, show the first available portrait/media image
             const isProfile = pathOnly.includes('profile.svg') || pathOnly.startsWith('/agents/');
             if (isProfile) {
                 if (galleryImages.length === 0) {
-                    showCustomAlert("No Media", "No selfies or generated images exist in this sanctuary yet.");
+                    showCustomAlert("No Media", "No portraits or generated images exist in this sanctuary yet.");
                     return;
                 }
                 currentGalleryIndex = 0;
@@ -6180,7 +6203,7 @@ async function deleteCurrentImage(event) {
                                             <path d="M21 21H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h3m3-3h6l2 3h4a2 2 0 0 1 2 2v9.34"></path>
                                             <circle cx="12" cy="13" r="4"></circle>
                                         </svg>
-                                        <span>[Selfie Deleted]</span>
+                                        <span>[Portrait Deleted]</span>
                                     `;
                                     parent.replaceChild(placeholder, img);
                                 }
@@ -6233,9 +6256,9 @@ function handleSwipeGesture() {
             }
         }
 
-        // --- generateSelfiePrompt ---
-function generateSelfiePrompt() {
-            userInput.value = "Send me a selfie of yourself based on the context of our last message/current dialogue!";
+        // --- generatePortraitPrompt ---
+        function generatePortraitPrompt() {
+            userInput.value = "Send me a portrait of yourself based on the context of our last message/current dialogue!";
             sendMessage();
         }
 
@@ -6317,13 +6340,7 @@ async function regenerateImage(buttonElement, oldImageUrl, prompt) {
             }
         }
 
-        // --- animateImage ---
-        async function animateImage(buttonElement, oldImageUrl) {
-            showCustomAlert(
-                "Selfie Animation",
-                "Dynamic companion selfie animation (image-to-video) is currently disabled. This feature will be supported in a future implementation."
-            );
-        }
+
 
 
 
@@ -6800,7 +6817,7 @@ function purgeDataBank() {
 // --- reusePromptFromMessage ---
 
 /* ==========================================================================
-           XI. 10. TOOL INVOCATION & SELFIES
+           XI. 10. TOOL INVOCATION & PORTRAITS
            ========================================================================== */
 
         // --- fetchComfyCheckpoints ---
@@ -6831,7 +6848,7 @@ function purgeDataBank() {
 
 // --- handleSwipeGesture ---
 
-// --- generateSelfiePrompt ---
+// --- generatePortraitPrompt ---
 
 // --- regenerateImage ---
 
@@ -6900,6 +6917,7 @@ function purgeDataBank() {
 
         let attachedBase64 = null;
         let attachedMime = null;
+        let attachedMediaPath = null;
         let inversionActive = "";
 
         let profileCacheBuster = Date.now();
@@ -7008,6 +7026,29 @@ let selectedTavernCardFile = null;
                 }
             });
         }, 250);
+
+        // Global error handler to replace missing/deleted portraits with a clean placeholder
+        document.addEventListener('error', function (event) {
+            if (event.target.tagName.toLowerCase() === 'img') {
+                const src = event.target.src;
+                if (src && src.includes('/images/portraits/')) {
+                    const parent = event.target.parentElement;
+                    if (parent && parent.classList.contains('message-image-container')) {
+                        const placeholder = document.createElement('div');
+                        placeholder.className = 'deleted-image-placeholder';
+                        placeholder.innerHTML = `
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 6px; display: inline-block; vertical-align: middle;">
+                                <line x1="1" y1="1" x2="23" y2="23"></line>
+                                <path d="M21 21H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h3m3-3h6l2 3h4a2 2 0 0 1 2 2v9.34"></path>
+                                <circle cx="12" cy="13" r="4"></circle>
+                            </svg>
+                            <span>[Portrait Deleted]</span>
+                        `;
+                        parent.replaceChild(placeholder, event.target);
+                    }
+                }
+            }
+        }, true);
 </script>
 </body>
 </html>

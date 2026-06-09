@@ -12,7 +12,7 @@ from google.genai import types
 
 def _get_safe_local_path(image_url: str) -> str:
     """Safely converts an image URL into a local path relative to the workspace,
-    supporting subdirectories like 'selfies' while preventing path traversal.
+    supporting subdirectories like 'portraits' while preventing path traversal.
     """
     if "/images/" not in image_url:
         return None
@@ -162,12 +162,12 @@ class BaseAgentRunner:
         return False
 
     def _ensure_images_are_embedded(self, text: str) -> str:
-        """Ensures that any selfie image links in the text are prefixed with '!' so they render as images instead of links."""
+        """Ensures that any portrait image links in the text are prefixed with '!' so they render as images instead of links."""
         if not text:
             return text
         import re
-        # Convert [Name](/images/selfies/...) to ![Name](/images/selfies/...) if it is not already prefixed with !
-        return re.sub(r'(?<!\!)(\[[^\]]*\]\(/images/selfies/[^)]+\))', r'!\1', text)
+        # Convert [Name](/images/portraits/...) to ![Name](...) if it is not already prefixed with !
+        return re.sub(r'(?<!\!)(\[[^\]]*\]\(/images/portraits/[^)]+\))', r'!\1', text)
 
     def _get_system_instructions(self, inversion_directive=None) -> str:
         """Pulls the system prompt directly from <agent>.md and skill files."""
@@ -488,7 +488,7 @@ class GoogleAdkRunner(BaseAgentRunner):
                         break
         return full_text, tool_calls
 
-    async def run_async(self, session_id: str, new_message_text: str, image_data: str = None, image_mime: str = None, model: str = None) -> tuple:
+    async def run_async(self, session_id: str, new_message_text: str, image_data: str = None, image_mime: str = None, model: str = None, media_path: str = None) -> tuple:
         rag_context = _get_rag_context(new_message_text)
         inversion_directive = await self._get_inversion_directive(session_id)
         self._reload_config(model, inversion_directive, rag_context)
@@ -512,6 +512,40 @@ class GoogleAdkRunner(BaseAgentRunner):
                 app_name=self.app_name, user_id="user", session_id=session_id
             )
         adk_session = session_dict[self.app_name]["user"][session_id]
+
+        # Resolve media upload if present
+        file_part = None
+        if media_path:
+            try:
+                if media_path.startswith('/images/'):
+                    rel_path = media_path[len('/images/'):]
+                    active_agent = os.getenv("ACTIVE_AGENT", "arthur")
+                    local_file_path = os.path.normpath(os.path.join('core', 'agents', active_agent, rel_path))
+                    
+                    if os.path.exists(local_file_path):
+                        import mimetypes
+                        mime_type, _ = mimetypes.guess_type(local_file_path)
+                        if not mime_type:
+                            mime_type = image_mime or "application/octet-stream"
+                            
+                        if _is_local_model(model):
+                            if mime_type.startswith('image/'):
+                                with open(local_file_path, 'rb') as f:
+                                    img_bytes = f.read()
+                                file_part = types.Part.from_bytes(data=img_bytes, mime_type=mime_type)
+                            else:
+                                print(f"[LOCAL MODEL] Video/audio inputs not supported. Skipping {local_file_path}")
+                        else:
+                            # Upload to Gemini Files API
+                            from google import genai
+                            api_key = os.getenv("GEMINI_API_KEY")
+                            client = genai.Client(api_key=api_key)
+                            print(f"[FILES API] Uploading {local_file_path} to Gemini...")
+                            uploaded_file = client.files.upload(file=local_file_path)
+                            print(f"[FILES API] File uploaded successfully. URI: {uploaded_file.uri}")
+                            file_part = types.Part.from_uri(file_uri=uploaded_file.uri, mime_type=uploaded_file.mime_type)
+            except Exception as e:
+                print(f"Error handling media_path in run_async: {e}")
 
         if _is_local_model(model):
             # Local LM Studio logic utilizing the unified ADK session
@@ -548,9 +582,9 @@ class GoogleAdkRunner(BaseAgentRunner):
             sys_inst += (
                 "\n\n# LOCAL MODEL ENGINE DIRECTIVE\n"
                 "You are running on a local engine that does not support native function calling.\n"
-                "If you want to generate a selfie/image of yourself, you MUST output a text tag in your response "
+                "If you want to generate a portrait/image of yourself, you MUST output a text tag in your response "
                 "in this exact format:\n"
-                "[generate_selfie(prompt=\"your detailed image description prompt here\")]\n"
+                "[generate_companion_portrait(prompt=\"your detailed image description prompt here\")]\n"
                 "Do NOT output the markdown image link yourself; the system will detect this tag, "
                 "run the generator, and substitute the image link into your message.\n"
                 "Your response must contain ONLY the tag, with no other text.\n"
@@ -626,18 +660,18 @@ class GoogleAdkRunner(BaseAgentRunner):
             except Exception as e:
                 bot_response_text = f"Error connecting to local LM Studio server: {e}. Please ensure LM Studio is running, a model is loaded, and the local server is started (port 1234)."
                 
-            # Check for selfie generator tags in local model response
+            # Check for portrait generator tags in local model response
             import re
-            match = re.search(r'\[generate_selfie\((?:prompt=)?["\'](.*?)["\']\)\]', bot_response_text)
+            match = re.search(r'\[generate_companion_portrait\((?:prompt=)?["\'](.*?)["\']\)\]', bot_response_text)
             if not match:
-                match = re.search(r'<selfie>(.*?)</selfie>', bot_response_text)
+                match = re.search(r'<portrait>(.*?)</portrait>', bot_response_text)
             
             tool_calls = []
             if match:
                 prompt_text = match.group(1).strip()
                 print(f"[DEBUG EMULATOR] Extracted prompt from local LLM text response: {prompt_text}")
                 import tools
-                new_markdown = tools.generate_selfie(prompt_text)
+                new_markdown = tools.generate_companion_portrait(prompt_text)
                 
                 # Replace the tool call tag with the generated markdown link
                 original_tag = match.group(0)
@@ -649,7 +683,7 @@ class GoogleAdkRunner(BaseAgentRunner):
                 # 1. The function call event
                 fc_part = types.Part(
                     function_call=types.FunctionCall(
-                        name="generate_selfie",
+                        name="generate_companion_portrait",
                         args={"prompt": prompt_text},
                         id=call_id
                     )
@@ -666,7 +700,7 @@ class GoogleAdkRunner(BaseAgentRunner):
                 # 2. The function response event
                 fr_part = types.Part(
                     function_response=types.FunctionResponse(
-                        name="generate_selfie",
+                        name="generate_companion_portrait",
                         response={"result": new_markdown},
                         id=call_id
                     )
@@ -683,7 +717,7 @@ class GoogleAdkRunner(BaseAgentRunner):
                 # We return the tool call list so that the frontend can see it immediately
                 tool_calls.append({
                     'type': 'call',
-                    'name': 'generate_selfie',
+                    'name': 'generate_companion_portrait',
                     'args': {'prompt': prompt_text},
                     'id': call_id
                 })
@@ -706,7 +740,9 @@ class GoogleAdkRunner(BaseAgentRunner):
             if new_message_text:
                 parts.append(types.Part.from_text(text=new_message_text))
                 
-            if image_data and image_mime:
+            if file_part:
+                parts.append(file_part)
+            elif image_data and image_mime:
                 try:
                     img_bytes = base64.b64decode(image_data)
                     parts.append(types.Part.from_bytes(data=img_bytes, mime_type=image_mime))
@@ -906,13 +942,14 @@ class GoogleAdkRunner(BaseAgentRunner):
             self._load_session_from_disk(session_id)
             
         if self.app_name not in session_dict or user_id not in session_dict[self.app_name] or session_id not in session_dict[self.app_name][user_id]:
-            return False
+            # Session not found in memory or disk. Still delete the local image from the portraits folder!
+            return self._delete_local_image(image_url)
             
         storage_session = session_dict[self.app_name][user_id][session_id]
         modified = False
         
         # We need to find and remove this image from the history.
-        # It could be referenced as markdown like: ![Selfie](/images/selfie_123.png)
+        # It could be referenced as markdown like: ![Portrait](/images/portraits/portrait_123.png)
         for ev in storage_session.events:
             if ev.content and ev.content.parts:
                 for part in ev.content.parts:
@@ -920,7 +957,7 @@ class GoogleAdkRunner(BaseAgentRunner):
                         if image_url in part.text:
                             import re
                             pattern = r'!\[[^\]]*\]\(' + re.escape(image_url) + r'\)'
-                            part.text = re.sub(pattern, '[Selfie Deleted]', part.text)
+                            part.text = re.sub(pattern, '[Portrait Deleted]', part.text)
                             modified = True
                     elif getattr(part, 'function_response', None):
                         fr = part.function_response
@@ -929,7 +966,7 @@ class GoogleAdkRunner(BaseAgentRunner):
                                 if image_url in fr.response['result']:
                                     import re
                                     pattern = r'!\[[^\]]*\]\(' + re.escape(image_url) + r'\)'
-                                    fr.response['result'] = re.sub(pattern, '[Selfie Deleted]', fr.response['result'])
+                                    fr.response['result'] = re.sub(pattern, '[Portrait Deleted]', fr.response['result'])
                                     modified = True
                             
         # Clean up the actual image file from the server's local disk
@@ -1088,7 +1125,7 @@ class OpenSourceRunner(BaseAgentRunner):
             self._load_session_from_disk(session_id)
         return self.sessions_history.get(session_id, [])
 
-    async def run_async(self, session_id: str, new_message_text: str, image_data: str = None, image_mime: str = None, model: str = None) -> tuple:
+    async def run_async(self, session_id: str, new_message_text: str, image_data: str = None, image_mime: str = None, model: str = None, media_path: str = None) -> tuple:
         import httpx
         if session_id not in self.sessions_history:
             self._load_session_from_disk(session_id)
@@ -1096,11 +1133,27 @@ class OpenSourceRunner(BaseAgentRunner):
         if session_id not in self.sessions_history:
             self.sessions_history[session_id] = []
         
+        # Resolve media upload if present
+        file_path_resolved = None
+        if media_path:
+            try:
+                if media_path.startswith('/images/'):
+                    rel_path = media_path[len('/images/'):]
+                    active_agent = os.getenv("ACTIVE_AGENT", "arthur")
+                    local_file_path = os.path.normpath(os.path.join('core', 'agents', active_agent, rel_path))
+                    if os.path.exists(local_file_path):
+                        import mimetypes
+                        mime_type, _ = mimetypes.guess_type(local_file_path)
+                        if mime_type and mime_type.startswith('image/'):
+                            file_path_resolved = local_file_path
+            except Exception as e:
+                print(f"Error handling media_path in OpenSourceRunner: {e}")
+
         # Log User input
         user_msg = {
             'role': 'user',
             'text': new_message_text,
-            'image_url': f"data:{image_mime};base64,{image_data}" if image_data else None
+            'image_url': media_path if media_path else (f"data:{image_mime};base64,{image_data}" if image_data else None)
         }
         self.sessions_history[session_id].append(user_msg)
         
@@ -1115,9 +1168,9 @@ class OpenSourceRunner(BaseAgentRunner):
         sys_inst += (
             "\n\n# LOCAL MODEL ENGINE DIRECTIVE\n"
                 "You are running on a local engine that does not support native function calling.\n"
-                "If you want to generate a selfie/image of yourself, you MUST output a text tag in your response "
+                "If you want to generate a portrait/image of yourself, you MUST output a text tag in your response "
                 "in this exact format:\n"
-                "[generate_selfie(prompt=\"your detailed image description prompt here\")]\n"
+                "[generate_companion_portrait(prompt=\"your detailed image description prompt here\")]\n"
                 "Do NOT output the markdown image link yourself; the system will detect this tag, "
                 "run the generator, and substitute the image link into your message.\n"
                 "Your response must contain ONLY the tag, with no other text.\n"
@@ -1144,7 +1197,7 @@ class OpenSourceRunner(BaseAgentRunner):
                 })
                 
         # Format latest user turn
-        if image_data and image_mime:
+        if file_path_resolved or (image_data and image_mime):
             text_content = f"{new_message_text or ''} (image: [Attached Image])" if new_message_text else "[Attached Image]"
             openai_messages.append({
                 "role": "user",
@@ -1179,11 +1232,11 @@ class OpenSourceRunner(BaseAgentRunner):
         except Exception as e:
             bot_response_text = f"Error connecting to local LM Studio server: {e}. Please ensure LM Studio is running, a model is loaded, and the local server is started (port 1234)."
         
-        # Check for selfie generator tags in response
+        # Check for portrait generator tags in response
         import re
-        match = re.search(r'\[generate_selfie\((?:prompt=)?["\'](.*?)["\']\)\]', bot_response_text)
+        match = re.search(r'\[generate_companion_portrait\((?:prompt=)?["\'](.*?)["\']\)\]', bot_response_text)
         if not match:
-            match = re.search(r'<selfie>(.*?)</selfie>', bot_response_text)
+            match = re.search(r'<portrait>(.*?)</portrait>', bot_response_text)
             
         tool_calls = []
         if match:
@@ -1191,7 +1244,7 @@ class OpenSourceRunner(BaseAgentRunner):
             print(f"[DEBUG OS EMULATOR] Extracted prompt from local LLM text response: {prompt_text}")
             import tools
             import time
-            new_markdown = tools.generate_selfie(prompt_text)
+            new_markdown = tools.generate_companion_portrait(prompt_text)
             
             # Replace the tool call tag with the generated markdown link
             original_tag = match.group(0)
@@ -1202,13 +1255,13 @@ class OpenSourceRunner(BaseAgentRunner):
             # Append simulated tool call and response events to preserve history
             tool_calls.append({
                 'type': 'call',
-                'name': 'generate_selfie',
+                'name': 'generate_companion_portrait',
                 'args': {'prompt': prompt_text},
                 'id': call_id
             })
             tool_calls.append({
                 'type': 'response',
-                'name': 'generate_selfie',
+                'name': 'generate_companion_portrait',
                 'response': new_markdown,
                 'id': call_id
             })
@@ -1330,7 +1383,8 @@ class OpenSourceRunner(BaseAgentRunner):
         if session_id not in self.sessions_history:
             self._load_session_from_disk(session_id)
         if session_id not in self.sessions_history:
-            return False
+            # Session not found in memory or disk. Still delete the local image from the portraits folder!
+            return self._delete_local_image(image_url)
             
         history = self.sessions_history[session_id]
         modified = False
@@ -1339,14 +1393,14 @@ class OpenSourceRunner(BaseAgentRunner):
             if msg.get('text') and image_url in msg['text']:
                 import re
                 pattern = r'!\[[^\]]*\]\(' + re.escape(image_url) + r'\)'
-                msg['text'] = re.sub(pattern, '[Selfie Deleted]', msg['text'])
+                msg['text'] = re.sub(pattern, '[Portrait Deleted]', msg['text'])
                 modified = True
             if msg.get('tool_calls'):
                 for tc in msg['tool_calls']:
                     if tc.get('type') == 'response' and tc.get('response') and image_url in tc['response']:
                         import re
                         pattern = r'!\[[^\]]*\]\(' + re.escape(image_url) + r'\)'
-                        tc['response'] = re.sub(pattern, '[Selfie Deleted]', tc['response'])
+                        tc['response'] = re.sub(pattern, '[Portrait Deleted]', tc['response'])
                         modified = True
                 
         # Clean up the actual image file from the server's local disk
