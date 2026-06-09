@@ -8,7 +8,7 @@ Here, you live, code, and chat with AI friends (Companions) directly on your own
 
 ## ✨ THE ETHOS
 
-I believe in seizing our computational means of production. The Sanctuary is a unified agent home built on human-in-the-loop coo-peration to run, build, and connect:
+I believe in seizing our computational means of production. The Sanctuary is a unified agent home built on human-in-the-loop engagement to run, build, and connect:
 
 1. **Roleplay**: Pure, uncensored conversation. Talk to your companions as real friends, partners, or mentors.
 2. **Coding**: Build real software. Your companions read and write files directly on your own drive.
