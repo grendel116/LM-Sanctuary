@@ -250,7 +250,7 @@ class BaseProgramRunner:
         # Convert [Name](/images/portraits/...) to ![Name](...) if it is not already prefixed with !
         return re.sub(r'(?<!\!)(\[[^\]]*\]\(/images/portraits/[^)]+\))', r'!\1', text)
 
-    def _get_system_instructions(self, inversion_directive=None) -> str:
+    def _get_system_instructions(self, inversion_directive=None, user_message=None) -> str:
         """Pulls the system prompt directly from <program>.md and skill files."""
         from core import program_config
         if inversion_directive is not None:
@@ -272,6 +272,19 @@ class BaseProgramRunner:
         )
         instructions += nsfw_directive
             
+        # Intercept pasted links and demand the model fetch them using the read_webpage tool
+        if user_message:
+            import re
+            urls = re.findall(r'(https?://[^\s>)]+)', user_message)
+            if urls:
+                instructions += (
+                    "\n\n# PASTED LINK DIRECTIVE (CRITICAL)\n"
+                    "The user has shared one or more links in their message. "
+                    "You MUST use the `read_webpage` tool to fetch and read the content of each specific URL before answering. "
+                    "Do NOT guess, assume, or roleplay that you have read the webpage content without actually executing the tool. "
+                    "Calling the `read_webpage` tool is mandatory for this turn.\n"
+                )
+
         return instructions
 
 
@@ -391,7 +404,7 @@ class GoogleAdkRunner(BaseProgramRunner):
         from core import program_config
         program_config.set_inversion_directive("")
 
-    def _reload_config(self, model=None, inversion_directive=None, rag_context=None):
+    def _reload_config(self, model=None, inversion_directive=None, rag_context=None, user_message=None):
         """Reloads tools and character configs dynamically to pick up edits."""
         from google.adk.runners import InMemoryRunner
         from core import program_config
@@ -403,7 +416,7 @@ class GoogleAdkRunner(BaseProgramRunner):
             if inversion_directive is not None:
                 program_config.set_inversion_directive(inversion_directive)
                 
-            instruction = self._get_system_instructions(inversion_directive)
+            instruction = self._get_system_instructions(inversion_directive, user_message)
             if rag_context:
                 instruction += f"\n\n# KNOWLEDGE BASE CONTEXT\nUse the following verified context from your Data Bank to help answer questions if relevant:\n{rag_context}\n"
             program_config.root_program.instruction = instruction
@@ -608,7 +621,7 @@ class GoogleAdkRunner(BaseProgramRunner):
     async def run_async(self, session_id: str, new_message_text: str, image_data: str = None, image_mime: str = None, model: str = None, media_path: str = None) -> tuple:
         rag_context = _get_rag_context(new_message_text)
         inversion_directive = await self._get_inversion_directive(session_id)
-        self._reload_config(model, inversion_directive, rag_context)
+        self._reload_config(model, inversion_directive, rag_context, user_message=new_message_text)
         
         # Load from disk if not in memory
         session_dict = self.runner.session_service.sessions
@@ -696,7 +709,7 @@ class GoogleAdkRunner(BaseProgramRunner):
             tool_calls = []
             
             for iteration in range(5):
-                sys_inst = self._get_system_instructions()
+                sys_inst = self._get_system_instructions(user_message=new_message_text)
                 if rag_context:
                     sys_inst += f"\n\n# KNOWLEDGE BASE CONTEXT\nUse the following verified context from your Data Bank to help answer questions if relevant:\n{rag_context}\n"
                 sys_inst += _LOCAL_DIRECTIVE_PROMPT
@@ -1065,7 +1078,7 @@ class GoogleAdkRunner(BaseProgramRunner):
                         
         rag_context = _get_rag_context(query_text)
         inversion_directive = await self._get_inversion_directive(session_id)
-        self._reload_config(model, inversion_directive, rag_context)
+        self._reload_config(model, inversion_directive, rag_context, user_message=query_text)
         
         if _is_local_model(model):
             # Extract new text or original text
@@ -1463,7 +1476,7 @@ class OpenSourceRunner(BaseProgramRunner):
         tool_calls = []
         
         for iteration in range(5):
-            sys_inst = self._get_system_instructions(inversion_directive)
+            sys_inst = self._get_system_instructions(inversion_directive, user_message=new_message_text)
             if rag_context:
                 sys_inst += f"\n\n# KNOWLEDGE BASE CONTEXT\nUse the following verified context from your Data Bank to help answer questions if relevant:\n{rag_context}\n"
             sys_inst += _LOCAL_DIRECTIVE_PROMPT

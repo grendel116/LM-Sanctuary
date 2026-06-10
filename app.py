@@ -73,9 +73,9 @@ def check_program_change():
                 if os.path.exists(legacy_dir) and not os.path.exists(portraits_dir):
                     try:
                         os.rename(legacy_dir, portraits_dir)
-                        print(f"Migrated legacy folder to portraits for program {current_agent}")
+                        print(f"Migrated legacy folder to portraits for program {current_program}")
                     except Exception as ex:
-                        print(f"Error migrating legacy folder for program {current_agent}: {ex}")
+                        print(f"Error migrating legacy folder for program {current_program}: {ex}")
                 os.makedirs(portraits_dir, exist_ok=True)
             except Exception as ex:
                 print(f"Error preparing portraits directory for active program: {ex}")
@@ -94,7 +94,7 @@ def check_program_change():
                 runner.sessions_history.clear()
             if hasattr(runner, 'runner') and hasattr(runner.runner, 'session_service'):
                 runner.runner.session_service.sessions.clear()
-            print(f">>> Dynamic check loaded new program consciousness (Program: '{current_agent}', User Profile: '{current_user}')")
+            print(f">>> Dynamic check loaded new program consciousness (Program: '{current_program}', User Profile: '{current_user}')")
         except Exception as e:
             print(f"Error dynamically reloading program/user: {e}")
 
