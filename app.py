@@ -77,6 +77,15 @@ def check_program_change():
                     except Exception as ex:
                         print(f"Error migrating legacy folder for program {current_program}: {ex}")
                 os.makedirs(portraits_dir, exist_ok=True)
+                target_workflow = os.path.join(portraits_dir, 'ImageWorkflow.json')
+                if not os.path.exists(target_workflow):
+                    default_workflow = os.path.join(base_dir, 'templates', 'default_ImageWorkflow.json')
+                    if os.path.exists(default_workflow):
+                        try:
+                            shutil.copy(default_workflow, target_workflow)
+                            print(f">>> Automatically initialized {target_workflow} from template")
+                        except Exception as e_copy:
+                            print(f"Error copying default workflow template: {e_copy}")
             except Exception as ex:
                 print(f"Error preparing portraits directory for active program: {ex}")
         if user_changed:
