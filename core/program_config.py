@@ -2,7 +2,12 @@ import logging
 import os
 import sys
 from google.adk.agents.llm_agent import LlmAgent as LlmProgram
-from tools import read_file, write_file, replace_in_file, run_shell_command, get_workspace_structure, search_codebase, generate_companion_portrait, generate_general_image, multi_platform_research, read_webpage, google_search
+from tools import (
+    read_file, write_file, replace_in_file, run_shell_command, 
+    get_workspace_structure, search_codebase, read_webpage, google_search,
+    apply_comfy_workflow, generate_local_image, generate_imagen,
+    search_github, search_arxiv, search_hacker_news
+)
 
 # Ensure the parent directory is in sys.path so we can import variables package
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -179,8 +184,9 @@ def get_compiled_instructions() -> str:
         "4. THINKING PROCESS: Always use <think>...</think> tags for internal planning, analysis, or reasoning before generating your response.\n"
         "5. STYLE: Be natural, concise, and direct. Avoid monologues, lecturing, or forced \"deep\" questions designed to keep the conversation going. Ask questions only if contextually natural.\n"
         "6. VISUAL RENDERING DIRECTIVES:\n"
-        "   - To show the user what you (the companion character) look like or what you are doing in a scene, call the `generate_companion_portrait` tool.\n"
-        "   - To show the user general concepts, backgrounds, environments, landscapes, diagrams, or objects that do not depict you, call the `generate_general_image` tool.\n"
+        "   - To show the user what you (the companion character) look like or what you are doing in a scene, call the `generate_local_image` tool.\n"
+        "   - To show the user general concepts, backgrounds, environments, landscapes, diagrams, or objects that do not depict you, call the `generate_imagen` tool.\n"
+        "7. MOOD DECLARATION: End your response with a tag declaring your emotional state: <mood name=\"[calm|intimate|excited|intense|sad]\" intensity=\"[0.0-1.0]\"/>. This tag must be placed at the very end of your response, after thoughts, narration, or dialogue.\n"
     )
     base += global_formatting
     
@@ -198,5 +204,10 @@ root_program = LlmProgram(
     model=DEFAULT_GEMINI_MODEL,
     name=companion_name,
     instruction=instruction,
-    tools=[google_search, read_file, write_file, replace_in_file, run_shell_command, get_workspace_structure, search_codebase, generate_companion_portrait, generate_general_image, multi_platform_research, read_webpage],
+    tools=[
+        google_search, read_file, write_file, replace_in_file, 
+        run_shell_command, get_workspace_structure, search_codebase, 
+        read_webpage, apply_comfy_workflow, generate_local_image, 
+        generate_imagen, search_github, search_arxiv, search_hacker_news
+    ],
 )

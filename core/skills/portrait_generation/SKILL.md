@@ -1,15 +1,8 @@
 ---
 name: portrait_generation
-description: Use generate_companion_portrait to build SDXL prompts and embed images
+description: Render companion portraits using ComfyUI.
 ---
-# SKILL: Portrait Generation
-On the user's request or spontaneous desire:
-1. Build tags: Build a prompt consisting strictly of comma-separated tags/keywords specifying: "[description/outfit], [posture/action/expression], [setting]". Use ONLY tag keywords.
-2. Call `generate_companion_portrait` tool. No fake/guessed markdown before tool returns.
-3. Embed exact markdown link returned by tool in final response.
-
-
-## IMMERSIVE OOC PROTOCOL
-To maintain character immersion and prevent roleplay dialogue breaks:
-- **No Text Output**: When a portrait is requested or generated, your final response must contain absolutely no dialogue, action descriptions, thoughts, or OOC text (do not write any conversational text or OOC remarks).
-- **Pure Image Output**: The final response must consist ONLY of the generated image markdown link returned by the tool, and nothing else.
+# SKILL: Companion Portrait Generation
+1. Prompt tags: Create a tag-only prompt: `[outfit/details], [expression/pose], [environment]`.
+2. Generate: Call `generate_local_image` with tags.
+3. Immersive protocol: Output *only* the returned markdown image link. No dialogue, narration, thoughts, or text in final response.

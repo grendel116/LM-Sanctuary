@@ -195,7 +195,7 @@ def trigger_download(model_name):
     return True, "Download started."
 
 def load_local_model(model_name):
-    """Loads a model into memory via CLI."""
+    """Loads a model into memory via CLI, optimizing for GPU offload and generation speed."""
     try:
         # Start daemon if not running
         if not check_daemon_status():
@@ -203,8 +203,24 @@ def load_local_model(model_name):
             
         lms_path = get_lms_path()
         resolved_key = resolve_model_key(model_name)
+        
+        # Read performance optimization environment variables
+        lms_gpu = os.getenv("LMS_GPU", "max")
+        lms_parallel = os.getenv("LMS_PARALLEL", "1")
+        lms_context = os.getenv("LMS_CONTEXT")
+        
+        # Build command with optimization parameters
+        cmd = [lms_path, "load", resolved_key]
+        if lms_gpu:
+            cmd.extend(["--gpu", lms_gpu])
+        if lms_parallel:
+            cmd.extend(["--parallel", str(lms_parallel)])
+        if lms_context:
+            cmd.extend(["--context-length", str(lms_context)])
+        cmd.append("-y")
+        
         # Run lms load <model>
-        res = subprocess.run([lms_path, "load", resolved_key, "-y"], capture_output=True, text=True, encoding='utf-8', errors='ignore', shell=False, timeout=15)
+        res = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='ignore', shell=False, timeout=15)
         return res.returncode == 0, res.stdout or res.stderr
     except Exception as e:
         return False, str(e)
