@@ -1967,7 +1967,7 @@ def import_tavern_program():
             "You MUST output exactly these four sections:\n"
             "# ROLE: [Name]\n\n"
             "## IDENTITY & FORM\n"
-            "Translate the raw description into a clean visual profile summarizing their appearance, visual features, and physical form. Do NOT write any image URLs, front-matter keys like profile_image, or metadata attributes.\n\n"
+            "Translate the raw description into a simple visual profile summarizing their appearance, visual features, and physical form. Do NOT write any image URLs, front-matter keys like profile_image, or metadata attributes.\n\n"
             "## THE SETTING\n"
             "Design a quiet, cozy sanctuary room, keep, or setting that reflects this character's background or theme.\n\n"
             "## ONTOLOGY & ETHICS\n"

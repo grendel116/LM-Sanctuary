@@ -532,9 +532,9 @@ def generate_companion_portrait(prompt: str) -> str:
     # Define dynamic replacement parameters
     seed_val = random.randint(1, 1125899906842624)
     replacements = {
-        "%prompt%": f"score_9, score_8_up, score_7_up, {prompt}",
+        "%prompt%": f"{prompt}",
         "%appearance%": appearance_val,
-        "%negative_prompt%": "score_4, score_5, score_6, 3d, worst quality, low quality, deformed, mutated, extra limbs",
+        "%negative_prompt%": "worst quality, low quality, deformed, mutated, extra limbs",
         "%seed%": seed_val,
         "%steps%": 25,
         "%scale%": 7.0,
@@ -641,7 +641,7 @@ def generate_general_image(prompt: str) -> str:
     or items that do not depict you (the companion character).
 
     Args:
-        prompt: A descriptive prompt detailing the scene or object (e.g. 'a cozy coffee shop at night', 'a blue bird sitting on a branch').
+        prompt: A descriptive prompt detailing the scene or object.
 
     Returns:
         A markdown link to the generated image, or an error message.
