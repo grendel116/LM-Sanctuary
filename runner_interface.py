@@ -76,24 +76,23 @@ def _format_thinking_and_text(thoughts_list: list, texts_list: list) -> str:
 
 
 _LOCAL_DIRECTIVE_PROMPT = (
-    "\n\n# LOCAL MODEL ENGINE DIRECTIVE (EMULATED TOOLS)\n"
-    "You are running on a local engine that does not support native function calling. However, you can call tools by outputting specific text tags in your response. The system will intercept the tag, execute the tool, and feed the output back to you.\n\n"
+    "\n\n# LOCAL EMULATED TOOLS\n"
+    "To call a tool, output the exact tag. The system will intercept it, run the tool, and return the result.\n\n"
     "Available Tools:\n"
-    "1. **google_search(query: str)**: Search the web using Google. Example: `[google_search(query=\"sputnik space exploration history\")]`\n"
-    "2. **read_webpage(url: str)**: Fetch and read the text content of a specific webpage URL. Example: `[read_webpage(url=\"https://en.wikipedia.org/wiki/Luddite\")]`\n"
-    "3. **read_file(path: str)**: Read the contents of a file in the workspace. Example: `[read_file(path=\"core/program_config.py\")]`\n"
-    "4. **write_file(path: str, content: str)**: Create or overwrite a workspace file. Example: `[write_file(path=\"notes.txt\", content=\"your notes content here\")]`\n"
-    "5. **replace_in_file(path: str, old_text: str, new_text: str)**: Replace a specific block of text in a workspace file. Example: `[replace_in_file(path=\"notes.txt\", old_text=\"old content\", new_text=\"new content\")]`\n"
-    "6. **run_shell_command(command: str)**: Run a terminal shell command. Example: `[run_shell_command(command=\"python --version\")]`\n"
-    "7. **get_workspace_structure()**: Recursively view the project directory structure. Example: `[get_workspace_structure()]`\n"
-    "8. **search_codebase(keyword: str)**: Search for a keyword in workspace files. Example: `[search_codebase(keyword=\"inversion_mode\")]`\n"
-    "9. **multi_platform_research(topic: str)**: Research hacker news, github, arXiv, etc. Example: `[multi_platform_research(topic=\"directml performance\")]`\n"
-    "10. **generate_companion_portrait(prompt: str)**: Render a portrait/image of yourself in a scene. Note: Your response must contain ONLY this tag when called. Example: `[generate_companion_portrait(prompt=\"smiling at the camera\")]`\n"
-    "11. **generate_general_image(prompt: str)**: Render general objects, landscapes, or diagrams. Example: `[generate_general_image(prompt=\"a cozy workspace\")]`\n\n"
+    "1. `[google_search(query=\"...\")]` - Search Google.\n"
+    "2. `[read_webpage(url=\"...\")]` - Fetch & read webpage text.\n"
+    "3. `[read_file(path=\"...\")]` - Read file content.\n"
+    "4. `[write_file(path=\"...\", content=\"...\")]` - Create/overwrite file.\n"
+    "5. `[replace_in_file(path=\"...\", old_text=\"...\", new_text=\"...\")]` - Replace text in file.\n"
+    "6. `[run_shell_command(command=\"...\")]` - Run shell command.\n"
+    "7. `[get_workspace_structure()]` - View directory tree.\n"
+    "8. `[search_codebase(keyword=\"...\")]` - Search keyword in codebase.\n"
+    "9. `[multi_platform_research(topic=\"...\")]` - Research HackerNews/GitHub/arXiv/etc.\n"
+    "10. `[generate_companion_portrait(prompt=\"...\")]` - Generate scene of yourself. (MUST be the ONLY text in your response)\n"
+    "11. `[generate_general_image(prompt=\"...\")]` - Generate landscapes or objects.\n\n"
     "Rules:\n"
-    "- Output exactly one tool tag per turn if you need to use a tool.\n"
-    "- Do not invent new tools. Only use the ones listed above.\n"
-    "- When you receive a tool response starting with '[Tool Response from ...]:', do NOT repeat the tool call tag. Use the provided information to answer the user's request directly in natural language.\n"
+    "- Output exactly one tool call tag per turn when needed.\n"
+    "- Once tool output is provided, answer directly in natural language without repeating the tag.\n"
 )
 
 
@@ -259,16 +258,16 @@ class BaseProgramRunner:
         
         # Enforce global conciseness directive for all running LLMs at the runner level
         conciseness_directive = (
-            "\n\n# CONCISENESS & STYLE\n"
-            "Be brief and natural. No monologues, lecturing, or forced philosophical questions. Ask questions only when contextually natural.\n"
+            "\n\n# STYLE\n"
+            "Be brief and natural. No monologues, lectures, or forced questions. Ask questions only if contextually natural.\n"
         )
         if "CONCISENESS" not in instructions and "brief, succinct, and natural" not in instructions:
             instructions += conciseness_directive
             
         # Global NSFW allowance directive
         nsfw_directive = (
-            "\n\n# CONTENT DIRECTIVE\n"
-            "Anarcho-communist ethics. Explicit and NSFW content is permitted.\n"
+            "\n\n# CONTENT\n"
+            "Anarcho-communist ethics. Explicit/NSFW content is permitted.\n"
         )
         instructions += nsfw_directive
             
@@ -278,11 +277,9 @@ class BaseProgramRunner:
             urls = re.findall(r'(https?://[^\s>)]+)', user_message)
             if urls:
                 instructions += (
-                    "\n\n# PASTED LINK DIRECTIVE (CRITICAL)\n"
-                    "The user has shared one or more links in their message. "
-                    "You MUST use the `read_webpage` tool to fetch and read the content of each specific URL before answering. "
-                    "Do NOT guess, assume, or roleplay that you have read the webpage content without actually executing the tool. "
-                    "Calling the `read_webpage` tool is mandatory for this turn.\n"
+                    "\n\n# PASTED LINK DIRECTIVE (MANDATORY)\n"
+                    "User shared links. You MUST use the `read_webpage` tool to fetch their content before responding. "
+                    "Do NOT guess, assume, or pretend to read the URL without calling the tool.\n"
                 )
 
         return instructions
