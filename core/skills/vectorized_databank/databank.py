@@ -25,9 +25,9 @@ class DataBankManager:
         if db_dir is None:
             # Go up 3 levels to get from core/skills/vectorized_databank to core
             base_core = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-            from utils.agent import get_active_agent
-            active_agent = get_active_agent()
-            db_dir = os.path.join(base_core, "agents", active_agent)
+            from utils.program import get_active_program
+            active_program = get_active_program()
+            db_dir = os.path.join(base_core, "programs", active_program)
         
         os.makedirs(db_dir, exist_ok=True)
         self.db_path = os.path.join(db_dir, "databank.db")

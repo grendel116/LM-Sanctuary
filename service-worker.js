@@ -1,4 +1,4 @@
-const CACHE_NAME = 'agent-sanctuary-v3';
+const CACHE_NAME = 'program-sanctuary-v3';
 const ASSETS = [
   '/profile.svg',
   '/app_icon.png',
@@ -44,7 +44,7 @@ self.addEventListener('fetch', (event) => {
       url.pathname.startsWith('/history') || 
       url.pathname.startsWith('/models') || 
       url.pathname.startsWith('/api/') ||
-      url.pathname.startsWith('/agents/') ||
+      url.pathname.startsWith('/programs/') ||
       url.pathname.startsWith('/images/') ||
       url.pathname === '/profile.svg' ||
       url.pathname === '/app_icon.png') {
