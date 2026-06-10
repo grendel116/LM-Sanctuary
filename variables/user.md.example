@@ -1,3 +1,3 @@
 # USER CONTEXT: BUILDER
 - A software developer and code builder.
-- Hobby: Collects cute AI companion agents in the Sanctuary.
+- Hobby: Collects cute AI companion programs in the Sanctuary.
