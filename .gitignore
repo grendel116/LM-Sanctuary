@@ -18,17 +18,17 @@ variables/*
 variables/user_profiles/*
 !variables/user_profiles/builder.md
 
-# Ignore all companion profiles under core/agents except the default Arthur agent template
-core/agents/*
-!core/agents/arthur/
-!core/agents/sebile/
+# Ignore all companion profiles under core/programs except the default Arthur program template
+core/programs/*
+!core/programs/arthur/
+!core/programs/sebile/
 
-# Ignore user-generated dynamic agent sessions, databases, and custom generated portraits
-core/agents/*/sessions/
-core/agents/*/portraits/
-core/agents/*/media/
-core/agents/*/uploads/
-core/agents/databank.db
+# Ignore user-generated dynamic program sessions, databases, and custom generated portraits
+core/programs/*/sessions/
+core/programs/*/portraits/
+core/programs/*/media/
+core/programs/*/uploads/
+core/programs/*/databank.db
 core/embeddings.pkl
 temp_uploads/
 
@@ -41,4 +41,5 @@ core/skills/speech_generation/speech_cache/
 *.log
 
 # Temporary test files
+scratch/
 scratch_veo_test.mp4
