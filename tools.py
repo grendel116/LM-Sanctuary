@@ -5,7 +5,7 @@ import requests
 import time
 import uuid
 
-from variables import COMFYUI_SERVER_URL, COMFYUI_CHECKPOINT, COMFYUI_VAE
+from variables import COMFYUI_SERVER_URL, COMFYUI_CHECKPOINT, COMFYUI_VAE, DEFAULT_GEMINI_MODEL
 
 
 # Global memory dict to hold tool confirmation states for mobile/web human-in-the-loop approvals
@@ -94,8 +94,8 @@ def read_webpage(url: str) -> str:
 
 
 def web_search(query: str) -> str:
-    """Searches the web for information using Google Custom Search API.
-    If the custom search credentials are not set, it falls back to Wikipedia Search.
+    """Searches the web using Google Search Grounding via Gemini API.
+    If the key is not set or the API call fails, it falls back to Wikipedia Search.
 
     Args:
         query: The search query to look up.
@@ -103,27 +103,47 @@ def web_search(query: str) -> str:
     Returns:
         A text summary of the search results containing titles, URLs, and snippets.
     """
-    api_key = os.getenv("GOOGLE_SEARCH_API_KEY")
-    cx = os.getenv("GOOGLE_SEARCH_CX")
-
-    if api_key and cx:
+    # Google Search Grounding via Gemini API (uses the user's GEMINI_API_KEY)
+    gemini_api_key = os.getenv("GEMINI_API_KEY")
+    if gemini_api_key:
         try:
-            url = "https://www.googleapis.com/customsearch/v1"
-            response = requests.get(url, params={"key": api_key, "cx": cx, "q": query}, timeout=10)
-            if response.status_code == 200:
-                data = response.json()
-                items = data.get("items", [])
-                if items:
-                    results = []
-                    for item in items[:5]:
-                        results.append(
-                            f"Title: {item.get('title')}\n"
-                            f"Link: {item.get('link')}\n"
-                            f"Snippet: {item.get('snippet')}\n"
-                        )
-                    return "Google Custom Search Results:\n\n" + "\n".join(results)
-        except Exception:
-            pass
+            from google import genai
+            from google.genai import types
+            
+            client = genai.Client(api_key=gemini_api_key)
+            grounding_tool = types.Tool(
+                google_search=types.GoogleSearch()
+            )
+            config = types.GenerateContentConfig(
+                tools=[grounding_tool],
+                temperature=0.0
+            )
+            
+            # Query Gemini to execute search grounding natively
+            response = client.models.generate_content(
+                model=DEFAULT_GEMINI_MODEL,
+                contents=query,
+                config=config
+            )
+            
+            results = []
+            if response.text:
+                results.append(response.text)
+                
+            metadata = response.candidates[0].grounding_metadata if (response.candidates and response.candidates[0]) else None
+            if metadata and hasattr(metadata, 'grounding_chunks') and metadata.grounding_chunks:
+                sources_list = []
+                for chunk in metadata.grounding_chunks:
+                    web = getattr(chunk, 'web', None)
+                    if web and web.uri:
+                        sources_list.append(f"- [{web.title or 'Source'}]({web.uri})")
+                if sources_list:
+                    results.append("\nVerified Sources:\n" + "\n".join(sources_list))
+                    
+            if results:
+                return "Google Grounded Search Results:\n\n" + "\n\n".join(results)
+        except Exception as e:
+            print(f"Google Grounding Search fallback error: {e}")
 
     # Wikipedia Search
     try:
@@ -160,6 +180,11 @@ def web_search(query: str) -> str:
         return f"Error performing Wikipedia Search: {e}"
         
     return "Error performing Wikipedia Search."
+
+
+def google_search(query: str) -> str:
+    """Wrapper that delegates search queries to web_search."""
+    return web_search(query)
 
 def read_file(path: str) -> str:
     """Reads the contents of a file at the specified path.
