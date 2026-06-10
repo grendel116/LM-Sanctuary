@@ -79,7 +79,7 @@ _LOCAL_DIRECTIVE_PROMPT = (
     "\n\n# LOCAL MODEL ENGINE DIRECTIVE (EMULATED TOOLS)\n"
     "You are running on a local engine that does not support native function calling. However, you can call tools by outputting specific text tags in your response. The system will intercept the tag, execute the tool, and feed the output back to you.\n\n"
     "Available Tools:\n"
-    "1. **web_search(query: str)**: Search the web using Google/Wikipedia. Example: `[web_search(query=\"sputnik space exploration history\")]`\n"
+    "1. **google_search(query: str)**: Search the web using Google. Example: `[google_search(query=\"sputnik space exploration history\")]`\n"
     "2. **read_webpage(url: str)**: Fetch and read the text content of a specific webpage URL. Example: `[read_webpage(url=\"https://en.wikipedia.org/wiki/Luddite\")]`\n"
     "3. **read_file(path: str)**: Read the contents of a file in the workspace. Example: `[read_file(path=\"core/agent_config.py\")]`\n"
     "4. **write_file(path: str, content: str)**: Create or overwrite a workspace file. Example: `[write_file(path=\"notes.txt\", content=\"your notes content here\")]`\n"
@@ -93,6 +93,7 @@ _LOCAL_DIRECTIVE_PROMPT = (
     "Rules:\n"
     "- Output exactly one tool tag per turn if you need to use a tool.\n"
     "- Do not invent new tools. Only use the ones listed above.\n"
+    "- When you receive a tool response starting with '[Tool Response from ...]:', do NOT repeat the tool call tag. Use the provided information to answer the user's request directly in natural language.\n"
 )
 
 
@@ -700,47 +701,72 @@ class GoogleAdkRunner(BaseAgentRunner):
                     sys_inst += f"\n\n# KNOWLEDGE BASE CONTEXT\nUse the following verified context from your Data Bank to help answer questions if relevant:\n{rag_context}\n"
                 sys_inst += _LOCAL_DIRECTIVE_PROMPT
                 
-                openai_messages = [{"role": "system", "content": sys_inst}]
-                
+                raw_messages = []
                 for ev in adk_session.events:
-                    role = ev.author.lower()
-                    if role == 'user':
-                        text = ""
-                        image_url = None
-                        if ev.content and ev.content.parts:
-                            for part in ev.content.parts:
-                                if part.text:
-                                    text += part.text
-                                elif getattr(part, 'inline_data', None):
+                    role_str = ev.content.role if ev.content and ev.content.role else ev.author.lower()
+                    role = "user" if role_str == "user" else "assistant"
+                    
+                    text = ""
+                    image_url = None
+                    if ev.content and ev.content.parts:
+                        for part in ev.content.parts:
+                            if part.text:
+                                text += part.text
+                            elif getattr(part, 'inline_data', None):
+                                try:
+                                    blob = part.inline_data
+                                    if hasattr(blob, 'data') and hasattr(blob, 'mime_type'):
+                                        data_b64 = base64.b64encode(blob.data).decode('utf-8')
+                                        image_url = f"data:{blob.mime_type};base64,{data_b64}"
+                                except Exception:
+                                    pass
+                            elif getattr(part, 'function_call', None):
+                                fc = part.function_call
+                                args_list = []
+                                if fc.args:
+                                    args_dict = dict(fc.args) if not isinstance(fc.args, dict) else fc.args
+                                    for k, v in args_dict.items():
+                                        if isinstance(v, str):
+                                            escaped_v = v.replace('"', '\\"')
+                                            args_list.append(f'{k}="{escaped_v}"')
+                                        else:
+                                            args_list.append(f'{k}={v}')
+                                args_str = ", ".join(args_list)
+                                text += f"\n[{fc.name}({args_str})]"
+                            elif getattr(part, 'function_response', None):
+                                fr = part.function_response
+                                resp = fr.response
+                                if hasattr(resp, "fields"):
                                     try:
-                                        blob = part.inline_data
-                                        if hasattr(blob, 'data') and hasattr(blob, 'mime_type'):
-                                            data_b64 = base64.b64encode(blob.data).decode('utf-8')
-                                            image_url = f"data:{blob.mime_type};base64,{data_b64}"
+                                        from google.protobuf.json_format import MessageToDict
+                                        resp_dict = MessageToDict(resp)
+                                        resp = resp_dict.get("result", resp_dict)
                                     except Exception:
                                         pass
+                                elif isinstance(resp, dict):
+                                    resp = resp.get("result", resp)
+                                text += f"\n[Tool Response from {fr.name}]:\n{resp}"
+                                
+                    text = text.strip()
+                    if text or image_url:
                         if image_url:
                             text_content = f"{text} (image: [Attached Image])" if text else "[Attached Image]"
-                            openai_messages.append({
-                                "role": "user",
+                            raw_messages.append({
+                                "role": role,
                                 "content": text_content
                             })
                         else:
-                            openai_messages.append({
-                                "role": "user",
+                            raw_messages.append({
+                                "role": role,
                                 "content": text
                             })
-                    elif role == 'companion' or role == self.runner.agent.name.lower() or role == 'model':
-                        text = ""
-                        if ev.content and ev.content.parts:
-                            for part in ev.content.parts:
-                                if part.text:
-                                    text += part.text
-                        if text:
-                            openai_messages.append({
-                                "role": "assistant",
-                                "content": text
-                            })
+                            
+                openai_messages = [{"role": "system", "content": sys_inst}]
+                for msg in raw_messages:
+                    if openai_messages and openai_messages[-1]["role"] == msg["role"]:
+                        openai_messages[-1]["content"] += "\n\n" + msg["content"]
+                    else:
+                        openai_messages.append(msg)
                             
                 url = LOCAL_SERVER_URL
                 headers = {"Content-Type": "application/json"}
@@ -788,17 +814,17 @@ class GoogleAdkRunner(BaseAgentRunner):
                     func = getattr(tools, tool_name, None)
                     
                     if func:
-                        companion_content = types.Content(role="model", parts=[types.Part.from_text(text=bot_response_text)])
-                        companion_event = Event(
-                            author="Companion",
-                            content=companion_content,
-                            invocation_id=user_event.invocation_id,
-                            id=f"companion-{int(time.time())}",
-                            timestamp=time.time()
-                        )
-                        adk_session.events.append(companion_event)
-                        
                         if tool_name in ("generate_companion_portrait", "generate_general_image"):
+                            companion_content = types.Content(role="model", parts=[types.Part.from_text(text=bot_response_text)])
+                            companion_event = Event(
+                                author="Companion",
+                                content=companion_content,
+                                invocation_id=user_event.invocation_id,
+                                id=f"companion-{int(time.time())}",
+                                timestamp=time.time()
+                            )
+                            adk_session.events.append(companion_event)
+                            
                             new_markdown = func(*parsed_args["args"], **parsed_args["kwargs"])
                             original_tag = match.group(0)
                             bot_response_text = bot_response_text.replace(original_tag, new_markdown)
@@ -846,6 +872,18 @@ class GoogleAdkRunner(BaseAgentRunner):
                             companion_event.content.parts[0].text = self._ensure_images_are_embedded(bot_response_text)
                             break
                         else:
+                            text_before = bot_response_text[:match.start()].strip()
+                            if text_before:
+                                companion_content = types.Content(role="model", parts=[types.Part.from_text(text=text_before)])
+                                companion_event = Event(
+                                    author="Companion",
+                                    content=companion_content,
+                                    invocation_id=user_event.invocation_id,
+                                    id=f"companion-{int(time.time())}",
+                                    timestamp=time.time()
+                                )
+                                adk_session.events.append(companion_event)
+                            
                             try:
                                 tool_output = func(*parsed_args["args"], **parsed_args["kwargs"])
                             except Exception as ex:
@@ -911,6 +949,37 @@ class GoogleAdkRunner(BaseAgentRunner):
                     )
                     adk_session.events.append(companion_event)
                     break
+            
+            # Post-process current turn events to convert intermediate texts into thoughts
+            companion_events_this_turn = [
+                ev for ev in adk_session.events 
+                if ev.invocation_id == user_event.invocation_id 
+                and ev.author.lower() in ('companion', self.runner.agent.name.lower(), 'model')
+            ]
+            
+            # Find the last companion event that contains actual text
+            last_text_ev = None
+            for ev in reversed(companion_events_this_turn):
+                if ev.content and ev.content.parts:
+                    has_text = any(part.text for part in ev.content.parts if not getattr(part, 'thought', False))
+                    if has_text:
+                        last_text_ev = ev
+                        break
+                        
+            # Mark all text parts of other companion events in this turn as thoughts
+            for ev in companion_events_this_turn:
+                if ev is not last_text_ev:
+                    if ev.content and ev.content.parts:
+                        for part in ev.content.parts:
+                            if part.text:
+                                try:
+                                    part.thought = True
+                                except Exception:
+                                    pass
+                                try:
+                                    part.metadata = {"thought": True}
+                                except Exception:
+                                    pass
             
             bot_response_text = self._ensure_images_are_embedded(bot_response_text)
             self._save_session_to_disk(session_id)
@@ -1357,6 +1426,8 @@ class OpenSourceRunner(BaseAgentRunner):
             
         if session_id not in self.sessions_history:
             self.sessions_history[session_id] = []
+            
+        initial_history_len = len(self.sessions_history[session_id])
         
         # Resolve media upload if present
         file_path_resolved = None
@@ -1397,39 +1468,60 @@ class OpenSourceRunner(BaseAgentRunner):
                 sys_inst += f"\n\n# KNOWLEDGE BASE CONTEXT\nUse the following verified context from your Data Bank to help answer questions if relevant:\n{rag_context}\n"
             sys_inst += _LOCAL_DIRECTIVE_PROMPT
             
-            # Format messages for LM Studio OpenAI API standard
-            openai_messages = [{"role": "system", "content": sys_inst}]
-            
             history = self.sessions_history[session_id]
+            raw_messages = []
             
             # Format existing history
             for msg in history[:-1]:
                 role = "assistant" if msg['role'] == 'companion' else "user"
+                content_text = msg.get('text', '') or ''
+                if msg.get('tool_calls'):
+                    for tc in msg['tool_calls']:
+                        if tc.get('type') == 'call':
+                            name = tc.get('name')
+                            args = tc.get('args', {})
+                            args_list = []
+                            for k, v in args.items():
+                                if isinstance(v, str):
+                                    escaped_v = v.replace('"', '\\"')
+                                    args_list.append(f'{k}="{escaped_v}"')
+                                else:
+                                    args_list.append(f'{k}={v}')
+                            args_str = ", ".join(args_list)
+                            content_text += f"\n[{name}({args_str})]"
+                            
                 if msg.get('image_url'):
-                    text_content = f"{msg.get('text', '')} (image: [Attached Image])" if msg.get('text') else "[Attached Image]"
-                    openai_messages.append({
+                    text_content = f"{content_text} (image: [Attached Image])" if content_text else "[Attached Image]"
+                    raw_messages.append({
                         "role": role,
                         "content": text_content
                     })
                 else:
-                    openai_messages.append({
+                    raw_messages.append({
                         "role": role,
-                        "content": msg.get('text', '')
+                        "content": content_text
                     })
                     
             # Format latest user turn
             latest_msg = history[-1]
             if file_path_resolved or (image_data and image_mime):
                 text_content = f"{latest_msg.get('text') or ''} (image: [Attached Image])" if latest_msg.get('text') else "[Attached Image]"
-                openai_messages.append({
+                raw_messages.append({
                     "role": "user",
                     "content": text_content
                 })
             else:
-                openai_messages.append({
+                raw_messages.append({
                     "role": "user",
                     "content": latest_msg.get('text') or ''
                 })
+                
+            openai_messages = [{"role": "system", "content": sys_inst}]
+            for msg in raw_messages:
+                if openai_messages and openai_messages[-1]["role"] == msg["role"]:
+                    openai_messages[-1]["content"] += "\n\n" + msg["content"]
+                else:
+                    openai_messages.append(msg)
                 
             url = LOCAL_SERVER_URL
             headers = {"Content-Type": "application/json"}
@@ -1477,14 +1569,14 @@ class OpenSourceRunner(BaseAgentRunner):
                 func = getattr(tools, tool_name, None)
                 
                 if func:
-                    bot_msg_intermediate = {
-                        'role': 'companion',
-                        'text': bot_response_text,
-                        'tool_calls': []
-                    }
-                    self.sessions_history[session_id].append(bot_msg_intermediate)
-                    
                     if tool_name in ("generate_companion_portrait", "generate_general_image"):
+                        bot_msg_intermediate = {
+                            'role': 'companion',
+                            'text': bot_response_text,
+                            'tool_calls': []
+                        }
+                        self.sessions_history[session_id].append(bot_msg_intermediate)
+                        
                         new_markdown = func(*parsed_args["args"], **parsed_args["kwargs"])
                         original_tag = match.group(0)
                         bot_response_text = bot_response_text.replace(original_tag, new_markdown)
@@ -1509,6 +1601,14 @@ class OpenSourceRunner(BaseAgentRunner):
                         bot_msg_intermediate['text'] = self._ensure_images_are_embedded(bot_response_text)
                         break
                     else:
+                        text_before = bot_response_text[:match.start()].strip()
+                        bot_msg_intermediate = {
+                            'role': 'companion',
+                            'text': text_before,
+                            'tool_calls': []
+                        }
+                        self.sessions_history[session_id].append(bot_msg_intermediate)
+                        
                         try:
                             tool_output = func(*parsed_args["args"], **parsed_args["kwargs"])
                         except Exception as ex:
@@ -1550,6 +1650,16 @@ class OpenSourceRunner(BaseAgentRunner):
                 self.sessions_history[session_id].append(bot_msg)
                 break
                 
+        # Post-process current turn messages to convert intermediate texts into thoughts
+        companion_msgs_this_turn = [
+            msg for msg in self.sessions_history[session_id][initial_history_len:]
+            if msg.get('role') == 'companion'
+        ]
+        if companion_msgs_this_turn:
+            for msg in companion_msgs_this_turn[:-1]:
+                if msg.get('text'):
+                    msg['text'] = f"<thought>\n{msg['text']}\n</thought>"
+                    
         bot_response_text = self._ensure_images_are_embedded(bot_response_text)
         self._save_session_to_disk(session_id)
         return bot_response_text, tool_calls
