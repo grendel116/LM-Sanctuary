@@ -3351,8 +3351,17 @@ async function stopComfyUI(btn) {
             }
         }
 
+        // --- formatBytes helper ---
+        function formatBytes(bytes) {
+            if (!bytes) return '0 B';
+            const k = 1024;
+            const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+        }
+
         // --- searchHFModels ---
-async function searchHFModels(inputId, resultsId) {
+        async function searchHFModels(inputId, resultsId) {
             const input = document.getElementById(inputId);
             const container = document.getElementById(resultsId);
             if (!input || !container) return;
@@ -3371,13 +3380,16 @@ async function searchHFModels(inputId, resultsId) {
                 container.innerHTML = '';
                 results.forEach(m => {
                     const item = document.createElement('div');
-                    item.style.cssText = 'display: flex; align-items: center; justify-content: space-between; padding: 6px 10px; background: rgba(255,255,255,0.03); border: 1px solid var(--border-color); border-radius: 8px; width: 100%; box-sizing: border-box; gap: 8px;';
+                    item.style.cssText = 'display: flex; flex-direction: column; padding: 10px; background: rgba(255,255,255,0.03); border: 1px solid var(--border-color); border-radius: 8px; width: 100%; box-sizing: border-box; gap: 8px; margin-bottom: 6px;';
                     item.innerHTML = `
-                        <div style="min-width: 0; flex: 1;">
-                            <div style="font-weight: 500; font-size: 0.75rem; color: var(--text-main); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;" title="${m.id}">${m.id}</div>
-                            <div style="font-size: 0.65rem; color: var(--text-muted); margin-top: 2px;">Likes: ${m.likes} • Downloads: ${m.downloads}</div>
+                        <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%;">
+                            <div style="min-width: 0; flex: 1; text-align: left;">
+                                <div style="font-weight: 600; font-size: 0.78rem; color: var(--text-main); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;" title="${m.id}">${m.id}</div>
+                                <div style="font-size: 0.65rem; color: var(--text-muted); margin-top: 2px;">Likes: ${m.likes} • Downloads: ${m.downloads}</div>
+                            </div>
+                            <button onclick="expandHFRepo('${m.id}', this)" class="onboarding-btn" style="margin: 0; padding: 2px 8px; font-size: 0.7rem; height: 24px; flex-shrink: 0; background: var(--border-color); color: var(--text-main); border: 1px solid var(--border-color); border-radius: 4px;">Show Files</button>
                         </div>
-                        <button onclick="downloadHFModel('${m.id}', this)" class="onboarding-btn" style="margin: 0; padding: 2px 8px; font-size: 0.7rem; height: 24px; flex-shrink: 0;">Download</button>
+                        <div class="repo-files-container" style="display: none; border-top: 1px solid rgba(255,255,255,0.05); padding-top: 8px; margin-top: 4px; flex-direction: column; gap: 6px;"></div>
                     `;
                     container.appendChild(item);
                 });
@@ -3386,77 +3398,148 @@ async function searchHFModels(inputId, resultsId) {
             }
         }
 
+        // --- expandHFRepo ---
+        async function expandHFRepo(repoId, btn) {
+            const card = btn.closest('div').parentNode;
+            const filesContainer = card.querySelector('.repo-files-container');
+            if (!filesContainer) return;
+            
+            if (filesContainer.style.display === 'flex') {
+                filesContainer.style.display = 'none';
+                btn.textContent = "Show Files";
+                return;
+            }
+            
+            filesContainer.style.display = 'flex';
+            filesContainer.innerHTML = '<div style="color: var(--text-muted); font-size: 0.65rem; text-align: center; width: 100%; margin: 5px 0;">Loading variants...</div>';
+            btn.textContent = "Hide Files";
+            
+            try {
+                const res = await fetch(`/api/lms/huggingface/files?repo_id=${encodeURIComponent(repoId)}`);
+                const data = await res.json();
+                const files = data.files || [];
+                if (files.length === 0) {
+                    filesContainer.innerHTML = '<div style="color: var(--text-muted); font-size: 0.65rem; text-align: center; width: 100%; margin: 5px 0;">No GGUF variants found in this repo.</div>';
+                    return;
+                }
+                filesContainer.innerHTML = '';
+                files.forEach(f => {
+                    const fileRow = document.createElement('div');
+                    fileRow.style.cssText = 'display: flex; flex-direction: column; font-size: 0.7rem; background: rgba(0,0,0,0.15); padding: 8px; border-radius: 6px; gap: 6px; width: 100%; box-sizing: border-box; border: 1px solid rgba(255,255,255,0.03);';
+                    const trackingName = `${repoId}@${f.quantization}`;
+                    const cleanId = trackingName.replace(/[^a-zA-Z0-9]/g, '');
+                    fileRow.innerHTML = `
+                        <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%;">
+                            <div style="flex: 1; min-width: 0; text-align: left;">
+                                <div style="font-weight: 500; text-overflow: ellipsis; overflow: hidden; white-space: nowrap; color: var(--text-main);" title="${f.filename}">${f.filename}</div>
+                                <div style="font-size: 0.62rem; color: var(--text-muted); margin-top: 1px;">Size: ${formatBytes(f.size)} • Quant: ${f.quantization || 'Unknown'}</div>
+                            </div>
+                            <button onclick="downloadHFModel('${repoId}', '${f.quantization}', this)" class="onboarding-btn" style="margin: 0; padding: 2px 6px; font-size: 0.65rem; height: 20px; flex-shrink: 0; background: var(--primary-accent); border: none; border-radius: 4px; color: white;">Download</button>
+                        </div>
+                        <div class="progress-wrapper-${cleanId}" style="display: none; width: 100%;">
+                            <div style="display: flex; justify-content: space-between; font-size: 0.58rem; color: var(--text-muted); margin-bottom: 2px; width: 100%;">
+                                <span class="pct-span">0%</span>
+                                <span class="speed-span">0 MB/s</span>
+                                <span class="eta-span">--:--</span>
+                            </div>
+                            <div style="background: rgba(255,255,255,0.08); border-radius: 3px; height: 4px; overflow: hidden; width: 100%;">
+                                <div class="bar-span" style="background: var(--primary-accent); height: 100%; width: 0%; transition: width 0.3s ease;"></div>
+                            </div>
+                        </div>
+                    `;
+                    filesContainer.appendChild(fileRow);
+                });
+            } catch (e) {
+                filesContainer.innerHTML = '<div style="color: #fca5a5; font-size: 0.65rem; text-align: center; width: 100%; margin: 5px 0;">Failed to load files.</div>';
+            }
+        }
+
         // --- downloadHFModel ---
-async function downloadHFModel(modelName, btn) {
+        async function downloadHFModel(repoId, quantization, btn) {
             btn.disabled = true;
             btn.textContent = "Requesting...";
+            const trackingName = `${repoId}@${quantization}`;
+            const cleanId = trackingName.replace(/[^a-zA-Z0-9]/g, '');
+            const row = btn.closest('div').parentNode;
+            const progressWrapper = row.querySelector(`.progress-wrapper-${cleanId}`);
+            if (progressWrapper) progressWrapper.style.display = 'block';
+
             try {
                 const res = await fetch('/api/lms/download', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ model_name: modelName })
+                    body: JSON.stringify({ model_name: repoId, quantization: quantization })
                 });
                 const data = await res.json();
                 if (data.success) {
                     btn.textContent = "Downloading...";
-                    pollDownloadProgress(modelName, btn);
+                    pollDownloadProgress(trackingName, progressWrapper, btn);
                 } else {
                     showCustomAlert("Download Failed", data.error || data.message || "Failed to start download.");
                     btn.disabled = false;
                     btn.textContent = "Download";
+                    if (progressWrapper) progressWrapper.style.display = 'none';
                 }
             } catch (e) {
                 showCustomAlert("Error", "Failed to connect to server.");
                 btn.disabled = false;
                 btn.textContent = "Download";
+                if (progressWrapper) progressWrapper.style.display = 'none';
             }
         }
 
         // --- pollDownloadProgress ---
-function pollDownloadProgress(modelName, btn) {
+        function pollDownloadProgress(trackingName, progressWrapper, btn) {
             const interval = setInterval(async () => {
                 try {
                     const res = await fetch('/api/lms/status');
                     const data = await res.json();
-                    const statusObj = data.download_status[modelName];
+                    const statusObj = data.download_status[trackingName];
                     if (statusObj) {
-                        if (statusObj.status === 'completed') {
+                        const pctSpan = progressWrapper.querySelector('.pct-span');
+                        const speedSpan = progressWrapper.querySelector('.speed-span');
+                        const etaSpan = progressWrapper.querySelector('.eta-span');
+                        const barSpan = progressWrapper.querySelector('.bar-span');
+
+                        if (statusObj.status === 'downloading') {
+                            const downloaded = statusObj.downloaded_bytes || 0;
+                            const total = statusObj.total_size_bytes || 1;
+                            const percent = (downloaded / total * 100).toFixed(1);
+                            const speed = ((statusObj.bytes_per_second || 0) / 1024 / 1024).toFixed(2);
+                            
+                            if (pctSpan) pctSpan.textContent = `${percent}%`;
+                            if (speedSpan) speedSpan.textContent = `${speed} MB/s`;
+                            if (barSpan) barSpan.style.width = `${percent}%`;
+
+                            if (statusObj.estimated_completion && etaSpan) {
+                                const remainingMs = new Date(statusObj.estimated_completion) - new Date();
+                                const remainingSec = Math.max(0, Math.floor(remainingMs / 1000));
+                                const min = Math.floor(remainingSec / 60);
+                                const sec = remainingSec % 60;
+                                etaSpan.textContent = `ETA: ${min}m ${sec}s`;
+                            }
+                        } else if (statusObj.status === 'completed') {
                             clearInterval(interval);
-                            btn.textContent = "Load Model";
-                            btn.style.background = "";
-                            btn.disabled = false;
-                            btn.onclick = async () => {
-                                btn.disabled = true;
-                                btn.textContent = "Loading...";
-                                const loadRes = await fetch('/api/lms/load', {
-                                    method: 'POST',
-                                    headers: { 'Content-Type': 'application/json' },
-                                    body: JSON.stringify({ model_name: modelName })
-                                });
-                                const loadData = await loadRes.json();
-                                if (loadData.success) {
-                                    await initializeModelSelect();
-                                    if (document.getElementById('onboarding-container')) {
-                                        showOnboardingCard();
-                                    }
-                                    updateConnectionModalStatus();
-                                } else {
-                                    showCustomAlert("Load Failed", loadData.message || "Failed to load model.");
-                                    btn.disabled = false;
-                                    btn.textContent = "Load Model";
-                                }
-                            };
+                            btn.textContent = "Downloaded";
+                            btn.style.background = "#10b981"; // green style
+                            btn.disabled = true;
+                            if (pctSpan) pctSpan.textContent = "100%";
+                            if (barSpan) barSpan.style.width = "100%";
+                            if (etaSpan) etaSpan.textContent = "Finished";
+                            await initializeModelSelect();
+                            fetchAndRenderLmsModels();
                         } else if (statusObj.status === 'failed') {
                             clearInterval(interval);
-                            showCustomAlert("Download Failed", `Model download failed:<br><code style="color: #fca5a5; font-size: 0.75rem;">${statusObj.error}</code>`);
+                            showCustomAlert("Download Failed", `Model download failed:<br><code style="color: #fca5a5; font-size: 0.75rem;">${statusObj.error || 'Unknown error'}</code>`);
                             btn.disabled = false;
                             btn.textContent = "Download";
+                            if (progressWrapper) progressWrapper.style.display = 'none';
                         }
                     }
                 } catch (e) {
                     console.error("Error polling download progress:", e);
                 }
-            }, 3000);
+            }, 2000);
         }
 
         // --- fetchAndRenderLmsModels ---

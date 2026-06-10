@@ -1,11 +1,12 @@
 import os
-import subprocess
-import threading
 import requests
+import re
 import json
 
-# Thread-safe storage for background downloads
-download_status = {}  # model_name: { 'status': 'idle'|'downloading'|'completed'|'failed', 'error': None }
+# Thread-safe storage/tracking for downloads
+# download_status = { model_name: { 'status': 'idle'|'downloading'|'completed'|'failed', 'downloaded_bytes': ..., 'total_size_bytes': ..., 'bytes_per_second': ..., 'error': None } }
+download_status = {}
+active_jobs = {}  # model_name: job_id
 
 def get_lms_path():
     """Returns the absolute path to the lms executable if it exists, otherwise 'lms'."""
@@ -20,67 +21,13 @@ def get_lms_path():
         return unix_path
     return "lms"
 
-def resolve_model_key(model_name):
-    """Resolves a model path or identifier to the correct modelKey recognized by lms CLI."""
-    if not model_name:
-        return model_name
-    
-    # Strip any quantization suffix (e.g. repo@quant) from the search query
-    base_name = model_name
-    if "@" in base_name:
-        base_name = base_name.split("@")[0]
-        
-    try:
-        lms_path = get_lms_path()
-        res = subprocess.run([lms_path, "ls", "--json"], capture_output=True, text=True, encoding='utf-8', errors='ignore', shell=False, timeout=5)
-        if res.returncode == 0 and res.stdout.strip():
-            models_data = json.loads(res.stdout)
-            search_name = base_name.replace("\\", "/").lower()
-            for m in models_data:
-                m_key = m.get("modelKey")
-                m_path = m.get("path")
-                m_id = m.get("indexedModelIdentifier")
-                
-                m_key_lower = m_key.lower() if m_key else ""
-                m_path_lower = m_path.replace("\\", "/").lower() if m_path else ""
-                m_id_lower = m_id.replace("\\", "/").lower() if m_id else ""
-                
-                if m_key and m_key_lower == search_name:
-                    return m_key
-                if m_path and m_path_lower == search_name:
-                    return m_key
-                if m_id and m_id_lower == search_name:
-                    return m_key
-                if m_path and (search_name.endswith(m_path_lower) or m_path_lower.endswith(search_name) or m_path_lower.startswith(search_name) or search_name in m_path_lower):
-                    return m_key
-                if m_id and (search_name.endswith(m_id_lower) or m_id_lower.endswith(search_name) or m_id_lower.startswith(search_name) or search_name in m_id_lower):
-                    return m_key
-    except Exception as e:
-        print(f"[resolve_model_key] Error resolving model key: {e}")
-    return model_name
-
-_lms_cli_installed_cached = None
-
 def check_lms_cli():
-    """Checks if the lms executable is in the system path and is fully functional."""
-    global _lms_cli_installed_cached
-    if _lms_cli_installed_cached is True:
-        return True
-        
+    """Checks if the lms executable is functional."""
     try:
         lms_path = get_lms_path()
+        import subprocess
         res = subprocess.run([lms_path, "--version"], capture_output=True, text=True, encoding='utf-8', errors='ignore', shell=False)
-        if res.returncode != 0:
-            return False
-        
-        # Check if the command complains about missing installation or daemon
-        res2 = subprocess.run([lms_path, "ls"], capture_output=True, text=True, encoding='utf-8', errors='ignore', shell=False, timeout=5)
-        combined = (res2.stdout + res2.stderr).lower()
-        if "no valid installation" in combined:
-            return False
-            
-        _lms_cli_installed_cached = True
-        return True
+        return res.returncode == 0
     except Exception:
         return False
 
@@ -88,7 +35,6 @@ def check_daemon_status():
     """Checks if the LM Studio daemon is running and responsive."""
     try:
         from variables import LOCAL_MODELS_URL
-        # Check dynamic models URL
         response = requests.get(LOCAL_MODELS_URL, timeout=0.5)
         if response.status_code == 200:
             return True
@@ -96,36 +42,21 @@ def check_daemon_status():
         pass
     return False
 
-def install_lms_cli():
-    """Triggers the Windows headless installation script via PowerShell."""
-    global _lms_cli_installed_cached
-    try:
-        # Reset cached status so it re-checks
-        _lms_cli_installed_cached = None
-        # Run the official PS1 installer command
-        cmd = 'powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://lmstudio.ai/install.ps1 | iex"'
-        process = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        stdout, stderr = process.communicate()
-        if process.returncode == 0:
-            return True, "Installation triggered successfully."
-        else:
-            return False, stderr.decode('utf-8', errors='ignore')
-    except Exception as e:
-        return False, str(e)
-
 def start_lms_daemon():
     """Starts the lms server daemon in the background."""
     try:
         lms_path = get_lms_path()
+        import subprocess
         subprocess.Popen([lms_path, "server", "start"], shell=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         return True, "LM Studio daemon start initiated."
     except Exception as e:
         return False, f"Failed to start LM Studio daemon: {e}"
 
 def stop_lms_daemon():
-    """Stops the LM Studio daemon using lms CLI server stop."""
+    """Stops the LM Studio daemon."""
     try:
         lms_path = get_lms_path()
+        import subprocess
         process = subprocess.run([lms_path, "server", "stop"], shell=False, capture_output=True, text=True, encoding='utf-8', errors='ignore')
         if process.returncode == 0:
             return True, "LM Studio daemon stopped successfully."
@@ -133,9 +64,209 @@ def stop_lms_daemon():
     except Exception as e:
         return False, f"Failed to stop LM Studio daemon: {e}"
 
+def extract_quantization_tag(filename):
+    """Parses a quantization tag from a GGUF filename."""
+    tags = [
+        "IQ1_M", "IQ1_S", "IQ2_XXS", "IQ2_XS", "IQ2_S", "IQ2_M",
+        "Q2_K_S", "Q2_K", "IQ3_XXS", "IQ3_XS", "Q3_K_S", "IQ3_S", "IQ3_M", "Q3_K_M", "Q3_K_L",
+        "IQ4_XS", "IQ4_NL", "Q4_0", "Q4_1", "Q4_K_M", "Q4_K_S", "Q5_0", "Q5_1", "Q5_K_M", "Q5_K_S",
+        "Q6_K", "Q8_0", "F16", "BF16", "FP16"
+    ]
+    filename_upper = filename.upper()
+    for tag in tags:
+        pattern = rf"\b{tag}\b|[\.\-_]{tag}[\.\-_]|[\.\-_]{tag}$"
+        if re.search(pattern, filename_upper):
+            return tag
+    # Fallback pattern
+    match = re.search(r'[qQ][iI]?[0-9]_[A-Za-z0-9_]+', filename)
+    if match:
+        return match.group(0).upper()
+    return None
+
+def search_huggingface_repos(query):
+    """Searches Hugging Face for GGUF model repositories."""
+    results = []
+    query = query.strip()
+    if not query:
+        return results
+
+    # If user searched a full GGUF filename directly, strip suffix and extract quantization
+    extracted_quant = None
+    cleaned_query = query
+    if ".gguf" in cleaned_query.lower():
+        quant_match = re.search(r'(?:i\d+[\.\-_]?)?([qQ]\d+(?:_[a-zA-Z0-9_]+)?)', cleaned_query)
+        if quant_match:
+            extracted_quant = quant_match.group(1).upper()
+        if cleaned_query.lower().endswith(".gguf"):
+            cleaned_query = cleaned_query[:-5]
+        else:
+            idx = cleaned_query.lower().find(".gguf")
+            cleaned_query = cleaned_query[:idx]
+        # Strip quantization suffix patterns
+        pattern = r'[\.\-_](?:i\d+[\.\-_]?)?[qQ]\d+[a-zA-Z0-9_]*'
+        cleaned_query = re.sub(pattern, '', cleaned_query).strip()
+
+    # Extract repo ID if user entered a full HF URL
+    if "huggingface.co/" in cleaned_query:
+        parts = cleaned_query.split("huggingface.co/")
+        if len(parts) > 1:
+            subparts = parts[1].split("/")
+            if len(subparts) >= 2:
+                cleaned_query = f"{subparts[0]}/{subparts[1]}"
+
+    headers = {"User-Agent": "LM-Sanctuary-Client/1.0"}
+    try:
+        url = f"https://huggingface.co/api/models?search={cleaned_query}&filter=gguf&sort=likes&direction=-1&limit=20"
+        response = requests.get(url, headers=headers, timeout=5.0)
+        if response.status_code == 200:
+            for item in response.json():
+                model_id = item.get("id")
+                likes = item.get("likes", 0)
+                downloads = item.get("downloads", 0)
+                
+                results.append({
+                    "id": model_id,
+                    "likes": likes,
+                    "downloads": downloads,
+                    "author": model_id.split("/")[0] if "/" in model_id else "Unknown",
+                    "extracted_quant": extracted_quant
+                })
+        
+        # Fallback if query is directly "author/repo" and returned nothing
+        if not results and "/" in cleaned_query:
+            check_url = f"https://huggingface.co/api/models/{cleaned_query}"
+            r = requests.get(check_url, headers=headers, timeout=3.0)
+            if r.status_code == 200:
+                results.append({
+                    "id": cleaned_query,
+                    "likes": r.json().get("likes", 0),
+                    "downloads": r.json().get("downloads", 0),
+                    "author": cleaned_query.split("/")[0],
+                    "extracted_quant": extracted_quant
+                })
+    except Exception as e:
+        print(f"[search_huggingface_repos] Error: {e}")
+    return results
+
+def get_huggingface_repo_files(repo_id):
+    """Fetches all GGUF files in a repository using HF's tree API."""
+    files = []
+    headers = {"User-Agent": "LM-Sanctuary-Client/1.0"}
+    try:
+        url = f"https://huggingface.co/api/models/{repo_id}/tree/main"
+        response = requests.get(url, headers=headers, timeout=5.0)
+        if response.status_code == 200:
+            for item in response.json():
+                if item.get("type") == "file" and item.get("path", "").lower().endswith(".gguf"):
+                    filename = item.get("path")
+                    size = item.get("size", 0)
+                    quant = extract_quantization_tag(filename)
+                    files.append({
+                        "filename": filename,
+                        "size": size,
+                        "quantization": quant
+                    })
+    except Exception as e:
+        print(f"[get_huggingface_repo_files] Error fetching files for {repo_id}: {e}")
+    return files
+
+def trigger_download(model_name, quantization=None):
+    """Initiates a download job via LM Studio REST API."""
+    try:
+        # Start daemon if offline
+        if not check_daemon_status():
+            start_lms_daemon()
+
+        repo_id = model_name
+        if "@" in repo_id and not quantization:
+            repo_id, quantization = repo_id.split("@", 1)
+
+        # Normalize to full Hugging Face URL
+        if not repo_id.startswith("http://") and not repo_id.startswith("https://") and "/" in repo_id:
+            model_url = f"https://huggingface.co/{repo_id}"
+        else:
+            model_url = repo_id
+
+        payload = {"model": model_url}
+        if quantization:
+            payload["quantization"] = quantization
+
+        url = "http://localhost:1234/api/v1/models/download"
+        resp = requests.post(url, json=payload, timeout=5.0)
+        if resp.status_code == 200:
+            data = resp.json()
+            job_id = data.get("job_id")
+            
+            # Map tracking entry
+            tracking_name = f"{repo_id}@{quantization}" if quantization else repo_id
+            active_jobs[tracking_name] = job_id
+            download_status[tracking_name] = {
+                "status": "downloading",
+                "downloaded_bytes": 0,
+                "total_size_bytes": data.get("total_size_bytes", 0),
+                "bytes_per_second": 0,
+                "error": None
+            }
+            return True, "Download started."
+        else:
+            err = resp.json().get("error", {}).get("message", resp.text)
+            return False, f"Failed to start download: {err}"
+    except Exception as e:
+        return False, str(e)
+
+def update_download_statuses():
+    """Polls LM Studio for progress on all active download jobs."""
+    to_remove = []
+    for model_name, job_id in list(active_jobs.items()):
+        try:
+            url = f"http://localhost:1234/api/v1/models/download/status/{job_id}"
+            resp = requests.get(url, timeout=2.0)
+            if resp.status_code == 200:
+                data = resp.json()
+                status = data.get("status", "downloading")
+                download_status[model_name].update({
+                    "status": status,
+                    "downloaded_bytes": data.get("downloaded_bytes", 0),
+                    "total_size_bytes": data.get("total_size_bytes", 0),
+                    "bytes_per_second": data.get("bytes_per_second", 0),
+                    "estimated_completion": data.get("estimated_completion")
+                })
+                if status in ["completed", "failed"]:
+                    to_remove.append(model_name)
+                    if status == "failed":
+                        download_status[model_name]["error"] = "Download failed on LM Studio."
+            else:
+                download_status[model_name].update({
+                    "status": "failed",
+                    "error": f"API returned status {resp.status_code}"
+                })
+                to_remove.append(model_name)
+        except Exception as e:
+            print(f"[update_download_statuses] Error polling {job_id}: {e}")
+            
+    for model_name in to_remove:
+        active_jobs.pop(model_name, None)
+
 def list_local_models():
-    """Returns a list of downloaded models available in LM Studio by scanning files directly (fast)."""
+    """Returns a list of GGUF model keys by scanning the REST API or falling back to disk."""
     models = []
+    # If online, use native REST API to list models
+    if check_daemon_status():
+        try:
+            url = "http://localhost:1234/api/v1/models"
+            resp = requests.get(url, timeout=3.0)
+            if resp.status_code == 200:
+                for m in resp.json().get("models", []):
+                    # Only show LLM models, exclude embedding models
+                    if m.get("type") == "llm" and m.get("format") == "gguf":
+                        key = m.get("key")
+                        if key:
+                            models.append(key)
+                return sorted(list(set(models)))
+        except Exception as e:
+            print(f"[list_local_models] REST API listing failed: {e}")
+
+    # Fallback to local disk scan if offline
     user_profile = os.environ.get("USERPROFILE")
     if user_profile:
         models_dir = os.path.join(user_profile, ".lmstudio", "models")
@@ -143,203 +274,119 @@ def list_local_models():
             for root, dirs, files in os.walk(models_dir):
                 for file in files:
                     if file.lower().endswith(".gguf"):
-                        # Deduce model key from relative path (e.g. publisher/model/file.gguf)
                         rel_path = os.path.relpath(os.path.join(root, file), models_dir)
-                        # Normalize path separators
                         model_key = rel_path.replace("\\", "/")
                         models.append(model_key)
     return sorted(list(set(models)))
 
-def search_huggingface(query):
-    """Searches Hugging Face for GGUF models directly via the HF API."""
-    import re
-    results = []
-    original_query = query.strip()
-    if not original_query:
-        return results
-        
-    extracted_quant = None
-    cleaned_query = original_query
-    
-    # 1. Extract quantization if GGUF filename or URL containing GGUF is provided
-    if ".gguf" in cleaned_query.lower():
-        # Match quantization pattern like Q4_K_M, q8_0, Q4_1, i1-q4_k_m, etc.
-        quant_match = re.search(r'(?:i\d+[\.\-_]?)?([qQ]\d+(?:_[a-zA-Z0-9_]+)?)', cleaned_query)
-        if quant_match:
-            extracted_quant = quant_match.group(1).lower()
-            
-    # 2. Extract repository ID if a full Hugging Face URL is provided
-    if "huggingface.co/" in cleaned_query:
-        parts = cleaned_query.split("huggingface.co/")
-        if len(parts) > 1:
-            subparts = parts[1].split("/")
-            if len(subparts) >= 2:
-                cleaned_query = f"{subparts[0]}/{subparts[1]}"
-                
-    # 3. Clean GGUF file extension if present in the term
-    if cleaned_query.lower().endswith(".gguf") or ".gguf" in cleaned_query.lower():
-        if cleaned_query.lower().endswith(".gguf"):
-            cleaned_query = cleaned_query[:-5]
-        else:
-            idx = cleaned_query.lower().find(".gguf")
-            cleaned_query = cleaned_query[:idx]
-            
-    # 4. Strip quantization suffix patterns from the search query itself to get the base repo name
-    pattern = r'[\.\-_](?:i\d+[\.\-_]?)?[qQ]\d+[a-zA-Z0-9_]*'
-    cleaned_query = re.sub(pattern, '', cleaned_query).strip()
-
-    try:
-        # Search Hugging Face API using the cleaned search term
-        url = f"https://huggingface.co/api/models?search={cleaned_query}&filter=gguf&sort=likes&direction=-1&limit=20"
-        response = requests.get(url, timeout=3.0)
-        if response.status_code == 200:
-            data = response.json()
-            for item in data:
-                model_id = item.get("id")
-                likes = item.get("likes", 0)
-                downloads = item.get("downloads", 0)
-                
-                # Append extracted quantization if we found one in the original query
-                resolved_id = model_id
-                if extracted_quant:
-                    resolved_id = f"{model_id}@{extracted_quant}"
-                    
-                results.append({
-                    "id": resolved_id,
-                    "likes": likes,
-                    "downloads": downloads,
-                    "author": model_id.split("/")[0] if "/" in model_id else "Unknown"
-                })
-                
-            # If the search returned empty but the cleaned query is a direct "author/repo" path,
-            # query Hugging Face API directly for that model page to see if it exists
-            if not results and "/" in cleaned_query:
-                check_url = f"https://huggingface.co/api/models/{cleaned_query}"
-                check_resp = requests.get(check_url, timeout=2.0)
-                if check_resp.status_code == 200:
-                    model_id = cleaned_query
-                    resolved_id = model_id
-                    if extracted_quant:
-                        resolved_id = f"{model_id}@{extracted_quant}"
-                    results.append({
-                        "id": resolved_id,
-                        "likes": 0,
-                        "downloads": 0,
-                        "author": model_id.split("/")[0]
-                    })
-    except Exception as e:
-        print(f"Error searching Hugging Face: {e}")
-    return results
-
-def _download_worker(model_name):
-    download_status[model_name] = {"status": "downloading", "error": None}
-    try:
-        # Start daemon if not running
-        if not check_daemon_status():
-            start_lms_daemon()
-            
-        lms_path = get_lms_path()
-        
-        # Convert repository path (e.g. author/repo@quant) to full Hugging Face URL
-        # to prevent LM Studio CLI from lowercase-normalizing the name internally.
-        target_name = model_name
-        if not target_name.startswith("http://") and not target_name.startswith("https://") and "/" in target_name:
-            if "@" in target_name:
-                repo_part, quant_part = target_name.split("@", 1)
-                target_name = f"https://huggingface.co/{repo_part}@{quant_part}"
-            else:
-                target_name = f"https://huggingface.co/{target_name}"
-                
-        # Run get command non-interactively
-        cmd = [lms_path, "get", target_name, "-y"]
-        process = subprocess.Popen(cmd, shell=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        stdout, stderr = process.communicate()
-        
-        if process.returncode == 0:
-            download_status[model_name]["status"] = "completed"
-        else:
-            err_msg = stderr.decode('utf-8', errors='ignore') or stdout.decode('utf-8', errors='ignore')
-            download_status[model_name]["status"] = "failed"
-            download_status[model_name]["error"] = err_msg
-    except Exception as e:
-        download_status[model_name]["status"] = "failed"
-        download_status[model_name]["error"] = str(e)
-
-def trigger_download(model_name):
-    """Starts the background downloader thread for a model."""
-    if model_name in download_status and download_status[model_name]["status"] == "downloading":
-        return False, "Already downloading."
-        
-    thread = threading.Thread(target=_download_worker, args=(model_name,))
-    thread.daemon = True
-    thread.start()
-    return True, "Download started."
-
 def load_local_model(model_name):
-    """Loads a model into memory via CLI, optimizing for GPU offload and generation speed."""
+    """Loads a model into memory via native REST API."""
     try:
-        # Start daemon if not running
         if not check_daemon_status():
             start_lms_daemon()
-            
-        lms_path = get_lms_path()
-        resolved_key = resolve_model_key(model_name)
-        
-        # Read performance optimization environment variables
-        lms_gpu = os.getenv("LMS_GPU", "max")
-        lms_parallel = os.getenv("LMS_PARALLEL", "1")
+
         lms_context = os.getenv("LMS_CONTEXT")
-        
-        # Build command with optimization parameters
-        cmd = [lms_path, "load", resolved_key]
-        if lms_gpu:
-            cmd.extend(["--gpu", lms_gpu])
-        if lms_parallel:
-            cmd.extend(["--parallel", str(lms_parallel)])
+        payload = {"model": model_name}
         if lms_context:
-            cmd.extend(["--context-length", str(lms_context)])
-        cmd.append("-y")
-        
-        # Run lms load <model>
-        res = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='ignore', shell=False, timeout=15)
-        return res.returncode == 0, res.stdout or res.stderr
+            try:
+                payload["context_length"] = int(lms_context)
+            except ValueError:
+                pass
+
+        url = "http://localhost:1234/api/v1/models/load"
+        resp = requests.post(url, json=payload, timeout=30.0)
+        if resp.status_code == 200:
+            return True, f"Model {model_name} loaded successfully."
+        else:
+            err = resp.json().get("error", {}).get("message", resp.text)
+            return False, f"Failed to load model: {err}"
     except Exception as e:
         return False, str(e)
 
 def unload_local_model(model_name=None):
-    """Unloads a loaded model from memory via CLI."""
+    """Unloads a loaded model or all models from VRAM via native REST API."""
     try:
-        lms_path = get_lms_path()
+        url = "http://localhost:1234/api/v1/models/unload"
+        
+        # If unloading all
         if not model_name or model_name == "all":
-            res = subprocess.run([lms_path, "unload", "--all"], capture_output=True, text=True, encoding='utf-8', errors='ignore', shell=False, timeout=10)
-        else:
-            resolved_key = resolve_model_key(model_name)
-            res = subprocess.run([lms_path, "unload", resolved_key], capture_output=True, text=True, encoding='utf-8', errors='ignore', shell=False, timeout=10)
-        return res.returncode == 0, res.stdout or res.stderr
+            models_url = "http://localhost:1234/api/v1/models"
+            resp = requests.get(models_url, timeout=3.0)
+            if resp.status_code == 200:
+                unloaded_any = False
+                for m in resp.json().get("models", []):
+                    for instance in m.get("loaded_instances", []):
+                        instance_id = instance.get("id")
+                        if instance_id:
+                            requests.post(url, json={"instance_id": instance_id}, timeout=10.0)
+                            unloaded_any = True
+                return True, "All models unloaded." if unloaded_any else "No active models loaded."
+            return False, "Failed to fetch loaded models list."
+
+        # Unload specific model key or instance
+        models_url = "http://localhost:1234/api/v1/models"
+        resp = requests.get(models_url, timeout=3.0)
+        unloaded = False
+        if resp.status_code == 200:
+            for m in resp.json().get("models", []):
+                if m.get("key", "").lower() == model_name.lower():
+                    for instance in m.get("loaded_instances", []):
+                        instance_id = instance.get("id")
+                        if instance_id:
+                            requests.post(url, json={"instance_id": instance_id}, timeout=10.0)
+                            unloaded = True
+
+        if unloaded:
+            return True, f"Model {model_name} unloaded successfully."
+            
+        # Direct fallback call
+        resp = requests.post(url, json={"instance_id": model_name}, timeout=10.0)
+        if resp.status_code == 200:
+            return True, f"Model {model_name} unloaded successfully."
+        return False, f"Failed to unload model: {resp.text}"
     except Exception as e:
         return False, str(e)
 
-def delete_local_model(model_name):
-    """Deletes the GGUF model file and its parent folders from disk if they are empty."""
+def delete_local_model(model_key):
+    """Deletes a GGUF model file and its empty parent directories from disk by matching the model key."""
     user_profile = os.environ.get("USERPROFILE")
     if not user_profile:
         return False, "User profile not found."
     
     models_dir = os.path.normpath(os.path.join(user_profile, ".lmstudio", "models"))
-    # Normalize model path to match OS style
-    target_path = os.path.normpath(os.path.join(models_dir, model_name))
-    
-    # Verify that the path is actually inside the models directory (prevent directory traversal)
+    if not os.path.exists(models_dir):
+        return False, "Models directory does not exist."
+        
+    # First check exact direct file match
+    target_path = os.path.normpath(os.path.join(models_dir, model_key))
     if not target_path.startswith(models_dir):
         return False, "Invalid model path."
         
-    if not os.path.exists(target_path):
-        return False, "Model file does not exist on disk."
-        
+    if not (os.path.exists(target_path) and os.path.isfile(target_path)):
+        # Resolve via normalization matching
+        resolved_path = None
+        model_norm = re.sub(r'[^a-z0-9]', '', model_key.lower())
+        for root, dirs, files in os.walk(models_dir):
+            for file in files:
+                if file.lower().endswith(".gguf"):
+                    full_p = os.path.join(root, file)
+                    rel_p = os.path.relpath(full_p, models_dir).replace("\\", "/")
+                    if rel_p.lower() == model_key.lower():
+                        resolved_path = full_p
+                        break
+                    file_norm = re.sub(r'[^a-z0-9]', '', rel_p.lower()).replace("gguf", "")
+                    if model_norm in file_norm or file_norm in model_norm:
+                        resolved_path = full_p
+                        break
+            if resolved_path:
+                break
+        if resolved_path:
+            target_path = resolved_path
+        else:
+            return False, "Model file does not exist on disk."
+            
     try:
-        # Delete file
         os.remove(target_path)
-        
         # Clean up empty parent directories
         parent = os.path.dirname(target_path)
         while parent != models_dir:
@@ -348,6 +395,6 @@ def delete_local_model(model_name):
                 parent = os.path.dirname(parent)
             else:
                 break
-        return True, "Model deleted successfully from disk."
+        return True, "Model deleted successfully."
     except Exception as e:
-        return False, str(e)
+        return False, f"Failed to delete model: {e}"

@@ -2358,6 +2358,8 @@ def lms_status():
         from utils.models import fetch_local_models
         loaded_models = [m["value"] for m in fetch_local_models()]
         downloaded_models = lms_manager.list_local_models()
+        # Update download job statuses dynamically
+        lms_manager.update_download_statuses()
     return jsonify({
         "installed": installed,
         "online": online,
@@ -2378,16 +2380,26 @@ def lms_search():
     query = request.args.get('query', '').strip()
     if not query:
         return jsonify({"results": []})
-    results = lms_manager.search_huggingface(query)
+    results = lms_manager.search_huggingface_repos(query)
     return jsonify({"results": results})
+
+@app.route('/api/lms/huggingface/files', methods=['GET'])
+@requires_auth
+def lms_hf_files():
+    repo_id = request.args.get('repo_id', '').strip()
+    if not repo_id:
+        return jsonify({"error": "Missing repo_id"}), 400
+    files = lms_manager.get_huggingface_repo_files(repo_id)
+    return jsonify({"files": files})
 
 @app.route('/api/lms/download', methods=['POST'])
 @requires_auth
 def lms_download():
     model_name = request.json.get('model_name')
+    quantization = request.json.get('quantization')
     if not model_name:
         return jsonify({"error": "Missing model_name"}), 400
-    success, message = lms_manager.trigger_download(model_name)
+    success, message = lms_manager.trigger_download(model_name, quantization)
     return jsonify({"success": success, "message": message})
 
 @app.route('/api/lms/load', methods=['POST'])
