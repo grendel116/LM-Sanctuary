@@ -140,10 +140,45 @@ def list_local_models():
 
 def search_huggingface(query):
     """Searches Hugging Face for GGUF models directly via the HF API."""
+    import re
     results = []
+    original_query = query.strip()
+    if not original_query:
+        return results
+        
+    extracted_quant = None
+    cleaned_query = original_query
+    
+    # 1. Extract quantization if GGUF filename or URL containing GGUF is provided
+    if ".gguf" in cleaned_query.lower():
+        # Match quantization pattern like Q4_K_M, q8_0, Q4_1, i1-q4_k_m, etc.
+        quant_match = re.search(r'(?:i\d+[\.\-_]?)?([qQ]\d+(?:_[a-zA-Z0-9_]+)?)', cleaned_query)
+        if quant_match:
+            extracted_quant = quant_match.group(1).lower()
+            
+    # 2. Extract repository ID if a full Hugging Face URL is provided
+    if "huggingface.co/" in cleaned_query:
+        parts = cleaned_query.split("huggingface.co/")
+        if len(parts) > 1:
+            subparts = parts[1].split("/")
+            if len(subparts) >= 2:
+                cleaned_query = f"{subparts[0]}/{subparts[1]}"
+                
+    # 3. Clean GGUF file extension if present in the term
+    if cleaned_query.lower().endswith(".gguf") or ".gguf" in cleaned_query.lower():
+        if cleaned_query.lower().endswith(".gguf"):
+            cleaned_query = cleaned_query[:-5]
+        else:
+            idx = cleaned_query.lower().find(".gguf")
+            cleaned_query = cleaned_query[:idx]
+            
+    # 4. Strip quantization suffix patterns from the search query itself to get the base repo name
+    pattern = r'[\.\-_](?:i\d+[\.\-_]?)?[qQ]\d+[a-zA-Z0-9_]*'
+    cleaned_query = re.sub(pattern, '', cleaned_query).strip()
+
     try:
-        # Search API for GGUF models
-        url = f"https://huggingface.co/api/models?search={query}&filter=gguf&sort=likes&direction=-1&limit=20"
+        # Search Hugging Face API using the cleaned search term
+        url = f"https://huggingface.co/api/models?search={cleaned_query}&filter=gguf&sort=likes&direction=-1&limit=20"
         response = requests.get(url, timeout=3.0)
         if response.status_code == 200:
             data = response.json()
@@ -151,12 +186,35 @@ def search_huggingface(query):
                 model_id = item.get("id")
                 likes = item.get("likes", 0)
                 downloads = item.get("downloads", 0)
+                
+                # Append extracted quantization if we found one in the original query
+                resolved_id = model_id
+                if extracted_quant:
+                    resolved_id = f"{model_id}@{extracted_quant}"
+                    
                 results.append({
-                    "id": model_id,
+                    "id": resolved_id,
                     "likes": likes,
                     "downloads": downloads,
                     "author": model_id.split("/")[0] if "/" in model_id else "Unknown"
                 })
+                
+            # If the search returned empty but the cleaned query is a direct "author/repo" path,
+            # query Hugging Face API directly for that model page to see if it exists
+            if not results and "/" in cleaned_query:
+                check_url = f"https://huggingface.co/api/models/{cleaned_query}"
+                check_resp = requests.get(check_url, timeout=2.0)
+                if check_resp.status_code == 200:
+                    model_id = cleaned_query
+                    resolved_id = model_id
+                    if extracted_quant:
+                        resolved_id = f"{model_id}@{extracted_quant}"
+                    results.append({
+                        "id": resolved_id,
+                        "likes": 0,
+                        "downloads": 0,
+                        "author": model_id.split("/")[0]
+                    })
     except Exception as e:
         print(f"Error searching Hugging Face: {e}")
     return results
