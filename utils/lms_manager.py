@@ -24,24 +24,36 @@ def resolve_model_key(model_name):
     """Resolves a model path or identifier to the correct modelKey recognized by lms CLI."""
     if not model_name:
         return model_name
+    
+    # Strip any quantization suffix (e.g. repo@quant) from the search query
+    base_name = model_name
+    if "@" in base_name:
+        base_name = base_name.split("@")[0]
+        
     try:
         lms_path = get_lms_path()
         res = subprocess.run([lms_path, "ls", "--json"], capture_output=True, text=True, encoding='utf-8', errors='ignore', shell=False, timeout=5)
         if res.returncode == 0 and res.stdout.strip():
             models_data = json.loads(res.stdout)
-            search_name = model_name.replace("\\", "/").lower()
+            search_name = base_name.replace("\\", "/").lower()
             for m in models_data:
                 m_key = m.get("modelKey")
                 m_path = m.get("path")
                 m_id = m.get("indexedModelIdentifier")
                 
-                if m_key and m_key.lower() == search_name:
+                m_key_lower = m_key.lower() if m_key else ""
+                m_path_lower = m_path.replace("\\", "/").lower() if m_path else ""
+                m_id_lower = m_id.replace("\\", "/").lower() if m_id else ""
+                
+                if m_key and m_key_lower == search_name:
                     return m_key
-                if m_path and m_path.replace("\\", "/").lower() == search_name:
+                if m_path and m_path_lower == search_name:
                     return m_key
-                if m_id and m_id.replace("\\", "/").lower() == search_name:
+                if m_id and m_id_lower == search_name:
                     return m_key
-                if m_path and (search_name.endswith(m_path.replace("\\", "/").lower()) or m_path.replace("\\", "/").lower().endswith(search_name)):
+                if m_path and (search_name.endswith(m_path_lower) or m_path_lower.endswith(search_name) or m_path_lower.startswith(search_name) or search_name in m_path_lower):
+                    return m_key
+                if m_id and (search_name.endswith(m_id_lower) or m_id_lower.endswith(search_name) or m_id_lower.startswith(search_name) or search_name in m_id_lower):
                     return m_key
     except Exception as e:
         print(f"[resolve_model_key] Error resolving model key: {e}")
