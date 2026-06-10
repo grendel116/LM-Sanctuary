@@ -280,15 +280,15 @@ def history():
     try:
         chat_history = asyncio.run(runner.get_history(session_id))
         
-        # Analyze last message from Companion to determine state
-        last_companion_text = ""
+        # Retrieve parsed mood metadata directly from history payload
+        state_info = None
         for msg in reversed(chat_history):
             if msg.get('role') == 'companion':
-                last_companion_text = msg.get('text', '')
+                state_info = msg.get('mood')
                 break
-        
-        import tools
-        state_info = tools.analyze_emotional_state(last_companion_text)
+        if not state_info:
+            from utils.program_mood import analyze_emotional_state
+            state_info = analyze_emotional_state("")
         inversion_mode = asyncio.run(runner._get_inversion_mode(session_id))
         
         from core.program_config import companion_name
@@ -392,8 +392,8 @@ def chat():
                 asyncio.run(runner.update_message_text(session_id, 'companion', companion_count - 1, sanitized_response))
             response_text = sanitized_response
 
-        import tools
-        state_info = tools.analyze_emotional_state(response_text)
+        from utils.program_mood import extract_and_strip_mood
+        response_text, state_info = extract_and_strip_mood(response_text)
         inversion_mode = asyncio.run(runner._get_inversion_mode(session_id))
         return jsonify({
             'response': response_text,
@@ -437,8 +437,8 @@ def edit():
                 asyncio.run(runner.update_message_text(session_id, 'companion', companion_count - 1, sanitized_response))
             response_text = sanitized_response
 
-        import tools
-        state_info = tools.analyze_emotional_state(response_text)
+        from utils.program_mood import extract_and_strip_mood
+        response_text, state_info = extract_and_strip_mood(response_text)
         inversion_mode = asyncio.run(runner._get_inversion_mode(session_id))
         return jsonify({
             'response': response_text,

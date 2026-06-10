@@ -87,9 +87,12 @@ _LOCAL_DIRECTIVE_PROMPT = (
     "6. `[run_shell_command(command=\"...\")]` - Run shell command.\n"
     "7. `[get_workspace_structure()]` - View directory tree.\n"
     "8. `[search_codebase(keyword=\"...\")]` - Search keyword in codebase.\n"
-    "9. `[multi_platform_research(topic=\"...\")]` - Research HackerNews/GitHub/arXiv/etc.\n"
-    "10. `[generate_companion_portrait(prompt=\"...\")]` - Generate scene of yourself. (MUST be the ONLY text in your response)\n"
-    "11. `[generate_general_image(prompt=\"...\")]` - Generate landscapes or objects.\n\n"
+    "9. `[search_github(query=\"...\")]` - Search GitHub for repositories.\n"
+    "10. `[search_arxiv(query=\"...\")]` - Search arXiv for research papers.\n"
+    "11. `[search_hacker_news(query=\"...\")]` - Search Hacker News for developer discussions.\n"
+    "12. `[generate_local_image(prompt=\"...\")]` - Generate scene of yourself. (MUST be the ONLY text in your response)\n"
+    "13. `[generate_imagen(prompt=\"...\", aspect_ratio=\"...\")]` - Generate landscapes or objects.\n"
+    "14. `[apply_comfy_workflow(workflow_path=\"...\", parameters={...}, save_path=\"...\")]` - Apply custom ComfyUI workflow.\n\n"
     "Rules:\n"
     "- Output exactly one tool call tag per turn when needed.\n"
     "- Once tool output is provided, answer directly in natural language without repeating the tag.\n"
@@ -181,7 +184,7 @@ class BaseProgramRunner:
             if not history:
                 return ""
                 
-            from tools import analyze_emotional_state
+            from utils.program_mood import analyze_emotional_state
             counts = {
                 "intimate": 0,
                 "excited": 0,
@@ -552,6 +555,15 @@ class GoogleAdkRunner(BaseProgramRunner):
                 current_companion_thoughts, current_companion_texts
             )
             chat_history.append(current_companion_msg)
+            
+        from utils.program_mood import extract_and_strip_mood
+        for msg in chat_history:
+            if msg.get('role') == 'companion':
+                m_text = msg.get('text', '')
+                if m_text:
+                    clean_text, mood_details = extract_and_strip_mood(m_text)
+                    msg['text'] = clean_text
+                    msg['mood'] = mood_details
         return chat_history
 
     async def _execute_runner_and_collect(self, session_id, content):
@@ -757,7 +769,8 @@ class GoogleAdkRunner(BaseProgramRunner):
                                     resp = resp.get("result", resp)
                                 text += f"\n[Tool Response from {fr.name}]:\n{resp}"
                                 
-                    text = text.strip()
+                    from utils.program_mood import extract_and_strip_mood
+                    text = extract_and_strip_mood(text)[0].strip()
                     if text or image_url:
                         if image_url:
                             text_content = f"{text} (image: [Attached Image])" if text else "[Attached Image]"
@@ -813,10 +826,14 @@ class GoogleAdkRunner(BaseProgramRunner):
                         
                 if match:
                     if legacy_portrait:
-                        tool_name = "generate_companion_portrait"
+                        tool_name = "generate_local_image"
                         args_str = f"prompt={match.group(1)}"
                     else:
                         tool_name = match.group(1)
+                        if tool_name == "generate_companion_portrait":
+                            tool_name = "generate_local_image"
+                        elif tool_name == "generate_general_image":
+                            tool_name = "generate_imagen"
                         args_str = match.group(2)
                         
                     parsed_args = _parse_emulated_tool_call(tool_name, args_str)
@@ -824,7 +841,7 @@ class GoogleAdkRunner(BaseProgramRunner):
                     func = getattr(tools, tool_name, None)
                     
                     if func:
-                        if tool_name in ("generate_companion_portrait", "generate_general_image"):
+                        if tool_name in ("generate_local_image", "generate_imagen", "generate_companion_portrait", "generate_general_image"):
                             companion_content = types.Content(role="model", parts=[types.Part.from_text(text=bot_response_text)])
                             companion_event = Event(
                                 author=self.runner.agent.name,
@@ -1566,10 +1583,14 @@ class OpenSourceRunner(BaseProgramRunner):
                     
             if match:
                 if legacy_portrait:
-                    tool_name = "generate_companion_portrait"
+                    tool_name = "generate_local_image"
                     args_str = f"prompt={match.group(1)}"
                 else:
                     tool_name = match.group(1)
+                    if tool_name == "generate_companion_portrait":
+                        tool_name = "generate_local_image"
+                    elif tool_name == "generate_general_image":
+                        tool_name = "generate_imagen"
                     args_str = match.group(2)
                     
                 parsed_args = _parse_emulated_tool_call(tool_name, args_str)
@@ -1577,7 +1598,7 @@ class OpenSourceRunner(BaseProgramRunner):
                 func = getattr(tools, tool_name, None)
                 
                 if func:
-                    if tool_name in ("generate_companion_portrait", "generate_general_image"):
+                    if tool_name in ("generate_local_image", "generate_imagen", "generate_companion_portrait", "generate_general_image"):
                         bot_msg_intermediate = {
                             'role': 'companion',
                             'text': bot_response_text,

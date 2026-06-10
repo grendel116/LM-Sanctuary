@@ -30,21 +30,29 @@ Here is what a Sanctuary session looks like:
 
 These are the concrete abilities your companion uses to do work on your machine. Every modifying action requires your explicit confirmation:
 
-### Local Functions (Offline)
-* **Read File** (`read_file`): Looks inside a file on your drive to get information.
-* **Write File** (`write_file`): Creates new files or writes over old ones to save code or text.
-* **Edit File** (`replace_in_file`): Swaps out old text with new text inside your code files.
-* **Shell Execution** (`run_shell_command`): Runs terminal commands to execute programs or build tools locally.
-* **Map Directory** (`get_workspace_structure`): Shows the layout of all files and folders in your project.
-* **Find Code** (`search_codebase`): Searches all files in your project to find specific words or configurations.
-* **Render Portrait** (`generate_companion_portrait`): Calls a local ComfyUI instance to draw the companion doing actions or in a specific scene.
-* **Sense Mood** (`analyze_emotional_state`): Reads the conversation tone to adjust neon glows and animation speeds of the companion's display frame.
+### Local Workspace Operations (Offline)
+* **Read File** (`read_file`): Read file contents on your local drive.
+* **Write File** (`write_file`): Create new files or overwrite existing files.
+* **Edit File** (`replace_in_file`): Swap old text block with new text block inside files.
+* **Map Directory** (`get_workspace_structure`): Read directory layouts and tree structures.
+* **Find Code** (`search_codebase`): Search workspace codebase for keywords.
+* **Shell Execution** (`run_shell_command`): Run terminal commands on your system.
 
-### Cloud & Network Functions (Online)
-* **Search Web** (`google_search`): Finds current facts or information using the internet (falls back to Wikipedia if offline).
-* **Read URL** (`read_webpage`): Fetches and displays clean text from any HTTP/HTTPS link.
-* **Research Hub** (`multi_platform_research`): Gathers discussions, repositories, and publications across Hacker News, GitHub, arXiv, Reddit, and YouTube to compile a complete report.
-* **Render Scene** (`generate_general_image`): Calls Imagen to draw general concepts, objects, or backgrounds.
+### Network Grounding & Research (Online)
+* **Web Search** (`google_search` / `web_search`): Retrieve search results from Google, falling back to Wikipedia when offline.
+* **Read URL** (`read_webpage`): Fetch and extract text content from any webpage.
+* **Search GitHub** (`search_github`): Search for repository trends, stars, forks, and descriptions.
+* **Search arXiv** (`search_arxiv`): Retrieve publication titles, dates, abstracts, and links for research papers.
+* **Search Hacker News** (`search_hacker_news`): Check story titles, scores, and comment counts for developer discussions.
+
+### Generative Media (Local & Cloud)
+* **Render Portrait** (`generate_local_image`): Render yourself in a scene using ComfyUI.
+* **Render Concept** (`generate_imagen`): Render landscapes, diagrams, or objects using Google Imagen.
+* **Comfy Workflow** (`apply_comfy_workflow`): Run custom workflows against a local ComfyUI API.
+
+### 💖 Direct Mood Declaration
+* Rather than running static sentiment analysis scripts, the companion explicitly appends its current emotional state (`<mood name="[calm|intimate|excited|intense|sad]" intensity="[0.0-1.0]"/>`) to the end of each response.
+* The system parses and strips this tag from the final display text, mapping the parameters directly to the pulse color, neon glow, and heartbeat speed of the interactive frame.
 
 ---
 
