@@ -718,7 +718,7 @@ class GoogleAdkRunner(BaseProgramRunner):
             bot_response_text = ""
             tool_calls = []
             
-            for iteration in range(5):
+            for iteration in range(10):
                 sys_inst = self._get_system_instructions(user_message=new_message_text)
                 if rag_context:
                     sys_inst += f"\n\n# KNOWLEDGE BASE CONTEXT\nUse the following verified context from your Data Bank to help answer questions if relevant:\n{rag_context}\n"
@@ -825,7 +825,8 @@ class GoogleAdkRunner(BaseProgramRunner):
                         legacy_portrait = True
                         match = match_legacy
                         
-                if match:
+                executed_calls_count = len([tc for tc in tool_calls if tc.get('type') == 'call'])
+                if match and executed_calls_count < 5:
                     if legacy_portrait:
                         tool_name = "generate_local_image"
                         args_str = f"prompt={match.group(1)}"
@@ -967,6 +968,8 @@ class GoogleAdkRunner(BaseProgramRunner):
                     else:
                         break
                 else:
+                    if match:
+                        bot_response_text = re.sub(r'\[\w+\(.*?\)\]', '', bot_response_text).strip()
                     companion_content = types.Content(role="model", parts=[types.Part.from_text(text=bot_response_text)])
                     companion_event = Event(
                         author=self.runner.agent.name,
@@ -1488,7 +1491,7 @@ class OpenSourceRunner(BaseProgramRunner):
         bot_response_text = ""
         tool_calls = []
         
-        for iteration in range(5):
+        for iteration in range(10):
             sys_inst = self._get_system_instructions(inversion_directive, user_message=new_message_text)
             if rag_context:
                 sys_inst += f"\n\n# KNOWLEDGE BASE CONTEXT\nUse the following verified context from your Data Bank to help answer questions if relevant:\n{rag_context}\n"
@@ -1581,7 +1584,8 @@ class OpenSourceRunner(BaseProgramRunner):
                     legacy_portrait = True
                     match = match_legacy
                     
-            if match:
+            executed_calls_count = len([tc for tc in tool_calls if tc.get('type') == 'call'])
+            if match and executed_calls_count < 5:
                 if legacy_portrait:
                     tool_name = "generate_local_image"
                     args_str = f"prompt={match.group(1)}"
@@ -1671,6 +1675,8 @@ class OpenSourceRunner(BaseProgramRunner):
                 else:
                     break
             else:
+                if match:
+                    bot_response_text = re.sub(r'\[\w+\(.*?\)\]', '', bot_response_text).strip()
                 bot_msg = {
                     'role': 'companion',
                     'text': self._ensure_images_are_embedded(bot_response_text),
