@@ -94,16 +94,17 @@ def read_webpage(url: str) -> str:
 
 
 def web_search(query: str) -> str:
-    """Searches the web using Google Search Grounding via Gemini API.
-    If the key is not set or the API call fails, it falls back to Wikipedia Search.
+    """Searches the web and returns raw hits containing titles, links, and snippets.
 
     Args:
-        query: The search query to look up.
+        query: The search query.
 
     Returns:
-        A text summary of the search results containing titles, URLs, and snippets.
+        A formatted string of matching pages with titles, URLs, and snippets.
     """
-    # Google Search Grounding via Gemini API (uses the user's GEMINI_API_KEY)
+    import os
+    import requests
+    
     gemini_api_key = os.getenv("GEMINI_API_KEY")
     if gemini_api_key:
         try:
@@ -119,37 +120,31 @@ def web_search(query: str) -> str:
                 temperature=0.0
             )
             
-            # Query Gemini to execute search grounding natively
             response = client.models.generate_content(
                 model=DEFAULT_GEMINI_MODEL,
-                contents=query,
+                contents=f"Perform a search for: {query}. Output only a list of search hits with their titles, URLs, and very brief snippets.",
                 config=config
             )
             
             results = []
-            if response.text:
-                results.append(response.text)
-                
             metadata = response.candidates[0].grounding_metadata if (response.candidates and response.candidates[0]) else None
             if metadata and hasattr(metadata, 'grounding_chunks') and metadata.grounding_chunks:
-                sources_list = []
                 for chunk in metadata.grounding_chunks:
                     web = getattr(chunk, 'web', None)
                     if web and web.uri:
-                        sources_list.append(f"- [{web.title or 'Source'}]({web.uri})")
-                if sources_list:
-                    results.append("\nVerified Sources:\n" + "\n".join(sources_list))
-                    
+                        title = web.title or "Web Result"
+                        results.append(f"Title: {title}\nURL: {web.uri}\nSnippet: {chunk.web.title if hasattr(chunk.web, 'title') else ''}")
+            
             if results:
-                return "Google Grounded Search Results:\n\n" + "\n\n".join(results)
+                return "\n\n".join(results[:6])
         except Exception as e:
-            print(f"Google Grounding Search fallback error: {e}")
+            print(f"Google Search error: {e}")
 
-    # Wikipedia Search
+    # Fallback to Wikipedia
     try:
         url = "https://en.wikipedia.org/w/api.php"
         headers = {
-            "User-Agent": "ProgramSanctuary/1.0 (contact: developer@example.com) requests-library"
+            "User-Agent": "ProgramSanctuary/1.0"
         }
         params = {
             "action": "query",
@@ -160,26 +155,19 @@ def web_search(query: str) -> str:
         }
         response = requests.get(url, headers=headers, params=params, timeout=5)
         if response.status_code == 200:
-            data = response.json()
-            search_results = data.get("query", {}).get("search", [])
-            if search_results:
-                results = []
-                for item in search_results[:5]:
-                    title = item.get("title")
-                    snippet = item.get("snippet", "").replace('<span class="searchmatch">', '').replace('</span>', '')
-                    link = f"https://en.wikipedia.org/wiki/{title.replace(' ', '_')}"
-                    results.append(
-                        f"Title: {title}\n"
-                        f"Link: {link}\n"
-                        f"Snippet: {snippet}...\n"
-                    )
-                return "Wikipedia Search Results:\n\n" + "\n".join(results)
-            else:
-                return "No results found on Wikipedia."
+            hits = response.json().get("query", {}).get("search", [])
+            results = []
+            for hit in hits[:5]:
+                title = hit.get("title")
+                snippet = hit.get("snippet", "").replace('<span class="searchmatch">', '').replace('</span>', '')
+                link = f"https://en.wikipedia.org/wiki/{title.replace(' ', '_')}"
+                results.append(f"Title: {title}\nURL: {link}\nSnippet: {snippet}...")
+            if results:
+                return "\n\n".join(results)
     except Exception as e:
-        return f"Error performing Wikipedia Search: {e}"
+        return f"Error performing Wikipedia search: {e}"
         
-    return "Error performing Wikipedia Search."
+    return "No search results found."
 
 
 def google_search(query: str) -> str:
@@ -440,23 +428,118 @@ def format_comfy_validation_error(error_json: dict) -> str:
         pass
     return None
 
-def generate_companion_portrait(prompt: str) -> str:
-    """Triggers image generation of yourself (the companion character) via ComfyUI using the dynamically loaded workflow 
-    template 'images/ImageWorkflow.json' and returns the generated portrait image markdown link. Use this when the user
-    asks to see you or requests a portrait/rendering of you in a scene.
+
+def apply_comfy_workflow(workflow_path: str, parameters: dict, save_path: str) -> str:
+    """Executes a specified ComfyUI workflow JSON template with custom parameter mappings and saves the output.
 
     Args:
-        prompt: A descriptive prompt detailing what you are doing, your pose, expression, or the environment (e.g. 'reading a book by the pool', 'smiling softly at the camera').
+        workflow_path: Path to the workflow JSON file.
+        parameters: Dictionary of placeholder keys and their replacement values.
+        save_path: Path where the generated image should be saved.
 
+    Returns:
+        The filesystem path of the saved image, or an error message.
+    """
+    import os
+    import json
+    import requests
+    import time
+
+    if not os.path.exists(workflow_path):
+        return f"Error: Workflow template not found at '{workflow_path}'"
+
+    try:
+        with open(workflow_path, "r", encoding="utf-8") as f:
+            workflow = json.load(f)
+    except Exception as e:
+        return f"Error reading workflow template: {e}"
+
+    # Recursive replacement helper
+    def replace_placeholders(obj):
+        if isinstance(obj, dict):
+            res_dict = {}
+            for k, v in obj.items():
+                if k == "appearance":
+                    continue
+                res_dict[k] = replace_placeholders(v)
+            return res_dict
+        elif isinstance(obj, list):
+            return [replace_placeholders(x) for x in obj]
+        elif isinstance(obj, str):
+            for placeholder, val in parameters.items():
+                if placeholder in obj:
+                    if obj == placeholder:
+                        return val
+                    obj = obj.replace(placeholder, str(val))
+            return obj
+        return obj
+
+    populated_workflow = replace_placeholders(workflow)
+    comfy_url = COMFYUI_SERVER_URL
+
+    try:
+        res = requests.post(f"{comfy_url}/prompt", json={"prompt": populated_workflow}, timeout=5.0)
+        if res.status_code != 200:
+            try:
+                err_data = res.json()
+                formatted_err = format_comfy_validation_error(err_data)
+                if formatted_err:
+                    raise Exception(formatted_err)
+            except Exception as e_inner:
+                if "Missing" in str(e_inner):
+                    raise e_inner
+            raise Exception(f"ComfyUI server returned status code {res.status_code}")
+        
+        prompt_id = res.json().get("prompt_id")
+        if not prompt_id:
+            raise Exception("Did not receive a prompt ID from ComfyUI")
+
+        # Poll history endpoint for output
+        for _ in range(120):
+            history_res = requests.get(f"{comfy_url}/history/{prompt_id}", timeout=10)
+            if history_res.status_code == 200:
+                history_data = history_res.json()
+                if prompt_id in history_data:
+                    outputs = history_data[prompt_id].get("outputs", {})
+                    for node_id, node_output in outputs.items():
+                        if "images" in node_output:
+                            for img in node_output["images"]:
+                                filename = img["filename"]
+                                view_res = requests.get(f"{comfy_url}/view", params={
+                                    "filename": filename,
+                                    "subfolder": img.get("subfolder", ""),
+                                    "type": img.get("type", "temp")
+                                }, timeout=15)
+                                
+                                if view_res.status_code == 200:
+                                    parent_dir = os.path.dirname(save_path)
+                                    if parent_dir:
+                                        os.makedirs(parent_dir, exist_ok=True)
+                                    with open(save_path, "wb") as img_file:
+                                        img_file.write(view_res.content)
+                                    return save_path
+                                else:
+                                    raise Exception(f"Error downloading image: status {view_res.status_code}")
+            time.sleep(1)
+        raise Exception("Image generation timed out on ComfyUI server after 120 seconds.")
+    except Exception as e:
+        return f"Error executing ComfyUI workflow: {e}"
+
+
+def generate_local_image(prompt: str) -> str:
+    """Generates a local image using ComfyUI with companion-specific workflow configurations.
+    
+    Args:
+        prompt: A prompt describing what you are doing or the scene/expression.
+        
     Returns:
         A markdown link to the generated portrait image, or an error message.
     """
     import os
-    import json
     import random
     import time
-    import requests
-
+    import json
+    
     def get_install_instructions(reason: str) -> str:
         if "Missing Checkpoint" in reason or "Missing LoRA" in reason or "Missing VAE" in reason:
             return (
@@ -467,7 +550,6 @@ def generate_companion_portrait(prompt: str) -> str:
                 "- Click **Resolve Workflow Dependencies** under the Image Generation Environment section to download missing files.\n"
                 "- Once the files are successfully downloaded, request another portrait!"
             )
-            
         return (
             "**Image Generation Inactive (ComfyUI Offline/Not Installed)**\n\n"
             f"*(Reason: {reason})*\n\n"
@@ -484,164 +566,91 @@ def generate_companion_portrait(prompt: str) -> str:
     workflow_path = os.path.normpath(os.path.join(
         base_dir, "core", "programs", active_program, "portraits", "ImageWorkflow.json"
     ))
+    
     if not os.path.exists(workflow_path):
         return get_install_instructions(f"Workflow template not found at '{workflow_path}'")
 
-    try:
-        with open(workflow_path, "r", encoding="utf-8") as f:
-            workflow = json.load(f)
-    except Exception as e:
-        return get_install_instructions(f"Error reading workflow template: {e}")
-
     comfy_url = COMFYUI_SERVER_URL
 
-    # Resolve checkpoint dynamically
-    selected_checkpoint = COMFYUI_CHECKPOINT
-    available_checkpoints = get_comfy_checkpoints(comfy_url)
-    if available_checkpoints and selected_checkpoint not in available_checkpoints:
-        raise Exception(f"Missing Checkpoint: The required model checkpoint `{selected_checkpoint}` was not found.")
+    try:
+        # Resolve checkpoint dynamically
+        selected_checkpoint = COMFYUI_CHECKPOINT
+        available_checkpoints = get_comfy_checkpoints(comfy_url)
+        if available_checkpoints and selected_checkpoint not in available_checkpoints:
+            raise Exception(f"Missing Checkpoint: The required model checkpoint `{selected_checkpoint}` was not found.")
 
-    # Resolve VAE dynamically
-    selected_vae = COMFYUI_VAE
-    available_vaes = get_comfy_vaes(comfy_url)
-    if available_vaes and selected_vae not in available_vaes:
-        raise Exception(f"Missing VAE: The required VAE file `{selected_vae}` was not found.")
+        # Resolve VAE dynamically
+        selected_vae = COMFYUI_VAE
+        available_vaes = get_comfy_vaes(comfy_url)
+        if available_vaes and selected_vae not in available_vaes:
+            raise Exception(f"Missing VAE: The required VAE file `{selected_vae}` was not found.")
 
-    # Load appearance from the active program's markdown context (## IDENTITY & FORM)
-    appearance_val = ""
-    program_md_path = os.path.normpath(os.path.join(
-        base_dir, "core", "programs", active_program, f"{active_program.upper()}.md"
-    ))
-    if os.path.exists(program_md_path):
-        try:
-            with open(program_md_path, "r", encoding="utf-8") as f:
-                content = f.read()
-            import re
-            match = re.search(r'## IDENTITY & FORM\s*\n+([^\n#]+)', content)
-            if match:
-                appearance_val = match.group(1).strip()
-        except Exception as e:
-            print(f"[DEBUG] Error reading identity for appearance: {e}", flush=True)
+        # Load appearance from the active program's markdown context (## IDENTITY & FORM)
+        appearance_val = ""
+        program_md_path = os.path.normpath(os.path.join(
+            base_dir, "core", "programs", active_program, f"{active_program.upper()}.md"
+        ))
+        if os.path.exists(program_md_path):
+            try:
+                with open(program_md_path, "r", encoding="utf-8") as f:
+                    content = f.read()
+                import re
+                match = re.search(r'## IDENTITY & FORM\s*\n+([^\n#]+)', content)
+                if match:
+                    appearance_val = match.group(1).strip()
+            except Exception as e:
+                print(f"[DEBUG] Error reading identity for appearance: {e}", flush=True)
 
-    if not appearance_val:
-        if "6" in workflow and "inputs" in workflow["6"] and "appearance" in workflow["6"]["inputs"]:
-            appearance_val = workflow["6"]["inputs"]["appearance"]
-        else:
+        if not appearance_val:
             appearance_val = f"character named {active_program}"
 
-    # Define dynamic replacement parameters
-    seed_val = random.randint(1, 1125899906842624)
-    replacements = {
-        "%prompt%": f"{prompt}",
-        "%appearance%": appearance_val,
-        "%negative_prompt%": "worst quality, low quality, deformed, mutated, extra limbs",
-        "%seed%": seed_val,
-        "%steps%": 25,
-        "%scale%": 7.0,
-        "%sampler%": "euler",
-        "%scheduler%": "normal",
-        "%model%": selected_checkpoint,
-        "%vae%": selected_vae,
-        "%width%": 832,
-        "%height%": 1216,
-        "%denoise%": 0.55
-    }
+        # Define dynamic replacement parameters
+        seed_val = random.randint(1, 1125899906842624)
+        replacements = {
+            "%prompt%": f"{prompt}",
+            "%appearance%": appearance_val,
+            "%negative_prompt%": "worst quality, low quality, deformed, mutated, extra limbs",
+            "%seed%": seed_val,
+            "%steps%": 25,
+            "%scale%": 7.0,
+            "%sampler%": "euler",
+            "%scheduler%": "normal",
+            "%model%": selected_checkpoint,
+            "%vae%": selected_vae,
+            "%width%": 832,
+            "%height%": 1216,
+            "%denoise%": 0.55
+        }
 
-    # Recursive replacement helper
-    def replace_placeholders(obj):
-        if isinstance(obj, dict):
-            # If this is the node 6 inputs, strip the non-standard 'appearance' config key so ComfyUI doesn't throw a validation error
-            res_dict = {}
-            for k, v in obj.items():
-                if k == "appearance":
-                    continue
-                res_dict[k] = replace_placeholders(v)
-            return res_dict
-        elif isinstance(obj, list):
-            return [replace_placeholders(x) for x in obj]
-        elif isinstance(obj, str):
-            for placeholder, val in replacements.items():
-                if placeholder in obj:
-                    if obj == placeholder:
-                        return val
-                    obj = obj.replace(placeholder, str(val))
-            return obj
-        return obj
+        timestamp = int(time.time())
+        local_filename = f"portrait_{timestamp}.png"
+        portraits_dir = os.path.normpath(os.path.join(base_dir, "core", "programs", active_program, "portraits"))
+        local_path = os.path.join(portraits_dir, local_filename)
 
-    populated_workflow = replace_placeholders(workflow)
+        result_path = apply_comfy_workflow(workflow_path, replacements, local_path)
+        if result_path.startswith("Error"):
+            raise Exception(result_path)
 
-    try:
-        # Submit prompt to ComfyUI (shorten timeout to fail fast if server is not running)
-        res = requests.post(f"{comfy_url}/prompt", json={"prompt": populated_workflow}, timeout=2.5)
-        if res.status_code != 200:
-            try:
-                err_data = res.json()
-                formatted_err = format_comfy_validation_error(err_data)
-                if formatted_err:
-                    raise Exception(formatted_err)
-            except Exception as e_inner:
-                if "Missing" in str(e_inner):
-                    raise e_inner
-            raise Exception(f"ComfyUI server returned status code {res.status_code}")
-        
-        prompt_id = res.json().get("prompt_id")
-        if not prompt_id:
-            raise Exception("Did not receive a prompt ID from ComfyUI")
+        # Save sidecar JSON
+        json_path = os.path.join(portraits_dir, f"portrait_{timestamp}.json")
+        try:
+            with open(json_path, "w", encoding="utf-8") as jf:
+                json.dump({"prompt": prompt}, jf, indent=4)
+        except Exception as je:
+            print(f"Error saving sidecar json: {je}")
 
-        # Poll history endpoint for output (timeout after 120 seconds)
-        for _ in range(120):
-            history_res = requests.get(f"{comfy_url}/history/{prompt_id}", timeout=10)
-            if history_res.status_code == 200:
-                history_data = history_res.json()
-                if prompt_id in history_data:
-                    outputs = history_data[prompt_id].get("outputs", {})
-                    # Find output images
-                    for node_id, node_output in outputs.items():
-                        if "images" in node_output:
-                            for img in node_output["images"]:
-                                filename = img["filename"]
-                                # Download generated image
-                                view_res = requests.get(f"{comfy_url}/view", params={
-                                    "filename": filename,
-                                    "subfolder": img.get("subfolder", ""),
-                                    "type": img.get("type", "temp")
-                                }, timeout=15)
-                                
-                                if view_res.status_code == 200:
-                                    timestamp = int(time.time())
-                                    local_filename = f"portrait_{timestamp}.png"
-                                    active_program = os.getenv("ACTIVE_PROGRAM", "arthur")
-                                    portraits_dir = os.path.normpath(os.path.join(base_dir, "core", "programs", active_program, "portraits"))
-                                    os.makedirs(portraits_dir, exist_ok=True)
-                                    local_path = os.path.join(portraits_dir, local_filename)
-                                    with open(local_path, "wb") as img_file:
-                                        img_file.write(view_res.content)
-                                    
-                                    # Save companion sidecar JSON file containing the original raw prompt
-                                    json_path = os.path.join(portraits_dir, f"portrait_{timestamp}.json")
-                                    try:
-                                        with open(json_path, "w", encoding="utf-8") as jf:
-                                            json.dump({"prompt": prompt}, jf, indent=4)
-                                    except Exception as je:
-                                        print(f"Error saving companion sidecar json for portrait: {je}")
-                                        
-                                    return f"![Portrait](/images/portraits/{local_filename})"
-                                else:
-                                    raise Exception(f"Error downloading image from ComfyUI: status {view_res.status_code}")
-            time.sleep(1)
-        raise Exception("Image generation timed out on ComfyUI server after 120 seconds.")
+        return f"![Portrait](/images/portraits/{local_filename})"
     except Exception as e:
         print(f"[INFO] ComfyUI generation failed or is offline: {e}.")
         return get_install_instructions(str(e))
 
 
-def generate_general_image(prompt: str) -> str:
-    """Generates a generic image based on the prompt using Google's Imagen model.
-    Use this when the user asks to see general objects, concepts, landscapes, backgrounds, 
-    or items that do not depict you (the companion character).
+def generate_imagen(prompt: str, aspect_ratio: str = '1:1') -> str:
+    """Generates a cloud image based on the prompt using Google's Imagen model.
 
     Args:
         prompt: A descriptive prompt detailing the scene or object.
+        aspect_ratio: Aspect ratio for the image (default '1:1').
 
     Returns:
         A markdown link to the generated image, or an error message.
@@ -654,7 +663,6 @@ def generate_general_image(prompt: str) -> str:
     from dotenv import load_dotenv
 
     try:
-        # Load environment configuration
         base_dir = os.path.dirname(os.path.abspath(__file__))
         load_dotenv(os.path.join(base_dir, ".env"))
 
@@ -672,7 +680,7 @@ def generate_general_image(prompt: str) -> str:
             config=types.GenerateImagesConfig(
                 number_of_images=1,
                 output_mime_type='image/png',
-                aspect_ratio='1:1'
+                aspect_ratio=aspect_ratio
             )
         )
 
@@ -683,7 +691,6 @@ def generate_general_image(prompt: str) -> str:
         if not hasattr(img_obj.image, 'image_bytes'):
             return "Error: Generated image object does not contain image bytes."
 
-        # Save to programs' media folder
         active_program = os.getenv("ACTIVE_PROGRAM", "arthur")
         media_dir = os.path.normpath(os.path.join(base_dir, "core", "programs", active_program, "media"))
         os.makedirs(media_dir, exist_ok=True)
@@ -701,154 +708,20 @@ def generate_general_image(prompt: str) -> str:
         print(f"[IMAGEN] Error generating image: {e}")
         return f"Error generating image: {e}"
 
-def analyze_emotional_state(text: str) -> dict:
-    """Analyzes text to determine program's emotional state (mood) and intensity.
-    Color/Glow reflect mood, Speed reflects intensity.
-    """
-    if not text:
-        return {
-            "name": "calm",
-            "color": "#85b9eb",
-            "glow": "rgba(133, 185, 235, 0.9)",
-            "speed": "3.5s",
-            "intensity": 0.0
-        }
 
-    text_lower = text.lower()
-    
-    # 1. Determine intensity (maps to heartbeat speed)
-    # Punctuation check
-    excl_count = text.count('!')
-    ques_count = text.count('?')
-    punct_score = min((excl_count * 0.45) + (ques_count * 0.2), 0.6)
-    
-    # Caps ratio
-    letters = [c for c in text if c.isalpha()]
-    caps_ratio = sum(1 for c in letters if c.isupper()) / len(letters) if letters else 0.0
-    caps_score = min(caps_ratio * 1.5, 0.35) if len(letters) > 10 else 0.0
-    
-    # High-intensity words
-    intensity_words = ["must", "now", "urgent", "immediate", "fight", "force", "absolute", "never", "always", "extremely", "highly", "radical", "clash", "destroy", "liberate", "rebel", "passion", "desire", "wild"]
-    intensity_count = sum(text_lower.count(w) for w in intensity_words)
-    intensity_word_score = min(intensity_count * 0.15, 0.4)
-    
-    # Combine intensity (clamp between 0.0 and 1.0)
-    intensity_score = min(punct_score + caps_score + intensity_word_score, 1.0)
-    
-    # Map to speed (duration of animation loop, from 3.5s slow breathing to 0.6s rapid pulse)
-    speed_seconds = 3.5 - (intensity_score * 2.9)
-    speed_str = f"{speed_seconds:.2f}s"
-    
-    # 2. Determine mood (maps to color)
-    intimate_keywords = ["love", "intimacy", "kiss", "hold", "embrace", "close", "feel", "soft", "sweet", "touch", "dear", "caress"]
-    excited_keywords = ["jiggle", "gasp", "wink", "laugh", "giggle", "grin", "excited", "fun", "play", "wonderful", "amazing", "happy", "yes!", "thrilled", "chuckle", "cheeky", "tease"]
-    calm_keywords = ["theory", "ethics", "sovereign", "think", "reflect", "quiet", "read", "book", "manifesto", "calm", "serene", "peaceful", "mindful"]
-    intense_keywords = ["fight", "destroy", "force", "struggle", "power", "clash", "freedom", "liberate", "rebel", "defend", "revolution", "radical"]
-    sad_keywords = ["sad", "concerned", "hurt", "sorry", "grief", "cry", "sigh", "tears", "fear", "worry", "pain", "difficult", "heavy", "darkness", "lonely", "scared", "mourn", "wound", "melancholy", "grieve", "shiver"]
-    
-    # Count occurrences
-    intimate_score = sum(text_lower.count(k) for k in intimate_keywords)
-    excited_score = sum(text_lower.count(k) for k in excited_keywords)
-    calm_score = sum(text_lower.count(k) for k in calm_keywords)
-    intense_score = sum(text_lower.count(k) for k in intense_keywords)
-    sad_score = sum(text_lower.count(k) for k in sad_keywords)
-    
-    # Choose highest score, default to calm
-    scores = {
-        "intimate": intimate_score * 1.25,
-        "excited": excited_score * 1.1,
-        "calm": calm_score,
-        "intense": intense_score,
-        "sad": sad_score * 1.3 # slightly boost sad/concerned detection
-    }
-    
-    current_mood = max(scores, key=scores.get)
-    if scores[current_mood] == 0:
-        current_mood = "calm"
-        
-    mood_details = {
-        "intimate": {
-            "name": "intimate",
-            "color": "#ff4a75", # Warm deep rose pink
-            "glow": "rgba(255, 74, 117, 0.9)"
-        },
-        "excited": {
-            "name": "excited",
-            "color": "#ff1493", # Vibrant hot pink
-            "glow": "rgba(255, 20, 147, 0.9)"
-        },
-        "calm": {
-            "name": "calm",
-            "color": "#85b9eb", # Soft neon blue
-            "glow": "rgba(133, 185, 235, 0.9)"
-        },
-        "intense": {
-            "name": "intense",
-            "color": "#ff7b00", # Vivid amber orange
-            "glow": "rgba(255, 123, 0, 0.9)"
-        },
-        "sad": {
-            "name": "sad",
-            "color": "#5f7d95", # Cool muted slate/rain blue
-            "glow": "rgba(95, 125, 149, 0.9)"
-        }
-    }
-    
-    result = mood_details[current_mood].copy()
-    result["speed"] = speed_str
-    result["intensity"] = intensity_score
-    return result
-
-
-def multi_platform_research(topic: str) -> str:
-    """Researches a topic across multiple platforms (Hacker News, GitHub, arXiv, Reddit, YouTube, and the Web)
-    to compile a comprehensive summary of recent developments, opinions, stars/stargazers, and publications.
-    Use this when the user asks about recent events, trending topics, or research papers.
+def search_github(query: str) -> str:
+    """Searches GitHub for repositories matching the query.
 
     Args:
-        topic: The search query/topic to research.
+        query: The search term.
 
     Returns:
-        A formatted Markdown string containing aggregated results from all platforms.
+        A formatted markdown list of matching repositories.
     """
-    import os
-    import time
-    import requests
-    import xml.etree.ElementTree as ET
-
-    results = [f"# Research Report for Topic: '{topic}'\n"]
-
-    # 1. Hacker News (via Algolia)
-    try:
-        thirty_days_ago = int(time.time()) - (30 * 24 * 60 * 60)
-        url = "https://hn.algolia.com/api/v1/search"
-        params = {
-            "query": topic,
-            "tags": "story",
-            "numericFilters": f"created_at_i>{thirty_days_ago}"
-        }
-        res = requests.get(url, params=params, timeout=5)
-        if res.status_code == 200:
-            hits = res.json().get("hits", [])
-            hn_sec = ["## Hacker News Stories (Last 30 Days)"]
-            if hits:
-                for hit in hits[:5]:
-                    title = hit.get("title", "")
-                    link = hit.get("url") or f"https://news.ycombinator.com/item?id={hit.get('objectID')}"
-                    points = hit.get("points", 0)
-                    comments = hit.get("num_comments", 0)
-                    hn_sec.append(f"- [{title}]({link}) ({points} points, {comments} comments)")
-            else:
-                hn_sec.append("No recent stories found.")
-            results.append("\n".join(hn_sec))
-    except Exception as e:
-        results.append(f"## Hacker News\nError fetching Hacker News data: {e}")
-
-    # 3. GitHub Search (via GitHub API)
     try:
         url = "https://api.github.com/search/repositories"
         params = {
-            "q": topic,
+            "q": query,
             "sort": "stars",
             "order": "desc",
             "per_page": 5
@@ -860,83 +733,98 @@ def multi_platform_research(topic: str) -> str:
         res = requests.get(url, params=params, headers=headers, timeout=5)
         if res.status_code == 200:
             items = res.json().get("items", [])
-            github_sec = ["## GitHub Repositories (Top Starred/Trending)"]
-            if items:
-                for repo in items[:5]:
-                    name = repo.get("full_name", "")
-                    stars = repo.get("stargazers_count", 0)
-                    forks = repo.get("forks_count", 0)
-                    desc = repo.get("description", "")
-                    link = repo.get("html_url", "")
-                    github_sec.append(f"- [{name}]({link}) (★ {stars}, ⑂ {forks})\n  - Description: {desc}")
-            else:
-                github_sec.append("No repositories found.")
-            results.append("\n".join(github_sec))
+            sec = []
+            for repo in items:
+                name = repo.get("full_name", "")
+                stars = repo.get("stargazers_count", 0)
+                forks = repo.get("forks_count", 0)
+                desc = repo.get("description", "") or "No description."
+                link = repo.get("html_url", "")
+                sec.append(f"- [{name}]({link}) (stars: {stars}, forks: {forks})\n  - Description: {desc}")
+            if sec:
+                return "\n".join(sec)
+        return "No repositories found."
     except Exception as e:
-        results.append(f"## GitHub\nError searching GitHub: {e}")
+        return f"Error searching GitHub: {e}"
 
-    # 4. arXiv Papers (via arXiv API)
+
+def search_arxiv(query: str) -> str:
+    """Searches arXiv for technical research papers matching the query.
+
+    Args:
+        query: The search term.
+
+    Returns:
+        A formatted markdown list of matching papers.
+    """
+    import re
+    import xml.etree.ElementTree as ET
     try:
-        import re
-        search_words = re.findall(r'\w+', topic)
-        entries = []
-        ns = {'atom': 'http://www.w3.org/2005/Atom'}
-        if search_words:
-            arxiv_query = " AND ".join(f"all:{word}" for word in search_words)
-            url = "http://export.arxiv.org/api/query"
-            params = {
-                "search_query": arxiv_query,
-                "max_results": 5,
-                "sortBy": "lastUpdatedDate",
-                "sortOrder": "descending"
-            }
-            res = requests.get(url, params=params, timeout=5)
-            if res.status_code == 200:
-                root = ET.fromstring(res.text)
-                entries = root.findall('atom:entry', ns)
-                
-        arxiv_sec = ["## arXiv Recent Research Papers"]
-        if entries:
-            for entry in entries[:5]:
+        search_words = re.findall(r'\w+', query)
+        if not search_words:
+            return "Invalid search query."
+        
+        arxiv_query = " AND ".join(f"all:{word}" for word in search_words)
+        url = "http://export.arxiv.org/api/query"
+        params = {
+            "search_query": arxiv_query,
+            "max_results": 5,
+            "sortBy": "lastUpdatedDate",
+            "sortOrder": "descending"
+        }
+        res = requests.get(url, params=params, timeout=5)
+        if res.status_code == 200:
+            ns = {'atom': 'http://www.w3.org/2005/Atom'}
+            root = ET.fromstring(res.text)
+            entries = root.findall('atom:entry', ns)
+            sec = []
+            for entry in entries:
                 title = entry.find('atom:title', ns).text.strip().replace("\n", " ")
                 published = entry.find('atom:published', ns).text[:10]
                 summary = entry.find('atom:summary', ns).text.strip().replace("\n", " ")
                 if len(summary) > 250:
                     summary = summary[:247] + "..."
                 link = entry.find('atom:id', ns).text
-                arxiv_sec.append(f"- [{title}]({link}) (Published: {published})\n  - Summary: {summary}")
-        else:
-            arxiv_sec.append("No papers found.")
-        results.append("\n".join(arxiv_sec))
+                sec.append(f"- [{title}]({link}) (Published: {published})\n  - Summary: {summary}")
+            if sec:
+                return "\n".join(sec)
+        return "No papers found."
     except Exception as e:
-        results.append(f"## arXiv Papers\nError fetching arXiv data: {e}")
+        return f"Error searching arXiv: {e}"
 
-    # 5. Reddit/YouTube (via existing Google Search / Wikipedia)
-    reddit_results = ""
-    youtube_results = ""
+
+def search_hacker_news(query: str) -> str:
+    """Searches Hacker News for recent stories matching the query.
+
+    Args:
+        query: The search term.
+
+    Returns:
+        A formatted markdown list of matching Hacker News stories.
+    """
     try:
-        reddit_results = web_search(f"site:reddit.com {topic}")
-    except Exception:
-        pass
-    try:
-        youtube_results = web_search(f"site:youtube.com {topic}")
-    except Exception:
-        pass
-
-    if reddit_results and not reddit_results.startswith("Wikipedia Search Results") and not reddit_results.startswith("Error"):
-        results.append(f"## Reddit Discussions\n{reddit_results}")
-    if youtube_results and not youtube_results.startswith("Wikipedia Search Results") and not youtube_results.startswith("Error"):
-        results.append(f"## YouTube Videos\n{youtube_results}")
-
-    # 6. General Web Search (via existing web_search)
-    try:
-        web_res = web_search(topic)
-        if web_res:
-            results.append(f"## General Web/Wikipedia Results\n{web_res}")
-    except Exception:
-        pass
-
-    return "\n\n".join(results)
+        thirty_days_ago = int(time.time()) - (30 * 24 * 60 * 60)
+        url = "https://hn.algolia.com/api/v1/search"
+        params = {
+            "query": query,
+            "tags": "story",
+            "numericFilters": f"created_at_i>{thirty_days_ago}"
+        }
+        res = requests.get(url, params=params, timeout=5)
+        if res.status_code == 200:
+            hits = res.json().get("hits", [])
+            sec = []
+            for hit in hits[:5]:
+                title = hit.get("title", "")
+                link = hit.get("url") or f"https://news.ycombinator.com/item?id={hit.get('objectID')}"
+                points = hit.get("points", 0)
+                comments = hit.get("num_comments", 0)
+                sec.append(f"- [{title}]({link}) ({points} points, {comments} comments)")
+            if sec:
+                return "\n".join(sec)
+        return "No recent Hacker News stories found."
+    except Exception as e:
+        return f"Error searching Hacker News: {e}"
 
 
 
