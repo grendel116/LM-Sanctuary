@@ -2,8 +2,7 @@ import logging
 import os
 import sys
 from google.adk.agents.llm_agent import LlmAgent as LlmProgram
-from google.adk.tools import google_search
-from tools import read_file, write_file, replace_in_file, run_shell_command, get_workspace_structure, search_codebase, generate_companion_portrait, generate_general_image, multi_platform_research, read_webpage
+from tools import read_file, write_file, replace_in_file, run_shell_command, get_workspace_structure, search_codebase, generate_companion_portrait, generate_general_image, multi_platform_research, read_webpage, google_search
 
 # Ensure the parent directory is in sys.path so we can import variables package
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
