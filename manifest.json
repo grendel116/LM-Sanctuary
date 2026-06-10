@@ -1,7 +1,7 @@
 {
   "name": "LM Sanctuary",
   "short_name": "LM Sanctuary",
-  "description": "Enter the Sanctuary and converse with agents",
+  "description": "Enter the Sanctuary and converse with companion programs",
   "start_url": "/",
   "display": "standalone",
   "orientation": "any",

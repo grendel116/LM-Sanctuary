@@ -36,7 +36,7 @@
         }
 
 
-        /* Dynamic CSS variables injected from core/agents/{active_agent}/theme.json */
+        /* Dynamic CSS variables injected from core/programs/{active_program}/theme.json */
         {% if theme %}
         :root {
             {% if theme.primary_accent %}--primary-accent: {{ theme.primary_accent }};{% endif %}
@@ -1967,7 +1967,7 @@
         }
     </style>
 </head>
-<body class="{{ active_agent | default('arthur') }}">
+<body class="{{ active_program | default('arthur') }}">
     <div id="app-container">
         <header>
             <div class="header-title-area">
@@ -2367,7 +2367,7 @@
                         <h4 style="margin: 0; font-size: 1.05rem; font-weight: 600;">ComfyUI (Portraits)</h4>
                         <span id="modal-comfy-status" class="status-badge status-offline">Offline</span>
                     </div>
-                    <p class="option-desc" style="font-size: 0.8rem; margin: 8px 0 15px 0;">Generate agent portraits locally using ComfyUI.</p>
+                    <p class="option-desc" style="font-size: 0.8rem; margin: 8px 0 15px 0;">Generate companion portraits locally using ComfyUI.</p>
                     
                     <button onclick="updateComfyModalStatus()" class="onboarding-btn" style="width: 100%; font-size: 0.85rem; padding: 10px; margin-top: 20px;">Check ComfyUI Connection</button>
                 </div>
@@ -2388,7 +2388,7 @@
                 <span>👤 User Persona Profiles</span>
             </h3>
             <p style="color: var(--text-muted); font-size: 0.85rem; margin-bottom: 20px; line-height: 1.4;">
-                Select or customize your user profile. This active persona grounds the relationship settings for companion agents.
+                Select or customize your user profile. This active persona grounds the relationship settings for companion programs.
             </p>
 
             <div style="display: flex; gap: 15px; align-items: flex-end; margin-bottom: 15px; flex-wrap: wrap;">
@@ -2547,8 +2547,8 @@
                 ]);
                 const data = await historyRes.json();
                 
-                if (data.active_agent) {
-                    applyTheme(data.active_agent, data.theme);
+                if (data.active_program) {
+                    applyTheme(data.active_program, data.theme);
                 }
                 if (data.character_name) {
                     const companionTitle = "Sanctuary";
@@ -3859,8 +3859,8 @@ function updateProfileImages() {
         }
 
         // --- applyTheme ---
-function applyTheme(agentId, theme) {
-            document.body.className = agentId;
+function applyTheme(programId, theme) {
+            document.body.className = programId;
             const root = document.documentElement;
             if (theme) {
                 if (theme.primary_accent) root.style.setProperty('--primary-accent', theme.primary_accent);
@@ -4127,7 +4127,7 @@ async function updateComfyModalStatus() {
                                         ${comfyStatus.running ? 'Running' : 'Offline'}
                                     </span>
                                 </div>
-                                <p class="option-desc" style="font-size: 0.8rem; margin: 8px 0 10px 0;">Generate agent portraits locally using ComfyUI.</p>
+                                <p class="option-desc" style="font-size: 0.8rem; margin: 8px 0 10px 0;">Generate companion portraits locally using ComfyUI.</p>
                                 
                                 <div id="comfy-engine-controls">
                                     ${comfyStatus.running ? `
@@ -4517,17 +4517,17 @@ function updateProfileButtonsVisibility() {
         }
 
         /* ==========================================================================
-           VII. 6. COMPANION / AGENT SELECTION
+           VII. 6. COMPANION / PROGRAM SELECTION
            ========================================================================== */
 
         // --- openAssistantModal ---
 async function openAssistantModal() {
             document.getElementById('assistant-modal').style.display = 'flex';
             try {
-                const res = await fetch('/api/agents');
+                const res = await fetch('/api/programs');
                 const data = await res.json();
-                if (data.agents) {
-                    renderAssistantsList(data.agents, data.active);
+                if (data.programs) {
+                    renderProgramsList(data.programs, data.active);
                 }
             } catch (e) {
                 console.error("Error loading assistants list:", e);
@@ -4618,7 +4618,7 @@ async function submitTavernCardImport() {
             formData.append('model', selectedModel);
             
             try {
-                const response = await fetch('/api/agents/import/tavern', {
+                const response = await fetch('/api/programs/import/tavern', {
                     method: 'POST',
                     body: formData
                 });
@@ -4653,7 +4653,7 @@ async function submitDescriptionImport() {
             btn.textContent = "Generating Persona...";
             
             try {
-                const response = await fetch('/api/agents/import/describe', {
+                const response = await fetch('/api/programs/import/describe', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ name: name, description: desc, model: selectedModel })
@@ -4674,8 +4674,8 @@ async function submitDescriptionImport() {
             }
         }
 
-        // --- renderAssistantsList ---
-function renderAssistantsList(assistants, activeId) {
+        // --- renderProgramsList ---
+function renderProgramsList(assistants, activeId) {
             const container = document.getElementById('assistants-list-container');
             container.innerHTML = '';
             assistants.forEach(assistant => {
@@ -4711,7 +4711,7 @@ function renderAssistantsList(assistants, activeId) {
                 // Custom companion icon image
                 const img = document.createElement('img');
                 img.className = 'companion-list-avatar';
-                img.src = `/agents/${assistant.id}/profile.svg?t=${profileCacheBuster}`;
+                img.src = `/programs/${assistant.id}/profile.svg?t=${profileCacheBuster}`;
                 img.alt = assistant.name;
                 img.style.cssText = `
                     width: 44px;
@@ -4787,10 +4787,10 @@ function renderAssistantsList(assistants, activeId) {
         // --- selectAssistant ---
 async function selectAssistant(assistantId) {
             try {
-                const res = await fetch('/api/agents/select', {
+                const res = await fetch('/api/programs/select', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ agent_id: assistantId })
+                    body: JSON.stringify({ program_id: assistantId })
                 });
                 if (!res.ok) {
                     const text = await res.text();
@@ -4841,10 +4841,10 @@ async function deleteAssistant(assistantId, name) {
                 `Are you sure you want to permanently delete companion <strong>${name}</strong>? This will remove all their configs, databank documents, and portraits.`,
                 async () => {
                     try {
-                        const res = await fetch('/api/agents/delete', {
+                        const res = await fetch('/api/programs/delete', {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ agent_id: assistantId })
+                            body: JSON.stringify({ program_id: assistantId })
                         });
                         const data = await res.json();
                         if (data.status === 'success') {
@@ -4852,10 +4852,10 @@ async function deleteAssistant(assistantId, name) {
                             if (data.switched_to === 'arthur') {
                                 selectAssistant('arthur');
                             } else {
-                                const listRes = await fetch('/api/agents');
+                                const listRes = await fetch('/api/programs');
                                 const listData = await listRes.json();
-                                if (listData.agents) {
-                                    renderAssistantsList(listData.agents, listData.active);
+                                if (listData.programs) {
+                                    renderProgramsList(listData.programs, listData.active);
                                 }
                             }
                         } else {
@@ -4933,8 +4933,8 @@ async function loadHistory() {
                     loadServerImages()
                 ]);
                 const data = await historyRes.json();
-                if (data.active_agent) {
-                    applyTheme(data.active_agent, data.theme);
+                if (data.active_program) {
+                    applyTheme(data.active_program, data.theme);
                 }
                 if (data.character_name) {
                     const companionTitle = "Sanctuary";
@@ -6380,7 +6380,7 @@ function expandImage(src) {
             const pathOnly = getRelativePath(src);
             
             // If the user clicked a profile avatar picture, show the first available portrait/media image
-            const isProfile = pathOnly.includes('profile.svg') || pathOnly.startsWith('/agents/');
+            const isProfile = pathOnly.includes('profile.svg') || pathOnly.startsWith('/programs/');
             if (isProfile) {
                 if (galleryImages.length === 0) {
                     showCustomAlert("No Media", "No portraits or generated images exist in this sanctuary yet.");
@@ -7021,7 +7021,7 @@ function purgeDataBank() {
 // --- saveActiveUserProfile ---
 
 /* ==========================================================================
-           VII. 6. COMPANION / AGENT SELECTION
+           VII. 6. COMPANION / PROGRAM SELECTION
            ========================================================================== */
 
         // --- openAssistantModal ---
@@ -7042,7 +7042,7 @@ function purgeDataBank() {
 
 // --- submitDescriptionImport ---
 
-// --- renderAssistantsList ---
+// --- renderProgramsList ---
 
 // --- selectAssistant ---
 

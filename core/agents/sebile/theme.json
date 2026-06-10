@@ -1,9 +1,0 @@
-{
-  "primary_accent": "#9370db",
-  "primary_glow": "rgba(147, 112, 219, 0.08)",
-  "companion_bubble": "rgba(29, 28, 36, 0.85)",
-  "send_btn_hover": "rgba(37, 33, 48, 0.75)",
-  "accent_green": "#b19cd9",
-  "quote_blue": "#79aeff",
-  "primary_btn_text": "#ffffff"
-}
