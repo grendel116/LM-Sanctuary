@@ -193,19 +193,34 @@ class BaseProgramRunner:
                 "sad": 0
             }
             
-            threshold = 5  # Evoke inversion if at least 5 turns are in that emotional state
+            threshold = 5
+            active_inversion = ""
+            inversion_turns_remaining = 0
             
-            # Scan history chronologically
+            # Scan history chronologically to simulate personality state machine
             for msg in history:
                 if msg.get('role') == 'companion':
                     text = msg.get('text', '')
                     if text:
-                        state = analyze_emotional_state(text)
-                        mood = state.get('name')
-                        if mood in counts:
-                            counts[mood] += 1
-                            if counts[mood] >= threshold:
-                                return mood
+                        if active_inversion:
+                            # Inversion is active, count down the turns
+                            inversion_turns_remaining -= 1
+                            if inversion_turns_remaining <= 0:
+                                # Inversion has worn off, reset counts and clear active state
+                                active_inversion = ""
+                                for k in counts:
+                                    counts[k] = 0
+                        else:
+                            # Count up mood frequency to check against threshold
+                            state = analyze_emotional_state(text)
+                            mood = state.get('name')
+                            if mood in counts:
+                                counts[mood] += 1
+                                if counts[mood] >= threshold:
+                                    active_inversion = mood
+                                    inversion_turns_remaining = 5
+                                    
+            return active_inversion
         except Exception as e:
             print(f"Error calculating inversion mode: {e}")
         return ""
