@@ -48,7 +48,7 @@ These are the concrete abilities your companion uses to do work on your machine.
 * **Render Scene** (`generate_general_image`): Calls Imagen to draw general concepts, objects, or backgrounds.
 * **Sense Mood** (`analyze_emotional_state`) <font color="#10b981">*</font>: Reads the conversation tone to adjust neon glows and animation speeds of the companion's display frame.
 
-<font color="#10b981">* Local operations run entirely on your own machine, keeping your data and workspace sovereign.</font>
+<font color="#10b981">*Local operations run entirely on your own machine, keeping your data and workspace sovereign.</font>
 
 ---
 
