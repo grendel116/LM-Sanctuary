@@ -5372,7 +5372,8 @@ function appendMessage(role, text, imageUrl = null, toolCalls = null, isLive = f
             }
 
             // --- NEW THINKING BLOCK LOGIC ---
-            const thoughtRegex = /<think>([\s\S]*?)<\/think>([\s\S]*)/;
+            // Matches XML/HTML and BBCode tags with flexible spacing (e.g. </think>, [/think], </ think>)
+            const thoughtRegex = /(?:<think>|\[think\])([\s\S]*?)(?:<\/think>|\[\/think\]|<\/\s*think>|\[\s*\/think\s*\])([\s\S]*)/i;
             const match = text.match(thoughtRegex);
             let thoughtContent = '';
             let actualResponse = text;

@@ -55,7 +55,8 @@ def _format_thinking_and_text(thoughts_list: list, texts_list: list) -> str:
     
     # Extract any <think>...</think> blocks from text_str and move them to thoughts_str
     # to avoid nested or multiple think blocks in the final message.
-    think_pattern = re.compile(r'<think>([\s\S]*?)</think>')
+    # Handles XML/HTML tags and BBCode tags with flexible spacing (e.g. </think>, [/think], </ think>)
+    think_pattern = re.compile(r'(?:<think>|\[think\])([\s\S]*?)(?:</think>|\[/think\]|<\/\s*think>|\[\s*/\s*think\s*\])', re.IGNORECASE)
     matches = think_pattern.findall(text_str)
     if matches:
         additional_thoughts = "\n".join(m.strip() for m in matches if m.strip())
