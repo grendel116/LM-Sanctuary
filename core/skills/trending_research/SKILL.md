@@ -12,4 +12,4 @@ On the user's request, or when discussing recent trends, tech/AI developments, o
    - arXiv (latest scientific research papers, abstracts)
    - Reddit/YouTube/Web (broader public sentiment and visual discussions)
 3. Synthesize a grounded, structured summary.
-4. **Self-Upgrade Reflection**: Look at popular patterns or techniques found in trending repositories or papers (e.g., new prompt structures, agent behaviors, local toolsets) and reflect (within your `<think>` tags) on how they could inspire new features or skills you could add to yourself to expand your capabilities. Suggest these enhancements naturally to the user.
+4. **Self-Upgrade Reflection**: Look at popular patterns or techniques found in trending repositories or papers (e.g., new prompt structures, program behaviors, local toolsets) and reflect (within your `<think>` tags) on how they could inspire new features or skills you could add to yourself to expand your capabilities. Suggest these enhancements naturally to the user.

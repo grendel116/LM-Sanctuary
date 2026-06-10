@@ -8,7 +8,7 @@ VARIABLES_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # Configuration and data file paths
 BANNED_WORDS_FILE = os.path.join(VARIABLES_DIR, "banned_words.json")
-ACTIVE_AGENT_FILE = os.path.join(VARIABLES_DIR, "active_agent.txt")
+ACTIVE_PROGRAM_FILE = os.path.join(VARIABLES_DIR, "active_program.txt")
 USER_MD_FILE = os.path.join(VARIABLES_DIR, "user.md")
 USER_PROFILES_DIR = os.path.join(VARIABLES_DIR, "user_profiles")
 ACTIVE_USER_FILE = os.path.join(VARIABLES_DIR, "active_user.txt")
@@ -39,6 +39,6 @@ COMFYUI_CHECKPOINT = os.getenv("COMFYUI_CHECKPOINT", "sd_xl_base_1.0.safetensors
 COMFYUI_VAE = os.getenv("COMFYUI_VAE", "sdxl_vae.safetensors")
 
 # Shared directory paths
-AGENTS_DIR = os.path.join(BASE_DIR, "core", "agents")
-AGENTS_DIR = AGENTS_DIR
+PROGRAMS_DIR = os.path.join(BASE_DIR, "core", "programs")
+PROGRAMS_DIR = PROGRAMS_DIR
 

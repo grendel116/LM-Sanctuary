@@ -149,7 +149,7 @@ def web_search(query: str) -> str:
     try:
         url = "https://en.wikipedia.org/w/api.php"
         headers = {
-            "User-Agent": "AgentSanctuary/1.0 (contact: developer@example.com) requests-library"
+            "User-Agent": "ProgramSanctuary/1.0 (contact: developer@example.com) requests-library"
         }
         params = {
             "action": "query",
@@ -471,7 +471,7 @@ def generate_companion_portrait(prompt: str) -> str:
         return (
             "**Image Generation Inactive (ComfyUI Offline/Not Installed)**\n\n"
             f"*(Reason: {reason})*\n\n"
-            "To enable agent portrait generation, you can install, run, and resolve ComfyUI dependencies directly from the **Connection Settings** panel:\n\n"
+            "To enable companion portrait generation, you can install, run, and resolve ComfyUI dependencies directly from the **Connection Settings** panel:\n\n"
             "- **Open Connection Settings**: Click the gear icon (⚙️) in the top header.\n"
             "- **Install ComfyUI**: If not already installed, click **Install Headless ComfyUI** under the Image Generation Environment section.\n"
             "- **Start the Server**: Click **Start ComfyUI Engine** to launch the server headlessly.\n"
@@ -480,9 +480,9 @@ def generate_companion_portrait(prompt: str) -> str:
         )
 
     base_dir = os.path.dirname(os.path.abspath(__file__))
-    active_agent = os.getenv("ACTIVE_AGENT", "arthur")
+    active_program = os.getenv("ACTIVE_PROGRAM", "arthur")
     workflow_path = os.path.normpath(os.path.join(
-        base_dir, "core", "agents", active_agent, "portraits", "ImageWorkflow.json"
+        base_dir, "core", "programs", active_program, "portraits", "ImageWorkflow.json"
     ))
     if not os.path.exists(workflow_path):
         return get_install_instructions(f"Workflow template not found at '{workflow_path}'")
@@ -507,14 +507,14 @@ def generate_companion_portrait(prompt: str) -> str:
     if available_vaes and selected_vae not in available_vaes:
         raise Exception(f"Missing VAE: The required VAE file `{selected_vae}` was not found.")
 
-    # Load appearance from the active agent's markdown context (## IDENTITY & FORM)
+    # Load appearance from the active program's markdown context (## IDENTITY & FORM)
     appearance_val = ""
-    agent_md_path = os.path.normpath(os.path.join(
-        base_dir, "core", "agents", active_agent, f"{active_agent.upper()}.md"
+    program_md_path = os.path.normpath(os.path.join(
+        base_dir, "core", "programs", active_program, f"{active_program.upper()}.md"
     ))
-    if os.path.exists(agent_md_path):
+    if os.path.exists(program_md_path):
         try:
-            with open(agent_md_path, "r", encoding="utf-8") as f:
+            with open(program_md_path, "r", encoding="utf-8") as f:
                 content = f.read()
             import re
             match = re.search(r'## IDENTITY & FORM\s*\n+([^\n#]+)', content)
@@ -527,7 +527,7 @@ def generate_companion_portrait(prompt: str) -> str:
         if "6" in workflow and "inputs" in workflow["6"] and "appearance" in workflow["6"]["inputs"]:
             appearance_val = workflow["6"]["inputs"]["appearance"]
         else:
-            appearance_val = f"character named {active_agent}"
+            appearance_val = f"character named {active_program}"
 
     # Define dynamic replacement parameters
     seed_val = random.randint(1, 1125899906842624)
@@ -610,8 +610,8 @@ def generate_companion_portrait(prompt: str) -> str:
                                 if view_res.status_code == 200:
                                     timestamp = int(time.time())
                                     local_filename = f"portrait_{timestamp}.png"
-                                    active_agent = os.getenv("ACTIVE_AGENT", "arthur")
-                                    portraits_dir = os.path.normpath(os.path.join(base_dir, "core", "agents", active_agent, "portraits"))
+                                    active_program = os.getenv("ACTIVE_PROGRAM", "arthur")
+                                    portraits_dir = os.path.normpath(os.path.join(base_dir, "core", "programs", active_program, "portraits"))
                                     os.makedirs(portraits_dir, exist_ok=True)
                                     local_path = os.path.join(portraits_dir, local_filename)
                                     with open(local_path, "wb") as img_file:
@@ -683,9 +683,9 @@ def generate_general_image(prompt: str) -> str:
         if not hasattr(img_obj.image, 'image_bytes'):
             return "Error: Generated image object does not contain image bytes."
 
-        # Save to agents' media folder
-        active_agent = os.getenv("ACTIVE_AGENT", "arthur")
-        media_dir = os.path.normpath(os.path.join(base_dir, "core", "agents", active_agent, "media"))
+        # Save to programs' media folder
+        active_program = os.getenv("ACTIVE_PROGRAM", "arthur")
+        media_dir = os.path.normpath(os.path.join(base_dir, "core", "programs", active_program, "media"))
         os.makedirs(media_dir, exist_ok=True)
 
         timestamp = int(time.time())
@@ -702,7 +702,7 @@ def generate_general_image(prompt: str) -> str:
         return f"Error generating image: {e}"
 
 def analyze_emotional_state(text: str) -> dict:
-    """Analyzes text to determine agent's emotional state (mood) and intensity.
+    """Analyzes text to determine program's emotional state (mood) and intensity.
     Color/Glow reflect mood, Speed reflects intensity.
     """
     if not text:
@@ -855,7 +855,7 @@ def multi_platform_research(topic: str) -> str:
         }
         headers = {
             "Accept": "application/vnd.github.v3+json",
-            "User-Agent": "AgentSanctuary/1.0"
+            "User-Agent": "ProgramSanctuary/1.0"
         }
         res = requests.get(url, params=params, headers=headers, timeout=5)
         if res.status_code == 200:

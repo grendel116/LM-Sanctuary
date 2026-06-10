@@ -24,7 +24,7 @@ load_dotenv(override=True)
 
 app = Flask(__name__)
 
-_cached_active_agent = None
+_cached_active_program = None
 _cached_active_user = None
 
 def init_runner():
@@ -43,10 +43,10 @@ def init_runner():
             runner = OpenSourceRunner(app_name="Sanctuary")
 
 @app.before_request
-def check_agent_change():
-    global _cached_active_agent, _cached_active_user
-    from utils.agent import get_active_agent
-    current_agent = get_active_agent()
+def check_program_change():
+    global _cached_active_program, _cached_active_user
+    from utils.program import get_active_program
+    current_program = get_active_program()
     
     from variables import ACTIVE_USER_FILE
     current_user = "builder"
@@ -57,59 +57,59 @@ def check_agent_change():
         except Exception as e:
             print(f"Error reading active user file: {e}")
             
-    agent_changed = current_agent != _cached_active_agent
+    program_changed = current_program != _cached_active_program
     user_changed = current_user != _cached_active_user
     
-    if agent_changed or user_changed:
-        if agent_changed:
-            _cached_active_agent = current_agent
-            os.environ["ACTIVE_AGENT"] = current_agent
+    if program_changed or user_changed:
+        if program_changed:
+            _cached_active_program = current_program
+            os.environ["ACTIVE_PROGRAM"] = current_program
             try:
-                from variables import AGENTS_DIR
-                agent_path = os.path.join(AGENTS_DIR, current_agent)
+                from variables import PROGRAMS_DIR
+                program_path = os.path.join(PROGRAMS_DIR, current_program)
                 # Setup portraits directory and perform migration from legacy folder if needed
-                portraits_dir = os.path.join(agent_path, 'portraits')
-                legacy_dir = os.path.join(agent_path, 'sel' + 'fies')
+                portraits_dir = os.path.join(program_path, 'portraits')
+                legacy_dir = os.path.join(program_path, 'sel' + 'fies')
                 if os.path.exists(legacy_dir) and not os.path.exists(portraits_dir):
                     try:
                         os.rename(legacy_dir, portraits_dir)
-                        print(f"Migrated legacy folder to portraits for agent {current_agent}")
+                        print(f"Migrated legacy folder to portraits for program {current_agent}")
                     except Exception as ex:
-                        print(f"Error migrating legacy folder for agent {current_agent}: {ex}")
+                        print(f"Error migrating legacy folder for program {current_agent}: {ex}")
                 os.makedirs(portraits_dir, exist_ok=True)
             except Exception as ex:
-                print(f"Error preparing portraits directory for active agent: {ex}")
+                print(f"Error preparing portraits directory for active program: {ex}")
         if user_changed:
             _cached_active_user = current_user
             
         try:
-            from core import agent_config
+            from core import program_config
             import importlib
-            importlib.reload(agent_config)
+            importlib.reload(program_config)
             
-            # Re-initialize the runner backend with the new consciousness/agent/user config
+            # Re-initialize the runner backend with the new consciousness/program/user config
             init_runner()
             
             if hasattr(runner, 'sessions_history'):
                 runner.sessions_history.clear()
             if hasattr(runner, 'runner') and hasattr(runner.runner, 'session_service'):
                 runner.runner.session_service.sessions.clear()
-            print(f">>> Dynamic check loaded new agent consciousness (Agent: '{current_agent}', User Profile: '{current_user}')")
+            print(f">>> Dynamic check loaded new program consciousness (Program: '{current_agent}', User Profile: '{current_user}')")
         except Exception as e:
-            print(f"Error dynamically reloading agent/user: {e}")
+            print(f"Error dynamically reloading program/user: {e}")
 
 
-# Initialize active_agent.txt from environment if it doesn't exist
+# Initialize active_program.txt from environment if it doesn't exist
 try:
-    from variables import ACTIVE_AGENT_FILE
-    if not os.path.exists(ACTIVE_AGENT_FILE):
-        active_mon = os.getenv("ACTIVE_AGENT")
+    from variables import ACTIVE_PROGRAM_FILE
+    if not os.path.exists(ACTIVE_PROGRAM_FILE):
+        active_mon = os.getenv("ACTIVE_PROGRAM")
         if not active_mon:
-            raise ValueError("ACTIVE_AGENT environment variable is not set and active_agent.txt does not exist")
-        with open(ACTIVE_AGENT_FILE, "w", encoding="utf-8") as f:
+            raise ValueError("ACTIVE_PROGRAM environment variable is not set and active_program.txt does not exist")
+        with open(ACTIVE_PROGRAM_FILE, "w", encoding="utf-8") as f:
             f.write(active_mon)
 except Exception as e:
-    print(f"Error initializing active_agent.txt: {e}")
+    print(f"Error initializing active_program.txt: {e}")
     raise
 
 # Initialize the dynamic runner based on configuration
@@ -155,16 +155,16 @@ def index():
     
     tts_auto_speak = os.getenv("TTS_AUTO_SPEAK", "false").lower() == "true"
     tts_provider = os.getenv("TTS_PROVIDER", "local").lower()
-    active_agent = os.getenv("ACTIVE_AGENT", "arthur")
+    active_program = os.getenv("ACTIVE_PROGRAM", "arthur")
     import json
     theme = None
-    theme_path = os.path.join(base_dir, "core", "agents", active_agent, "theme.json")
+    theme_path = os.path.join(base_dir, "core", "programs", active_program, "theme.json")
     if os.path.exists(theme_path):
         try:
             with open(theme_path, "r", encoding="utf-8") as tf:
                 theme = json.load(tf)
         except Exception as e:
-            print(f"Error loading theme for {active_agent}: {e}")
+            print(f"Error loading theme for {active_program}: {e}")
 
     from variables import ACTIVE_USER_FILE
     active_user = "builder"
@@ -179,13 +179,13 @@ def index():
             pass
 
     from flask import make_response
-    response = make_response(render_template('index.html', local_ip=local_ip, tts_auto_speak=tts_auto_speak, tts_provider=tts_provider, active_agent=active_agent, theme=theme, active_user=active_user))
+    response = make_response(render_template('index.html', local_ip=local_ip, tts_auto_speak=tts_auto_speak, tts_provider=tts_provider, active_program=active_program, theme=theme, active_user=active_user))
     response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
     return response
 
 @app.route('/manifest.json')
 def serve_manifest():
-    from core.agent_config import companion_name
+    from core.program_config import companion_name
     import json
     try:
         with open('manifest.json', 'r', encoding='utf-8') as f:
@@ -203,12 +203,12 @@ def serve_service_worker():
 
 @app.route('/app_icon.png')
 def app_icon():
-    active_agent = os.getenv("ACTIVE_AGENT", "arthur")
-    path_svg = os.path.join('core', 'agents', active_agent, 'profile.svg')
+    active_program = os.getenv("ACTIVE_PROGRAM", "arthur")
+    path_svg = os.path.join('core', 'programs', active_program, 'profile.svg')
     if os.path.exists(path_svg):
         response = send_file(path_svg, mimetype='image/svg+xml')
     else:
-        path = os.path.join('core', 'agents', active_agent, 'app_icon.png')
+        path = os.path.join('core', 'programs', active_program, 'app_icon.png')
         if os.path.exists(path):
             response = send_file(path)
         else:
@@ -221,12 +221,12 @@ def app_icon():
  
 @app.route('/profile.svg')
 def profile_svg():
-    active_agent = os.getenv("ACTIVE_AGENT", "arthur")
-    path_svg = os.path.join('core', 'agents', active_agent, 'profile.svg')
+    active_program = os.getenv("ACTIVE_PROGRAM", "arthur")
+    path_svg = os.path.join('core', 'programs', active_program, 'profile.svg')
     if os.path.exists(path_svg):
         response = send_file(path_svg, mimetype='image/svg+xml')
     else:
-        path_icon = os.path.join('core', 'agents', active_agent, 'app_icon.png')
+        path_icon = os.path.join('core', 'programs', active_program, 'app_icon.png')
         if os.path.exists(path_icon):
             response = send_file(path_icon)
         else:
@@ -237,16 +237,16 @@ def profile_svg():
     res.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
     return res
  
-@app.route('/agents/<agent_id>/profile.svg')
-def agent_profile_svg(agent_id):
-    # Ensure agent_id is safe (alphanumeric/simple)
-    if not agent_id.isalnum() and '_' not in agent_id:
-        return "Invalid agent ID", 400
-    path_svg = os.path.join('core', 'agents', agent_id, 'profile.svg')
+@app.route('/programs/<program_id>/profile.svg')
+def program_profile_svg(program_id):
+    # Ensure program_id is safe (alphanumeric/simple)
+    if not program_id.isalnum() and '_' not in program_id:
+        return "Invalid program ID", 400
+    path_svg = os.path.join('core', 'programs', program_id, 'profile.svg')
     if os.path.exists(path_svg):
         response = send_file(path_svg, mimetype='image/svg+xml')
     else:
-        path_icon = os.path.join('core', 'agents', agent_id, 'app_icon.png')
+        path_icon = os.path.join('core', 'programs', program_id, 'app_icon.png')
         if os.path.exists(path_icon):
             response = send_file(path_icon)
         else:
@@ -260,9 +260,9 @@ def agent_profile_svg(agent_id):
 @app.route('/images/<path:filename>')
 @requires_auth
 def serve_image(filename):
-    active_agent = os.getenv("ACTIVE_AGENT", "arthur")
-    agent_dir = os.path.join('core', 'agents', active_agent)
-    return send_from_directory(agent_dir, filename)
+    active_program = os.getenv("ACTIVE_PROGRAM", "arthur")
+    program_dir = os.path.join('core', 'programs', active_program)
+    return send_from_directory(program_dir, filename)
 
 @app.route('/history', methods=['GET'])
 @requires_auth
@@ -282,26 +282,26 @@ def history():
         state_info = tools.analyze_emotional_state(last_companion_text)
         inversion_mode = asyncio.run(runner._get_inversion_mode(session_id))
         
-        from core.agent_config import companion_name
-        active_agent = os.environ.get("ACTIVE_AGENT", "arthur")
+        from core.program_config import companion_name
+        active_program = os.environ.get("ACTIVE_PROGRAM", "arthur")
         
         theme = None
         base_dir = os.path.dirname(os.path.abspath(__file__))
-        theme_path = os.path.join(base_dir, "core", "agents", active_agent, "theme.json")
+        theme_path = os.path.join(base_dir, "core", "programs", active_program, "theme.json")
         if os.path.exists(theme_path):
             try:
                 import json
                 with open(theme_path, "r", encoding="utf-8") as tf:
                     theme = json.load(tf)
             except Exception as e:
-                print(f"Error loading theme for {active_agent} in history: {e}")
+                print(f"Error loading theme for {active_program} in history: {e}")
 
         return jsonify({
             'history': chat_history,
             'state': state_info,
             'inversion_active': inversion_mode,
             'character_name': companion_name,
-            'active_agent': active_agent,
+            'active_program': active_program,
             'theme': theme
         })
     except Exception as e:
@@ -340,8 +340,8 @@ def upload_media():
     ext = os.path.splitext(filename)[1].lower()
     unique_name = f"upload_{int(time.time())}_{uuid.uuid4().hex}{ext}"
 
-    active_agent = os.getenv("ACTIVE_AGENT", "arthur")
-    uploads_dir = os.path.normpath(os.path.join('core', 'agents', active_agent, 'uploads'))
+    active_program = os.getenv("ACTIVE_PROGRAM", "arthur")
+    uploads_dir = os.path.normpath(os.path.join('core', 'programs', active_program, 'uploads'))
     os.makedirs(uploads_dir, exist_ok=True)
     
     local_path = os.path.join(uploads_dir, unique_name)
@@ -526,12 +526,12 @@ def regenerate_image():
         # 1. Try to find the prompt in the companion sidecar JSON file (most reliable and clean)
         try:
             base_dir = os.path.dirname(os.path.abspath(__file__))
-            active_agent = os.getenv("ACTIVE_AGENT", "arthur")
+            active_program = os.getenv("ACTIVE_PROGRAM", "arthur")
             if old_image_url.startswith('/images/'):
                 img_subpath = old_image_url[8:]
             else:
                 img_subpath = os.path.basename(old_image_url)
-            png_path = os.path.normpath(os.path.join(base_dir, 'core', 'agents', active_agent, img_subpath))
+            png_path = os.path.normpath(os.path.join(base_dir, 'core', 'programs', active_program, img_subpath))
             
             json_path = png_path.rsplit('.', 1)[0] + '.json'
             if os.path.exists(json_path):
@@ -614,8 +614,8 @@ def animate_image():
 @requires_auth
 def list_images():
     try:
-        active_agent = os.getenv("ACTIVE_AGENT", "arthur")
-        portraits_dir = os.path.join('core', 'agents', active_agent, 'portraits')
+        active_program = os.getenv("ACTIVE_PROGRAM", "arthur")
+        portraits_dir = os.path.join('core', 'programs', active_program, 'portraits')
         if not os.path.exists(portraits_dir):
             return jsonify({'images': []})
         files = os.listdir(portraits_dir)
@@ -939,57 +939,57 @@ def databank_purge():
     except Exception as e:
         print(f"Error purging databank: {e}")
         return jsonify({"error": str(e)}), 500
-@app.route('/api/agents', methods=['GET'])
+@app.route('/api/programs', methods=['GET'])
 @requires_auth
-def list_agents():
+def list_programs():
     try:
-        active_agent = os.getenv("ACTIVE_AGENT", "arthur")
-        from variables import AGENTS_DIR
-        agents_dir = AGENTS_DIR
+        active_program = os.getenv("ACTIVE_PROGRAM", "arthur")
+        from variables import PROGRAMS_DIR
+        programs_dir = PROGRAMS_DIR
         
-        agents = []
-        if os.path.exists(agents_dir):
-            for folder in os.listdir(agents_dir):
-                folder_path = os.path.join(agents_dir, folder)
+        programs = []
+        if os.path.exists(programs_dir):
+            for folder in os.listdir(programs_dir):
+                folder_path = os.path.join(programs_dir, folder)
                 if os.path.isdir(folder_path):
                     companion_name = folder.title()
                     for file in os.listdir(folder_path):
                         if file.lower().endswith('.md') and not file.lower().startswith('user'):
                             companion_name = os.path.splitext(file)[0].title()
                             break
-                    agents.append({
+                    programs.append({
                         'id': folder,
                         'name': companion_name,
-                        'active': folder == active_agent
+                        'active': folder == active_program
                     })
-        return jsonify({'agents': agents, 'active': active_agent})
+        return jsonify({'programs': programs, 'active': active_program})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
-@app.route('/api/agents/select', methods=['POST'])
+@app.route('/api/programs/select', methods=['POST'])
 @requires_auth
-def select_agent():
+def select_program():
     try:
         data = request.get_json(silent=True) or {}
-        agent_id = data.get('agent_id')
-        if not agent_id:
-            return jsonify({'error': 'Missing agent_id'}), 400
+        program_id = data.get('program_id')
+        if not program_id:
+            return jsonify({'error': 'Missing program_id'}), 400
             
         base_dir = os.path.dirname(os.path.abspath(__file__))
-        agent_path = os.path.join(base_dir, 'core', 'agents', agent_id)
-        if not os.path.exists(agent_path):
-            return jsonify({'error': f"Agent '{agent_id}' does not exist"}), 404
+        program_path = os.path.join(base_dir, 'core', 'programs', program_id)
+        if not os.path.exists(program_path):
+            return jsonify({'error': f"Program '{program_id}' does not exist"}), 404
             
         # Update environment variable
-        os.environ["ACTIVE_AGENT"] = agent_id
+        os.environ["ACTIVE_PROGRAM"] = program_id
         
-        # Update active_agent.txt to sync across processes/threads
+        # Update active_program.txt to sync across processes/threads
         try:
-            from variables import ACTIVE_AGENT_FILE
-            with open(ACTIVE_AGENT_FILE, 'w', encoding='utf-8') as f:
-                f.write(agent_id)
+            from variables import ACTIVE_PROGRAM_FILE
+            with open(ACTIVE_PROGRAM_FILE, 'w', encoding='utf-8') as f:
+                f.write(program_id)
         except Exception as e:
-            print(f"Error persisting ACTIVE_AGENT to active_agent.txt: {e}")
+            print(f"Error persisting ACTIVE_PROGRAM to active_program.txt: {e}")
         
         # Update .env file to persist across restarts
         try:
@@ -999,23 +999,23 @@ def select_agent():
                     lines = f.readlines()
                 updated = False
                 for i, line in enumerate(lines):
-                    if line.strip().startswith('ACTIVE_AGENT='):
-                        lines[i] = f"ACTIVE_AGENT={agent_id}\n"
+                    if line.strip().startswith('ACTIVE_PROGRAM='):
+                        lines[i] = f"ACTIVE_PROGRAM={program_id}\n"
                         updated = True
                         break
                 if not updated:
-                    lines.append(f"\nACTIVE_AGENT={agent_id}\n")
+                    lines.append(f"\nACTIVE_PROGRAM={program_id}\n")
                 with open(env_path, 'w', encoding='utf-8') as f:
                     f.writelines(lines)
         except Exception as e:
-            print(f"Error persisting ACTIVE_AGENT to .env: {e}")
+            print(f"Error persisting ACTIVE_PROGRAM to .env: {e}")
 
-        # Reload agent config module to pick up new identity
-        from core import agent_config
+        # Reload program config module to pick up new identity
+        from core import program_config
         import importlib
-        importlib.reload(agent_config)
+        importlib.reload(program_config)
         
-        # Re-initialize the runner backend with the new consciousness/agent config
+        # Re-initialize the runner backend with the new consciousness/program config
         init_runner()
         
         # Clear sessions memory in the runner so they reload from the new assistant's folders
@@ -1025,17 +1025,17 @@ def select_agent():
             runner.runner.session_service.sessions.clear()
             
         theme = None
-        theme_path = os.path.join(agent_path, "theme.json")
+        theme_path = os.path.join(program_path, "theme.json")
         if os.path.exists(theme_path):
             try:
                 import json
                 with open(theme_path, "r", encoding="utf-8") as tf:
                     theme = json.load(tf)
             except Exception as e:
-                print(f"Error loading theme for {agent_id} in select_agent: {e}")
+                print(f"Error loading theme for {program_id} in select_program: {e}")
 
-        from core.agent_config import companion_name
-        return jsonify({'status': 'success', 'active': agent_id, 'character_name': companion_name, 'theme': theme})
+        from core.program_config import companion_name
+        return jsonify({'status': 'success', 'active': program_id, 'character_name': companion_name, 'theme': theme})
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -1047,36 +1047,36 @@ def select_agent():
         return jsonify({'error': str(e)}), 500
 
 
-@app.route('/api/agents/delete', methods=['POST'])
+@app.route('/api/programs/delete', methods=['POST'])
 @requires_auth
-def delete_agent():
+def delete_program():
     try:
         data = request.get_json(silent=True) or {}
-        agent_id = data.get('agent_id')
-        if not agent_id:
-            return jsonify({'error': 'Missing agent_id'}), 400
+        program_id = data.get('program_id')
+        if not program_id:
+            return jsonify({'error': 'Missing program_id'}), 400
             
-        if agent_id == 'arthur':
+        if program_id == 'arthur':
             return jsonify({'error': 'Cannot delete default companion Arthur'}), 400
             
-        if agent_id == 'sebile':
+        if program_id == 'sebile':
             return jsonify({'error': 'Cannot delete essential companion Sebile'}), 400
             
         base_dir = os.path.dirname(os.path.abspath(__file__))
-        agent_path = os.path.join(base_dir, 'core', 'agents', agent_id)
-        if not os.path.exists(agent_path):
-            return jsonify({'error': f"Agent '{agent_id}' does not exist"}), 404
+        program_path = os.path.join(base_dir, 'core', 'programs', program_id)
+        if not os.path.exists(program_path):
+            return jsonify({'error': f"Program '{program_id}' does not exist"}), 404
             
-        # If the deleted agent is currently active, switch to Arthur first
-        active_agent = os.getenv("ACTIVE_AGENT", "arthur")
-        if agent_id == active_agent:
-            os.environ["ACTIVE_AGENT"] = "arthur"
+        # If the deleted program is currently active, switch to Arthur first
+        active_program = os.getenv("ACTIVE_PROGRAM", "arthur")
+        if program_id == active_program:
+            os.environ["ACTIVE_PROGRAM"] = "arthur"
             try:
-                from variables import ACTIVE_AGENT_FILE
-                with open(ACTIVE_AGENT_FILE, 'w', encoding='utf-8') as f:
+                from variables import ACTIVE_PROGRAM_FILE
+                with open(ACTIVE_PROGRAM_FILE, 'w', encoding='utf-8') as f:
                     f.write("arthur")
             except Exception as e:
-                print(f"Error resetting active agent to arthur: {e}")
+                print(f"Error resetting active program to arthur: {e}")
                 
             try:
                 env_path = os.path.join(base_dir, '.env')
@@ -1085,32 +1085,32 @@ def delete_agent():
                         lines = f.readlines()
                     updated = False
                     for i, line in enumerate(lines):
-                        if line.strip().startswith('ACTIVE_AGENT='):
-                            lines[i] = "ACTIVE_AGENT=arthur\n"
+                        if line.strip().startswith('ACTIVE_PROGRAM='):
+                            lines[i] = "ACTIVE_PROGRAM=arthur\n"
                             updated = True
                             break
                     if not updated:
-                        lines.append("\nACTIVE_AGENT=arthur\n")
+                        lines.append("\nACTIVE_PROGRAM=arthur\n")
                     with open(env_path, 'w', encoding='utf-8') as f:
                         f.writelines(lines)
             except Exception as e:
-                print(f"Error resetting ACTIVE_AGENT in .env: {e}")
+                print(f"Error resetting ACTIVE_PROGRAM in .env: {e}")
                 
-            # Reload agent config and re-initialize the runner
-            from core import agent_config
+            # Reload program config and re-initialize the runner
+            from core import program_config
             import importlib
-            importlib.reload(agent_config)
+            importlib.reload(program_config)
             init_runner()
             if hasattr(runner, 'sessions_history'):
                 runner.sessions_history.clear()
             if hasattr(runner, 'runner') and hasattr(runner.runner, 'session_service'):
                 runner.runner.session_service.sessions.clear()
                 
-        # Delete the agent folder recursively
+        # Delete the program folder recursively
         import shutil
-        shutil.rmtree(agent_path)
+        shutil.rmtree(program_path)
         
-        return jsonify({'status': 'success', 'switched_to': 'arthur' if agent_id == active_agent else None})
+        return jsonify({'status': 'success', 'switched_to': 'arthur' if program_id == active_program else None})
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -1150,7 +1150,7 @@ def list_user_profiles():
         # If there are no profiles at all, ensure at least "builder" is present
         if not profiles:
             builder_path = os.path.join(USER_PROFILES_DIR, "builder.md")
-            default_content = "# USER CONTEXT: BUILDER\n- A software developer and code builder.\n- Hobby: Collects cute AI companion agents in the Sanctuary.\n"
+            default_content = "# USER CONTEXT: BUILDER\n- A software developer and code builder.\n- Hobby: Collects cute AI companion programs in the Sanctuary.\n"
             with open(builder_path, "w", encoding="utf-8") as f:
                 f.write(default_content)
             profiles.append({
@@ -1181,10 +1181,10 @@ def select_user_profile():
         with open(ACTIVE_USER_FILE, "w", encoding="utf-8") as f:
             f.write(profile_id)
         
-        # Re-initialize the agent config module
-        from core import agent_config
+        # Re-initialize the program config module
+        from core import program_config
         import importlib
-        importlib.reload(agent_config)
+        importlib.reload(program_config)
         
         # Re-initialize the runner
         init_runner()
@@ -1233,9 +1233,9 @@ def save_user_profile():
         
         # If we edited the active profile, trigger hot reload immediately
         if profile_id == active_user:
-            from core import agent_config
+            from core import program_config
             import importlib
-            importlib.reload(agent_config)
+            importlib.reload(program_config)
             
             init_runner()
             if hasattr(runner, 'sessions_history'):
@@ -1278,9 +1278,9 @@ def delete_user_profile():
             with open(ACTIVE_USER_FILE, "w", encoding="utf-8") as f:
                 f.write("builder")
                 
-            from core import agent_config
+            from core import program_config
             import importlib
-            importlib.reload(agent_config)
+            importlib.reload(program_config)
             init_runner()
             if hasattr(runner, 'sessions_history'):
                 runner.sessions_history.clear()
@@ -1343,9 +1343,9 @@ def rename_user_profile():
             with open(ACTIVE_USER_FILE, "w", encoding="utf-8") as f:
                 f.write(new_profile_id)
                 
-            from core import agent_config
+            from core import program_config
             import importlib
-            importlib.reload(agent_config)
+            importlib.reload(program_config)
             init_runner()
             if hasattr(runner, 'sessions_history'):
                 runner.sessions_history.clear()
@@ -1854,9 +1854,9 @@ def clean_and_normalize_profile(name, description, personality, text):
         
     return cleaned_text
 
-@app.route('/api/agents/import/tavern', methods=['POST'])
+@app.route('/api/programs/import/tavern', methods=['POST'])
 @requires_auth
-def import_tavern_agent():
+def import_tavern_program():
     try:
         if 'card' not in request.files:
             return jsonify({'error': 'No card file provided'}), 400
@@ -1944,17 +1944,17 @@ def import_tavern_agent():
         first_mes = data.get('first_mes', f"Hello, I am {name}.")
         model = request.form.get('model', '').strip()
         
-        agent_id = re.sub(r'[^a-zA-Z0-9_\-]', '', name).lower()
-        if not agent_id:
-            agent_id = "companion_" + str(int(time.time()))
+        program_id = re.sub(r'[^a-zA-Z0-9_\-]', '', name).lower()
+        if not program_id:
+            program_id = "companion_" + str(int(time.time()))
             
-        agent_path = os.path.join(base_dir, 'core', 'agents', agent_id)
-        if os.path.exists(agent_path):
+        program_path = os.path.join(base_dir, 'core', 'programs', program_id)
+        if os.path.exists(program_path):
             if os.path.exists(temp_path):
                 os.remove(temp_path)
-            return jsonify({'error': f"Agent folder '{agent_id}' already exists"}), 400
+            return jsonify({'error': f"Program folder '{program_id}' already exists"}), 400
             
-        os.makedirs(agent_path, exist_ok=True)
+        os.makedirs(program_path, exist_ok=True)
         
         # Use LLM to parse, interpret and translate raw card data into standard structure
         instructions_md = ""
@@ -2045,7 +2045,7 @@ def import_tavern_agent():
                 "sad": f"{name} is now a highly empathetic, introspective, and gentle companion offering deep emotional support."
             }
             
-        with open(os.path.join(agent_path, 'inversion_directives.json'), 'w', encoding='utf-8') as f:
+        with open(os.path.join(program_path, 'inversion_directives.json'), 'w', encoding='utf-8') as f:
             json.dump(inversion_data, f, indent=2)
             
         # Clean any inversion headers from markdown text
@@ -2054,15 +2054,15 @@ def import_tavern_agent():
         instructions_md = instructions_md.strip()
 
         instructions_md = clean_and_normalize_profile(name, description, personality, instructions_md)
-        instruction_file_path = os.path.join(agent_path, f"{name.upper()}.md")
+        instruction_file_path = os.path.join(program_path, f"{name.upper()}.md")
         with open(instruction_file_path, "w", encoding="utf-8") as f:
             f.write(instructions_md)
             
-        # Delete temp file without saving any PNG artwork in the agent's folder
+        # Delete temp file without saving any PNG artwork in the program's folder
         os.remove(temp_path)
         
         # Setup portraits folder and default workflow
-        portraits_dir = os.path.join(agent_path, 'portraits')
+        portraits_dir = os.path.join(program_path, 'portraits')
         os.makedirs(portraits_dir, exist_ok=True)
         
         default_workflow_path = os.path.join(base_dir, 'templates', 'default_ImageWorkflow.json')
@@ -2101,7 +2101,7 @@ def import_tavern_agent():
             with open(target_workflow_path, "w", encoding="utf-8") as tf:
                 json.dump(workflow, tf, indent=2)
         else:
-            arthur_workflow = os.path.join(base_dir, 'core', 'agents', 'arthur', 'portraits', 'ImageWorkflow.json')
+            arthur_workflow = os.path.join(base_dir, 'core', 'programs', 'arthur', 'portraits', 'ImageWorkflow.json')
             if os.path.exists(arthur_workflow):
                 shutil.copy(arthur_workflow, target_workflow_path)
                 
@@ -2112,22 +2112,22 @@ def import_tavern_agent():
         eye_color = colors_data["eye_color"]
         
         theme_data = generate_character_theme(primary_color)
-        with open(os.path.join(agent_path, 'theme.json'), "w", encoding="utf-8") as tf:
+        with open(os.path.join(program_path, 'theme.json'), "w", encoding="utf-8") as tf:
             json.dump(theme_data, tf, indent=2)
             
         svg_content = get_animated_svg_template(body_color, wing_color, eye_color, name=name, description=description, personality=personality)
-        with open(os.path.join(agent_path, 'profile.svg'), "w", encoding="utf-8") as sf:
+        with open(os.path.join(program_path, 'profile.svg'), "w", encoding="utf-8") as sf:
             sf.write(svg_content)
             
-        return jsonify({'status': 'success', 'agent_id': agent_id, 'name': name})
+        return jsonify({'status': 'success', 'program_id': program_id, 'name': name})
     except Exception as e:
         import traceback
         traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
-@app.route('/api/agents/import/describe', methods=['POST'])
+@app.route('/api/programs/import/describe', methods=['POST'])
 @requires_auth
-def import_describe_agent():
+def import_describe_program():
     try:
         data = request.get_json(silent=True) or {}
         name = data.get('name', '').strip()
@@ -2148,7 +2148,7 @@ def import_describe_agent():
         eye_color = "#38bdf8"
         
         identity_prompt = (
-            f"Generate a rich identity configuration prompt in markdown for a companion agent named '{name}' based on the description: '{description}'.\n"
+            f"Generate a rich identity configuration prompt in markdown for a companion program named '{name}' based on the description: '{description}'.\n"
             "Format the output exactly using the following four sections:\n"
             "# ROLE: [Name]\n\n"
             "## IDENTITY & FORM\n"
@@ -2253,22 +2253,22 @@ def import_describe_agent():
             generated_md = re.sub(pattern, '', generated_md)
         generated_md = generated_md.strip()
             
-        agent_id = re.sub(r'[^a-zA-Z0-9_\-]', '', name).lower()
-        if not agent_id:
-            agent_id = "companion_" + str(int(time.time()))
+        program_id = re.sub(r'[^a-zA-Z0-9_\-]', '', name).lower()
+        if not program_id:
+            program_id = "companion_" + str(int(time.time()))
             
-        agent_path = os.path.join(base_dir, 'core', 'agents', agent_id)
-        if os.path.exists(agent_path):
-            return jsonify({'error': f"Agent folder '{agent_id}' already exists"}), 400
+        program_path = os.path.join(base_dir, 'core', 'programs', program_id)
+        if os.path.exists(program_path):
+            return jsonify({'error': f"Program folder '{program_id}' already exists"}), 400
             
-        os.makedirs(agent_path, exist_ok=True)
+        os.makedirs(program_path, exist_ok=True)
         
         # Write inversion directives
-        with open(os.path.join(agent_path, 'inversion_directives.json'), "w", encoding="utf-8") as f:
+        with open(os.path.join(program_path, 'inversion_directives.json'), "w", encoding="utf-8") as f:
             json.dump(inversion_data, f, indent=2)
         
         generated_md = clean_and_normalize_profile(name, description, "", generated_md)
-        instruction_file_path = os.path.join(agent_path, f"{name.upper()}.md")
+        instruction_file_path = os.path.join(program_path, f"{name.upper()}.md")
         with open(instruction_file_path, "w", encoding="utf-8") as f:
             f.write(generated_md)
             
@@ -2281,10 +2281,10 @@ def import_describe_agent():
             eye_color = colors_data["eye_color"]
 
         theme_data = generate_character_theme(primary_color)
-        with open(os.path.join(agent_path, 'theme.json'), "w", encoding="utf-8") as tf:
+        with open(os.path.join(program_path, 'theme.json'), "w", encoding="utf-8") as tf:
             json.dump(theme_data, tf, indent=2)
             
-        portraits_dir = os.path.join(agent_path, 'portraits')
+        portraits_dir = os.path.join(program_path, 'portraits')
         os.makedirs(portraits_dir, exist_ok=True)
         
         default_workflow_path = os.path.join(base_dir, 'templates', 'default_ImageWorkflow.json')
@@ -2320,15 +2320,15 @@ def import_describe_agent():
             with open(target_workflow_path, "w", encoding="utf-8") as tf:
                 json.dump(workflow, tf, indent=2)
         else:
-            arthur_workflow = os.path.join(base_dir, 'core', 'agents', 'arthur', 'portraits', 'ImageWorkflow.json')
+            arthur_workflow = os.path.join(base_dir, 'core', 'programs', 'arthur', 'portraits', 'ImageWorkflow.json')
             if os.path.exists(arthur_workflow):
                 shutil.copy(arthur_workflow, target_workflow_path)
                 
         svg_content = get_animated_svg_template(body_color, wing_color, eye_color, name=name, description=description, personality="")
-        with open(os.path.join(agent_path, 'profile.svg'), "w", encoding="utf-8") as sf:
+        with open(os.path.join(program_path, 'profile.svg'), "w", encoding="utf-8") as sf:
             sf.write(svg_content)
             
-        return jsonify({'status': 'success', 'agent_id': agent_id, 'name': name})
+        return jsonify({'status': 'success', 'program_id': program_id, 'name': name})
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -2458,15 +2458,15 @@ def comfy_resolve_workflow():
     workflow_json = request.json.get("workflow_json")
     if not workflow_json:
         try:
-            from variables import AGENTS_DIR, COMFYUI_CHECKPOINT
-            from utils.agent import get_active_agent
-            active_agent = get_active_agent()
+            from variables import PROGRAMS_DIR, COMFYUI_CHECKPOINT
+            from utils.program import get_active_program
+            active_program = get_active_program()
             
             combined_workflow = {}
             
             # Read ImageWorkflow.json
             image_path = os.path.normpath(os.path.join(
-                AGENTS_DIR, active_agent, "portraits", "ImageWorkflow.json"
+                PROGRAMS_DIR, active_program, "portraits", "ImageWorkflow.json"
             ))
             if os.path.exists(image_path):
                 with open(image_path, "r", encoding="utf-8") as f:
@@ -2580,6 +2580,6 @@ if __name__ == '__main__':
         exclude_patterns=[
             '*.venv*', '*\\.venv\\*', '*\\site-packages\\*', 
             '*AppData*', '*site-packages*', '*__pycache__*',
-            '*.env', 'active_agent.txt', '*.txt', '*.db', '*.json'
+            '*.env', 'active_program.txt', '*.txt', '*.db', '*.json'
         ]
     )

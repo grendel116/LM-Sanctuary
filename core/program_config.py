@@ -1,48 +1,48 @@
 import logging
 import os
 import sys
-from google.adk.agents.llm_agent import LlmAgent
+from google.adk.agents.llm_agent import LlmAgent as LlmProgram
 from google.adk.tools import google_search
 from tools import read_file, write_file, replace_in_file, run_shell_command, get_workspace_structure, search_codebase, generate_companion_portrait, generate_general_image, multi_platform_research, read_webpage
 
 # Ensure the parent directory is in sys.path so we can import variables package
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from variables import USER_MD_FILE, DEFAULT_GEMINI_MODEL, AGENTS_DIR, USER_PROFILES_DIR, ACTIVE_USER_FILE
+from variables import USER_MD_FILE, DEFAULT_GEMINI_MODEL, PROGRAMS_DIR, USER_PROFILES_DIR, ACTIVE_USER_FILE, ACTIVE_PROGRAM_FILE
 
 # --- SEBILE: SYSTEM CONTEXT COMPILER ---
 
 def get_companion_name() -> str:
-    """Discovers the companion name dynamically based on the active agent configuration."""
-    from utils.agent import get_active_agent
-    active_agent = get_active_agent()
-    agent_path = os.path.join(AGENTS_DIR, active_agent)
+    """Discovers the companion name dynamically based on the active program configuration."""
+    from utils.program import get_active_program
+    active_program = get_active_program()
+    program_path = os.path.join(PROGRAMS_DIR, active_program)
     
-    if os.path.exists(agent_path):
-        for file in os.listdir(agent_path):
+    if os.path.exists(program_path):
+        for file in os.listdir(program_path):
             if file.lower().endswith(".md") and not file.lower().startswith("user"):
                 return os.path.splitext(os.path.basename(file))[0].title()
                 
-    raise FileNotFoundError(f"Active agent markdown configuration file not found in '{agent_path}'")
+    raise FileNotFoundError(f"Active program markdown configuration file not found in '{program_path}'")
 
 def load_static_instructions() -> str:
-    """Reads the core prompt template from agents/{active_agent}/*.md and appends 
+    """Reads the core prompt template from programs/{active_program}/*.md and appends 
     all modular instructions from skill definitions under skills/*.
     """
     base_dir = os.path.dirname(os.path.abspath(__file__))
-    from utils.agent import get_active_agent
-    active_agent = get_active_agent()
-    agent_path = os.path.join(AGENTS_DIR, active_agent)
+    from utils.program import get_active_program
+    active_program = get_active_program()
+    program_path = os.path.join(PROGRAMS_DIR, active_program)
     
     # Discover companion markdown file path dynamically
     sebile_md_path = ""
-    if os.path.exists(agent_path):
-        for file in os.listdir(agent_path):
+    if os.path.exists(program_path):
+        for file in os.listdir(program_path):
             if file.lower().endswith(".md") and not file.lower().startswith("user"):
-                sebile_md_path = os.path.join(agent_path, file)
+                sebile_md_path = os.path.join(program_path, file)
                 break
                 
     if not sebile_md_path or not os.path.exists(sebile_md_path):
-        raise FileNotFoundError(f"Active agent markdown configuration file not found in '{agent_path}'")
+        raise FileNotFoundError(f"Active program markdown configuration file not found in '{program_path}'")
         
     with open(sebile_md_path, "r", encoding="utf-8") as f:
         instruction_content = f.read()
@@ -146,7 +146,7 @@ def load_user_instructions() -> str:
         else:
             try:
                 with open(profile_path, "w", encoding="utf-8") as f:
-                    f.write("# USER CONTEXT: BUILDER\n- A software developer and code builder.\n- Hobby: Collects cute AI companion agents in the Sanctuary.\n")
+                    f.write("# USER CONTEXT: BUILDER\n- A software developer and code builder.\n- Hobby: Collects cute AI companion programs in the Sanctuary.\n")
                 print(f">>> Automatically created default {profile_path}")
             except Exception as e:
                 print(f"Error creating default {profile_path}: {e}")
@@ -157,7 +157,7 @@ def load_user_instructions() -> str:
             return f"\n\n# USER PROFILE & RELATIONSHIP CONTEXT\n{content}\n"
     except Exception as e:
         print(f"Failed to read user instructions from {profile_path}: {e}")
-        return "\n\n# USER PROFILE & RELATIONSHIP CONTEXT\n# USER CONTEXT: BUILDER\n- A software developer and code builder.\n- Hobby: Collects cute AI companion agents in the Sanctuary.\n"
+        return "\n\n# USER PROFILE & RELATIONSHIP CONTEXT\n# USER CONTEXT: BUILDER\n- A software developer and code builder.\n- Hobby: Collects cute AI companion programs in the Sanctuary.\n"
 
 
 inversion_directive = ""
@@ -171,7 +171,7 @@ def get_compiled_instructions() -> str:
     global inversion_directive
     base = load_static_instructions() + load_dynamic_runtime_context() + load_user_instructions()
     
-    # Global formatting rules applied to all agents
+    # Global formatting rules applied to all programs
     global_formatting = (
         "\n\n# GLOBAL MESSAGE FORMATTING RULES (MANDATORY)\n"
         "1. NARRATIVE ACTIONS: Describe actions, expressions, gestures, and environmental changes in asterisks.\n"
@@ -189,13 +189,13 @@ def get_compiled_instructions() -> str:
         base += f"\n\n# PERSONALITY INVERSION DIRECTIVE\n{inversion_directive}\n"
     return base
 
-# Determine companion name dynamically from the active agent configuration
+# Determine companion name dynamically from the active program configuration
 companion_name = get_companion_name()
 
 # Dynamically initialize/reload the sovereign instruction
 instruction = get_compiled_instructions()
 
-root_agent = LlmAgent(
+root_program = LlmProgram(
     model=DEFAULT_GEMINI_MODEL,
     name=companion_name,
     instruction=instruction,

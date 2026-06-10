@@ -2,7 +2,7 @@ import sys
 import os
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from variables import AGENTS_DIR, LOCAL_SERVER_URL, DEFAULT_LOCAL_MODEL
+from variables import PROGRAMS_DIR, LOCAL_SERVER_URL, DEFAULT_LOCAL_MODEL
 from utils.models import is_local_model
 import asyncio
 import base64
@@ -26,9 +26,9 @@ def _get_safe_local_path(image_url: str) -> str:
             safe_parts.append(safe_p)
     if not safe_parts:
         return None
-    from utils.agent import get_active_agent
-    active_agent = get_active_agent()
-    return os.path.normpath(os.path.join("core", "agents", active_agent, *safe_parts))
+    from utils.program import get_active_program
+    active_program = get_active_program()
+    return os.path.normpath(os.path.join("core", "programs", active_program, *safe_parts))
 
 
 def _get_rag_context(query_text: str) -> str:
@@ -81,7 +81,7 @@ _LOCAL_DIRECTIVE_PROMPT = (
     "Available Tools:\n"
     "1. **google_search(query: str)**: Search the web using Google. Example: `[google_search(query=\"sputnik space exploration history\")]`\n"
     "2. **read_webpage(url: str)**: Fetch and read the text content of a specific webpage URL. Example: `[read_webpage(url=\"https://en.wikipedia.org/wiki/Luddite\")]`\n"
-    "3. **read_file(path: str)**: Read the contents of a file in the workspace. Example: `[read_file(path=\"core/agent_config.py\")]`\n"
+    "3. **read_file(path: str)**: Read the contents of a file in the workspace. Example: `[read_file(path=\"core/program_config.py\")]`\n"
     "4. **write_file(path: str, content: str)**: Create or overwrite a workspace file. Example: `[write_file(path=\"notes.txt\", content=\"your notes content here\")]`\n"
     "5. **replace_in_file(path: str, old_text: str, new_text: str)**: Replace a specific block of text in a workspace file. Example: `[replace_in_file(path=\"notes.txt\", old_text=\"old content\", new_text=\"new content\")]`\n"
     "6. **run_shell_command(command: str)**: Run a terminal shell command. Example: `[run_shell_command(command=\"python --version\")]`\n"
@@ -127,16 +127,16 @@ def _parse_emulated_tool_call(tool_name: str, args_str: str) -> dict:
         return {"args": [val], "kwargs": {}}
 
 
-class BaseAgentRunner:
+class BaseProgramRunner:
     def __init__(self, app_name="Sanctuary"):
         self.app_name = app_name
 
     @property
     def sessions_dir(self) -> str:
         base_dir = os.path.dirname(os.path.abspath(__file__))
-        from utils.agent import get_active_agent
-        active_agent = get_active_agent()
-        path = os.path.join(base_dir, "core", "agents", active_agent, "sessions")
+        from utils.program import get_active_program
+        active_program = get_active_program()
+        path = os.path.join(base_dir, "core", "programs", active_program, "sessions")
         os.makedirs(path, exist_ok=True)
         return path
 
@@ -145,7 +145,7 @@ class BaseAgentRunner:
         raise NotImplementedError()
 
     async def run_async(self, session_id: str, new_message_text: str, image_data: str = None, image_mime: str = None, model: str = None) -> tuple:
-        """Runs the agent with a new turn and returns (response_text, tool_calls_list)."""
+        """Runs the program with a new turn and returns (response_text, tool_calls_list)."""
         raise NotImplementedError()
 
     async def edit_turn(self, session_id: str, user_message_index: int, new_text: str = None, model: str = None) -> tuple:
@@ -210,11 +210,11 @@ class BaseAgentRunner:
     async def _get_inversion_directive(self, session_id: str) -> str:
         winning_mode = await self._get_inversion_mode(session_id)
         if winning_mode:
-            from utils.agent import get_active_agent
-            active_agent = get_active_agent()
-            json_path = os.path.normpath(os.path.join(AGENTS_DIR, active_agent, "inversion_directives.json"))
+            from utils.program import get_active_program
+            active_program = get_active_program()
+            json_path = os.path.normpath(os.path.join(PROGRAMS_DIR, active_program, "inversion_directives.json"))
             if not os.path.exists(json_path):
-                print(f"[WARN] inversion_directives.json not found at '{json_path}' for agent '{active_agent}'.")
+                print(f"[WARN] inversion_directives.json not found at '{json_path}' for program '{active_program}'.")
                 return ""
             try:
                 with open(json_path, "r", encoding="utf-8") as f:
@@ -251,11 +251,11 @@ class BaseAgentRunner:
         return re.sub(r'(?<!\!)(\[[^\]]*\]\(/images/portraits/[^)]+\))', r'!\1', text)
 
     def _get_system_instructions(self, inversion_directive=None) -> str:
-        """Pulls the system prompt directly from <agent>.md and skill files."""
-        from core import agent_config
+        """Pulls the system prompt directly from <program>.md and skill files."""
+        from core import program_config
         if inversion_directive is not None:
-            agent_config.set_inversion_directive(inversion_directive)
-        instructions = agent_config.get_compiled_instructions()
+            program_config.set_inversion_directive(inversion_directive)
+        instructions = program_config.get_compiled_instructions()
         
         # Enforce global conciseness directive for all running LLMs at the runner level
         conciseness_directive = (
@@ -275,15 +275,15 @@ class BaseAgentRunner:
         return instructions
 
 
-class GoogleAdkRunner(BaseAgentRunner):
+class GoogleAdkRunner(BaseProgramRunner):
     def __init__(self, app_name="Sanctuary"):
         super().__init__(app_name)
         # Import dynamically to prevent crashes if ADK library is missing when toggle is switched off
         from google.adk.runners import InMemoryRunner
-        from core import agent_config
+        from core import program_config
         
         self.runner = InMemoryRunner(
-            agent=agent_config.root_agent,
+            agent=program_config.root_program,
             app_name=self.app_name,
         )
 
@@ -388,32 +388,32 @@ class GoogleAdkRunner(BaseAgentRunner):
             except Exception as e:
                 print(f"Error deleting session file {path}: {e}")
                 
-        from core import agent_config
-        agent_config.set_inversion_directive("")
+        from core import program_config
+        program_config.set_inversion_directive("")
 
     def _reload_config(self, model=None, inversion_directive=None, rag_context=None):
         """Reloads tools and character configs dynamically to pick up edits."""
         from google.adk.runners import InMemoryRunner
-        from core import agent_config
+        from core import program_config
         try:
             old_sessions = self.runner.session_service.sessions if hasattr(self, 'runner') else None
             import tools
             importlib.reload(tools)
-            importlib.reload(agent_config)
+            importlib.reload(program_config)
             if inversion_directive is not None:
-                agent_config.set_inversion_directive(inversion_directive)
+                program_config.set_inversion_directive(inversion_directive)
                 
             instruction = self._get_system_instructions(inversion_directive)
             if rag_context:
                 instruction += f"\n\n# KNOWLEDGE BASE CONTEXT\nUse the following verified context from your Data Bank to help answer questions if relevant:\n{rag_context}\n"
-            agent_config.root_agent.instruction = instruction
+            program_config.root_program.instruction = instruction
             
             if model:
-                agent_config.root_agent.model = model
+                program_config.root_program.model = model
             
-            # Re-create runner to cleanly bind the reloaded agent
+            # Re-create runner to cleanly bind the reloaded program
             self.runner = InMemoryRunner(
-                agent=agent_config.root_agent,
+                agent=program_config.root_program,
                 app_name=self.app_name,
             )
             if old_sessions is not None:
@@ -636,8 +636,8 @@ class GoogleAdkRunner(BaseAgentRunner):
             try:
                 if media_path.startswith('/images/'):
                     rel_path = media_path[len('/images/'):]
-                    active_agent = os.getenv("ACTIVE_AGENT", "arthur")
-                    local_file_path = os.path.normpath(os.path.join('core', 'agents', active_agent, rel_path))
+                    active_program = os.getenv("ACTIVE_PROGRAM", "arthur")
+                    local_file_path = os.path.normpath(os.path.join('core', 'programs', active_program, rel_path))
                     
                     if os.path.exists(local_file_path):
                         import mimetypes
@@ -1376,11 +1376,11 @@ class GoogleAdkRunner(BaseAgentRunner):
 
 
 
-class OpenSourceRunner(BaseAgentRunner):
+class OpenSourceRunner(BaseProgramRunner):
     """Scaffold implementation showing how we can run Companion using a local open-source LLM.
     
     This operates independently of google-adk or Google cloud infrastructure, 
-    reading character settings directly from sanctuary/<agent>.md.
+    reading character settings directly from sanctuary/<program>.md.
     """
     def __init__(self, app_name="Sanctuary"):
         super().__init__(app_name)
@@ -1435,8 +1435,8 @@ class OpenSourceRunner(BaseAgentRunner):
             try:
                 if media_path.startswith('/images/'):
                     rel_path = media_path[len('/images/'):]
-                    active_agent = os.getenv("ACTIVE_AGENT", "arthur")
-                    local_file_path = os.path.normpath(os.path.join('core', 'agents', active_agent, rel_path))
+                    active_program = os.getenv("ACTIVE_PROGRAM", "arthur")
+                    local_file_path = os.path.normpath(os.path.join('core', 'programs', active_program, rel_path))
                     if os.path.exists(local_file_path):
                         import mimetypes
                         mime_type, _ = mimetypes.guess_type(local_file_path)
@@ -1724,8 +1724,8 @@ class OpenSourceRunner(BaseAgentRunner):
             except Exception as e:
                 print(f"Error deleting OS session file {path}: {e}")
                 
-        from core import agent_config
-        agent_config.set_inversion_directive("")
+        from core import program_config
+        program_config.set_inversion_directive("")
 
     async def delete_turn(self, session_id: str, user_message_index: int) -> bool:
         if session_id not in self.sessions_history:
