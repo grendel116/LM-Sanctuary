@@ -8,35 +8,26 @@ from variables import LOCAL_MODELS_URL, DEFAULT_LOCAL_MODEL
 
 def fetch_local_models() -> list:
     """Queries LM Studio for loaded models. Returns empty list if offline."""
-    import subprocess
-    import json
+    import requests
     
-    # Try using lms CLI first for precise in-memory loaded status
+    # Try using native REST API GET /api/v1/models to see which ones are loaded
     try:
-        from utils.lms_manager import get_lms_path, check_lms_cli
-        if check_lms_cli():
-            lms_path = get_lms_path()
-            res = subprocess.run([lms_path, "ps", "--json"], capture_output=True, text=True, encoding='utf-8', errors='ignore', shell=False, timeout=5)
-            if res.returncode == 0:
-                stdout_str = res.stdout.strip()
-                if stdout_str:
-                    loaded_data = json.loads(stdout_str)
-                    local_models = []
-                    for m in loaded_data:
-                        model_id = m.get("identifier") or m.get("modelKey")
-                        if model_id:
-                            model_id_lower = model_id.lower()
-                            if "embed" in model_id_lower or "nomic" in model_id_lower:
-                                continue
-                            disp = m.get("displayName") or model_id.split("/")[-1]
-                            local_models.append({"value": model_id, "label": f"{disp} (Local)"})
-                    return local_models
+        response = requests.get("http://localhost:1234/api/v1/models", timeout=1.0)
+        if response.status_code == 200:
+            local_models = []
+            for m in response.json().get("models", []):
+                # Only include loaded chat/LLM models, filter out embeddings
+                if m.get("type") == "llm" and len(m.get("loaded_instances", [])) > 0:
+                    model_id = m.get("key")
+                    disp = m.get("display_name") or model_id.split("/")[-1]
+                    local_models.append({"value": model_id, "label": f"{disp} (Local)"})
+            return local_models
     except Exception as e:
-        print(f"[LM Studio] Error querying loaded models via CLI: {e}")
+        print(f"[LM Studio] Native models listing offline: {e}")
 
-    # Fallback to HTTP endpoint
+    # Fallback to standard OpenAI compatibility endpoint /v1/models
     try:
-        response = requests.get(LOCAL_MODELS_URL, timeout=0.5)
+        response = requests.get(LOCAL_MODELS_URL, timeout=1.0)
         response.raise_for_status()
         data = response.json()
         models_data = data.get("data", [])
