@@ -817,7 +817,7 @@ class GoogleAdkRunner(BaseAgentRunner):
                         if tool_name in ("generate_companion_portrait", "generate_general_image"):
                             companion_content = types.Content(role="model", parts=[types.Part.from_text(text=bot_response_text)])
                             companion_event = Event(
-                                author="Companion",
+                                author=self.runner.agent.name,
                                 content=companion_content,
                                 invocation_id=user_event.invocation_id,
                                 id=f"companion-{int(time.time())}",
@@ -838,7 +838,7 @@ class GoogleAdkRunner(BaseAgentRunner):
                                 )
                             )
                             fc_event = Event(
-                                author="Companion",
+                                author=self.runner.agent.name,
                                 content=types.Content(role="model", parts=[fc_part]),
                                 invocation_id=user_event.invocation_id,
                                 id=f"companion-call-{int(time.time())}",
@@ -854,7 +854,7 @@ class GoogleAdkRunner(BaseAgentRunner):
                                 )
                             )
                             fr_event = Event(
-                                author="Companion",
+                                author=self.runner.agent.name,
                                 content=types.Content(role="user", parts=[fr_part]),
                                 invocation_id=user_event.invocation_id,
                                 id=f"companion-resp-{int(time.time())}",
@@ -876,7 +876,7 @@ class GoogleAdkRunner(BaseAgentRunner):
                             if text_before:
                                 companion_content = types.Content(role="model", parts=[types.Part.from_text(text=text_before)])
                                 companion_event = Event(
-                                    author="Companion",
+                                    author=self.runner.agent.name,
                                     content=companion_content,
                                     invocation_id=user_event.invocation_id,
                                     id=f"companion-{int(time.time())}",
@@ -899,7 +899,7 @@ class GoogleAdkRunner(BaseAgentRunner):
                                 )
                             )
                             fc_event = Event(
-                                author="Companion",
+                                author=self.runner.agent.name,
                                 content=types.Content(role="model", parts=[fc_part]),
                                 invocation_id=user_event.invocation_id,
                                 id=f"companion-call-{int(time.time())}",
@@ -915,7 +915,7 @@ class GoogleAdkRunner(BaseAgentRunner):
                                 )
                             )
                             fr_event = Event(
-                                author="Companion",
+                                author=self.runner.agent.name,
                                 content=types.Content(role="user", parts=[fr_part]),
                                 invocation_id=user_event.invocation_id,
                                 id=f"companion-resp-{int(time.time())}",
@@ -941,7 +941,7 @@ class GoogleAdkRunner(BaseAgentRunner):
                 else:
                     companion_content = types.Content(role="model", parts=[types.Part.from_text(text=bot_response_text)])
                     companion_event = Event(
-                        author="Companion",
+                        author=self.runner.agent.name,
                         content=companion_content,
                         invocation_id=user_event.invocation_id,
                         id=f"companion-{int(time.time())}",
@@ -1274,7 +1274,7 @@ class GoogleAdkRunner(BaseAgentRunner):
         from google.adk.events.event import Event
         import time
         
-        author = "Companion" if role != "user" else "user"
+        author = self.runner.agent.name if role != "user" else "user"
         content_role = "model" if role != "user" else "user"
         
         new_event = Event(
@@ -1362,7 +1362,7 @@ class GoogleAdkRunner(BaseAgentRunner):
                         from google.adk.events.event import Event
                         import time
                         fallback_ev = Event(
-                            author="Companion",
+                            author=self.runner.agent.name,
                             content=types.Content(role="model", parts=[types.Part.from_text(text=new_text)]),
                             invocation_id=f"e-{int(time.time())}",
                             id=f"companion-{int(time.time())}",
