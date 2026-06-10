@@ -49,11 +49,6 @@ These are the concrete abilities your companion uses to do work on your machine.
 * **Render Portrait** (`generate_local_image`): Render yourself in a scene using ComfyUI.
 * **Render Concept** (`generate_imagen`): Render landscapes, diagrams, or objects using Google Imagen.
 * **Comfy Workflow** (`apply_comfy_workflow`): Run custom workflows against a local ComfyUI API.
-
-### 💖 Direct Mood Declaration
-* Rather than running static sentiment analysis scripts, the companion explicitly appends its current emotional state (`<mood name="[calm|intimate|excited|intense|sad]" intensity="[0.0-1.0]"/>`) to the end of each response.
-* The system parses and strips this tag from the final display text, mapping the parameters directly to the pulse color, neon glow, and heartbeat speed of the interactive frame.
-
 ---
 
 ## 🚀 HOW TO RUN
