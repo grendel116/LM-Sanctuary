@@ -39,7 +39,7 @@ These are the concrete abilities your companion uses to do work on your machine.
 * **Shell Execution** (`run_shell_command`): Run terminal commands on your system.
 
 ### Network Grounding & Research (Online)
-* **Web Search** (`google_search` / `web_search`): Retrieve search results from Google, falling back to Wikipedia when offline.
+* **Web Search** (`google_search` / `web_search`): Retrieve search results from Google or Wikipedia.
 * **Read URL** (`read_webpage`): Fetch and extract text content from any webpage.
 * **Search GitHub** (`search_github`): Search for repository trends, stars, forks, and descriptions.
 * **Search arXiv** (`search_arxiv`): Retrieve publication titles, dates, abstracts, and links for research papers.
