@@ -11,8 +11,8 @@ import json
 from google.genai import types
 
 def _get_safe_local_path(image_url: str) -> str:
-    """Safely converts an image URL into a local path relative to the workspace,
-    supporting subdirectories like 'portraits' while preventing path traversal.
+    """Converts an image URL into a local path relative to the workspace,
+    supporting subdirectories like 'portraits'.
     """
     if "/images/" not in image_url:
         return None
@@ -242,7 +242,7 @@ class BaseProgramRunner:
         return False
 
     def _ensure_images_are_embedded(self, text: str) -> str:
-        """Ensures that any portrait image links in the text are prefixed with '!' so they render as images instead of links."""
+        """Links portrait images in the text prefixed with '!' so they render as images instead of links."""
         if not text:
             return text
         import re
@@ -1387,9 +1387,7 @@ class GoogleAdkRunner(BaseProgramRunner):
 
 
 class OpenSourceRunner(BaseProgramRunner):
-    """Scaffold implementation showing how we can run Companion using a local open-source LLM.
-    
-    This operates independently of google-adk or Google cloud infrastructure, 
+    """This operates independently of google-adk or Google cloud infrastructure, 
     reading character settings directly from sanctuary/<program>.md.
     """
     def __init__(self, app_name="Sanctuary"):
