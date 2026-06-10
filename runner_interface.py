@@ -727,7 +727,20 @@ class GoogleAdkRunner(BaseProgramRunner):
                 raw_messages = []
                 for ev in adk_session.events:
                     role_str = ev.content.role if ev.content and ev.content.role else ev.author.lower()
-                    role = "user" if role_str == "user" else "assistant"
+                    
+                    is_tool_response = False
+                    if ev.content and ev.content.parts:
+                        for part in ev.content.parts:
+                            if getattr(part, 'function_response', None):
+                                is_tool_response = True
+                                break
+                                
+                    if role_str == "system" or is_tool_response:
+                        role = "system"
+                    elif role_str == "user":
+                        role = "user"
+                    else:
+                        role = "assistant"
                     
                     text = ""
                     image_url = None
@@ -883,7 +896,7 @@ class GoogleAdkRunner(BaseProgramRunner):
                             )
                             fr_event = Event(
                                 author=self.runner.agent.name,
-                                content=types.Content(role="user", parts=[fr_part]),
+                                content=types.Content(role="system", parts=[fr_part]),
                                 invocation_id=user_event.invocation_id,
                                 id=f"companion-resp-{int(time.time())}",
                                 timestamp=time.time()
@@ -944,7 +957,7 @@ class GoogleAdkRunner(BaseProgramRunner):
                             )
                             fr_event = Event(
                                 author=self.runner.agent.name,
-                                content=types.Content(role="user", parts=[fr_part]),
+                                content=types.Content(role="system", parts=[fr_part]),
                                 invocation_id=user_event.invocation_id,
                                 id=f"companion-resp-{int(time.time())}",
                                 timestamp=time.time()
@@ -1302,8 +1315,15 @@ class GoogleAdkRunner(BaseProgramRunner):
         from google.adk.events.event import Event
         import time
         
-        author = self.runner.agent.name if role != "user" else "user"
-        content_role = "model" if role != "user" else "user"
+        if role == "system":
+            author = self.runner.agent.name
+            content_role = "system"
+        elif role == "user":
+            author = "user"
+            content_role = "user"
+        else:
+            author = self.runner.agent.name
+            content_role = "model"
         
         new_event = Event(
             author=author,
@@ -1499,7 +1519,12 @@ class OpenSourceRunner(BaseProgramRunner):
             
             # Format existing history
             for msg in history[:-1]:
-                role = "assistant" if msg['role'] == 'companion' else "user"
+                if msg.get('role') == 'companion':
+                    role = "assistant"
+                elif msg.get('role') == 'system':
+                    role = "system"
+                else:
+                    role = "user"
                 content_text = msg.get('text', '') or ''
                 if msg.get('tool_calls'):
                     for tc in msg['tool_calls']:
@@ -1528,9 +1553,11 @@ class OpenSourceRunner(BaseProgramRunner):
                         "content": content_text
                     })
                     
-            # Format latest user turn
+            # Format latest message/turn
             latest_msg = history[-1]
-            if file_path_resolved or (image_data and image_mime):
+            latest_role = "assistant" if latest_msg.get('role') == 'companion' else ("system" if latest_msg.get('role') == 'system' else "user")
+            
+            if latest_role == "user" and (file_path_resolved or (image_data and image_mime)):
                 text_content = f"{latest_msg.get('text') or ''} (image: [Attached Image])" if latest_msg.get('text') else "[Attached Image]"
                 raw_messages.append({
                     "role": "user",
@@ -1538,7 +1565,7 @@ class OpenSourceRunner(BaseProgramRunner):
                 })
             else:
                 raw_messages.append({
-                    "role": "user",
+                    "role": latest_role,
                     "content": latest_msg.get('text') or ''
                 })
                 
@@ -1663,7 +1690,7 @@ class OpenSourceRunner(BaseProgramRunner):
                         bot_msg_intermediate['tool_calls'] = t_calls
                         
                         tool_resp_msg = {
-                            'role': 'user',
+                            'role': 'system',
                             'text': f"[Tool Response from {tool_name}]:\n{tool_output}",
                             'tool_calls': []
                         }
@@ -1862,7 +1889,7 @@ class OpenSourceRunner(BaseProgramRunner):
             
         history = self.sessions_history[session_id]
         new_msg = {
-            'role': 'user' if role == 'user' else 'companion',
+            'role': role if role in ('user', 'system') else 'companion',
             'text': text,
             'tool_calls': []
         }
@@ -1877,11 +1904,11 @@ class OpenSourceRunner(BaseProgramRunner):
             return False
             
         history = self.sessions_history[session_id]
-        target_role = 'user' if role == 'user' else 'companion'
+        target_role = role if role in ('user', 'system') else 'companion'
         match_count = 0
         target_msg = None
         for msg in history:
-            msg_role = 'user' if msg.get('role') == 'user' else 'companion'
+            msg_role = msg.get('role', 'companion')
             if msg_role == target_role:
                 if match_count == index:
                     target_msg = msg
