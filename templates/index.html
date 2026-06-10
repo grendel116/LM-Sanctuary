@@ -3915,6 +3915,76 @@ function triggerHeartBurst() {
                     heart.classList.remove('burst');
                 }, 1500);
             }
+            
+            // Play a magical synthesized dialectical inversion sound effect using Web Audio API
+            try {
+                const AudioContext = window.AudioContext || window.webkitAudioContext;
+                if (AudioContext) {
+                    const ctx = new AudioContext();
+                    
+                    // Master volume
+                    const masterGain = ctx.createGain();
+                    masterGain.gain.setValueAtTime(0.12, ctx.currentTime);
+                    masterGain.connect(ctx.destination);
+                    
+                    // Synth oscillator 1 (Sine wave for sub/body dive)
+                    const osc1 = ctx.createOscillator();
+                    osc1.type = 'sine';
+                    osc1.frequency.setValueAtTime(220, ctx.currentTime);
+                    osc1.frequency.exponentialRampToValueAtTime(110, ctx.currentTime + 1.2);
+                    
+                    const gain1 = ctx.createGain();
+                    gain1.gain.setValueAtTime(0.25, ctx.currentTime);
+                    gain1.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 1.2);
+                    
+                    osc1.connect(gain1);
+                    gain1.connect(masterGain);
+                    
+                    // Synth oscillator 2 (Sawtooth for bright resonance + lowpass filter sweep)
+                    const osc2 = ctx.createOscillator();
+                    osc2.type = 'sawtooth';
+                    osc2.frequency.setValueAtTime(110, ctx.currentTime);
+                    osc2.frequency.exponentialRampToValueAtTime(55, ctx.currentTime + 1.5);
+                    
+                    const filter = ctx.createBiquadFilter();
+                    filter.type = 'lowpass';
+                    filter.Q.setValueAtTime(12, ctx.currentTime); // Resonance
+                    filter.frequency.setValueAtTime(1000, ctx.currentTime);
+                    filter.frequency.exponentialRampToValueAtTime(80, ctx.currentTime + 1.5);
+                    
+                    const gain2 = ctx.createGain();
+                    gain2.gain.setValueAtTime(0.08, ctx.currentTime);
+                    gain2.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 1.5);
+                    
+                    osc2.connect(filter);
+                    filter.connect(gain2);
+                    gain2.connect(masterGain);
+                    
+                    // Oscillator 3 (Shimmer chime rising upwards)
+                    const osc3 = ctx.createOscillator();
+                    osc3.type = 'triangle';
+                    osc3.frequency.setValueAtTime(660, ctx.currentTime);
+                    osc3.frequency.exponentialRampToValueAtTime(1320, ctx.currentTime + 1.0);
+                    
+                    const gain3 = ctx.createGain();
+                    gain3.gain.setValueAtTime(0.12, ctx.currentTime);
+                    gain3.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 1.0);
+                    
+                    osc3.connect(gain3);
+                    gain3.connect(masterGain);
+                    
+                    // Start and stop all nodes
+                    osc1.start(ctx.currentTime);
+                    osc2.start(ctx.currentTime);
+                    osc3.start(ctx.currentTime);
+                    
+                    osc1.stop(ctx.currentTime + 1.5);
+                    osc2.stop(ctx.currentTime + 1.5);
+                    osc3.stop(ctx.currentTime + 1.5);
+                }
+            } catch (e) {
+                console.error("Web Audio API error playing inversion sound:", e);
+            }
         }
 
         // --- updateInputGlow ---
