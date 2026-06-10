@@ -4408,6 +4408,46 @@ function closeCustomDialog(approved) {
             }
         }
 
+        // --- showCustomPrompt ---
+        function showCustomPrompt(title, message, defaultValue, onConfirm, onCancel = null) {
+            document.getElementById('custom-dialog-title').innerHTML = title;
+            document.getElementById('custom-dialog-message').innerHTML = `
+                <p style="margin-top: 0; margin-bottom: 10px;">${message}</p>
+                <input type="text" id="custom-dialog-input" value="${defaultValue}" style="width: 100%; background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.15); color: var(--text-main); padding: 8px 12px; border-radius: 8px; font-size: 0.9rem; box-sizing: border-box; outline: none; margin-bottom: 10px;">
+            `;
+            
+            const buttonsContainer = document.getElementById('custom-dialog-buttons');
+            buttonsContainer.innerHTML = `
+                <button onclick="closeCustomDialog(false)" style="background: rgba(255, 255, 255, 0.05); border: 1px solid rgba(255, 255, 255, 0.1); color: var(--text-muted); padding: 10px 20px; border-radius: 8px; font-weight: 500; cursor: pointer; transition: all 0.2s; min-width: 100px;">
+                    Cancel
+                </button>
+                <button id="custom-dialog-submit-btn" style="background: var(--primary-accent); border: none; color: white; padding: 10px 24px; border-radius: 8px; font-weight: 500; cursor: pointer; transition: all 0.2s; box-shadow: 0 4px 10px color-mix(in srgb, var(--primary-accent) 30%, transparent); min-width: 100px;">
+                    Confirm
+                </button>
+            `;
+            
+            const submitBtn = document.getElementById('custom-dialog-submit-btn');
+            const submitAction = () => {
+                const val = document.getElementById('custom-dialog-input').value;
+                document.getElementById('custom-dialog-modal').style.display = 'none';
+                if (onConfirm) onConfirm(val);
+            };
+            submitBtn.onclick = submitAction;
+            
+            const inputField = document.getElementById('custom-dialog-input');
+            inputField.onkeydown = (e) => {
+                if (e.key === 'Enter') {
+                    submitAction();
+                }
+            };
+            
+            customDialogCallback = null;
+            customDialogCancelCallback = onCancel;
+            
+            document.getElementById('custom-dialog-modal').style.display = 'flex';
+            setTimeout(() => inputField.focus(), 50);
+        }
+
         /* ==========================================================================
            VI. 5. USER PROFILE MANAGEMENT
            ========================================================================== */
@@ -4450,6 +4490,7 @@ async function loadUserProfiles() {
                 if (statusText) {
                     statusText.textContent = "";
                 }
+                updateProfileButtonsVisibility();
             } catch (e) {
                 console.error("Error fetching user profiles:", e);
             }
@@ -4471,6 +4512,7 @@ function onUserProfileSelectChange() {
                         statusText.textContent = "Unsaved Selection";
                     }
                 }
+                updateProfileButtonsVisibility();
             }
         }
 
