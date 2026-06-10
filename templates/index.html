@@ -270,6 +270,11 @@
             justify-content: flex-start;
         }
 
+        .message-row.system-row {
+            justify-content: center;
+            margin: 10px 0;
+        }
+
         .message {
             max-width: 70%;
             min-width: 0;
@@ -312,6 +317,19 @@
             border-radius: 20px;
             border-top-left-radius: 4px;
             border: none;
+        }
+
+        .system {
+            background: rgba(30, 26, 42, 0.25);
+            color: var(--text-muted);
+            border-radius: 12px;
+            border: 1px dashed var(--border-color);
+            max-width: 90% !important;
+            font-family: 'Courier New', Courier, monospace;
+            font-size: 0.85rem;
+            padding: 12px 18px;
+            box-shadow: none;
+            white-space: pre-wrap;
         }
 
         /* Preview area */
