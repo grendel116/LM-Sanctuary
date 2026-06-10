@@ -173,7 +173,7 @@ def set_inversion_directive(directive: str):
 def get_compiled_instructions() -> str:
     """Merges static identity profiles, dynamic temporal/runtime contexts, and user relationship settings."""
     global inversion_directive
-    base = load_static_instructions() + load_dynamic_runtime_context() + load_user_instructions()
+    base = load_static_instructions() + load_user_instructions()
     
     # Global formatting rules applied to all programs
     global_formatting = (
@@ -192,6 +192,8 @@ def get_compiled_instructions() -> str:
     
     if inversion_directive:
         base += f"\n\n# PERSONALITY INVERSION DIRECTIVE\n{inversion_directive}\n"
+        
+    base += load_dynamic_runtime_context()
     return base
 
 # Determine companion name dynamically from the active program configuration
