@@ -227,8 +227,19 @@ def _download_worker(model_name):
             start_lms_daemon()
             
         lms_path = get_lms_path()
+        
+        # Convert repository path (e.g. author/repo@quant) to full Hugging Face URL
+        # to prevent LM Studio CLI from lowercase-normalizing the name internally.
+        target_name = model_name
+        if not target_name.startswith("http://") and not target_name.startswith("https://") and "/" in target_name:
+            if "@" in target_name:
+                repo_part, quant_part = target_name.split("@", 1)
+                target_name = f"https://huggingface.co/{repo_part}@{quant_part}"
+            else:
+                target_name = f"https://huggingface.co/{target_name}"
+                
         # Run get command non-interactively
-        cmd = [lms_path, "get", model_name, "-y"]
+        cmd = [lms_path, "get", target_name, "-y"]
         process = subprocess.Popen(cmd, shell=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         stdout, stderr = process.communicate()
         
