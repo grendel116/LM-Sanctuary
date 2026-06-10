@@ -199,12 +199,18 @@ def get_compiled_instructions() -> str:
 # Determine companion name dynamically from the active program configuration
 companion_name = get_companion_name()
 
+# LlmAgent requires the name to be a valid identifier. Sanitize it.
+import re
+sanitized_agent_name = re.sub(r'[^a-zA-Z0-9_]', '_', companion_name)
+if not sanitized_agent_name or not (sanitized_agent_name[0].isalpha() or sanitized_agent_name[0] == '_'):
+    sanitized_agent_name = '_' + sanitized_agent_name
+
 # Dynamically initialize/reload the sovereign instruction
 instruction = get_compiled_instructions()
 
 root_program = LlmProgram(
     model=DEFAULT_GEMINI_MODEL,
-    name=companion_name,
+    name=sanitized_agent_name,
     instruction=instruction,
     tools=[
         google_search, read_file, write_file, replace_in_file, 
