@@ -315,6 +315,14 @@
             border: none;
         }
 
+        .message-timestamp {
+            font-size: 0.7rem;
+            color: var(--text-muted);
+            user-select: none;
+            margin-right: 6px;
+            white-space: nowrap;
+        }
+
 
         /* Preview area */
         #preview-area {
@@ -1444,6 +1452,7 @@
             position: absolute;
             top: -12px;
             display: flex;
+            align-items: center;
             gap: 6px;
             opacity: 0;
             transition: opacity 0.2s ease, transform 0.2s ease;
@@ -2593,16 +2602,17 @@
                         const textMatches = existingRow.dataset.rawText === msgText;
                         const imgMatches = existingRow.dataset.imageUrl === msgImg;
                         const toolsMatches = existingRow.dataset.toolCalls === msgTools;
+                        const timestampMatches = existingRow.dataset.timestamp === String(msg.timestamp || '');
                         
-                        if (!roleMatches || !textMatches || !imgMatches || !toolsMatches) {
+                        if (!roleMatches || !textMatches || !imgMatches || !toolsMatches || !timestampMatches) {
                             // Elements changed, replace in-place
-                            const newRow = appendMessage(msgRole, msgText, msg.image_url, msg.tool_calls);
+                            const newRow = appendMessage(msgRole, msgText, msg.image_url, msg.tool_calls, false, msg.timestamp);
                             chatContainer.replaceChild(newRow, existingRow);
                             domUpdated = true;
                         }
                     } else {
                         // Element is new, append it
-                        appendMessage(msgRole, msgText, msg.image_url, msg.tool_calls);
+                        appendMessage(msgRole, msgText, msg.image_url, msg.tool_calls, false, msg.timestamp);
                         domUpdated = true;
                     }
                 });
@@ -5156,7 +5166,7 @@ async function loadHistory() {
                     
                     // Render history
                     data.history.forEach(msg => {
-                        appendMessage(msg.role, msg.text, msg.image_url, msg.tool_calls);
+                        appendMessage(msg.role, msg.text, msg.image_url, msg.tool_calls, false, msg.timestamp);
                     });
                 } else {
                     // History is empty! Check connection status
@@ -5347,8 +5357,29 @@ function toggleThinkingBlock(headerElement) {
             chevron.textContent = body.classList.contains('expanded') ? '▲' : '▼';
         }
 
+        // --- formatMessageTimestamp ---
+        function formatMessageTimestamp(timestamp) {
+            if (!timestamp) return '';
+            const date = new Date(timestamp < 10000000000 ? timestamp * 1000 : timestamp);
+            if (isNaN(date.getTime())) return '';
+            
+            const now = new Date();
+            const isToday = date.toDateString() === now.toDateString();
+            
+            const timeOptions = { hour: 'numeric', minute: '2-digit', hour12: true };
+            const timeStr = date.toLocaleTimeString(undefined, timeOptions);
+            
+            if (isToday) {
+                return timeStr;
+            } else {
+                const dateOptions = { month: 'short', day: 'numeric' };
+                const dateStr = date.toLocaleDateString(undefined, dateOptions);
+                return `${dateStr}, ${timeStr}`;
+            }
+        }
+
         // --- appendMessage ---
-function appendMessage(role, text, imageUrl = null, toolCalls = null, isLive = false) {
+        function appendMessage(role, text, imageUrl = null, toolCalls = null, isLive = false, timestamp = null) {
             text = text || '';
             
             // Extract ComfyUI prompt if present in toolCalls
@@ -5366,6 +5397,7 @@ function appendMessage(role, text, imageUrl = null, toolCalls = null, isLive = f
             row.dataset.rawText = text || '';
             row.dataset.imageUrl = imageUrl || '';
             row.dataset.toolCalls = JSON.stringify(toolCalls || []);
+            row.dataset.timestamp = timestamp || '';
 
             // Hide the user message requesting a portrait
             const isPortraitRequest = (role === 'user' && text === "Send me a portrait of yourself based on the context of our last message/current dialogue!");
@@ -5392,6 +5424,16 @@ function appendMessage(role, text, imageUrl = null, toolCalls = null, isLive = f
             // Action buttons container (visible on hover)
             const actions = document.createElement('div');
             actions.className = 'message-actions';
+
+            if (!timestamp && isLive) {
+                timestamp = Date.now() / 1000;
+            }
+            if (timestamp) {
+                const tsSpan = document.createElement('span');
+                tsSpan.className = 'message-timestamp';
+                tsSpan.textContent = formatMessageTimestamp(timestamp);
+                actions.appendChild(tsSpan);
+            }
 
             if (role === 'user') {
                 const reuseBtn = document.createElement('button');
@@ -5750,6 +5792,8 @@ function appendMessage(role, text, imageUrl = null, toolCalls = null, isLive = f
                 bubble.appendChild(logsContainer);
             }
 
+
+
             row.appendChild(bubble);
             chatContainer.appendChild(row);
             chatContainer.scrollTop = chatContainer.scrollHeight;
@@ -5940,7 +5984,7 @@ function triggerFileInput() {
             } else if (attachedBase64) {
                 userImageUrl = `data:${attachedMime};base64,${attachedBase64}`;
             }
-            appendMessage('user', text, userImageUrl);
+            appendMessage('user', text, userImageUrl, null, false, Date.now() / 1000);
 
             // Trigger heart jiggle on high user interaction or when Companion is generating/responding
             const heartElement = document.querySelector('.heart-pulse');
@@ -5991,7 +6035,7 @@ function triggerFileInput() {
 
                 const data = await response.json();
                 if (data.response !== undefined) {
-                    appendMessage('companion', data.response, null, data.tool_calls, true);
+                    appendMessage('companion', data.response, null, data.tool_calls, true, data.timestamp);
                 } else if (data.error) {
                     let errMsg = data.error;
                     if (errMsg.includes("429") || errMsg.includes("RESOURCE_EXHAUSTED")) {
@@ -6223,7 +6267,7 @@ async function saveMessageEdit(bubble, newText) {
                 
                 const data = await response.json();
                 if (data.response !== undefined) {
-                    appendMessage('companion', data.response, null, data.tool_calls, true);
+                    appendMessage('companion', data.response, null, data.tool_calls, true, data.timestamp);
                 } else if (data.error) {
                     let errMsg = data.error;
                     if (errMsg.includes("429") || errMsg.includes("RESOURCE_EXHAUSTED")) {
@@ -6316,7 +6360,7 @@ async function saveMessageEdit(bubble, newText) {
                 
                 const data = await response.json();
                 if (data.response !== undefined) {
-                    appendMessage('companion', data.response, null, data.tool_calls, true);
+                    appendMessage('companion', data.response, null, data.tool_calls, true, data.timestamp);
                 } else if (data.error) {
                     let errMsg = data.error;
                     if (errMsg.includes("429") || errMsg.includes("RESOURCE_EXHAUSTED")) {
