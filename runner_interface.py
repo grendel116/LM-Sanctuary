@@ -8,6 +8,7 @@ import asyncio
 import base64
 import importlib
 import json
+import time
 from google.genai import types
 
 def _get_safe_local_path(image_url: str) -> str:
@@ -499,14 +500,16 @@ class GoogleAdkRunner(BaseProgramRunner):
                 chat_history.append({
                     'role': 'user',
                     'text': text,
-                    'image_url': image_url
+                    'image_url': image_url,
+                    'timestamp': ev.timestamp
                 })
             elif role == 'companion' or role == self.runner.agent.name.lower():
                 if not current_companion_msg:
                     current_companion_msg = {
                         'role': 'companion',
                         'text': '',
-                        'tool_calls': []
+                        'tool_calls': [],
+                        'timestamp': ev.timestamp
                     }
                     current_companion_thoughts = []
                     current_companion_texts = []
@@ -1493,7 +1496,8 @@ class OpenSourceRunner(BaseProgramRunner):
         user_msg = {
             'role': 'user',
             'text': new_message_text,
-            'image_url': media_path if media_path else (f"data:{image_mime};base64,{image_data}" if image_data else None)
+            'image_url': media_path if media_path else (f"data:{image_mime};base64,{image_data}" if image_data else None),
+            'timestamp': time.time()
         }
         self.sessions_history[session_id].append(user_msg)
         
@@ -1621,7 +1625,8 @@ class OpenSourceRunner(BaseProgramRunner):
                         bot_msg_intermediate = {
                             'role': 'companion',
                             'text': bot_response_text,
-                            'tool_calls': []
+                            'tool_calls': [],
+                            'timestamp': time.time()
                         }
                         self.sessions_history[session_id].append(bot_msg_intermediate)
                         
@@ -1653,7 +1658,8 @@ class OpenSourceRunner(BaseProgramRunner):
                         bot_msg_intermediate = {
                             'role': 'companion',
                             'text': text_before,
-                            'tool_calls': []
+                            'tool_calls': [],
+                            'timestamp': time.time()
                         }
                         self.sessions_history[session_id].append(bot_msg_intermediate)
                         
@@ -1683,7 +1689,8 @@ class OpenSourceRunner(BaseProgramRunner):
                         tool_resp_msg = {
                             'role': 'user',
                             'text': f"[Tool Response from {tool_name}]:\n{tool_output}",
-                            'tool_calls': []
+                            'tool_calls': [],
+                            'timestamp': time.time()
                         }
                         self.sessions_history[session_id].append(tool_resp_msg)
                         continue
@@ -1695,7 +1702,8 @@ class OpenSourceRunner(BaseProgramRunner):
                 bot_msg = {
                     'role': 'companion',
                     'text': self._ensure_images_are_embedded(bot_response_text),
-                    'tool_calls': tool_calls
+                    'tool_calls': tool_calls,
+                    'timestamp': time.time()
                 }
                 self.sessions_history[session_id].append(bot_msg)
                 break
@@ -1884,7 +1892,8 @@ class OpenSourceRunner(BaseProgramRunner):
         new_msg = {
             'role': 'user' if role == 'user' else 'companion',
             'text': text,
-            'tool_calls': []
+            'tool_calls': [],
+            'timestamp': time.time()
         }
         history.append(new_msg)
         self._save_session_to_disk(session_id)

@@ -395,11 +395,13 @@ def chat():
         from utils.program_mood import extract_and_strip_mood
         response_text, state_info = extract_and_strip_mood(response_text)
         inversion_mode = asyncio.run(runner._get_inversion_mode(session_id))
+        import time
         return jsonify({
             'response': response_text,
             'tool_calls': tool_calls,
             'state': state_info,
-            'inversion_active': inversion_mode
+            'inversion_active': inversion_mode,
+            'timestamp': time.time()
         })
     except Exception as e:
         import traceback
@@ -440,11 +442,13 @@ def edit():
         from utils.program_mood import extract_and_strip_mood
         response_text, state_info = extract_and_strip_mood(response_text)
         inversion_mode = asyncio.run(runner._get_inversion_mode(session_id))
+        import time
         return jsonify({
             'response': response_text,
             'tool_calls': tool_calls,
             'state': state_info,
-            'inversion_active': inversion_mode
+            'inversion_active': inversion_mode,
+            'timestamp': time.time()
         })
     except Exception as e:
         print(f"Error occurred during edit: {e}")
