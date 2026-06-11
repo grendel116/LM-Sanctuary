@@ -588,7 +588,7 @@ def regenerate_image():
     try:
         import tools
         # Generate new portrait
-        new_markdown = tools.generate_companion_portrait(prompt)
+        new_markdown = tools.generate_local_image(prompt)
         if new_markdown.startswith("Error"):
             return jsonify({'error': new_markdown}), 500
             
