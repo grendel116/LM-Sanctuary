@@ -180,6 +180,10 @@ class BaseProgramRunner:
         """Updates the text of a specific message inside the session history without re-evaluation."""
         raise NotImplementedError()
 
+    async def delete_message_at(self, session_id: str, role: str, index: int) -> bool:
+        """Deletes a specific message inside the session history, merging surrounding messages of the same role if needed."""
+        raise NotImplementedError()
+
     async def _get_inversion_mode(self, session_id: str) -> str:
         try:
             history = await self.get_history(session_id)
@@ -1229,6 +1233,86 @@ class GoogleAdkRunner(BaseProgramRunner):
         self._save_session_to_disk(session_id)
         return True
 
+    async def delete_message_at(self, session_id: str, role: str, index: int) -> bool:
+        session_dict = self.runner.session_service.sessions
+        user_id = "user"
+        in_memory = (self.app_name in session_dict and 
+                      user_id in session_dict[self.app_name] and 
+                      session_id in session_dict[self.app_name][user_id])
+        if not in_memory:
+            self._load_session_from_disk(session_id)
+            
+        if self.app_name not in session_dict or user_id not in session_dict[self.app_name] or session_id not in session_dict[self.app_name][user_id]:
+            return False
+            
+        storage_session = session_dict[self.app_name][user_id][session_id]
+        events = list(storage_session.events)
+        from google.genai import types
+        
+        target_role = 'user' if role == 'user' else 'companion'
+        
+        if target_role == 'user':
+            user_event_indices = [i for i, ev in enumerate(events) if ev.author.lower() == 'user']
+            if index >= len(user_event_indices):
+                return False
+            target_idx = user_event_indices[index]
+            del events[target_idx]
+        else:
+            companion_turns = []
+            current_turn = []
+            for i, ev in enumerate(events):
+                if ev.author.lower() == 'user':
+                    if current_turn:
+                        companion_turns.append(current_turn)
+                        current_turn = []
+                else:
+                    current_turn.append((i, ev))
+            if current_turn:
+                companion_turns.append(current_turn)
+                
+            if index >= len(companion_turns):
+                return False
+                
+            turn_events = companion_turns[index]
+            indices_to_delete = {item[0] for item in turn_events}
+            events = [ev for i, ev in enumerate(events) if i not in indices_to_delete]
+            
+        # Merge consecutive events of same role type
+        i = 0
+        while i < len(events) - 1:
+            role_current = 'user' if events[i].author.lower() == 'user' else 'companion'
+            role_next = 'user' if events[i+1].author.lower() == 'user' else 'companion'
+            if role_current == role_next:
+                txt1 = ""
+                if events[i].content and events[i].content.parts:
+                    txt1 = next((p.text for p in events[i].content.parts if p.text is not None), "")
+                
+                txt2 = ""
+                if events[i+1].content and events[i+1].content.parts:
+                    txt2 = next((p.text for p in events[i+1].content.parts if p.text is not None), "")
+                
+                merged_text = f"{txt1}\n\n{txt2}".strip()
+                
+                updated = False
+                if events[i].content and events[i].content.parts:
+                    for part in events[i].content.parts:
+                        if part.text is not None:
+                            part.text = merged_text
+                            updated = True
+                            break
+                    if not updated:
+                        events[i].content.parts.append(types.Part.from_text(text=merged_text))
+                else:
+                    events[i].content = types.Content(role=events[i].content.role if events[i].content else 'user', parts=[types.Part.from_text(text=merged_text)])
+                
+                del events[i+1]
+            else:
+                i += 1
+                
+        storage_session.events = events
+        self._save_session_to_disk(session_id)
+        return True
+
     async def delete_image_from_session(self, session_id: str, image_url: str) -> bool:
         # Load from disk if not in memory
         session_dict = self.runner.session_service.sessions
@@ -1820,6 +1904,47 @@ class OpenSourceRunner(BaseProgramRunner):
             new_history = history[:user_idx]
             
         self.sessions_history[session_id] = new_history
+        self._save_session_to_disk(session_id)
+        return True
+
+    async def delete_message_at(self, session_id: str, role: str, index: int) -> bool:
+        if session_id not in self.sessions_history:
+            self._load_session_from_disk(session_id)
+        if session_id not in self.sessions_history:
+            return False
+            
+        history = list(self.sessions_history[session_id])
+        target_role = 'user' if role == 'user' else 'companion'
+        
+        target_abs_index = -1
+        role_count = 0
+        for i, msg in enumerate(history):
+            msg_role = 'user' if msg.get('role') == 'user' else 'companion'
+            if msg_role == target_role:
+                if role_count == index:
+                    target_abs_index = i
+                    break
+                role_count += 1
+                
+        if target_abs_index == -1:
+            return False
+            
+        del history[target_abs_index]
+        
+        # Merge consecutive events of same role type
+        i = 0
+        while i < len(history) - 1:
+            role_current = 'user' if history[i].get('role') == 'user' else 'companion'
+            role_next = 'user' if history[i+1].get('role') == 'user' else 'companion'
+            if role_current == role_next:
+                txt1 = history[i].get('text', '')
+                txt2 = history[i+1].get('text', '')
+                history[i]['text'] = f"{txt1}\n\n{txt2}".strip()
+                del history[i+1]
+            else:
+                i += 1
+                
+        self.sessions_history[session_id] = history
         self._save_session_to_disk(session_id)
         return True
 

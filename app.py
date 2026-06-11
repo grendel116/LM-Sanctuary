@@ -265,6 +265,12 @@ def program_profile_svg(program_id):
     res = make_response(response)
     res.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
     return res
+
+@app.route('/sparkle.mp3')
+@requires_auth
+def serve_sparkle_mp3():
+    programs_dir = os.path.join(base_dir, 'core', 'programs')
+    return send_from_directory(programs_dir, 'sparkle.mp3')
  
 @app.route('/images/<path:filename>')
 @requires_auth
@@ -454,6 +460,113 @@ def edit():
         print(f"Error occurred during edit: {e}")
         return jsonify({'error': str(e)}), 500
 
+def generate_impersonated_message(session_id, user_profile, model):
+    # Retrieve history
+    chat_history = asyncio.run(runner.get_history(session_id))
+    
+    # Format only the most recent history turns to keep token count low and prevent context overflow
+    recent_history = chat_history[-6:] if len(chat_history) > 6 else chat_history
+    history_text = ""
+    for msg in recent_history:
+        role = "User" if msg.get('role') == 'user' else "Companion"
+        history_text += f"{role}: {msg.get('text', '')}\n"
+        
+    system_instruction = (
+        "You are an assistant that auto-generates the User's next reply. "
+        "You MUST write in the first-person, impersonating the user desribed below. "
+        "Match the user's tone and context. Be short and concise."
+    )
+    
+    prompt = (
+        f"User Profile Context:\n{user_profile}\n\n"
+        f"Recent Chat History:\n{history_text}\n"
+        f"Generate the User's next message to the Companion:"
+    )
+    
+    # Check if local model
+    from utils.models import is_local_model
+    if is_local_model(model) or model == 'local-lm-studio':
+        import requests
+        from variables import LOCAL_SERVER_URL
+        payload = {
+            "messages": [
+                {"role": "system", "content": system_instruction},
+                {"role": "user", "content": prompt}
+            ],
+            "temperature": 0.7,
+            "max_tokens": 512
+        }
+        target_model = model if (model and model != 'local-lm-studio') else os.getenv("LOCAL_MODEL_NAME")
+        if target_model:
+            payload["model"] = target_model
+            
+        try:
+            r = requests.post(LOCAL_SERVER_URL, json=payload, timeout=60.0)
+            if r.status_code == 200:
+                res_json = r.json()
+                return res_json['choices'][0]['message']['content'].strip()
+            else:
+                raise Exception(f"Local server returned status code {r.status_code}: {r.text}")
+        except Exception as e:
+            print(f"Error generating impersonated message via local model: {e}")
+            raise
+    else:
+        # Gemini model
+        from google import genai
+        from google.genai import types
+        api_key = os.getenv("GEMINI_API_KEY")
+        if not api_key:
+            raise Exception("GEMINI_API_KEY environment variable is not configured.")
+        client = genai.Client(api_key=api_key)
+        
+        try:
+            target_model = model if model else "gemini-2.5-flash"
+            response = client.models.generate_content(
+                model=target_model,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    system_instruction=system_instruction,
+                    temperature=0.7,
+                    max_output_tokens=512
+                )
+            )
+            return response.text.strip()
+        except Exception as e:
+            print(f"Error generating impersonated message via Gemini: {e}")
+            raise
+
+@app.route('/api/generate_user_message', methods=['POST'])
+@requires_auth
+def generate_user_message():
+    session_id = request.json.get('session_id', 'default')
+    model = request.json.get('model')
+    user_profile = request.json.get('user_profile', '').strip()
+    
+    if not user_profile:
+        # Fallback to active user profile file
+        try:
+            from variables import USER_PROFILES_DIR, ACTIVE_USER_FILE
+            active_user = "builder"
+            if os.path.exists(ACTIVE_USER_FILE):
+                with open(ACTIVE_USER_FILE, "r", encoding="utf-8") as f:
+                    active_user = f.read().strip()
+            profile_path = os.path.join(USER_PROFILES_DIR, f"{active_user}.md")
+            if os.path.exists(profile_path):
+                with open(profile_path, "r", encoding="utf-8") as f:
+                    user_profile = f.read().strip()
+        except Exception as e:
+            print(f"Error loading fallback user profile: {e}")
+            
+    if not user_profile:
+        user_profile = "A software developer and code builder."
+        
+    try:
+        generated_msg = generate_impersonated_message(session_id, user_profile, model)
+        return jsonify({'status': 'success', 'message': generated_msg})
+    except Exception as e:
+        print(f"Error generating impersonated user message: {e}")
+        return jsonify({'error': str(e)}), 500
+
 @app.route('/update_message', methods=['POST'])
 @requires_auth
 def update_message():
@@ -479,13 +592,109 @@ def update_message():
 @requires_auth
 def delete_message():
     session_id = request.json.get('session_id', 'default')
-    user_message_index = request.json.get('user_message_index')
+    role = request.json.get('role')
+    index = request.json.get('index')
+    
+    if role is None or index is None:
+        user_message_index = request.json.get('user_message_index')
+        if user_message_index is not None:
+            try:
+                asyncio.run(runner.delete_turn(session_id, user_message_index))
+                return jsonify({'status': 'success'})
+            except Exception as e:
+                print(f"Error deleting turn in session {session_id}: {e}")
+                return jsonify({'error': str(e)}), 500
+        return jsonify({'error': 'Missing role/index or user_message_index parameters'}), 400
+        
+    try:
+        success = asyncio.run(runner.delete_message_at(session_id, role, int(index)))
+        if success:
+            return jsonify({'status': 'success'})
+        else:
+            return jsonify({'error': 'Message not found'}), 404
+    except Exception as e:
+        print(f"Error deleting message at index {index} with role {role}: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/continue', methods=['POST'])
+@requires_auth
+def continue_generation():
+    session_id = request.json.get('session_id', 'default')
+    model = request.json.get('model')
     
     try:
-        asyncio.run(runner.delete_turn(session_id, user_message_index))
-        return jsonify({'status': 'success'})
+        history = asyncio.run(runner.get_history(session_id))
+        if not history:
+            return jsonify({'error': 'No history to continue'}), 400
+            
+        last_msg = history[-1]
+        last_role = 'user' if last_msg.get('role') == 'user' else 'companion'
+        
+        if last_role == 'companion':
+            last_companion_text = last_msg.get('text', '')
+            
+            # Send a prompt to continue
+            continue_prompt = (
+                "[System: Continue your last message. Do NOT repeat or summarize your last message. "
+                "Start writing immediately from the exact point where you left off, connecting seamlessly to the end.]"
+            )
+            
+            response_text, tool_calls = asyncio.run(runner.run_async(
+                session_id=session_id,
+                new_message_text=continue_prompt,
+                model=model
+            ))
+            
+            # Delete the temporary turn
+            updated_history = asyncio.run(runner.get_history(session_id))
+            user_messages = [msg for msg in updated_history if msg.get('role') == 'user']
+            last_user_index = len(user_messages) - 1
+            asyncio.run(runner.delete_message_at(session_id, 'user', last_user_index))
+            
+            # Merge continuation text dynamically
+            if last_companion_text.endswith('\n') or response_text.startswith('\n'):
+                merged_text = last_companion_text + response_text
+            else:
+                last_char = last_companion_text.rstrip()[-1:] if last_companion_text.strip() else ""
+                if last_char in ['.', '!', '?', '"', '*']:
+                    merged_text = last_companion_text + "\n\n" + response_text
+                else:
+                    prefix = "" if (not response_text or response_text.startswith(' ')) else " "
+                    merged_text = last_companion_text + prefix + response_text
+            
+            # Update the original companion message
+            companion_messages = [msg for msg in asyncio.run(runner.get_history(session_id)) if msg.get('role') == 'companion']
+            last_companion_index = len(companion_messages) - 1
+            asyncio.run(runner.update_message_text(session_id, 'companion', last_companion_index, merged_text))
+            
+            return jsonify({
+                'status': 'success',
+                'response': merged_text,
+                'tool_calls': tool_calls
+            })
+        else:
+            user_text = last_msg.get('text', '')
+            user_image = last_msg.get('image_url')
+            
+            user_messages = [msg for msg in history if msg.get('role') == 'user']
+            last_user_index = len(user_messages) - 1
+            asyncio.run(runner.delete_message_at(session_id, 'user', last_user_index))
+            
+            response_text, tool_calls = asyncio.run(runner.run_async(
+                session_id=session_id,
+                new_message_text=user_text,
+                media_path=user_image if (user_image and not user_image.startswith('data:')) else None,
+                model=model
+            ))
+            
+            return jsonify({
+                'status': 'success',
+                'response': response_text,
+                'tool_calls': tool_calls
+            })
+            
     except Exception as e:
-        print(f"Error deleting turn in session {session_id}: {e}")
+        print(f"Error in continue_generation: {e}")
         return jsonify({'error': str(e)}), 500
 
 @app.route('/reset', methods=['POST'])
