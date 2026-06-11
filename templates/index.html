@@ -5911,6 +5911,7 @@ function triggerFileInput() {
                         const testRes = await fetch(`/manifest.json?t=${Date.now()}`);
                         if (testRes.ok) {
                             clearInterval(checkInterval);
+                            document.getElementById('reconnect-modal').style.display = 'none';
                             reloadApp();
                         }
                     } catch (e) {
