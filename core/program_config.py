@@ -5,7 +5,7 @@ from google.adk.agents.llm_agent import LlmAgent as LlmProgram
 from tools import (
     read_file, write_file, replace_in_file, run_shell_command, 
     get_workspace_structure, search_codebase, read_webpage, google_search,
-    apply_comfy_workflow, generate_local_image, generate_imagen,
+    web_search, apply_comfy_workflow, generate_local_image, generate_imagen,
     search_github, search_arxiv, search_hacker_news
 )
 
@@ -213,7 +213,7 @@ root_program = LlmProgram(
     name=sanitized_agent_name,
     instruction=instruction,
     tools=[
-        google_search, read_file, write_file, replace_in_file, 
+        google_search, web_search, read_file, write_file, replace_in_file, 
         run_shell_command, get_workspace_structure, search_codebase, 
         read_webpage, apply_comfy_workflow, generate_local_image, 
         generate_imagen, search_github, search_arxiv, search_hacker_news
