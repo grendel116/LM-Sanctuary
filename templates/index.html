@@ -4444,7 +4444,7 @@ async function loadUserProfiles() {
                     userProfiles.forEach(p => {
                         const opt = document.createElement('option');
                         opt.value = p.id;
-                        opt.textContent = p.name + (p.id === activeUserProfile ? " (Active)" : "");
+                        opt.textContent = p.name;
                         if (p.id === activeUserProfile) {
                             opt.selected = true;
                         }

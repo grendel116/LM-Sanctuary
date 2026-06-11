@@ -885,6 +885,25 @@ def fetch_gemini_models(api_key):
         return _cached_gemini_models
         
     import requests
+    from bs4 import BeautifulSoup
+    
+    # Dynamically fetch shutdown models from Google's official deprecations page
+    shutdown_models = set()
+    try:
+        depr_url = "https://ai.google.dev/gemini-api/docs/deprecations"
+        depr_resp = requests.get(depr_url, timeout=1.0)
+        if depr_resp.status_code == 200:
+            soup = BeautifulSoup(depr_resp.text, 'html.parser')
+            # Extract models listed in already shutdown rows (row-gray class)
+            for row in soup.find_all('tr', class_='row-gray'):
+                code_elem = row.find('code')
+                if code_elem:
+                    model_name = code_elem.text.strip()
+                    if model_name:
+                        shutdown_models.add(model_name)
+    except Exception as depr_err:
+        print(f"Error fetching dynamic deprecations list: {depr_err}")
+
     try:
         url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}&pageSize=1000"
         response = requests.get(url, timeout=1.5)
@@ -901,6 +920,10 @@ def fetch_gemini_models(api_key):
                     val = name.replace("models/", "")
                     val_lower = val.lower()
                     
+                    # Exclude dynamically identified shutdown models
+                    if val in shutdown_models or f"models/{val}" in shutdown_models:
+                        continue
+                        
                     # Filter out tuning, embeddings, image/video, audio, or other utility models
                     exclude_keywords = [
                         "embed", "tuning", "bidi", "aqa", "imagen", "veo", "lyria", 
