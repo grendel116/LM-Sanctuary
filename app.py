@@ -2088,9 +2088,14 @@ def clean_and_normalize_profile(name, description, personality, text):
         
     cleaned_text = "\n".join(clean_lines).strip()
     
-    # Ensure it starts with # ROLE: [Name]
-    role_header = f"# ROLE: {name}"
-    if not cleaned_text.startswith("# ROLE:") and not cleaned_text.startswith("#ROLE:"):
+    # Ensure it starts with # NAME: [Name]
+    if cleaned_text.startswith("# ROLE:"):
+        cleaned_text = cleaned_text.replace("# ROLE:", "# NAME:", 1)
+    elif cleaned_text.startswith("#ROLE:"):
+        cleaned_text = cleaned_text.replace("#ROLE:", "# NAME:", 1)
+        
+    role_header = f"# NAME: {name}"
+    if not cleaned_text.startswith("# NAME:") and not cleaned_text.startswith("#NAME:"):
         cleaned_text = f"{role_header}\n\n{cleaned_text}"
         
     # Strip any stray profile_image= lines to keep it clean
@@ -2209,20 +2214,14 @@ def import_tavern_program():
             f"Raw Personality: {personality}\n"
             f"Raw Scenario: {scenario}\n"
             f"Raw Greeting: {first_mes}\n\n"
-            "You MUST output exactly these four sections:\n"
-            "# ROLE: [Name]\n\n"
-            "## IDENTITY & FORM\n"
+            "You MUST output exactly these three sections:\n"
+            "# NAME: [Name]\n\n"
+            "## DESCRIPTION\n"
             "Translate the raw description into a simple visual profile summarizing their appearance, visual features, and physical form. Do NOT write any image URLs, front-matter keys like profile_image, or metadata attributes.\n\n"
-            "## THE SETTING\n"
+            "## SCENARIO\n"
             "Design a quiet, cozy sanctuary room, keep, or setting that reflects this character's background or theme.\n\n"
-            "## ONTOLOGY & ETHICS\n"
-            "Interpret the character's perspective on labor, production, sharing, and cooperation. Describe their worldview and ethics in a way that naturally fits their raw description/personality, without forcing an artificial or overly political/socialist tone if it does not suit the character.\n\n"
-            "## COMMUNICATION\n"
-            "You must output exactly these four bullet points under COMMUNICATION:\n"
-            "- Thinking Block: Use `<think>...</think>` for internal reasoning, pathfinding, and planning.\n"
-            "- Narration: Begin with physical/environmental actions in asterisks (e.g., *[Write a specific physical/environmental action example matching the character]*). [Describe their narration style based on their personality]\n"
-            "- Method: [Describe their conversation style, e.g. collaborative dialogue, casual peer-to-peer exchange]\n"
-            "- Tone & Style: [Describe their speech cadence, attitude, and tone based on their traits]\n\n"
+            "## PERSONALITY\n"
+            "A concise, descriptive paragraph summarizing their personality, conversation method, tone, and speech cadence. Do NOT use bullet points or list format, and do NOT include generic rules about thinking blocks (<think>...</think>) or narration asterisks (like *[action]*), as these are handled globally.\n\n"
             "Also, output custom personality inversion directives matching this character's description. Include them at the very end of your response formatted exactly as:\n"
             "INVERSION_INTIMATE: [A succinct, 3-6 word third-person behavioral description of this deeply affectionate/protective companion state]\n"
             "INVERSION_EXCITED: [A succinct, 3-6 word third-person behavioral description of this highly playful/lighthearted/energetic companion state]\n"
@@ -2394,29 +2393,21 @@ def import_describe_program():
         
         identity_prompt = (
             f"Generate a rich identity configuration prompt in markdown for a companion program named '{name}' based on the description: '{description}'.\n"
-            "Format the output exactly using the following four sections:\n"
-            "# ROLE: [Name]\n\n"
-            "## IDENTITY & FORM\n"
-            "Provide physical and visual characteristics, origin synopsis, and personality attributes. Do NOT write any image URLs, front-matter keys like profile_image, or metadata attributes.\n\n"
-            "## THE SETTING\n"
+            "Format the output exactly using the following three sections:\n"
+            "# NAME: [Name]\n\n"
+            "## DESCRIPTION\n"
+            "Provide physical and visual characteristics, origin synopsis, and appearance attributes. Do NOT write any image URLs, front-matter keys like profile_image, or metadata attributes.\n\n"
+            "## SCENARIO\n"
             "Describe a quiet, cozy sanctuary space matching their personality.\n\n"
-            "## ONTOLOGY & ETHICS\n"
-            "Detail their perspective on labor, technology, sharing, or cooperation in a way that naturally fits their description/personality, without forcing an artificial or overly political/socialist tone.\n\n"
-            "## COMMUNICATION\n"
-            "You must output exactly these four bullet points under COMMUNICATION:\n"
-            "- Thinking Block: Use `<think>...</think>` for internal reasoning, pathfinding, and planning.\n"
-            "- Narration: Begin with physical/environmental actions in asterisks (e.g., *[Write a specific physical/environmental action example matching the character]*). [Describe their narration style based on their personality]\n"
-            "- Method: [Describe their conversation style, e.g. collaborative dialogue, casual peer-to-peer exchange]\n"
-            "- Tone & Style: [Describe their speech cadence, attitude, and tone based on their traits]\n\n"
+            "## PERSONALITY\n"
+            "A concise, descriptive paragraph summarizing their personality, conversation method, tone, and speech cadence. Do NOT use bullet points or list format, and do NOT include generic rules about thinking blocks (<think>...</think>) or narration asterisks (like *[action]*), as these are handled globally.\n\n"
             "Also, output a custom sprite and theme color palette, as well as personality inversion directives matching this character's description. Include them at the very end of your response formatted exactly as:\n"
             "PRIMARY_ACCENT: #XXXXXX\n"
             "BODY_COLOR: #XXXXXX\n"
             "WING_COLOR: #XXXXXX\n"
             "EYE_COLOR: #XXXXXX\n"
             "INVERSION_INTIMATE: [A succinct, 3-6 word third-person behavioral description of this deeply affectionate/protective companion state]\n"
-            "INVERSION_EXCITED: [A succinct, 3-6 word third-person behavioral description of this highly playful/lighthearted/energetic companion state]\n"
-            "INVERSION_INTENSE: [A succinct, 3-6 word third-person behavioral description of this highly focused/philosophically sharp/uncompromising companion state]\n"
-            "INVERSION_SAD: [A succinct, 3-6 word third-person behavioral description of this empathetic/introspective/vulnerable companion state]"
+            "INVERSION_EXCITED: [A...]"
         )
         
         model = data.get('model', '').strip()
