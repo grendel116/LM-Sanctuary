@@ -80,7 +80,7 @@ _LOCAL_DIRECTIVE_PROMPT = (
     "\n\n# LOCAL EMULATED TOOLS\n"
     "To call a tool, output the exact tag. The system will intercept it, run the tool, and return the result.\n\n"
     "Available Tools:\n"
-    "1. `[google_search(query=\"...\")]` - Search Google.\n"
+    "1. `[google_search(query=\"...\")]` / `[web_search(query=\"...\")]` - Search Google.\n"
     "2. `[read_webpage(url=\"...\")]` - Fetch & read webpage text.\n"
     "3. `[read_file(path=\"...\")]` - Read file content.\n"
     "4. `[write_file(path=\"...\", content=\"...\")]` - Create/overwrite file.\n"
