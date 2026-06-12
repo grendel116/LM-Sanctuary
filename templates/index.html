@@ -7526,8 +7526,9 @@ function purgeDataBank() {
         userInput.addEventListener('blur', updateInputGlow);
 
         userInput.addEventListener('keydown', function(event) {
-            // User requested Enter to always send
-            if (event.key === 'Enter' && !event.shiftKey) {
+            // User requested Enter to always send only on desktop, while mobile requires pressing the send button
+            const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent) || window.matchMedia('(max-width: 768px)').matches;
+            if (event.key === 'Enter' && !event.shiftKey && !isMobile) {
                 event.preventDefault();
                 sendMessage();
             }
