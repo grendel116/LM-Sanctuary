@@ -22,6 +22,7 @@ variables/user_profiles/*
 core/programs/*
 !core/programs/arthur/
 !core/programs/sebile/
+!core/programs/sparkle.mp3
 
 # Ignore user-generated dynamic program sessions, databases, and custom generated portraits
 core/programs/*/sessions/
