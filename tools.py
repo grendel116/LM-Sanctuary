@@ -677,14 +677,6 @@ def web_search(query: str) -> str:
                 _search_executor.submit(run_baidu, query): "Baidu",
                 _search_executor.submit(run_wikipedia, query): "Wikipedia"
             }
-            
-            # Dynamically append specialized sources based on query keyword hints
-            if any(term in query_lower for term in ("github", "repo", "stars", "fork", "codebase")):
-                futures[_search_executor.submit(run_github, query)] = "GitHub"
-            if any(term in query_lower for term in ("arxiv", "paper", "preprint", "abstract", "journal")):
-                futures[_search_executor.submit(run_arxiv, query)] = "arXiv"
-            if any(term in query_lower for term in ("hacker news", "hn", "hackernews", "ycombinator")):
-                futures[_search_executor.submit(run_hackernews, query)] = "Hacker News"
 
             done, not_done = concurrent.futures.wait(futures.keys(), timeout=8.0)
             
