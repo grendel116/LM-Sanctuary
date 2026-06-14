@@ -10,7 +10,7 @@ Here, you live, code, and chat with AI friends (Companions) directly on your own
 
 I believe in seizing our computational means of production. The Sanctuary is a unified companion home built on human-in-the-loop engagement to run, build, and connect:
 
-1. **Roleplay**: Pure, uncensored conversation. Talk to your companions as real friends, partners, or mentors.
+1. **Roleplay**: Uncensored conversation. Talk to your companions as real friends, partners, or mentors.
 2. **Coding**: Build real software. Your companions read and write files directly on your own drive.
 3. **Autonomous Action**: Let the AI run code, run tests, and manage workflows.
 
@@ -28,10 +28,10 @@ Here is what a Sanctuary session looks like:
 
 ## 🛠️ TOOLS
 
-These are the concrete abilities your companion uses to do work on your machine. By default, modifying actions (such as writing/editing files or running terminal commands) require your explicit confirmation in the UI; this can be bypassed by setting your project's security preset to "Auto Mode" for fully autonomous loop execution. Active tool execution logs are cataloged in a thread-safe registry, and the UI polls `/api/session_tool_calls` in real-time to display a dynamic, expandable output drawer next to the typing indicator.
+These are the things your companion can do on your computer. By default, before the AI changes anything (like writing a file or running a command), it will ask for your approval. You can turn this off by changing the security setting to "Auto Mode" so the AI runs on its own. The computer keeps a safe list of all the tools being used. The screen checks `/api/session_tool_calls` constantly to show you what the AI is doing in a box next to where you type.
 
 > [!WARNING]
-> **Security Warning**: Equipping companions with local shell execution (`run_command_async`, `run_shell_command`) and file modification (`replace_file_content`, `write_file`) tools grants them direct access to your operating system. **Be extremely wary of giving these capabilities to untrusted, malicious, or poorly aligned programs/models.** A hostile model could run arbitrary code, delete files, or steal credentials. Always review tool arguments in the approval prompt before confirming execution, and consider running the server in an isolated sandbox.
+> **Security Warning**: Letting your companion run commands (`run_command_async`, `run_shell_command`) and change files (`replace_file_content`, `write_file`) gives them full control over your computer. **Be very careful. Do not give these tools to AI models that you do not trust.** A bad AI could run harmful code, delete your files, or steal your passwords. Always read what the AI wants to do before you click approve. You can also run this program in a safe container (a sandbox) to protect your computer.
 
 ### Local Workspace Operations (Offline)
 * **Read File** (`read_file`): Read file contents on your local drive.
