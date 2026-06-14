@@ -28,7 +28,7 @@ Here is what a Sanctuary session looks like:
 
 ## 🛠️ TOOLS
 
-These are the concrete abilities your companion uses to do work on your machine. Every modifying action requires your explicit confirmation.
+These are the concrete abilities your companion uses to do work on your machine. Every modifying action requires your explicit confirmation. Active tool execution logs are cataloged in a thread-safe registry, and the UI polls `/api/session_tool_calls` in real-time to display a dynamic, expandable output drawer next to the typing indicator.
 
 > [!WARNING]
 > **Security Warning**: Equipping companions with local shell execution (`run_command_async`, `run_shell_command`) and file modification (`replace_file_content`, `write_file`) tools grants them direct access to your operating system. **Be extremely wary of giving these capabilities to untrusted, malicious, or poorly aligned programs/models.** A hostile model could run arbitrary code, delete files, or steal credentials. Always review tool arguments in the approval prompt before confirming execution, and consider running the server in an isolated sandbox.
@@ -39,11 +39,11 @@ These are the concrete abilities your companion uses to do work on your machine.
 * **Edit File** (`replace_file_content` / `multi_replace_file_content`): Swap single or multiple non-contiguous text blocks inside files with line-bounded precision.
 * **Map Directory** (`get_workspace_structure`): Read directory layouts and tree structures.
 * **Find Code** (`search_codebase`): Search codebase for keywords.
-* **Shell Execution** (`run_shell_command` / `run_command_async`): Run synchronous terminal commands or spawn headless asynchronous background subprocesses.
+* **Shell Execution** (`run_shell_command` / `run_command_async`): Run terminal commands, or spawn headless asynchronous background subprocesses with daemon reading threads streaming stdout/stderr asynchronously (allowing the companion to multitask and write to stdin).
 * **Task Manager** (`manage_task` / `wait_task`): Monitor, write to stdin, kill, or block and wait on active background commands.
 
 ### Network Grounding & Research (Online)
-* **Hybrid Web Search** (`web_search`): Concurrently query Google Grounding Search, SearXNG, Baidu Scrape, and Wikipedia, merging and deduplicating results with automatic fallbacks.
+* **Hybrid Web Search** (`web_search`): A unified concurrent search client that queries Google Grounding Search, SearXNG, Baidu, and Wikipedia simultaneously. It aggregates, deduplicates URLs, collapses mobile/desktop paths, and falls back gracefully to Wikipedia if primary web queries are blocked or empty.
 * **Read URL** (`read_webpage`): Fetch and extract text content from any webpage.
 * **Search GitHub** (`search_github`): Search for repository trends, stars, forks, and descriptions.
 * **Search arXiv** (`search_arxiv`): Retrieve publication titles, dates, abstracts, and links for research papers.
@@ -53,12 +53,6 @@ These are the concrete abilities your companion uses to do work on your machine.
 * **Render Portrait** (`generate_local_image`): Render yourself in a scene using ComfyUI.
 * **Render Concept** (`generate_imagen`): Render landscapes, diagrams, or objects using Google Imagen.
 * **Comfy Workflow** (`apply_comfy_workflow`): Run custom workflows against a local ComfyUI API.
-
-### 🚀 Autonomous Developer Upgrades
-The Sanctuary includes a closed-loop execution system designed for autonomous pair programming:
-* **Expanded & Simplified Hybrid Search**: A unified concurrent search client that queries Google Grounding Search, SearXNG, Baidu, and Wikipedia simultaneously. It aggregates, deduplicates URLs, and collapses mobile/desktop paths, falling back gracefully to Wikipedia if primary web queries are blocked or empty.
-* **Background Subprocess Multitasking**: Asynchronous terminal execution (`run_command_async`). Spawns headless subprocesses with daemon reading threads streaming `stdout`/`stderr` asynchronously, permitting the companion to multitask and interact via `stdin` without freezing the main server thread.
-* **Real-Time Log Server & Polling**: Active tool logs are cataloged in a thread-safe registry. The UI polls `/api/session_tool_calls` in real-time, displaying a dynamic, expandable drawer next to the typing indicator that visualizes active tool parameters and live terminal outputs.
 ---
 
 ## 🚀 HOW TO RUN
