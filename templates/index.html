@@ -5685,7 +5685,7 @@ function toggleThinkingBlock(headerElement) {
 
                 const deleteBtn = document.createElement('button');
                 deleteBtn.className = 'action-icon-btn';
-                deleteBtn.title = 'Delete message and response';
+                deleteBtn.title = 'Delete message from history';
                 deleteBtn.innerHTML = `
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                         <polyline points="3 6 5 6 21 6"></polyline>
@@ -5722,7 +5722,7 @@ function toggleThinkingBlock(headerElement) {
 
                 const deleteBtn = document.createElement('button');
                 deleteBtn.className = 'action-icon-btn';
-                deleteBtn.title = 'Delete message and response';
+                deleteBtn.title = 'Delete message from history';
                 deleteBtn.innerHTML = `
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                         <polyline points="3 6 5 6 21 6"></polyline>
@@ -6995,7 +6995,8 @@ async function saveMessageEdit(bubble, newText) {
                 const role = isUser ? 'user' : 'companion';
                 
                 const selector = isUser ? '.message.user' : '.message.companion';
-                const allSameRoleBubbles = Array.from(chatContainer.querySelectorAll(selector));
+                const allSameRoleBubbles = Array.from(chatContainer.querySelectorAll(selector))
+                    .filter(el => !el.closest('#welcome-message') && !el.closest('#onboarding-container'));
                 const index = allSameRoleBubbles.indexOf(bubble);
                 
                 if (index === -1) {
