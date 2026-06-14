@@ -345,6 +345,27 @@ def load_local_model(model_name):
         url = "http://localhost:1234/api/v1/models/load"
         resp = requests.post(url, json=payload, timeout=30.0)
         if resp.status_code == 200:
+            # Update .env configuration
+            try:
+                base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                env_path = os.path.join(base_dir, '.env')
+                if os.path.exists(env_path):
+                    with open(env_path, 'r', encoding='utf-8') as f:
+                        lines = f.readlines()
+                    updated = False
+                    for i, line in enumerate(lines):
+                        if line.strip().startswith('LOCAL_MODEL_NAME='):
+                            lines[i] = f"LOCAL_MODEL_NAME={model_name}\n"
+                            updated = True
+                            break
+                    if not updated:
+                        lines.append(f"\nLOCAL_MODEL_NAME={model_name}\n")
+                    with open(env_path, 'w', encoding='utf-8') as f:
+                        f.writelines(lines)
+                os.environ["LOCAL_MODEL_NAME"] = model_name
+            except Exception as env_err:
+                print(f"[lms_manager] Failed to update LOCAL_MODEL_NAME in env: {env_err}")
+
             return True, f"Model {model_name} loaded successfully."
         else:
             err = resp.json().get("error", {}).get("message", resp.text)
