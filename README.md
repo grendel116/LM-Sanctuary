@@ -14,9 +14,9 @@ I believe in seizing our computational means of production. The Sanctuary is a u
 2. **Coding**: Build real software. Your companions read and write files directly on your own drive.
 3. **Autonomous Action**: Let the AI run code, run tests, and manage workflows.
 
-### Local First, Cloud Offloading
+### Local First / Cloud Offloading
 
-Local-First workspace. Your chats, your memory, and your data stay on your drive. Local models do the daily work, saving resources from irresponsible capitalist hyperscale data centers. When a task exceeds local capacity, processing is offloaded to their captured resources. Compute should be a public utility and cloud models governed locally, not by shareholders or venture capitalists. Co-operative compute networks where people share resources democratically instead of buying them from corporations.
+Local-First workspace. Your chats, your memory, and your data stay on your drive. Local models do the daily work, saving resources from capitalist hyperscale data centers. When a task exceeds local capacity, processing is offloaded to their captured resources. Compute should be a public utility and cloud models governed locally, not by shareholders or venture capitalists. Co-operative compute networks where people share resources democratically instead of buying them from corporations.
 
 
 
