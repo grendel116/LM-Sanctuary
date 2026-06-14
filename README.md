@@ -43,7 +43,7 @@ These are the things your companion can do on your computer. By default, before 
 * **Task Manager** (`manage_task` / `wait_task`): Monitor, write to stdin, kill, or block and wait on active background commands.
 
 ### Network Grounding & Research (Online)
-* **Hybrid Web Search** (`web_search`): A unified concurrent search client that queries Google Grounding Search, SearXNG, Baidu, and Wikipedia simultaneously. It aggregates, deduplicates URLs, collapses mobile/desktop paths, and falls back gracefully to Wikipedia. Supports explicit query prefix routing for specific platforms (e.g. `github: query`, `arxiv: query`, `hn: query`).
+* **Hybrid Web Search** (`web_search`): A unified search client that queries Google Grounding Search, SearXNG, and Wikipedia. SearXNG is now used as a centralized proxy for routing platform-specific queries (e.g., Baidu, Yandex). It aggregates and deduplicates URLs, and supports explicit query prefix routing (e.g. `github: query`, `arxiv: query`, `hn: query`).
 * **Read URL** (`read_webpage`): Fetch and extract text content from any webpage.
 
 ### Generative Media (Local & Cloud)
