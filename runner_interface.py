@@ -101,6 +101,7 @@ _LOCAL_DIRECTIVE_PROMPT = (
     "16. `[apply_comfy_workflow(workflow_path=\"...\", parameters={...}, save_path=\"...\")]` - Apply custom ComfyUI workflow.\n\n"
     "Rules:\n"
     "- Output exactly one tool call tag per turn when needed.\n"
+    "- Call image generation tools sparingly.\n"
     "- Once tool output is provided, answer directly in natural language without repeating the tag.\n"
 )
 
