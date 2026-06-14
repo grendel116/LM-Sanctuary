@@ -546,6 +546,72 @@
             transform: translate(-1px, 1px);
         }
 
+        .stop-btn {
+            background: #e11d48;
+            color: #ffffff;
+            border: 1px solid transparent;
+            width: 32px;
+            height: 32px;
+            border-radius: 50%;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            display: none;
+            align-items: center;
+            justify-content: center;
+            box-sizing: border-box;
+        }
+        .stop-btn:hover {
+            background: #be123c;
+            transform: scale(1.05);
+        }
+        .stop-btn svg {
+            width: 14px;
+            height: 14px;
+            fill: currentColor;
+        }
+
+        .avatar-container {
+            position: relative;
+            width: 48px;
+            height: 48px;
+            flex-shrink: 0;
+            display: inline-block;
+        }
+
+        .activity-exclamation {
+            position: absolute;
+            top: 2px;
+            right: 2px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #f59e0b;
+            font-size: 18px;
+            font-weight: 900;
+            cursor: help;
+            flex-shrink: 0;
+            z-index: 10;
+            animation: quick-ping 0.8s forwards cubic-bezier(0.16, 1, 0.3, 1);
+        }
+
+        @keyframes quick-ping {
+            0% {
+                transform: scale(0.5);
+                opacity: 0;
+                text-shadow: 0 0 2px rgba(245, 158, 11, 0);
+            }
+            20% {
+                transform: scale(1.4);
+                opacity: 1;
+                text-shadow: 0 0 10px rgba(245, 158, 11, 0.9);
+            }
+            100% {
+                transform: scale(0);
+                opacity: 0;
+                text-shadow: 0 0 2px rgba(245, 158, 11, 0);
+            }
+        }
+
         /* Typing indicator styling */
         .typing-indicator {
             display: flex;
@@ -711,95 +777,189 @@
             overflow-y: auto;
         }
 
-        /* Tool Logs Accordion styling */
-        .tool-logs-container {
+        /* Unified Antigravity Activity Log Design */
+        .antigravity-logs-container {
             margin-top: 12px;
             display: flex;
             flex-direction: column;
-            gap: 8px;
+            gap: 6px;
             border-top: 1px solid var(--border-color);
             padding-top: 12px;
-        }
-        .tool-card {
-            background: rgba(20, 22, 28, 0.6);
-            border: 1px solid rgba(255, 255, 255, 0.06);
-            border-radius: 12px;
-            overflow: hidden;
-            transition: all 0.2s ease;
             width: 100%;
         }
-        .tool-card:hover {
-            border-color: rgba(255, 255, 255, 0.15);
-            background: rgba(30, 34, 42, 0.8);
+
+        .antigravity-logs-card {
+            background: rgba(20, 22, 28, 0.45);
+            border: 1px solid rgba(255, 255, 255, 0.04);
+            border-radius: 8px;
+            overflow: hidden;
+            width: 100%;
+            transition: all 0.2s ease;
         }
-        .tool-card-header {
+
+        .antigravity-logs-card:hover {
+            border-color: rgba(255, 255, 255, 0.08);
+            background: rgba(30, 34, 42, 0.55);
+        }
+
+        .antigravity-logs-header {
             padding: 8px 12px;
             display: flex;
             align-items: center;
-            justify-content: space-between;
+            justify-content: flex-start;
             cursor: pointer;
-            font-size: 0.85rem;
-            user-select: none;
+            font-size: 0.8rem;
+            font-weight: 500;
             color: var(--text-muted);
+            user-select: none;
+            gap: 6px;
         }
-        .tool-card-header:hover {
+
+        .antigravity-logs-header:hover {
             color: var(--text-main);
         }
-        .tool-icon {
-            margin-right: 6px;
-            font-size: 0.9rem;
+
+        .ag-header-chevron, .ag-explore-chevron {
+            font-size: 0.65rem;
+            opacity: 0.6;
+            margin-left: auto;
+            transition: transform 0.2s ease;
         }
-        .tool-name {
-            flex: 1;
-            font-family: monospace;
-            font-size: 0.8rem;
-            white-space: nowrap;
-            overflow: hidden;
-            text-overflow: ellipsis;
-            color: #a8c7fa;
+
+        .ag-header-chevron.expanded, .ag-explore-chevron.expanded {
+            transform: rotate(180deg);
         }
-        .tool-name code {
-            color: #85b9eb;
-            background: transparent;
-            padding: 0;
+
+        .antigravity-logs-body {
+            border-top: 1px solid rgba(255, 255, 255, 0.03);
+            background: rgba(10, 11, 14, 0.3);
+            padding: 8px 12px 12px 12px;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
         }
-        .tool-chevron {
-            font-size: 0.7rem;
+
+        .antigravity-explore-container {
+            border-left: 1px solid rgba(255, 255, 255, 0.06);
+            margin-left: 6px;
+            padding-left: 10px;
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+
+        .antigravity-explore-header {
+            display: flex;
+            align-items: center;
+            font-size: 0.75rem;
             color: var(--text-muted);
+            cursor: pointer;
+            font-weight: 500;
+            padding: 4px 6px;
+            border-radius: 4px;
+            transition: all 0.15s ease;
+            gap: 6px;
+        }
+
+        .antigravity-explore-header:hover {
+            background: rgba(255, 255, 255, 0.03);
+            color: var(--text-main);
+        }
+
+        .antigravity-explore-body {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
             margin-left: 8px;
+            border-left: 1px dashed rgba(255, 255, 255, 0.05);
+            padding-left: 8px;
         }
-        .tool-card-body {
-            display: none;
-            border-top: 1px solid rgba(255, 255, 255, 0.05);
-            background: #090a0d;
-            width: 100%;
-            box-sizing: border-box;
+
+        .antigravity-log-item {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 0.75rem;
+            color: var(--text-muted);
+            cursor: pointer;
+            padding: 4px 6px;
+            border-radius: 4px;
+            transition: all 0.15s ease;
+            font-family: 'Outfit', sans-serif;
         }
-        .tool-card-body.expanded {
-            display: block;
+
+        .antigravity-log-item:hover {
+            background: rgba(255, 255, 255, 0.03);
+            color: var(--text-main);
         }
-        .tool-card-body pre {
-            margin: 0;
-            border: none;
-            border-radius: 0;
+
+        .ag-log-icon {
+            font-size: 0.8rem;
+            opacity: 0.8;
+            display: inline-block;
+            width: 14px;
+            text-align: center;
         }
-        .tool-card-body pre code {
-            background: transparent !important;
-            padding: 8px;
-            font-size: 0.7rem;
-            max-height: 150px;
-            overflow-y: auto;
-            color: #b0c4de;
+
+        .ag-log-icon svg, .ag-timer-icon svg {
+            width: 13px;
+            height: 13px;
+            vertical-align: -2px;
+            stroke-width: 2.2;
+            display: inline-block;
         }
-        .tool-response-text {
-            padding: 8px;
+
+        .ag-log-action {
+            color: var(--text-muted);
+            font-weight: 400;
+        }
+
+        .ag-log-target {
+            color: #a8c7fa;
+            font-family: monospace;
+            font-size: 0.72rem;
+            word-break: break-all;
+        }
+
+        .ag-log-suffix {
+            color: #8fa5c5;
             font-size: 0.7rem;
             font-family: monospace;
-            max-height: 150px;
-            overflow-y: auto;
-            color: #b0c4de;
-            white-space: pre-wrap;
         }
+
+        .mutation-item {
+            margin-left: 0;
+            border-left: none;
+        }
+
+        .mutation-item .ag-log-target {
+            color: #a8fae3; /* Slight green tint for mutating/editing targets */
+        }
+
+        .antigravity-log-detail {
+            margin: 2px 0 6px 14px;
+            border: 1px solid rgba(255, 255, 255, 0.04);
+            border-radius: 6px;
+            background: #090a0d;
+            overflow: hidden;
+        }
+
+        .antigravity-log-detail pre {
+            margin: 0;
+            padding: 8px;
+            max-height: 180px;
+            overflow-y: auto;
+        }
+
+        .antigravity-log-detail pre code {
+            font-family: monospace;
+            font-size: 0.7rem;
+            color: #b0c4de;
+            background: transparent !important;
+            white-space: pre-wrap;
+            word-break: break-all;
+        }
+        
         .tool-running {
             padding: 8px;
             font-size: 0.7rem;
@@ -2111,6 +2271,11 @@
                             <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
                         </svg>
                     </button>
+                    <button class="stop-btn" onclick="cancelGeneration()" title="Stop Generation">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <rect x="4" y="4" width="16" height="16" rx="2" ry="2" fill="currentColor"></rect>
+                        </svg>
+                    </button>
                 </div>
             </div>
         </div>
@@ -2159,7 +2324,7 @@
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                     <path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"></path>
                 </svg>
-                <span>Vectorized Knowledge Base</span>
+                <span>Knowledge Base</span>
             </h3>
             <p style="color: var(--text-muted); font-size: 0.85rem; margin-bottom: 15px; line-height: 1.4;">
                 Upload files (TXT, MD, HTML, PDF) or scrape web page URLs to ingest them into the companion's vectorized memory database.
@@ -2169,6 +2334,7 @@
             <div style="display: flex; gap: 10px; margin-bottom: 15px;">
                 <button onclick="switchDataBankTab('upload')" id="tab-btn-upload" class="edit-btn" style="background: var(--primary-accent); color: white; border: none;">Upload Files</button>
                 <button onclick="switchDataBankTab('scrape')" id="tab-btn-scrape" class="edit-btn edit-cancel-btn">Scrape URL</button>
+                <button onclick="switchDataBankTab('settings')" id="tab-btn-settings" class="edit-btn edit-cancel-btn">Project Settings</button>
             </div>
             
             <!-- Upload Tab -->
@@ -2188,6 +2354,74 @@
                     <button onclick="scrapeDataBankUrl()" class="edit-btn" style="background: var(--primary-accent); border: none; color: white; padding: 8px 16px;">Scrape</button>
                 </div>
                 <div style="font-size: 0.7rem; color: var(--text-muted); margin-top: 6px;">The companion will fetch the page and extract readable content.</div>
+            </div>
+            
+            <!-- Settings Tab -->
+            <div id="databank-tab-settings" style="background: rgba(0, 0, 0, 0.4); border: 1px solid rgba(255,255,255,0.05); border-radius: 12px; padding: 20px; margin-bottom: 20px; display: none; flex-direction: column; gap: 15px;">
+                <!-- Folders -->
+                <div>
+                    <h4 style="margin: 0 0 8px 0; font-size: 0.85rem; font-weight: 600; color: var(--text-main);">Folders</h4>
+                    <div id="project-folders-list" style="display: flex; flex-direction: column; gap: 6px; margin-bottom: 8px;">
+                        <!-- Folders populated dynamically -->
+                    </div>
+                    <button onclick="addProjectFolder()" class="edit-btn" style="background: transparent; border: 1px dashed rgba(255,255,255,0.15); color: var(--text-muted); padding: 6px 12px; font-size: 0.75rem; width: 100%; border-radius: 8px; cursor: pointer;">
+                        + Add Folder
+                    </button>
+                </div>
+                
+                <!-- Program Settings -->
+                <div style="border-top: 1px solid rgba(255,255,255,0.05); padding-top: 12px;">
+                    <h4 style="margin: 0 0 8px 0; font-size: 0.85rem; font-weight: 600; color: var(--text-main);">Program Settings</h4>
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+                        <div>
+                            <div style="font-size: 0.8rem; color: var(--text-main); font-weight: 500;">Security Preset</div>
+                            <div style="font-size: 0.7rem; color: var(--text-muted); margin-top: 2px;">Choose auto-execution policy for shell commands and file operations.</div>
+                        </div>
+                        <select id="project-security-preset" onchange="saveProjectSettings()" style="background: rgba(0, 0, 0, 0.3); border: 1px solid var(--border-color); color: var(--text-main); padding: 6px 10px; border-radius: 8px; font-size: 0.8rem; outline: none; cursor: pointer; color-scheme: dark;">
+                            <option value="ask_always">Ask Always</option>
+                            <option value="turbo">Turbo Mode</option>
+                        </select>
+                    </div>
+                </div>
+
+                <!-- Program Behavior -->
+                <div style="border-top: 1px solid rgba(255,255,255,0.05); padding-top: 12px;">
+                    <h4 style="margin: 0 0 8px 0; font-size: 0.85rem; font-weight: 600; color: var(--text-main);">Program Behavior</h4>
+                    <div style="display: flex; justify-content: space-between; align-items: center;">
+                        <div>
+                            <div style="font-size: 0.8rem; color: var(--text-main); font-weight: 500;">Artifact Review Policy</div>
+                            <div style="font-size: 0.7rem; color: var(--text-muted); margin-top: 2px;">Specifies behavior when generating documentation and plans.</div>
+                        </div>
+                        <select id="project-review-policy" onchange="saveProjectSettings()" style="background: rgba(0, 0, 0, 0.3); border: 1px solid var(--border-color); color: var(--text-main); padding: 6px 10px; border-radius: 8px; font-size: 0.8rem; outline: none; cursor: pointer; color-scheme: dark;">
+                            <option value="ask_always">Always Ask</option>
+                            <option value="auto_approve">Auto Approve</option>
+                        </select>
+                    </div>
+                </div>
+
+                <!-- Search Settings -->
+                <div style="border-top: 1px solid rgba(255,255,255,0.05); padding-top: 12px;">
+                    <h4 style="margin: 0 0 8px 0; font-size: 0.85rem; font-weight: 600; color: var(--text-main);">Search Settings</h4>
+                    <div style="display: flex; flex-direction: column; gap: 10px;">
+                        <div style="display: flex; justify-content: space-between; align-items: center;">
+                            <div>
+                                <div style="font-size: 0.8rem; color: var(--text-main); font-weight: 500;">Search Mode</div>
+                                <div style="font-size: 0.7rem; color: var(--text-muted); margin-top: 2px;">Unified search crawling multiple backends simultaneously.</div>
+                            </div>
+                            <select id="project-search-engine" onchange="toggleSearxUrlVisibility(); saveProjectSettings();" style="background: rgba(0, 0, 0, 0.3); border: 1px solid var(--border-color); color: var(--text-main); padding: 6px 10px; border-radius: 8px; font-size: 0.8rem; outline: none; cursor: pointer; color-scheme: dark;">
+                                <option value="web_crawling">Web Crawling (Unified: SearXNG, Baidu, Google, Wikipedia)</option>
+                                <option value="wikipedia">Wikipedia Only</option>
+                            </select>
+                        </div>
+                        <div id="searxng-url-container" style="display: flex; justify-content: space-between; align-items: center;">
+                            <div>
+                                <div style="font-size: 0.8rem; color: var(--text-main); font-weight: 500;">SearXNG Custom URL</div>
+                                <div style="font-size: 0.7rem; color: var(--text-muted); margin-top: 2px;">URL of your private/preferred instance (blank for public pool).</div>
+                            </div>
+                            <input type="text" id="project-searxng-url" onchange="saveProjectSettings()" placeholder="https://searx.be" style="background: rgba(0, 0, 0, 0.3); border: 1px solid var(--border-color); color: var(--text-main); padding: 6px 10px; border-radius: 8px; font-size: 0.8rem; outline: none; width: 180px;">
+                        </div>
+                    </div>
+                </div>
             </div>
             
             <!-- Ingestion Status / Loader -->
@@ -2245,7 +2479,8 @@
         <div class="modal-card" style="max-width: 520px; width: 95%; text-align: left; align-items: stretch;" onclick="event.stopPropagation()">
             <span class="close-modal-btn" onclick="closeImportCompanionModal()">&times;</span>
             <h3 style="margin-bottom: 12px; display: flex; align-items: center; gap: 8px; font-size: 1.15rem; border-bottom: 1px solid rgba(255,255,255,0.08); padding-bottom: 10px;">
-                <span>✨ Create / Import Companion</span>
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--primary-accent)" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 4px;"><path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path><circle cx="8.5" cy="7" r="4"></circle><line x1="20" y1="8" x2="20" y2="14"></line><line x1="23" y1="11" x2="17" y2="11"></line></svg>
+                <span>Create / Import Companion</span>
             </h3>
             <p style="color: var(--text-muted); font-size: 0.85rem; margin-bottom: 20px; line-height: 1.4;">
                 Procedurally import a new companion from a character card (PNG) or describe a new character persona using text.
@@ -2308,7 +2543,8 @@
     <div id="tool-confirm-modal" class="modal" onclick="event.stopPropagation()">
         <div class="modal-card" style="max-width: 500px; width: 90%; text-align: left; align-items: stretch;" onclick="event.stopPropagation()">
             <h3 style="margin-bottom: 12px; display: flex; align-items: center; gap: 8px; font-size: 1.15rem; border-bottom: 1px solid rgba(255,255,255,0.08); padding-bottom: 10px;">
-                <span>🔧 Tool Execution Approval</span>
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--primary-accent)" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 4px;"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path></svg>
+                <span>Tool Execution Approval</span>
             </h3>
             <p style="color: var(--text-muted); font-size: 0.85rem; margin-bottom: 15px;">
                 The companion is requesting permission to execute a system-level tool call. Please review the details below.
@@ -2332,7 +2568,8 @@
         <div class="modal-card" style="max-width: 980px; width: 95%; text-align: left; align-items: stretch;" onclick="event.stopPropagation()">
             <span class="close-modal-btn" onclick="closeConnectionModal()">&times;</span>
             <h3 style="margin-bottom: 12px; display: flex; align-items: center; gap: 8px; font-size: 1.15rem; border-bottom: 1px solid rgba(255,255,255,0.08); padding-bottom: 10px;">
-                <span>👾 Sanctuary Connection Settings</span>
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--primary-accent)" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 4px;"><line x1="4" y1="21" x2="4" y2="14"></line><line x1="4" y1="10" x2="4" y2="3"></line><line x1="12" y1="21" x2="12" y2="12"></line><line x1="12" y1="8" x2="12" y2="3"></line><line x1="20" y1="21" x2="20" y2="16"></line><line x1="20" y1="12" x2="20" y2="3"></line><line x1="1" y1="14" x2="7" y2="14"></line><line x1="9" y1="8" x2="15" y2="8"></line><line x1="17" y1="16" x2="23" y2="16"></line></svg>
+                <span>Sanctuary Connection Settings</span>
             </h3>
             <p style="color: var(--text-muted); font-size: 0.85rem; margin-bottom: 20px; line-height: 1.4;">
                 Select your preferred model configuration. You can run completely offline, configure cloud connections, and manage your image generation environments.
@@ -2417,7 +2654,8 @@
         <div class="modal-card" style="max-width: 580px; width: 95%; text-align: left; align-items: stretch;" onclick="event.stopPropagation()">
             <span class="close-modal-btn" onclick="closeUserProfileModal()">&times;</span>
             <h3 style="margin-bottom: 12px; display: flex; align-items: center; gap: 8px; font-size: 1.15rem; border-bottom: 1px solid rgba(255,255,255,0.08); padding-bottom: 10px;">
-                <span>👤 User Persona Profiles</span>
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--primary-accent)" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 4px;"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></svg>
+                <span>User Persona Profiles</span>
             </h3>
             <p style="color: var(--text-muted); font-size: 0.85rem; margin-bottom: 20px; line-height: 1.4;">
                 Select or customize your user profile. This active persona grounds the relationship settings for companion programs.
@@ -2513,7 +2751,7 @@
             }
             const toast = document.createElement('div');
             toast.style.cssText = 'background: rgba(239, 68, 68, 0.95); color: white; padding: 12px 16px; border-radius: 8px; font-family: monospace; font-size: 0.8rem; box-shadow: 0 4px 12px rgba(0,0,0,0.5); pointer-events: auto; word-break: break-all; border-left: 4px solid #fca5a5;';
-            toast.innerHTML = `<div style="font-weight: bold; margin-bottom: 4px;">⚠️ Application Error</div><div>${message}</div><button onclick="this.parentElement.remove()" style="background: none; border: none; color: white; text-decoration: underline; margin-top: 8px; cursor: pointer; padding: 0; font-size: 0.75rem;">Dismiss</button>`;
+            toast.innerHTML = `<div style="font-weight: bold; margin-bottom: 4px; display: flex; align-items: center; gap: 6px;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#fca5a5" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>Application Error</div><div>${message}</div><button onclick="this.parentElement.remove()" style="background: none; border: none; color: white; text-decoration: underline; margin-top: 8px; cursor: pointer; padding: 0; font-size: 0.75rem;">Dismiss</button>`;
             container.appendChild(toast);
         }
 
@@ -2738,7 +2976,7 @@
                         extraMsg = `<br><br><span style="color: var(--text-muted); font-size: 0.9rem;">The companion has experienced a dialectical inversion. They are ${quality}.</span>`;
                     }
                     
-                    showCustomAlert("💖 Heart Status",
+                    showCustomAlert("Heart Status",
                           `Companion's Mood: <strong>${statusName}</strong><br>` +
                           `Emotional Intensity: <strong>${intensityPercent}%</strong>` + extraMsg);
                 });
@@ -3970,6 +4208,21 @@ function updateInputGlow() {
             } else {
                 wrapper.classList.remove('has-unsent-text');
             }
+        }
+
+        // --- getLogIconSvg ---
+        function getLogIconSvg(name) {
+            const svgs = {
+                timer: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>`,
+                file: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline></svg>`,
+                webpage: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="2" y1="12" x2="22" y2="12"></line><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path></svg>`,
+                folder: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>`,
+                search: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>`,
+                edit: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"></path><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"></path></svg>`,
+                command: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"></polyline><line x1="12" y1="19" x2="20" y2="19"></line></svg>`,
+                gear: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>`
+            };
+            return svgs[name] || svgs.command;
         }
 
         // --- getProfileUrl ---
@@ -5343,7 +5596,7 @@ function toggleThinkingBlock(headerElement) {
         }
 
         // --- appendMessage ---
-        function appendMessage(role, text, imageUrl = null, toolCalls = null, isLive = false, timestamp = null) {
+        function appendMessage(role, text, imageUrl = null, toolCalls = null, isLive = false, timestamp = null, duration = null) {
             text = text || '';
             
             // Extract ComfyUI prompt if present in toolCalls
@@ -5362,6 +5615,7 @@ function toggleThinkingBlock(headerElement) {
             row.dataset.imageUrl = imageUrl || '';
             row.dataset.toolCalls = JSON.stringify(toolCalls || []);
             row.dataset.timestamp = timestamp || '';
+            row.dataset.duration = duration || '';
 
             // Hide the user message requesting a portrait
             const isPortraitRequest = (role === 'user' && text === "Send me a portrait of yourself based on the context of our last message/current dialogue!");
@@ -5654,7 +5908,7 @@ function toggleThinkingBlock(headerElement) {
 
             if (toolCalls && toolCalls.length > 0) {
                 const logsContainer = document.createElement('div');
-                logsContainer.className = 'tool-logs-container';
+                logsContainer.className = 'antigravity-logs-container';
                 
                 const pairedTools = [];
                 const callsMap = {};
@@ -5684,73 +5938,301 @@ function toggleThinkingBlock(headerElement) {
                 });
 
                 if (pairedTools.length > 0) {
-                    const toolCard = document.createElement('div');
-                    toolCard.className = 'tool-card';
-                    
-                    const header = document.createElement('div');
-                    header.className = 'tool-card-header';
-                    header.innerHTML = `
-                        <div style="display: flex; align-items: center; gap: 6px; overflow: hidden;">
-                            <span class="tool-icon" style="opacity: 0.8;">⚙️</span>
-                            <span class="tool-name" style="font-weight: 500; font-family: inherit; font-size: 0.85rem; color: var(--text-muted);">Tool Calls (${pairedTools.length})</span>
-                        </div>
-                        <span class="tool-chevron" style="font-size: 0.7rem; opacity: 0.5; margin-left: 8px;">▼</span>
-                    `;
-                    
-                    const body = document.createElement('div');
-                    body.className = 'tool-card-body';
-                    body.style.padding = '12px';
-                    body.style.display = 'none';
-                    
-                    pairedTools.forEach((tool, idx) => {
-                        const toolItem = document.createElement('div');
-                        toolItem.className = 'tool-item';
-                        if (idx > 0) {
-                            toolItem.style.borderTop = '1px solid rgba(255, 255, 255, 0.06)';
-                            toolItem.style.marginTop = '12px';
-                            toolItem.style.paddingTop = '12px';
+                    const getBasename = (pathStr) => {
+                        if (!pathStr) return '';
+                        if (pathStr.startsWith('http://') || pathStr.startsWith('https://')) {
+                            try {
+                                const url = new URL(pathStr);
+                                return url.hostname + url.pathname;
+                            } catch(e) {
+                                return pathStr;
+                            }
                         }
-                        
-                        const argsStr = tool.args ? Object.entries(tool.args).map(([k, v]) => `${k}="${v}"`).join(', ') : '';
-                        
-                        const callHeader = document.createElement('div');
-                        callHeader.style.fontFamily = 'monospace';
-                        callHeader.style.fontSize = '0.75rem';
-                        callHeader.style.color = '#a8c7fa';
-                        callHeader.style.marginBottom = '6px';
-                        callHeader.style.wordBreak = 'break-all';
-                        callHeader.textContent = `${tool.name}(${argsStr})`;
-                        
-                        const responseContent = document.createElement('div');
-                        if (tool.response) {
-                            responseContent.className = 'tool-response-text';
-                            responseContent.style.padding = '8px 12px';
-                            responseContent.style.background = '#090a0d';
-                            responseContent.style.borderRadius = '8px';
-                            responseContent.style.marginTop = '6px';
-                            responseContent.style.border = '1px solid rgba(255, 255, 255, 0.04)';
-                            responseContent.style.maxHeight = '150px';
-                            responseContent.style.overflowY = 'auto';
-                            responseContent.textContent = tool.response;
-                        } else {
-                            responseContent.className = 'tool-running';
-                            responseContent.textContent = 'Executing tool...';
-                        }
-                        
-                        toolItem.appendChild(callHeader);
-                        toolItem.appendChild(responseContent);
-                        body.appendChild(toolItem);
-                    });
-                    
-                    header.onclick = () => {
-                        const isExpanded = body.style.display === 'block';
-                        body.style.display = isExpanded ? 'none' : 'block';
-                        header.querySelector('.tool-chevron').textContent = isExpanded ? '▼' : '▲';
+                        const parts = pathStr.split(/[\\/]/);
+                        return parts[parts.length - 1] || pathStr;
                     };
-                    
-                    toolCard.appendChild(header);
-                    toolCard.appendChild(body);
-                    logsContainer.appendChild(toolCard);
+
+                    const parseResultCount = (toolName, responseText) => {
+                        if (!responseText) return null;
+                        const trimmed = responseText.trim();
+                        if (trimmed === "No search results found." || trimmed === "No search results found") {
+                            return 0;
+                        }
+                        if (trimmed.startsWith("Error")) {
+                            return 0;
+                        }
+                        try {
+                            if (trimmed.startsWith('{') || trimmed.trim().startsWith('[')) {
+                                const parsed = JSON.parse(trimmed);
+                                if (Array.isArray(parsed)) return parsed.length;
+                                if (parsed.results && Array.isArray(parsed.results)) return parsed.results.length;
+                                if (parsed.matches && Array.isArray(parsed.matches)) return parsed.matches.length;
+                            }
+                        } catch(e) {}
+                        
+                        if (toolName === 'web_search' || toolName === 'google_search') {
+                            const blocks = responseText.split('\n\n').filter(b => b.trim().length > 0);
+                            return blocks.length;
+                        }
+                        
+                        const lines = responseText.split('\n').filter(l => l.trim().length > 0);
+                        if (lines.length > 0 && lines.length < 50) {
+                            return lines.length;
+                        }
+                        return null;
+                    };
+
+                    const escapeHtml = (text) => {
+                        if (!text) return '';
+                        return String(text)
+                            .replace(/&/g, '&amp;')
+                            .replace(/</g, '&lt;')
+                            .replace(/>/g, '&gt;')
+                            .replace(/"/g, '&quot;')
+                            .replace(/'/g, '&#039;');
+                    };
+
+                    const createLogItemElement = (item) => {
+                        const itemEl = document.createElement('div');
+                        itemEl.className = 'antigravity-log-item';
+                        itemEl.innerHTML = `
+                            <span class="ag-log-icon">${item.icon}</span>
+                            <span class="ag-log-action">${item.action}</span>
+                            <span class="ag-log-target">${item.target}</span>
+                            <span class="ag-log-suffix">${item.suffix}</span>
+                        `;
+
+                        const detailEl = document.createElement('div');
+                        detailEl.className = 'antigravity-log-detail';
+                        detailEl.style.display = 'none';
+                        
+                        let argsFormatted = '';
+                        if (item.args && Object.keys(item.args).length > 0) {
+                            argsFormatted = `Parameters:\n${JSON.stringify(item.args, null, 2)}\n\n`;
+                        }
+                        
+                        let responseText = item.response || 'No response data';
+                        
+                        detailEl.innerHTML = `
+                            <pre><code>${argsFormatted}Response:\n${escapeHtml(responseText)}</code></pre>
+                        `;
+
+                        itemEl.onclick = (e) => {
+                            e.stopPropagation();
+                            const isExpanded = detailEl.style.display === 'block';
+                            detailEl.style.display = isExpanded ? 'none' : 'block';
+                        };
+
+                        return { item: itemEl, detail: detailEl };
+                    };
+
+                    const formattedItems = pairedTools.map(tool => {
+                        let category = 'explore';
+                        let icon = getLogIconSvg('file');
+                        let action = 'Analyzed';
+                        let target = '';
+                        let suffix = '';
+                        let isMutation = false;
+                        
+                        const name = tool.name;
+                        const args = tool.args || {};
+                        
+                        if (name === 'read_file' || name === 'view_file' || name === 'read_webpage') {
+                            category = 'file';
+                            icon = name === 'read_webpage' ? getLogIconSvg('webpage') : getLogIconSvg('file');
+                            action = 'Analyzed';
+                            
+                            let pathVal = args.path || args.AbsolutePath || args.url || '';
+                            target = getBasename(pathVal);
+                            
+                            let start = args.StartLine || args.start_line || '';
+                            let end = args.EndLine || args.end_line || '';
+                            if (start && end) {
+                                suffix = ` #L${start}-${end}`;
+                            } else if (start) {
+                                suffix = ` #L${start}`;
+                            }
+                        } 
+                        else if (name === 'get_workspace_structure' || name === 'list_dir') {
+                            category = 'folder';
+                            icon = getLogIconSvg('folder');
+                            action = 'Analyzed';
+                            let pathVal = args.path || args.DirectoryPath || '';
+                            target = pathVal || 'workspace';
+                            suffix = ' >';
+                        }
+                        else if (name === 'search_codebase' || name === 'grep_search' || name === 'web_search' || name === 'google_search' || name === 'search_github' || name === 'search_arxiv' || name === 'search_hacker_news') {
+                            category = 'search';
+                            icon = getLogIconSvg('search');
+                            action = 'Searched';
+                            target = args.query || args.keyword || args.Query || '';
+                            
+                            if (tool.response) {
+                                let count = parseResultCount(tool.name, tool.response);
+                                if (count !== null) {
+                                    suffix = ` ${count} result${count !== 1 ? 's' : ''}`;
+                                }
+                            }
+                        }
+                        else if (name === 'write_file' || name === 'write_to_file') {
+                            category = 'edit';
+                            icon = getLogIconSvg('edit');
+                            isMutation = true;
+                            
+                            let pathVal = args.path || args.TargetFile || '';
+                            target = getBasename(pathVal);
+                            
+                            let contentVal = args.content || args.CodeContent || '';
+                            let linesCount = contentVal ? contentVal.split('\n').length : 0;
+                            
+                            action = args.Overwrite ? 'Edited' : 'Created';
+                            suffix = ` +${linesCount} -0`;
+                        }
+                        else if (name === 'replace_in_file' || name === 'replace_file_content' || name === 'multi_replace_file_content') {
+                            category = 'edit';
+                            icon = getLogIconSvg('edit');
+                            isMutation = true;
+                            
+                            let pathVal = args.path || args.TargetFile || '';
+                            target = getBasename(pathVal);
+                            action = 'Edited';
+                            
+                            let linesAdded = 0;
+                            let linesRemoved = 0;
+                            if (name === 'replace_file_content' && args.ReplacementContent) {
+                                linesAdded = args.ReplacementContent.split('\n').length;
+                            }
+                            if (name === 'replace_file_content' && args.TargetContent) {
+                                linesRemoved = args.TargetContent.split('\n').length;
+                            }
+                            
+                            if (linesAdded || linesRemoved) {
+                                suffix = ` +${linesAdded} -${linesRemoved}`;
+                            }
+                        }
+                        else if (name === 'run_shell_command' || name === 'run_command') {
+                            category = 'command';
+                            icon = getLogIconSvg('command');
+                            isMutation = true;
+                            action = 'Ran';
+                            target = args.command || args.CommandLine || '';
+                            if (target.length > 50) {
+                                target = target.substring(0, 47) + '...';
+                            }
+                        }
+                        else {
+                            category = 'other';
+                            icon = getLogIconSvg('gear');
+                            action = 'Ran';
+                            target = name;
+                            isMutation = true;
+                        }
+                        
+                        return {
+                            id: tool.id || 'call_' + Math.random().toString(36).substring(2, 6),
+                            name: tool.name,
+                            args: tool.args,
+                            response: tool.response,
+                            category,
+                            icon,
+                            action,
+                            target,
+                            suffix,
+                            isMutation
+                        };
+                    });
+
+                    const explorationItems = formattedItems.filter(item => !item.isMutation);
+                    const mutationItems = formattedItems.filter(item => item.isMutation);
+
+                    const uniqueFiles = new Set();
+                    const uniqueFolders = new Set();
+                    let searchesCount = 0;
+
+                    explorationItems.forEach(item => {
+                        if (item.category === 'file') {
+                            uniqueFiles.add(item.target);
+                        } else if (item.category === 'folder') {
+                            uniqueFolders.add(item.target);
+                        } else if (item.category === 'search') {
+                            searchesCount++;
+                        }
+                    });
+
+                    const filesCount = uniqueFiles.size;
+                    const foldersCount = uniqueFolders.size;
+                    const parts = [];
+                    if (filesCount > 0) parts.push(`${filesCount} file${filesCount > 1 ? 's' : ''}`);
+                    if (foldersCount > 0) parts.push(`${foldersCount} folder${foldersCount > 1 ? 's' : ''}`);
+                    if (searchesCount > 0) parts.push(`${searchesCount} search${searchesCount > 1 ? 'es' : ''}`);
+
+                    const subheaderText = parts.length > 0 ? `Explored ${parts.join(', ')}` : 'Explored workspace';
+
+                    const logsCard = document.createElement('div');
+                    logsCard.className = 'antigravity-logs-card';
+
+                    const header = document.createElement('div');
+                    header.className = 'antigravity-logs-header';
+                    const durationText = duration ? `Worked for ${duration}s` : 'Activity Log';
+                    header.innerHTML = `
+                        <span class="ag-timer-icon">${getLogIconSvg('timer')}</span>
+                        <span>${durationText}</span>
+                        <span class="ag-header-chevron">▼</span>
+                    `;
+
+                    const body = document.createElement('div');
+                    body.className = 'antigravity-logs-body';
+                    body.style.display = 'none';
+
+                    if (explorationItems.length > 0) {
+                        const exploreContainer = document.createElement('div');
+                        exploreContainer.className = 'antigravity-explore-container';
+
+                        const exploreHeader = document.createElement('div');
+                        exploreHeader.className = 'antigravity-explore-header';
+                        exploreHeader.innerHTML = `
+                            <span>${subheaderText}</span>
+                            <span class="ag-explore-chevron">▼</span>
+                        `;
+
+                        const exploreBody = document.createElement('div');
+                        exploreBody.className = 'antigravity-explore-body';
+                        exploreBody.style.display = 'none';
+
+                        explorationItems.forEach(item => {
+                            const itemEl = createLogItemElement(item);
+                            exploreBody.appendChild(itemEl.item);
+                            exploreBody.appendChild(itemEl.detail);
+                        });
+
+                        exploreHeader.onclick = (e) => {
+                            e.stopPropagation();
+                            const isExpanded = exploreBody.style.display === 'flex' || exploreBody.style.display === 'block';
+                            exploreBody.style.display = isExpanded ? 'none' : 'flex';
+                            exploreHeader.querySelector('.ag-explore-chevron').classList.toggle('expanded', !isExpanded);
+                        };
+
+                        exploreContainer.appendChild(exploreHeader);
+                        exploreContainer.appendChild(exploreBody);
+                        body.appendChild(exploreContainer);
+                    }
+
+                    mutationItems.forEach(item => {
+                        const itemEl = createLogItemElement(item);
+                        itemEl.item.classList.add('mutation-item');
+                        body.appendChild(itemEl.item);
+                        body.appendChild(itemEl.detail);
+                    });
+
+                    header.onclick = () => {
+                        const isExpanded = body.style.display === 'flex' || body.style.display === 'block';
+                        body.style.display = isExpanded ? 'none' : 'flex';
+                        header.querySelector('.ag-header-chevron').classList.toggle('expanded', !isExpanded);
+                    };
+
+                    logsCard.appendChild(header);
+                    logsCard.appendChild(body);
+                    logsContainer.appendChild(logsCard);
                 }
                 
                 bubble.appendChild(logsContainer);
@@ -5942,7 +6424,7 @@ function triggerFileInput() {
             }
 
             hasApprovedToolThisTurn = false;
-            isGenerating = true;
+            setGenerating(true);
             userInput.disabled = true;
             userInput.placeholder = "";
             updateInputGlow();
@@ -5980,7 +6462,9 @@ function triggerFileInput() {
             typingIndicatorRow.className = 'message-row companion-row';
             const profileUrl = getProfileUrl();
             typingIndicatorRow.innerHTML = `
-                <img class="avatar companion-avatar" src="${profileUrl}" alt="Companion" onclick="expandImage('${profileUrl}')">
+                <div class="avatar-container">
+                    <img class="avatar companion-avatar" src="${profileUrl}" alt="Companion" onclick="expandImage('${profileUrl}')">
+                </div>
                 <div class="message companion">
                     <div class="typing-indicator">
                         <div class="typing-dot"></div>
@@ -5993,18 +6477,20 @@ function triggerFileInput() {
             chatContainer.scrollTop = chatContainer.scrollHeight;
 
             startToolPolling();
+            chatAbortController = new AbortController();
             try {
                 const response = await fetch('/chat', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(payload)
+                    body: JSON.stringify(payload),
+                    signal: chatAbortController.signal
                 });
                 
                 chatContainer.removeChild(typingIndicatorRow);
 
                 const data = await response.json();
                 if (data.response !== undefined) {
-                    appendMessage('companion', data.response, null, data.tool_calls, true, data.timestamp);
+                    appendMessage('companion', data.response, null, data.tool_calls, true, data.timestamp, data.duration);
                 } else if (data.error) {
                     let errMsg = data.error;
                     if (errMsg.includes("429") || errMsg.includes("RESOURCE_EXHAUSTED")) {
@@ -6024,10 +6510,14 @@ function triggerFileInput() {
                 if (chatContainer.contains(typingIndicatorRow)) {
                     chatContainer.removeChild(typingIndicatorRow);
                 }
-                appendMessage('companion', 'Error connecting to the Sanctuary.');
+                if (error.name === 'AbortError') {
+                    appendMessage('companion', '*(Generation stopped)*');
+                } else {
+                    appendMessage('companion', 'Error connecting to the Sanctuary.');
+                }
                 handleToolReloadOrRecovery();
             } finally {
-                isGenerating = false;
+                setGenerating(false);
                 userInput.disabled = false;
                 userInput.placeholder = "Ask " + (activeCompanionName || "Companion");
                 updateInputGlow();
@@ -6043,7 +6533,7 @@ function triggerFileInput() {
             if (isGenerating) return;
             
             hasApprovedToolThisTurn = false;
-            isGenerating = true;
+            setGenerating(true);
             userInput.disabled = true;
             userInput.placeholder = "";
             updateInputGlow();
@@ -6057,7 +6547,9 @@ function triggerFileInput() {
             typingIndicatorRow.className = 'message-row companion-row';
             const profileUrl = getProfileUrl();
             typingIndicatorRow.innerHTML = `
-                <img class="avatar companion-avatar" src="${profileUrl}" alt="Companion" onclick="expandImage('${profileUrl}')">
+                <div class="avatar-container">
+                    <img class="avatar companion-avatar" src="${profileUrl}" alt="Companion" onclick="expandImage('${profileUrl}')">
+                </div>
                 <div class="message companion">
                     <div class="typing-indicator">
                         <div class="typing-dot"></div>
@@ -6069,6 +6561,7 @@ function triggerFileInput() {
             chatContainer.appendChild(typingIndicatorRow);
             chatContainer.scrollTop = chatContainer.scrollHeight;
             
+            chatAbortController = new AbortController();
             try {
                 const response = await fetch('/continue', {
                     method: 'POST',
@@ -6076,7 +6569,8 @@ function triggerFileInput() {
                     body: JSON.stringify({
                         session_id: sessionId,
                         model: selectedModel
-                    })
+                    }),
+                    signal: chatAbortController.signal
                 });
                 
                 if (chatContainer.contains(typingIndicatorRow)) {
@@ -6093,9 +6587,13 @@ function triggerFileInput() {
                 if (chatContainer.contains(typingIndicatorRow)) {
                     chatContainer.removeChild(typingIndicatorRow);
                 }
-                appendMessage('companion', 'Error connecting to the Sanctuary.');
+                if (error.name === 'AbortError') {
+                    appendMessage('companion', '*(Generation stopped)*');
+                } else {
+                    appendMessage('companion', 'Error connecting to the Sanctuary.');
+                }
             } finally {
-                isGenerating = false;
+                setGenerating(false);
                 userInput.disabled = false;
                 userInput.placeholder = "Ask " + (activeCompanionName || "Companion");
                 updateInputGlow();
@@ -6289,6 +6787,7 @@ async function saveMessageEdit(bubble, newText) {
             truncateChatAfter(row);
             
             hasApprovedToolThisTurn = false;
+            setGenerating(true);
             const heartElement = document.querySelector('.heart-pulse');
             if (heartElement) {
                 heartElement.classList.add('jiggling');
@@ -6298,7 +6797,9 @@ async function saveMessageEdit(bubble, newText) {
             typingIndicatorRow.className = 'message-row companion-row';
             const profileUrl = getProfileUrl();
             typingIndicatorRow.innerHTML = `
-                <img class="avatar companion-avatar" src="${profileUrl}" alt="Companion" onclick="expandImage('${profileUrl}')">
+                <div class="avatar-container">
+                    <img class="avatar companion-avatar" src="${profileUrl}" alt="Companion" onclick="expandImage('${profileUrl}')">
+                </div>
                 <div class="message companion">
                     <div class="typing-indicator">
                         <div class="typing-dot"></div>
@@ -6314,6 +6815,7 @@ async function saveMessageEdit(bubble, newText) {
             userInput.placeholder = "";
             
             startToolPolling();
+            chatAbortController = new AbortController();
             try {
                 const response = await fetch('/edit', {
                     method: 'POST',
@@ -6323,7 +6825,8 @@ async function saveMessageEdit(bubble, newText) {
                         user_message_index: index,
                         new_text: bubble.dataset.rawText || '',
                         model: selectedModel
-                    })
+                    }),
+                    signal: chatAbortController.signal
                 });
                 
                 if (chatContainer.contains(typingIndicatorRow)) {
@@ -6332,7 +6835,7 @@ async function saveMessageEdit(bubble, newText) {
                 
                 const data = await response.json();
                 if (data.response !== undefined) {
-                    appendMessage('companion', data.response, null, data.tool_calls, true, data.timestamp);
+                    appendMessage('companion', data.response, null, data.tool_calls, true, data.timestamp, data.duration);
                 } else if (data.error) {
                     let errMsg = data.error;
                     if (errMsg.includes("429") || errMsg.includes("RESOURCE_EXHAUSTED")) {
@@ -6352,10 +6855,15 @@ async function saveMessageEdit(bubble, newText) {
                 if (chatContainer.contains(typingIndicatorRow)) {
                     chatContainer.removeChild(typingIndicatorRow);
                 }
-                appendMessage('companion', 'Error connecting to the Sanctuary.');
+                if (error.name === 'AbortError') {
+                    appendMessage('companion', '*(Generation stopped)*');
+                } else {
+                    appendMessage('companion', 'Error connecting to the Sanctuary.');
+                }
                 handleToolReloadOrRecovery();
             } finally {
                 stopToolPolling();
+                setGenerating(false);
                 userInput.disabled = false;
                 userInput.placeholder = "Ask " + (activeCompanionName || "Companion");
                 if (heartElement) {
@@ -6396,7 +6904,9 @@ async function saveMessageEdit(bubble, newText) {
             typingIndicatorRow.className = 'message-row companion-row';
             const profileUrl = getProfileUrl();
             typingIndicatorRow.innerHTML = `
-                <img class="avatar companion-avatar" src="${profileUrl}" alt="Companion" onclick="expandImage('${profileUrl}')">
+                <div class="avatar-container">
+                    <img class="avatar companion-avatar" src="${profileUrl}" alt="Companion" onclick="expandImage('${profileUrl}')">
+                </div>
                 <div class="message companion">
                     <div class="typing-indicator">
                         <div class="typing-dot"></div>
@@ -6411,7 +6921,9 @@ async function saveMessageEdit(bubble, newText) {
             userInput.disabled = true;
             userInput.placeholder = "";
 
+            setGenerating(true);
             startToolPolling();
+            chatAbortController = new AbortController();
             try {
                 const response = await fetch('/edit', {
                     method: 'POST',
@@ -6421,7 +6933,8 @@ async function saveMessageEdit(bubble, newText) {
                         user_message_index: index,
                         new_text: null,
                         model: selectedModel
-                    })
+                    }),
+                    signal: chatAbortController.signal
                 });
                 
                 if (chatContainer.contains(typingIndicatorRow)) {
@@ -6430,7 +6943,7 @@ async function saveMessageEdit(bubble, newText) {
                 
                 const data = await response.json();
                 if (data.response !== undefined) {
-                    appendMessage('companion', data.response, null, data.tool_calls, true, data.timestamp);
+                    appendMessage('companion', data.response, null, data.tool_calls, true, data.timestamp, data.duration);
                 } else if (data.error) {
                     let errMsg = data.error;
                     if (errMsg.includes("429") || errMsg.includes("RESOURCE_EXHAUSTED")) {
@@ -6450,10 +6963,15 @@ async function saveMessageEdit(bubble, newText) {
                 if (chatContainer.contains(typingIndicatorRow)) {
                     chatContainer.removeChild(typingIndicatorRow);
                 }
-                appendMessage('companion', 'Error connecting to the Sanctuary.');
+                if (error.name === 'AbortError') {
+                    appendMessage('companion', '*(Generation stopped)*');
+                } else {
+                    appendMessage('companion', 'Error connecting to the Sanctuary.');
+                }
                 handleToolReloadOrRecovery();
             } finally {
                 stopToolPolling();
+                setGenerating(false);
                 userInput.disabled = false;
                 userInput.placeholder = "Ask " + (activeCompanionName || "Companion");
                 if (heartElement) {
@@ -6963,13 +7481,56 @@ async function regenerateImage(buttonElement, oldImageUrl, prompt) {
 
 
         // --- startToolPolling ---
-function startToolPolling() {
+        function startToolPolling() {
             if (toolPollInterval) clearInterval(toolPollInterval);
-            toolPollInterval = setInterval(async () => {
+            
+            const pollFunc = async () => {
                 try {
                     const response = await fetch('/pending_tool_call');
                     const data = await response.json();
-                    if (data.call_id) {
+                    
+                    // Update activity exclamation badge on the avatar if typing indicator exists
+                    const typingIndicator = document.querySelector('.typing-indicator');
+                    if (typingIndicator) {
+                        const row = typingIndicator.closest('.companion-row');
+                        if (row) {
+                            const avatarContainer = row.querySelector('.avatar-container');
+                            if (avatarContainer) {
+                                let excl = avatarContainer.querySelector('.activity-exclamation');
+                                if (!excl) {
+                                    excl = document.createElement('div');
+                                    excl.className = 'activity-exclamation';
+                                    excl.textContent = '!';
+                                    avatarContainer.appendChild(excl);
+                                }
+                                
+                                if (data.active_tools && data.active_tools.length > 0) {
+                                    excl.style.display = 'flex';
+                                    const toolsNames = data.active_tools.map(t => {
+                                        return t.split('_').map(word => word.charAt(0).toUpperCase() + word.slice(1)).join(' ');
+                                    }).join(', ');
+                                    excl.title = `Running: ${toolsNames}`;
+                                } else {
+                                    excl.style.display = 'none';
+                                }
+                            }
+                        }
+                        
+                        const bubble = typingIndicator.closest('.message.companion');
+                        if (bubble) {
+                            try {
+                                const logRes = await fetch(`/api/session_tool_calls?session_id=${sessionId}`);
+                                const logData = await logRes.json();
+                                if (logData.tool_calls && logData.tool_calls.length > 0) {
+                                    updateLiveLogs(bubble, logData.tool_calls);
+                                }
+                            } catch (e) {
+                                console.error("Error polling session tool calls:", e);
+                            }
+                        }
+                    }
+                    
+                    if (data.call_id && toolPollInterval) {
                         clearInterval(toolPollInterval); // Pause polling while showing modal
                         toolPollInterval = null;
                         showToolConfirmModal(data.call_id, data.tool_name, data.details);
@@ -6977,7 +7538,121 @@ function startToolPolling() {
                 } catch (e) {
                     console.error("Error polling for tool calls:", e);
                 }
-            }, 4000);
+            };
+            
+            pollFunc(); // Poll immediately
+            toolPollInterval = setInterval(pollFunc, 4000);
+        }
+
+        function updateLiveLogs(bubble, toolCalls) {
+            if (!toolCalls || toolCalls.length === 0) return;
+            
+            let logsContainer = bubble.querySelector('.antigravity-logs-container');
+            if (!logsContainer) {
+                logsContainer = document.createElement('div');
+                logsContainer.className = 'antigravity-logs-container';
+                bubble.appendChild(logsContainer);
+            }
+            
+            let logsCard = logsContainer.querySelector('.antigravity-logs-card');
+            if (!logsCard) {
+                logsCard = document.createElement('div');
+                logsCard.className = 'antigravity-logs-card';
+                logsContainer.appendChild(logsCard);
+            }
+            
+            let header = logsCard.querySelector('.antigravity-logs-header');
+            if (!header) {
+                header = document.createElement('div');
+                header.className = 'antigravity-logs-header';
+                header.innerHTML = `
+                    <span class="ag-timer-icon">${getLogIconSvg('timer')}</span>
+                    <span class="ag-timer-text">Working...</span>
+                    <span class="ag-header-chevron">▼</span>
+                `;
+                logsCard.appendChild(header);
+                
+                header.onclick = (e) => {
+                    e.stopPropagation();
+                    const body = logsCard.querySelector('.antigravity-logs-body');
+                    if (body) {
+                        const isExpanded = body.style.display === 'flex' || body.style.display === 'block';
+                        body.style.display = isExpanded ? 'none' : 'flex';
+                        header.querySelector('.ag-header-chevron').classList.toggle('expanded', !isExpanded);
+                    }
+                };
+            }
+            
+            let body = logsCard.querySelector('.antigravity-logs-body');
+            if (!body) {
+                body = document.createElement('div');
+                body.className = 'antigravity-logs-body';
+                body.style.display = 'flex'; // Keep expanded by default during live generation
+                logsCard.appendChild(body);
+            }
+            
+            body.innerHTML = '';
+            
+            toolCalls.forEach(tc => {
+                const itemEl = document.createElement('div');
+                itemEl.className = 'antigravity-log-item';
+                
+                let icon = getLogIconSvg('gear');
+                let action = 'Running';
+                let target = tc.name;
+                
+                if (tc.status === 'completed') {
+                    action = 'Completed';
+                } else if (tc.status === 'failed') {
+                    action = 'Failed';
+                }
+                
+                const name = tc.name;
+                if (name.includes('search')) {
+                    icon = getLogIconSvg('search');
+                    action = tc.status === 'running' ? 'Searching' : (tc.status === 'completed' ? 'Searched' : 'Search failed');
+                } else if (name.includes('read_file') || name.includes('view_file')) {
+                    icon = getLogIconSvg('file');
+                    action = tc.status === 'running' ? 'Reading' : (tc.status === 'completed' ? 'Read' : 'Read failed');
+                } else if (name.includes('write_file') || name.includes('replace') || name.includes('edit')) {
+                    icon = getLogIconSvg('edit');
+                    action = tc.status === 'running' ? 'Writing' : (tc.status === 'completed' ? 'Wrote' : 'Write failed');
+                } else if (name.includes('command') || name.includes('shell')) {
+                    icon = getLogIconSvg('command');
+                    action = tc.status === 'running' ? 'Running' : (tc.status === 'completed' ? 'Ran' : 'Execution failed');
+                }
+                
+                target = tc.args || '';
+                if (target.length > 50) {
+                    target = target.substring(0, 47) + '...';
+                }
+                
+                let durText = tc.duration ? ` (${tc.duration}s)` : '';
+                itemEl.innerHTML = `
+                    <span class="ag-log-icon">${icon}</span>
+                    <span class="ag-log-action" style="font-weight: 500;">${action}</span>
+                    <span class="ag-log-target" style="font-family: monospace; font-size: 0.75rem; color: var(--text-muted); opacity: 0.85; margin-left: 4px;">${tc.name}(${target})</span>
+                    <span class="ag-log-suffix" style="margin-left: auto; font-size: 0.7rem; color: var(--text-muted);">${durText}</span>
+                `;
+                
+                const detailEl = document.createElement('div');
+                detailEl.className = 'antigravity-log-detail';
+                detailEl.style.display = 'none';
+                
+                const responseText = tc.response || 'Running...';
+                detailEl.innerHTML = `
+                    <pre><code>${responseText}</code></pre>
+                `;
+                
+                itemEl.onclick = (e) => {
+                    e.stopPropagation();
+                    const isExpanded = detailEl.style.display === 'block';
+                    detailEl.style.display = isExpanded ? 'none' : 'block';
+                };
+                
+                body.appendChild(itemEl);
+                body.appendChild(detailEl);
+            });
         }
 
         // --- stopToolPolling ---
@@ -7035,42 +7710,175 @@ function showToolConfirmModal(callId, toolName, details) {
            ========================================================================== */
 
         // --- openDataBank ---
-function openDataBank() {
+        function openDataBank() {
             document.getElementById('databank-modal').style.display = 'flex';
             loadDataBankFiles();
+            loadProjectSettings();
         }
 
         // --- closeDataBank ---
-function closeDataBank() {
+        function closeDataBank() {
             document.getElementById('databank-modal').style.display = 'none';
         }
 
         // --- switchDataBankTab ---
-function switchDataBankTab(tab) {
+        function switchDataBankTab(tab) {
             const uploadTab = document.getElementById('databank-tab-upload');
             const scrapeTab = document.getElementById('databank-tab-scrape');
+            const settingsTab = document.getElementById('databank-tab-settings');
             const uploadBtn = document.getElementById('tab-btn-upload');
             const scrapeBtn = document.getElementById('tab-btn-scrape');
+            const settingsBtn = document.getElementById('tab-btn-settings');
+            
+            // Reset active buttons
+            [uploadBtn, scrapeBtn, settingsBtn].forEach(btn => {
+                if (btn) {
+                    btn.style.background = 'transparent';
+                    btn.style.color = 'var(--text-muted)';
+                    btn.classList.add('edit-cancel-btn');
+                }
+            });
+            
+            // Hide all tabs
+            [uploadTab, scrapeTab, settingsTab].forEach(t => {
+                if (t) t.style.display = 'none';
+            });
             
             if (tab === 'upload') {
                 uploadTab.style.display = 'block';
-                scrapeTab.style.display = 'none';
                 uploadBtn.style.background = 'var(--primary-accent)';
                 uploadBtn.style.color = 'white';
                 uploadBtn.classList.remove('edit-cancel-btn');
-                scrapeBtn.style.background = 'transparent';
-                scrapeBtn.style.color = 'var(--text-muted)';
-                scrapeBtn.classList.add('edit-cancel-btn');
-            } else {
-                uploadTab.style.display = 'none';
+            } else if (tab === 'scrape') {
                 scrapeTab.style.display = 'block';
-                uploadBtn.style.background = 'transparent';
-                uploadBtn.style.color = 'var(--text-muted)';
-                uploadBtn.classList.add('edit-cancel-btn');
                 scrapeBtn.style.background = 'var(--primary-accent)';
                 scrapeBtn.style.color = 'white';
                 scrapeBtn.classList.remove('edit-cancel-btn');
+            } else if (tab === 'settings') {
+                settingsTab.style.display = 'flex';
+                settingsBtn.style.background = 'var(--primary-accent)';
+                settingsBtn.style.color = 'white';
+                settingsBtn.classList.remove('edit-cancel-btn');
             }
+        }
+
+        // --- Project Settings JS Methods ---
+        let currentProjectSettings = {
+            folders: [],
+            security_preset: "ask_always",
+            artifact_review_policy: "ask_always",
+            search_engine: "web_crawling",
+            searxng_url: ""
+        };
+
+        function toggleSearxUrlVisibility() {
+            const engine = document.getElementById('project-search-engine').value;
+            const container = document.getElementById('searxng-url-container');
+            if (container) {
+                if (engine === 'web_crawling') {
+                    container.style.display = 'flex';
+                } else {
+                    container.style.display = 'none';
+                }
+            }
+        }
+
+        async function loadProjectSettings() {
+            try {
+                const res = await fetch('/api/project_settings');
+                const data = await res.json();
+                if (data.error) {
+                    console.error("Error loading project settings:", data.error);
+                    return;
+                }
+                currentProjectSettings = data;
+                
+                // Populate form controls
+                document.getElementById('project-security-preset').value = data.security_preset || 'ask_always';
+                document.getElementById('project-review-policy').value = data.artifact_review_policy || 'ask_always';
+                document.getElementById('project-search-engine').value = data.search_engine || 'web_crawling';
+                document.getElementById('project-searxng-url').value = data.searxng_url || '';
+                
+                toggleSearxUrlVisibility();
+                renderProjectFolders();
+            } catch (e) {
+                console.error("Failed to load project settings:", e);
+            }
+        }
+
+        function renderProjectFolders() {
+            const list = document.getElementById('project-folders-list');
+            if (!list) return;
+            list.innerHTML = '';
+            
+            currentProjectSettings.folders.forEach((folder, idx) => {
+                const isDefault = idx === 0; // The first folder is the default workspace root
+                const row = document.createElement('div');
+                row.style.display = 'flex';
+                row.style.justifyContent = 'space-between';
+                row.style.alignItems = 'center';
+                row.style.background = 'rgba(0,0,0,0.2)';
+                row.style.border = '1px solid rgba(255,255,255,0.04)';
+                row.style.padding = '8px 12px';
+                row.style.borderRadius = '8px';
+                row.style.fontSize = '0.75rem';
+                row.style.fontFamily = 'monospace';
+                
+                row.innerHTML = `
+                    <div style="display: flex; align-items: center; gap: 8px; color: var(--text-main); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1;">
+                        <span style="display: inline-flex; align-items: center; width: 14px; height: 14px; color: var(--text-muted); opacity: 0.85; vertical-align: middle;">${getLogIconSvg('folder')}</span>
+                        <span title="${folder}">${folder}</span>
+                    </div>
+                    ${isDefault ? '<span style="font-size: 0.65rem; color: var(--text-muted); opacity: 0.8; font-family: \'Outfit\', sans-serif;">Default</span>' : `
+                        <span onclick="removeProjectFolder('${folder.replace(/\\/g, '\\\\')}')" style="cursor: pointer; opacity: 0.6; font-size: 1.1rem; font-family: sans-serif; line-height: 1;" title="Remove Folder">&times;</span>
+                    `}
+                `;
+                list.appendChild(row);
+            });
+        }
+
+        async function saveProjectSettings() {
+            currentProjectSettings.security_preset = document.getElementById('project-security-preset').value;
+            currentProjectSettings.artifact_review_policy = document.getElementById('project-review-policy').value;
+            currentProjectSettings.search_engine = document.getElementById('project-search-engine').value;
+            currentProjectSettings.searxng_url = document.getElementById('project-searxng-url').value;
+            
+            try {
+                const res = await fetch('/api/project_settings', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(currentProjectSettings)
+                });
+                const data = await res.json();
+                if (data.error) {
+                    showCustomAlert("Error Saving Settings", data.error);
+                } else {
+                    currentProjectSettings = data.settings;
+                    renderProjectFolders();
+                }
+            } catch (e) {
+                console.error("Failed to save project settings:", e);
+                showCustomAlert("Error Saving Settings", "Failed to connect to backend.");
+            }
+        }
+
+        async function addProjectFolder() {
+            const folderPath = prompt("Enter absolute path to additional workspace folder:");
+            if (!folderPath || !folderPath.trim()) return;
+            
+            const cleanPath = folderPath.trim();
+            if (currentProjectSettings.folders.includes(cleanPath)) {
+                showCustomAlert("Folder Exists", "This folder is already in the workspace.");
+                return;
+            }
+            
+            currentProjectSettings.folders.push(cleanPath);
+            await saveProjectSettings();
+        }
+
+        async function removeProjectFolder(folder) {
+            currentProjectSettings.folders = currentProjectSettings.folders.filter(f => f !== folder);
+            await saveProjectSettings();
         }
 
         // --- loadDataBankFiles ---
@@ -7108,13 +7916,13 @@ async function loadDataBankFiles() {
                         return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
                     };
                     
-                    const docTypeIcon = file.source_type === 'url' ? '🔗' : '📄';
+                    const docTypeIcon = `<span style="display: inline-flex; align-items: center; width: 14px; height: 14px; color: var(--text-muted); opacity: 0.85; vertical-align: middle; margin-right: 6px;">${file.source_type === 'url' ? getLogIconSvg('webpage') : getLogIconSvg('file')}</span>`;
                     const fileDate = new Date(file.timestamp * 1000).toLocaleDateString();
                     
                     row.innerHTML = `
                         <div style="flex: 1; min-width: 0; padding-right: 10px;">
                             <div style="font-weight: 500; color: var(--text-main); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;" title="${file.name}">
-                                ${docTypeIcon} ${file.name}
+                                ${docTypeIcon}${file.name}
                             </div>
                             <div style="font-size: 0.7rem; color: var(--text-muted); margin-top: 3px; display: flex; gap: 10px;">
                                 <span>Size: ${formatBytes(file.size)}</span>
@@ -7513,6 +8321,36 @@ function purgeDataBank() {
            ========================================================================== */
 
         let isGenerating = false;
+        let chatAbortController = null;
+        
+        function setGenerating(val) {
+            isGenerating = val;
+            const sendBtn = document.querySelector('.send-btn');
+            const stopBtn = document.querySelector('.stop-btn');
+            if (val) {
+                if (sendBtn) sendBtn.style.display = 'none';
+                if (stopBtn) stopBtn.style.display = 'flex';
+            } else {
+                if (sendBtn) sendBtn.style.display = 'flex';
+                if (stopBtn) stopBtn.style.display = 'none';
+            }
+        }
+
+        async function cancelGeneration() {
+            if (chatAbortController) {
+                chatAbortController.abort();
+                chatAbortController = null;
+            }
+            try {
+                await fetch('/api/cancel_chat', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ session_id: sessionId })
+                });
+            } catch (e) {
+                console.error("Error cancelling chat:", e);
+            }
+        }
 
 // Better textarea handling for mobile and desktop
         userInput.addEventListener('input', function() {

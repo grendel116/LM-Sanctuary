@@ -11,6 +11,8 @@ import json
 import time
 from google.genai import types
 
+cancelled_sessions = set()
+
 def _get_safe_local_path(image_url: str) -> str:
     """Converts an image URL into a local path relative to the workspace,
     supporting subdirectories like 'portraits'.
@@ -86,15 +88,20 @@ _LOCAL_DIRECTIVE_PROMPT = (
     "3. `[read_file(path=\"...\")]` - Read file content.\n"
     "4. `[write_file(path=\"...\", content=\"...\")]` - Create/overwrite file.\n"
     "5. `[replace_in_file(path=\"...\", old_text=\"...\", new_text=\"...\")]` - Replace text in file.\n"
-    "6. `[run_shell_command(command=\"...\")]` - Run shell command.\n"
-    "7. `[get_workspace_structure()]` - View directory tree.\n"
-    "8. `[search_codebase(keyword=\"...\")]` - Search keyword in codebase.\n"
-    "9. `[search_github(query=\"...\")]` - Search GitHub for repositories.\n"
-    "10. `[search_arxiv(query=\"...\")]` - Search arXiv for research papers.\n"
-    "11. `[search_hacker_news(query=\"...\")]` - Search Hacker News for developer discussions.\n"
-    "12. `[generate_local_image(prompt=\"...\")]` - Generate scene of yourself. (MUST be the ONLY text in your response)\n"
-    "13. `[generate_imagen(prompt=\"...\", aspect_ratio=\"...\")]` - Generate landscapes or objects.\n"
-    "14. `[apply_comfy_workflow(workflow_path=\"...\", parameters={...}, save_path=\"...\")]` - Apply custom ComfyUI workflow.\n\n"
+    "6. `[replace_file_content(path=\"...\", start_line=..., end_line=..., target_content=\"...\", replacement_content=\"...\")]` - Replace a specific block of lines in a file (preferred over replace_in_file for code edits).\n"
+    "7. `[multi_replace_file_content(path=\"...\", replacement_chunks=[{\"start_line\": ..., \"end_line\": ..., \"target_content\": \"...\", \"replacement_content\": \"...\"}, ...])]` - Apply multiple non-contiguous line-bounded replacements in a single turn.\n"
+    "8. `[run_shell_command(command=\"...\")]` - Run shell command synchronously (blocks server for up to 30s).\n"
+    "9. `[run_command_async(command=\"...\")]` - Run command asynchronously in the background. Returns task_id immediately.\n"
+    "10. `[manage_task(action=\"...\", task_id=\"...\", input_val=\"...\")]` - Manage async tasks (action options: 'list', 'status', 'kill', 'send_input').\n"
+    "11. `[wait_task(task_id=\"...\", timeout=...)]` - Block and wait for background task output up to timeout (default 10.0).\n"
+    "12. `[get_workspace_structure()]` - View directory tree.\n"
+    "13. `[search_codebase(keyword=\"...\")]` - Search keyword in codebase.\n"
+    "14. `[search_github(query=\"...\")]` - Search GitHub for repositories.\n"
+    "15. `[search_arxiv(query=\"...\")]` - Search arXiv for research papers.\n"
+    "16. `[search_hacker_news(query=\"...\")]` - Search Hacker News for developer discussions.\n"
+    "17. `[generate_local_image(prompt=\"...\")]` - Generate scene of yourself. (MUST be the ONLY text in your response)\n"
+    "18. `[generate_imagen(prompt=\"...\", aspect_ratio=\"...\")]` - Generate landscapes or objects.\n"
+    "19. `[apply_comfy_workflow(workflow_path=\"...\", parameters={...}, save_path=\"...\")]` - Apply custom ComfyUI workflow.\n\n"
     "Rules:\n"
     "- Output exactly one tool call tag per turn when needed.\n"
     "- Once tool output is provided, answer directly in natural language without repeating the tag.\n"
@@ -129,6 +136,51 @@ def _parse_emulated_tool_call(tool_name: str, args_str: str) -> dict:
         if (val.startswith('"') and val.endswith('"')) or (val.startswith("'") and val.endswith("'")):
             val = val[1:-1]
         return {"args": [val], "kwargs": {}}
+
+
+def _compact_session_history(adk_session, keep_turns: int = 3):
+    """Prunes function calls and function response events from older turns to prevent token blowout."""
+    if not adk_session or not hasattr(adk_session, 'events') or not adk_session.events:
+        return
+        
+    # Chronological list of indices of user messages (excluding tool responses authored by user)
+    user_event_indices = []
+    for idx, ev in enumerate(adk_session.events):
+        if ev.author.lower() == 'user':
+            is_tool_response = False
+            if ev.content and ev.content.parts:
+                for part in ev.content.parts:
+                    if getattr(part, 'function_response', None):
+                        is_tool_response = True
+                        break
+            if not is_tool_response:
+                user_event_indices.append(idx)
+                
+    # If history contains more than the keep threshold of user turns, prune old tool trace logs
+    if len(user_event_indices) > keep_turns:
+        # The cutoff index is the start of the first kept turn
+        cutoff_idx = user_event_indices[-keep_turns]
+        
+        new_events = []
+        for idx, ev in enumerate(adk_session.events):
+            if idx >= cutoff_idx:
+                new_events.append(ev)
+                continue
+                
+            # For events before the cutoff, skip tool calls and responses entirely
+            is_tool_event = False
+            if ev.content and ev.content.parts:
+                for part in ev.content.parts:
+                    if getattr(part, 'function_call', None) or getattr(part, 'function_response', None):
+                        is_tool_event = True
+                        break
+            if not is_tool_event:
+                new_events.append(ev)
+                
+        pruned_count = len(adk_session.events) - len(new_events)
+        if pruned_count > 0:
+            print(f"[COMPACTION] Pruned {pruned_count} historical tool trace events prior to user turn index {cutoff_idx}.", flush=True)
+            adk_session.events = new_events
 
 
 class BaseProgramRunner:
@@ -304,6 +356,19 @@ class BaseProgramRunner:
                     "\n\n# PASTED LINK DIRECTIVE (MANDATORY)\n"
                     "User shared links. You MUST use the `read_webpage` tool to fetch their content before responding. "
                     "Do NOT guess, assume, or pretend to read the URL without calling the tool.\n"
+                )
+                
+            # Intercept workspace/file/mod queries and direct the model to run exploration tools
+            msg_lower = user_message.lower()
+            project_keywords = ["mod", "code", "file", "folder", "directory", "project", "workspace", "repo", "program", "script", "source"]
+            if any(kw in msg_lower for kw in project_keywords):
+                instructions += (
+                    "\n\n# WORKSPACE EXPLORATION DIRECTIVE (MANDATORY)\n"
+                    "The user is asking about their files, modifications (mods), code, or project folders. "
+                    "You have direct access to their workspace folders. You MUST use the appropriate tool "
+                    "(e.g., `[get_workspace_structure()]` to list workspace files, or `[search_codebase(keyword=\"...\")]` "
+                    "to search for specific terms) to inspect their files before replying. "
+                    "Do NOT answer blindly or ask the user where they are—proactively look into the project folders first using your tools.\n"
                 )
 
         return instructions
@@ -599,6 +664,9 @@ class GoogleAdkRunner(BaseProgramRunner):
             session_id=session_id,
             new_message=content,
         ):
+            if session_id in cancelled_sessions:
+                cancelled_sessions.discard(session_id)
+                raise asyncio.CancelledError("Session cancelled by user request.")
             if event.content and event.content.parts:
                 for part in event.content.parts:
                     if part.text:
@@ -674,6 +742,9 @@ class GoogleAdkRunner(BaseProgramRunner):
                 app_name=self.app_name, user_id="user", session_id=session_id
             )
         adk_session = session_dict[self.app_name]["user"][session_id]
+        
+        # Run history compaction to keep contexts compact and prevent token blowout
+        _compact_session_history(adk_session)
 
         # Resolve media upload if present
         file_part = None
@@ -741,6 +812,9 @@ class GoogleAdkRunner(BaseProgramRunner):
             tool_calls = []
             
             for iteration in range(10):
+                if session_id in cancelled_sessions:
+                    cancelled_sessions.discard(session_id)
+                    raise asyncio.CancelledError("Session cancelled by user request.")
                 sys_inst = self._get_system_instructions(user_message=new_message_text)
                 if rag_context:
                     sys_inst += f"\n\n# KNOWLEDGE BASE CONTEXT\nUse the following verified context from your Data Bank to help answer questions if relevant:\n{rag_context}\n"
@@ -839,33 +913,52 @@ class GoogleAdkRunner(BaseProgramRunner):
                     break
                     
                 import re
-                match = re.search(r'\[(\w+)\((.*?)\)\]', bot_response_text)
+                import uuid
+                import asyncio
+                
+                # Find all tool calls
+                matches = list(re.finditer(r'\[(\w+)\((.*?)\)\]', bot_response_text))
                 legacy_portrait = False
-                if not match:
+                if not matches:
                     match_legacy = re.search(r'<portrait>(.*?)</portrait>', bot_response_text)
                     if match_legacy:
                         legacy_portrait = True
-                        match = match_legacy
+                        matches = [match_legacy]
                         
                 executed_calls_count = len([tc for tc in tool_calls if tc.get('type') == 'call'])
-                if match and executed_calls_count < 5:
-                    if legacy_portrait:
-                        tool_name = "generate_local_image"
-                        args_str = f"prompt={match.group(1)}"
-                    else:
-                        tool_name = match.group(1)
-                        if tool_name == "generate_companion_portrait":
+                if matches and executed_calls_count < 10:
+                    # Check if any is an image generation tool
+                    has_image_gen = False
+                    for m in matches:
+                        if legacy_portrait:
                             tool_name = "generate_local_image"
-                        elif tool_name == "generate_general_image":
-                            tool_name = "generate_imagen"
-                        args_str = match.group(2)
-                        
-                    parsed_args = _parse_emulated_tool_call(tool_name, args_str)
-                    import tools
-                    func = getattr(tools, tool_name, None)
-                    
-                    if func:
+                        else:
+                            tool_name = m.group(1)
+                            if tool_name == "generate_companion_portrait":
+                                tool_name = "generate_local_image"
+                            elif tool_name == "generate_general_image":
+                                tool_name = "generate_imagen"
                         if tool_name in ("generate_local_image", "generate_imagen", "generate_companion_portrait", "generate_general_image"):
+                            has_image_gen = True
+                            break
+                            
+                    if has_image_gen:
+                        m = matches[0]
+                        if legacy_portrait:
+                            tool_name = "generate_local_image"
+                            args_str = f"prompt={m.group(1)}"
+                        else:
+                            tool_name = m.group(1)
+                            if tool_name == "generate_companion_portrait":
+                                tool_name = "generate_local_image"
+                            elif tool_name == "generate_general_image":
+                                tool_name = "generate_imagen"
+                            args_str = m.group(2)
+                            
+                        parsed_args = _parse_emulated_tool_call(tool_name, args_str)
+                        import tools
+                        func = getattr(tools, tool_name, None)
+                        if func:
                             companion_content = types.Content(role="model", parts=[types.Part.from_text(text=bot_response_text)])
                             companion_event = Event(
                                 author=self.runner.agent.name,
@@ -877,7 +970,7 @@ class GoogleAdkRunner(BaseProgramRunner):
                             adk_session.events.append(companion_event)
                             
                             new_markdown = func(*parsed_args["args"], **parsed_args["kwargs"])
-                            original_tag = match.group(0)
+                            original_tag = m.group(0)
                             bot_response_text = bot_response_text.replace(original_tag, new_markdown)
                             
                             call_id = f"call_{int(time.time())}"
@@ -922,30 +1015,47 @@ class GoogleAdkRunner(BaseProgramRunner):
                             
                             companion_event.content.parts[0].text = self._ensure_images_are_embedded(bot_response_text)
                             break
-                        else:
-                            text_before = bot_response_text[:match.start()].strip()
-                            if text_before:
-                                companion_content = types.Content(role="model", parts=[types.Part.from_text(text=text_before)])
-                                companion_event = Event(
-                                    author=self.runner.agent.name,
-                                    content=companion_content,
-                                    invocation_id=user_event.invocation_id,
-                                    id=f"companion-{int(time.time())}",
-                                    timestamp=time.time()
-                                )
-                                adk_session.events.append(companion_event)
+                    else:
+                        # Parallel execution for non-image tools
+                        first_match_start = min(m.start() for m in matches)
+                        text_before = bot_response_text[:first_match_start].strip()
+                        if text_before:
+                            companion_content = types.Content(role="model", parts=[types.Part.from_text(text=text_before)])
+                            companion_event = Event(
+                                author=self.runner.agent.name,
+                                content=companion_content,
+                                invocation_id=user_event.invocation_id,
+                                id=f"companion-{int(time.time())}",
+                                timestamp=time.time()
+                            )
+                            adk_session.events.append(companion_event)
                             
+                        async def execute_tool(t_name, a_str):
+                            if session_id in cancelled_sessions:
+                                raise asyncio.CancelledError("Session cancelled by user request.")
+                            parsed_args = _parse_emulated_tool_call(t_name, a_str)
+                            import tools
+                            f = getattr(tools, t_name, None)
+                            if not f:
+                                return t_name, parsed_args["kwargs"], f"Error: Tool '{t_name}' not found."
                             try:
-                                tool_output = func(*parsed_args["args"], **parsed_args["kwargs"])
+                                loop = asyncio.get_event_loop()
+                                output = await loop.run_in_executor(None, lambda: f(*parsed_args["args"], **parsed_args["kwargs"]))
                             except Exception as ex:
-                                tool_output = f"Error executing tool: {ex}"
-                                
-                            call_id = f"call_{int(time.time())}"
+                                output = f"Error executing tool: {ex}"
+                            return t_name, parsed_args["kwargs"], output
+                            
+                        # Schedule all tools concurrently
+                        tasks = [execute_tool(m.group(1), m.group(2)) for m in matches]
+                        results = await asyncio.gather(*tasks)
+                        
+                        for idx, (t_name, t_args, t_output) in enumerate(results):
+                            call_id = f"call_{int(time.time())}_{idx}_{uuid.uuid4().hex[:4]}"
                             
                             fc_part = types.Part(
                                 function_call=types.FunctionCall(
-                                    name=tool_name,
-                                    args=parsed_args["kwargs"],
+                                    name=t_name,
+                                    args=t_args,
                                     id=call_id
                                 )
                             )
@@ -953,15 +1063,15 @@ class GoogleAdkRunner(BaseProgramRunner):
                                 author=self.runner.agent.name,
                                 content=types.Content(role="model", parts=[fc_part]),
                                 invocation_id=user_event.invocation_id,
-                                id=f"companion-call-{int(time.time())}",
+                                id=f"companion-call-{int(time.time())}-{idx}",
                                 timestamp=time.time()
                             )
                             adk_session.events.append(fc_event)
                             
                             fr_part = types.Part(
                                 function_response=types.FunctionResponse(
-                                    name=tool_name,
-                                    response={"result": tool_output},
+                                    name=t_name,
+                                    response={"result": t_output},
                                     id=call_id
                                 )
                             )
@@ -969,29 +1079,30 @@ class GoogleAdkRunner(BaseProgramRunner):
                                 author=self.runner.agent.name,
                                 content=types.Content(role="user", parts=[fr_part]),
                                 invocation_id=user_event.invocation_id,
-                                id=f"companion-resp-{int(time.time())}",
+                                id=f"companion-resp-{int(time.time())}-{idx}",
                                 timestamp=time.time()
                             )
                             adk_session.events.append(fr_event)
                             
                             tool_calls.append({
                                 'type': 'call',
-                                'name': tool_name,
-                                'args': parsed_args["kwargs"],
+                                'name': t_name,
+                                'args': t_args,
                                 'id': call_id
                             })
                             tool_calls.append({
                                 'type': 'response',
-                                'name': tool_name,
-                                'response': tool_output,
+                                'name': t_name,
+                                'response': str(t_output),
                                 'id': call_id
                             })
-                            continue
-                    else:
-                        break
+                        continue
                 else:
-                    if match:
+                    if matches:
                         bot_response_text = re.sub(r'\[\w+\(.*?\)\]', '', bot_response_text).strip()
+                    else:
+                        bot_response_text = re.sub(r'\[\w+\(.*?\)\]', '', bot_response_text).strip()
+                        
                     companion_content = types.Content(role="model", parts=[types.Part.from_text(text=bot_response_text)])
                     companion_event = Event(
                         author=self.runner.agent.name,
@@ -1595,6 +1706,9 @@ class OpenSourceRunner(BaseProgramRunner):
         tool_calls = []
         
         for iteration in range(10):
+            if session_id in cancelled_sessions:
+                cancelled_sessions.discard(session_id)
+                raise asyncio.CancelledError("Session cancelled by user request.")
             sys_inst = self._get_system_instructions(inversion_directive, user_message=new_message_text)
             if rag_context:
                 sys_inst += f"\n\n# KNOWLEDGE BASE CONTEXT\nUse the following verified context from your Data Bank to help answer questions if relevant:\n{rag_context}\n"
@@ -1679,33 +1793,52 @@ class OpenSourceRunner(BaseProgramRunner):
                 break
             
             import re
-            match = re.search(r'\[(\w+)\((.*?)\)\]', bot_response_text)
+            import uuid
+            import asyncio
+            
+            # Find all tool calls
+            matches = list(re.finditer(r'\[(\w+)\((.*?)\)\]', bot_response_text))
             legacy_portrait = False
-            if not match:
+            if not matches:
                 match_legacy = re.search(r'<portrait>(.*?)</portrait>', bot_response_text)
                 if match_legacy:
                     legacy_portrait = True
-                    match = match_legacy
+                    matches = [match_legacy]
                     
             executed_calls_count = len([tc for tc in tool_calls if tc.get('type') == 'call'])
-            if match and executed_calls_count < 5:
-                if legacy_portrait:
-                    tool_name = "generate_local_image"
-                    args_str = f"prompt={match.group(1)}"
-                else:
-                    tool_name = match.group(1)
-                    if tool_name == "generate_companion_portrait":
+            if matches and executed_calls_count < 10:
+                # Check for image generation tool
+                has_image_gen = False
+                for m in matches:
+                    if legacy_portrait:
                         tool_name = "generate_local_image"
-                    elif tool_name == "generate_general_image":
-                        tool_name = "generate_imagen"
-                    args_str = match.group(2)
-                    
-                parsed_args = _parse_emulated_tool_call(tool_name, args_str)
-                import tools
-                func = getattr(tools, tool_name, None)
-                
-                if func:
+                    else:
+                        tool_name = m.group(1)
+                        if tool_name == "generate_companion_portrait":
+                            tool_name = "generate_local_image"
+                        elif tool_name == "generate_general_image":
+                            tool_name = "generate_imagen"
                     if tool_name in ("generate_local_image", "generate_imagen", "generate_companion_portrait", "generate_general_image"):
+                        has_image_gen = True
+                        break
+                        
+                if has_image_gen:
+                    m = matches[0]
+                    if legacy_portrait:
+                        tool_name = "generate_local_image"
+                        args_str = f"prompt={m.group(1)}"
+                    else:
+                        tool_name = m.group(1)
+                        if tool_name == "generate_companion_portrait":
+                            tool_name = "generate_local_image"
+                        elif tool_name == "generate_general_image":
+                            tool_name = "generate_imagen"
+                        args_str = m.group(2)
+                        
+                    parsed_args = _parse_emulated_tool_call(tool_name, args_str)
+                    import tools
+                    func = getattr(tools, tool_name, None)
+                    if func:
                         bot_msg_intermediate = {
                             'role': 'companion',
                             'text': bot_response_text,
@@ -1715,7 +1848,7 @@ class OpenSourceRunner(BaseProgramRunner):
                         self.sessions_history[session_id].append(bot_msg_intermediate)
                         
                         new_markdown = func(*parsed_args["args"], **parsed_args["kwargs"])
-                        original_tag = match.group(0)
+                        original_tag = m.group(0)
                         bot_response_text = bot_response_text.replace(original_tag, new_markdown)
                         
                         call_id = f"call_{int(time.time())}"
@@ -1737,51 +1870,69 @@ class OpenSourceRunner(BaseProgramRunner):
                         bot_msg_intermediate['tool_calls'] = t_calls
                         bot_msg_intermediate['text'] = self._ensure_images_are_embedded(bot_response_text)
                         break
-                    else:
-                        text_before = bot_response_text[:match.start()].strip()
-                        bot_msg_intermediate = {
-                            'role': 'companion',
-                            'text': text_before,
-                            'tool_calls': [],
-                            'timestamp': time.time()
-                        }
-                        self.sessions_history[session_id].append(bot_msg_intermediate)
-                        
+                else:
+                    # Parallel execution for non-image tools
+                    first_match_start = min(m.start() for m in matches)
+                    text_before = bot_response_text[:first_match_start].strip()
+                    
+                    bot_msg_intermediate = {
+                        'role': 'companion',
+                        'text': text_before,
+                        'tool_calls': [],
+                        'timestamp': time.time()
+                    }
+                    self.sessions_history[session_id].append(bot_msg_intermediate)
+                    
+                    async def execute_tool(t_name, a_str):
+                        if session_id in cancelled_sessions:
+                            raise asyncio.CancelledError("Session cancelled by user request.")
+                        parsed_args = _parse_emulated_tool_call(t_name, a_str)
+                        import tools
+                        f = getattr(tools, t_name, None)
+                        if not f:
+                            return t_name, parsed_args["kwargs"], f"Error: Tool '{t_name}' not found."
                         try:
-                            tool_output = func(*parsed_args["args"], **parsed_args["kwargs"])
+                            loop = asyncio.get_event_loop()
+                            output = await loop.run_in_executor(None, lambda: f(*parsed_args["args"], **parsed_args["kwargs"]))
                         except Exception as ex:
-                            tool_output = f"Error executing tool: {ex}"
-                            
-                        call_id = f"call_{int(time.time())}"
-                        t_calls = [
+                            output = f"Error executing tool: {ex}"
+                        return t_name, parsed_args["kwargs"], output
+                        
+                    # Schedule all tools concurrently
+                    tasks = [execute_tool(m.group(1), m.group(2)) for m in matches]
+                    results = await asyncio.gather(*tasks)
+                    
+                    t_calls = []
+                    for idx, (t_name, t_args, t_output) in enumerate(results):
+                        call_id = f"call_{int(time.time())}_{idx}_{uuid.uuid4().hex[:4]}"
+                        t_calls.extend([
                             {
                                 'type': 'call',
-                                'name': tool_name,
-                                'args': parsed_args["kwargs"],
+                                'name': t_name,
+                                'args': t_args,
                                 'id': call_id
                             },
                             {
                                 'type': 'response',
-                                'name': tool_name,
-                                'response': tool_output,
+                                'name': t_name,
+                                'response': str(t_output),
                                 'id': call_id
                             }
-                        ]
-                        tool_calls.extend(t_calls)
-                        bot_msg_intermediate['tool_calls'] = t_calls
+                        ])
                         
                         tool_resp_msg = {
                             'role': 'user',
-                            'text': f"[Tool Response from {tool_name}]:\n{tool_output}",
+                            'text': f"[Tool Response from {t_name}]:\n{t_output}",
                             'tool_calls': [],
                             'timestamp': time.time()
                         }
                         self.sessions_history[session_id].append(tool_resp_msg)
-                        continue
-                else:
-                    break
+                        
+                    tool_calls.extend(t_calls)
+                    bot_msg_intermediate['tool_calls'] = t_calls
+                    continue
             else:
-                if match:
+                if matches:
                     bot_response_text = re.sub(r'\[\w+\(.*?\)\]', '', bot_response_text).strip()
                 bot_msg = {
                     'role': 'companion',

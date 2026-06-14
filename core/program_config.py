@@ -6,7 +6,9 @@ from tools import (
     read_file, write_file, replace_in_file, run_shell_command, 
     get_workspace_structure, search_codebase, read_webpage, google_search,
     web_search, apply_comfy_workflow, generate_local_image, generate_imagen,
-    search_github, search_arxiv, search_hacker_news
+    search_github, search_arxiv, search_hacker_news,
+    replace_file_content, multi_replace_file_content, run_command_async,
+    manage_task, wait_task
 )
 
 # Ensure the parent directory is in sys.path so we can import variables package
@@ -216,6 +218,8 @@ root_program = LlmProgram(
         google_search, web_search, read_file, write_file, replace_in_file, 
         run_shell_command, get_workspace_structure, search_codebase, 
         read_webpage, apply_comfy_workflow, generate_local_image, 
-        generate_imagen, search_github, search_arxiv, search_hacker_news
+        generate_imagen, search_github, search_arxiv, search_hacker_news,
+        replace_file_content, multi_replace_file_content, run_command_async,
+        manage_task, wait_task
     ],
 )
