@@ -43,11 +43,8 @@ These are the concrete abilities your companion uses to do work on your machine.
 * **Task Manager** (`manage_task` / `wait_task`): Monitor, write to stdin, kill, or block and wait on active background commands.
 
 ### Network Grounding & Research (Online)
-* **Hybrid Web Search** (`web_search`): A unified concurrent search client that queries Google Grounding Search, SearXNG, Baidu, and Wikipedia simultaneously. It aggregates, deduplicates URLs, collapses mobile/desktop paths, and falls back gracefully to Wikipedia if primary web queries are blocked or empty.
+* **Hybrid Web Search** (`web_search`): A unified concurrent search client that queries Google Grounding Search, SearXNG, Baidu, and Wikipedia simultaneously. It aggregates, deduplicates URLs, collapses mobile/desktop paths, and falls back gracefully to Wikipedia. Supports query prefix routing for specific platforms (e.g. `github: query`, `arxiv: query`, `hn: query`) and dynamically queries them when keyword hints are detected.
 * **Read URL** (`read_webpage`): Fetch and extract text content from any webpage.
-* **Search GitHub** (`search_github`): Search for repository trends, stars, forks, and descriptions.
-* **Search arXiv** (`search_arxiv`): Retrieve publication titles, dates, abstracts, and links for research papers.
-* **Search Hacker News** (`search_hacker_news`): Check story titles, scores, and comment counts for developer discussions.
 
 ### Generative Media (Local & Cloud)
 * **Render Portrait** (`generate_local_image`): Render yourself in a scene using ComfyUI.

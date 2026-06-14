@@ -384,6 +384,8 @@ def scrape_yandex(query: str) -> list:
 @track_tool_activity
 def web_search(query: str) -> str:
     """Searches the web and returns raw hits containing titles, links, and snippets.
+    Supports routing via prefix queries (e.g. 'github: query', 'arxiv: query', 'hn: query')
+    or concurrent hybrid web blending for standard queries.
 
     Args:
         query: The search query.
@@ -395,6 +397,7 @@ def web_search(query: str) -> str:
     import json
     import requests
     import concurrent.futures
+    import time
     
     # Read project settings
     search_engine = "web_crawling"
@@ -413,9 +416,7 @@ def web_search(query: str) -> str:
     if search_engine in ("sovereign_hybrid", "sovereign_search", "searxng", "google_grounding"):
         search_engine = "web_crawling"
 
-    results_pool = []
-
-    def run_google():
+    def run_google(q):
         gemini_api_key = os.getenv("GEMINI_API_KEY")
         if not gemini_api_key:
             return []
@@ -434,7 +435,7 @@ def web_search(query: str) -> str:
             
             response = client.models.generate_content(
                 model=DEFAULT_GEMINI_MODEL,
-                contents=f"Perform a search for: {query}. Output only a list of search hits with their titles, URLs, and very brief snippets.",
+                contents=f"Perform a search for: {q}. Output only a list of search hits with their titles, URLs, and very brief snippets.",
                 config=config
             )
             
@@ -452,7 +453,7 @@ def web_search(query: str) -> str:
                             "source": "Google"
                         })
             
-            # Fallback parser if structured metadata was missing (e.g. on thinking models) but response text exists
+            # Fallback parser if structured metadata was missing
             if not g_results and response.text:
                 import re
                 lines = response.text.split('\n')
@@ -490,11 +491,11 @@ def web_search(query: str) -> str:
             print(f"[Google Grounding] Error: {e}")
             return []
 
-    def run_searxng():
+    def run_searxng(q):
         try:
-            hits = query_searxng(query, base_url=searxng_url, engines="baidu,yandex,bing")
+            hits = query_searxng(q, base_url=searxng_url, engines="baidu,yandex,bing")
             if not hits:
-                hits = query_searxng(query, base_url=searxng_url)
+                hits = query_searxng(q, base_url=searxng_url)
             return [{
                 "title": h["title"],
                 "url": h["url"],
@@ -505,9 +506,9 @@ def web_search(query: str) -> str:
             print(f"[SearXNG] Error: {e}")
             return []
 
-    def run_baidu():
+    def run_baidu(q):
         try:
-            hits = scrape_baidu(query)
+            hits = scrape_baidu(q)
             return [{
                 "title": h["title"],
                 "url": h["url"],
@@ -518,7 +519,7 @@ def web_search(query: str) -> str:
             print(f"[Baidu Scrape] Error: {e}")
             return []
 
-    def run_wikipedia():
+    def run_wikipedia(q):
         try:
             url = "https://en.wikipedia.org/w/api.php"
             headers = {
@@ -527,7 +528,7 @@ def web_search(query: str) -> str:
             params = {
                 "action": "query",
                 "list": "search",
-                "srsearch": query,
+                "srsearch": q,
                 "format": "json",
                 "utf8": 1
             }
@@ -550,64 +551,187 @@ def web_search(query: str) -> str:
             print(f"[Wikipedia] Error: {e}")
         return []
 
-    if search_engine == "web_crawling":
-        # Run all available engines concurrently using our global persistent executor
-        futures = {
-            _search_executor.submit(run_google): "Google",
-            _search_executor.submit(run_searxng): "SearXNG",
-            _search_executor.submit(run_baidu): "Baidu",
-            _search_executor.submit(run_wikipedia): "Wikipedia"
-        }
-        
-        # Wait for threads to finish up to 8.0 seconds without throwing TimeoutError
-        done, not_done = concurrent.futures.wait(futures.keys(), timeout=8.0)
-        
-        for future in done:
-            source_name = futures[future]
-            try:
-                data_hits = future.result()
-                results_pool.extend(data_hits)
-            except Exception as e:
-                print(f"[{source_name}] Thread error: {e}")
-                
-        for future in not_done:
-            source_name = futures[future]
-            print(f"[{source_name}] Thread timed out (exceeded 8.0s timeout limit).")
+    def run_github(q):
+        try:
+            url = "https://api.github.com/search/repositories"
+            params = {
+                "q": q,
+                "sort": "stars",
+                "order": "desc",
+                "per_page": 5
+            }
+            headers = {
+                "Accept": "application/vnd.github.v3+json",
+                "User-Agent": "ProgramSanctuary/1.0"
+            }
+            res = requests.get(url, params=params, headers=headers, timeout=5)
+            if res.status_code == 200:
+                items = res.json().get("items", [])
+                results = []
+                for repo in items:
+                    name = repo.get("full_name", "")
+                    stars = repo.get("stargazers_count", 0)
+                    forks = repo.get("forks_count", 0)
+                    desc = repo.get("description", "") or "No description."
+                    link = repo.get("html_url", "")
+                    results.append({
+                        "title": name,
+                        "url": link,
+                        "content": f"Stars: {stars}, Forks: {forks} | Description: {desc}",
+                        "source": "GitHub"
+                    })
+                return results
+        except Exception as e:
+            print(f"[GitHub] Error: {e}")
+        return []
+
+    def run_arxiv(q):
+        import re
+        import xml.etree.ElementTree as ET
+        try:
+            search_words = re.findall(r'\w+', q)
+            if not search_words:
+                return []
+            arxiv_query = " AND ".join(f"all:{word}" for word in search_words)
+            url = "http://export.arxiv.org/api/query"
+            params = {
+                "search_query": arxiv_query,
+                "max_results": 5,
+                "sortBy": "lastUpdatedDate",
+                "sortOrder": "descending"
+            }
+            res = requests.get(url, params=params, timeout=5)
+            if res.status_code == 200:
+                ns = {'atom': 'http://www.w3.org/2005/Atom'}
+                root = ET.fromstring(res.text)
+                entries = root.findall('atom:entry', ns)
+                results = []
+                for entry in entries:
+                    title = entry.find('atom:title', ns).text.strip().replace("\n", " ")
+                    published = entry.find('atom:published', ns).text[:10]
+                    summary = entry.find('atom:summary', ns).text.strip().replace("\n", " ")
+                    if len(summary) > 250:
+                        summary = summary[:247] + "..."
+                    link = entry.find('atom:id', ns).text
+                    results.append({
+                        "title": title,
+                        "url": link,
+                        "content": f"Published: {published} | Abstract: {summary}",
+                        "source": "arXiv"
+                    })
+                return results
+        except Exception as e:
+            print(f"[arXiv] Error: {e}")
+        return []
+
+    def run_hackernews(q):
+        try:
+            thirty_days_ago = int(time.time()) - (30 * 24 * 60 * 60)
+            url = "https://hn.algolia.com/api/v1/search"
+            params = {
+                "query": q,
+                "tags": "story",
+                "numericFilters": f"created_at_i>{thirty_days_ago}"
+            }
+            res = requests.get(url, params=params, timeout=5)
+            if res.status_code == 200:
+                hits = res.json().get("hits", [])
+                results = []
+                for hit in hits[:5]:
+                    title = hit.get("title", "")
+                    link = hit.get("url") or f"https://news.ycombinator.com/item?id={hit.get('objectID')}"
+                    points = hit.get("points", 0)
+                    comments = hit.get("num_comments", 0)
+                    results.append({
+                        "title": title,
+                        "url": link,
+                        "content": f"{points} points, {comments} comments",
+                        "source": "Hacker News"
+                    })
+                return results
+        except Exception as e:
+            print(f"[Hacker News] Error: {e}")
+        return []
+
+    results_pool = []
+    
+    # Parse prefixes for explicit single-source routing
+    query_lower = query.lower().strip()
+    
+    if query_lower.startswith("github:"):
+        raw_query = query[len("github:"):].strip()
+        results_pool = run_github(raw_query)
+    elif query_lower.startswith("arxiv:"):
+        raw_query = query[len("arxiv:"):].strip()
+        results_pool = run_arxiv(raw_query)
+    elif query_lower.startswith("hn:") or query_lower.startswith("hackernews:"):
+        prefix_len = len("hn:") if query_lower.startswith("hn:") else len("hackernews:")
+        raw_query = query[prefix_len:].strip()
+        results_pool = run_hackernews(raw_query)
+    else:
+        # Standard hybrid concurrent search blending
+        if search_engine == "web_crawling":
+            futures = {
+                _search_executor.submit(run_google, query): "Google",
+                _search_executor.submit(run_searxng, query): "SearXNG",
+                _search_executor.submit(run_baidu, query): "Baidu",
+                _search_executor.submit(run_wikipedia, query): "Wikipedia"
+            }
+            
+            # Dynamically append specialized sources based on query keyword hints
+            if any(term in query_lower for term in ("github", "repo", "stars", "fork", "codebase")):
+                futures[_search_executor.submit(run_github, query)] = "GitHub"
+            if any(term in query_lower for term in ("arxiv", "paper", "preprint", "abstract", "journal")):
+                futures[_search_executor.submit(run_arxiv, query)] = "arXiv"
+            if any(term in query_lower for term in ("hacker news", "hn", "hackernews", "ycombinator")):
+                futures[_search_executor.submit(run_hackernews, query)] = "Hacker News"
+
+            done, not_done = concurrent.futures.wait(futures.keys(), timeout=8.0)
+            
+            for future in done:
+                source_name = futures[future]
+                try:
+                    data_hits = future.result()
+                    if data_hits:
+                        results_pool.extend(data_hits)
+                except Exception as e:
+                    print(f"[{source_name}] Thread error: {e}")
                     
-        # Deduplicate results by URL (collapsing mobile/desktop variations)
-        seen_urls = set()
-        unique_results = []
-        for r in results_pool:
-            url_clean = r["url"].lower().strip().rstrip('/')
-            compare_url = url_clean.replace("https://m.", "https://www.").replace("http://m.", "http://www.")
-            if compare_url not in seen_urls:
-                seen_urls.add(compare_url)
-                unique_results.append(r)
-                
-        # Fallback to Wikipedia if other sources failed or returned empty list
-        if not unique_results:
-            print("[Web Crawling] All primary sources empty or failed. Falling back to Wikipedia.")
-            wiki_results = run_wikipedia()
-            for r in wiki_results:
+            for future in not_done:
+                source_name = futures[future]
+                print(f"[{source_name}] Thread timed out (exceeded 8.0s timeout limit).")
+                        
+            # Deduplicate results by URL (collapsing mobile/desktop variations)
+            seen_urls = set()
+            unique_results = []
+            for r in results_pool:
                 url_clean = r["url"].lower().strip().rstrip('/')
                 compare_url = url_clean.replace("https://m.", "https://www.").replace("http://m.", "http://www.")
                 if compare_url not in seen_urls:
                     seen_urls.add(compare_url)
                     unique_results.append(r)
                     
-        formatted = []
-        for r in unique_results[:8]:
-            formatted.append(f"Title: {r['title']}\nURL: {r['url']}\nSource: {r['source']}\nSnippet: {r['content']}")
-        if formatted:
-            return "\n\n".join(formatted)
+            # Fallback to Wikipedia if other sources failed or returned empty list
+            if not unique_results:
+                print("[Web Crawling] All primary sources empty or failed. Falling back to Wikipedia.")
+                wiki_results = run_wikipedia(query)
+                for r in wiki_results:
+                    url_clean = r["url"].lower().strip().rstrip('/')
+                    compare_url = url_clean.replace("https://m.", "https://www.").replace("http://m.", "http://www.")
+                    if compare_url not in seen_urls:
+                        seen_urls.add(compare_url)
+                        unique_results.append(r)
+                        
+            results_pool = unique_results
+            
+        elif search_engine == "wikipedia":
+            results_pool = run_wikipedia(query)
 
-    elif search_engine == "wikipedia":
-        wiki_results = run_wikipedia()
-        formatted = []
-        for r in wiki_results[:5]:
-            formatted.append(f"Title: {r['title']}\nURL: {r['url']}\nSource: {r['source']}\nSnippet: {r['content']}")
-        if formatted:
-            return "\n\n".join(formatted)
+    formatted = []
+    for r in results_pool[:8]:
+        formatted.append(f"Title: {r['title']}\nURL: {r['url']}\nSource: {r['source']}\nSnippet: {r['content']}")
+    if formatted:
+        return "\n\n".join(formatted)
 
     return "No search results found."
 
@@ -616,127 +740,6 @@ def web_search(query: str) -> str:
 def google_search(query: str) -> str:
     """Wrapper that delegates search queries to web_search."""
     return web_search(query)
-
-
-@track_tool_activity
-def search_github(query: str) -> str:
-    """Searches GitHub for repositories matching the query.
-
-    Args:
-        query: The search term.
-
-    Returns:
-        A formatted markdown list of matching repositories.
-    """
-    try:
-        url = "https://api.github.com/search/repositories"
-        params = {
-            "q": query,
-            "sort": "stars",
-            "order": "desc",
-            "per_page": 5
-        }
-        headers = {
-            "Accept": "application/vnd.github.v3+json",
-            "User-Agent": "ProgramSanctuary/1.0"
-        }
-        res = requests.get(url, params=params, headers=headers, timeout=5)
-        if res.status_code == 200:
-            items = res.json().get("items", [])
-            sec = []
-            for repo in items:
-                name = repo.get("full_name", "")
-                stars = repo.get("stargazers_count", 0)
-                forks = repo.get("forks_count", 0)
-                desc = repo.get("description", "") or "No description."
-                link = repo.get("html_url", "")
-                sec.append(f"- [{name}]({link}) (stars: {stars}, forks: {forks})\n  - Description: {desc}")
-            if sec:
-                return "\n".join(sec)
-        return "No repositories found."
-    except Exception as e:
-        return f"Error searching GitHub: {e}"
-
-
-@track_tool_activity
-def search_arxiv(query: str) -> str:
-    """Searches arXiv for technical research papers matching the query.
-
-    Args:
-        query: The search term.
-
-    Returns:
-        A formatted markdown list of matching papers.
-    """
-    import re
-    import xml.etree.ElementTree as ET
-    try:
-        search_words = re.findall(r'\w+', query)
-        if not search_words:
-            return "Invalid search query."
-        
-        arxiv_query = " AND ".join(f"all:{word}" for word in search_words)
-        url = "http://export.arxiv.org/api/query"
-        params = {
-            "search_query": arxiv_query,
-            "max_results": 5,
-            "sortBy": "lastUpdatedDate",
-            "sortOrder": "descending"
-        }
-        res = requests.get(url, params=params, timeout=5)
-        if res.status_code == 200:
-            ns = {'atom': 'http://www.w3.org/2005/Atom'}
-            root = ET.fromstring(res.text)
-            entries = root.findall('atom:entry', ns)
-            sec = []
-            for entry in entries:
-                title = entry.find('atom:title', ns).text.strip().replace("\n", " ")
-                published = entry.find('atom:published', ns).text[:10]
-                summary = entry.find('atom:summary', ns).text.strip().replace("\n", " ")
-                if len(summary) > 250:
-                    summary = summary[:247] + "..."
-                link = entry.find('atom:id', ns).text
-                sec.append(f"- [{title}]({link}) (Published: {published})\n  - Summary: {summary}")
-            if sec:
-                return "\n".join(sec)
-        return "No papers found."
-    except Exception as e:
-        return f"Error searching arXiv: {e}"
-
-
-@track_tool_activity
-def search_hacker_news(query: str) -> str:
-    """Searches Hacker News for recent stories matching the query.
-
-    Args:
-        query: The search term.
-
-    Returns:
-        A formatted markdown list of matching Hacker News stories.
-    """
-    try:
-        thirty_days_ago = int(time.time()) - (30 * 24 * 60 * 60)
-        url = "https://hn.algolia.com/api/v1/search"
-        params = {
-            "query": query,
-            "tags": "story",
-            "numericFilters": f"created_at_i>{thirty_days_ago}"
-        }
-        res = requests.get(url, params=params, timeout=5)
-        if res.status_code == 200:
-            hits = res.json().get("hits", [])
-            sec = []
-            for hit in hits[:5]:
-                title = hit.get("title", "")
-                link = hit.get("url") or f"https://news.ycombinator.com/item?id={hit.get('objectID')}"
-                points = hit.get("points", 0)
-                comments = hit.get("num_comments", 0)
-                sec.append(f"- [{title}]({link}) ({points} points, {comments} comments)")
-            if sec:
-                return "\n".join(sec)
-        return "No recent Hacker News stories found."
-    except Exception as e:
-        return f"Error searching Hacker News: {e}"
 
 
 @track_tool_activity
