@@ -1396,11 +1396,15 @@ class GoogleAdkRunner(BaseProgramRunner):
         texts = []
         tool_calls = []
         
+        first_iter = True
         async for event in self.runner.run_async(
             user_id="user",
             session_id=session_id,
             new_message=content,
         ):
+            if first_iter:
+                self._save_session_to_disk(session_id)
+                first_iter = False
             if session_id in cancelled_sessions:
                 cancelled_sessions.discard(session_id)
                 raise asyncio.CancelledError("Session cancelled by user request.")
@@ -1592,6 +1596,7 @@ class GoogleAdkRunner(BaseProgramRunner):
                 timestamp=time.time()
             )
             adk_session.events.append(user_event)
+            self._save_session_to_disk(session_id)
             
             adapter = AdkHistoryAdapter(self, session_id, adk_session, user_event)
             try:
@@ -1610,7 +1615,6 @@ class GoogleAdkRunner(BaseProgramRunner):
                 adk_session.events = [ev for ev in adk_session.events if ev.invocation_id != invocation_id]
                 
                 # Switch to DEFAULT_GEMINI_MODEL and recursively execute run_async
-                from variables import DEFAULT_GEMINI_MODEL
                 model = DEFAULT_GEMINI_MODEL
                 print(f"[OFFLOAD] Recursively calling run_async with remote model: {model}", flush=True)
                 return await self.run_async(
@@ -2133,6 +2137,7 @@ class OpenSourceRunner(BaseProgramRunner):
             'timestamp': time.time()
         }
         self.sessions_history[session_id].append(user_msg)
+        self._save_session_to_disk(session_id)
         
         # Get RAG context
         rag_context = _get_rag_context(new_message_text)
@@ -2192,6 +2197,7 @@ class OpenSourceRunner(BaseProgramRunner):
         # Truncate history
         history = history[:user_idx]
         self.sessions_history[session_id] = history
+        self._save_session_to_disk(session_id)
         
         # Re-run turn
         new_input = new_text if new_text is not None else orig_msg.get('text', '')
