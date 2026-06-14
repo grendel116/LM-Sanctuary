@@ -115,8 +115,8 @@ def confirm_tool_execution(tool_name: str, details: str) -> bool:
         if os.path.exists(settings_path):
             with open(settings_path, "r", encoding="utf-8") as f:
                 settings = json.load(f)
-            if settings.get("security_preset") == "turbo":
-                print(f"[TURBO MODE] Auto-approving tool execution for '{tool_name}'", flush=True)
+            if settings.get("security_preset") in ("auto", "turbo"):
+                print(f"[AUTO MODE] Auto-approving tool execution for '{tool_name}'", flush=True)
                 return True
     except Exception as e:
         print(f"Error checking security preset in confirm_tool_execution: {e}")
