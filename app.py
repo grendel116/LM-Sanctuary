@@ -1,4 +1,5 @@
 import os
+import time
 import shutil
 
 # Automate copying of default .env configuration if it doesn't exist
@@ -106,6 +107,13 @@ def check_program_change():
             print(f">>> Dynamic check loaded new program consciousness (Program: '{current_program}', User Profile: '{current_user}')")
         except Exception as e:
             print(f"Error dynamically reloading program/user: {e}")
+
+@app.after_request
+def add_cache_control_headers(response):
+    response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+    response.headers['Pragma'] = 'no-cache'
+    response.headers['Expires'] = '0'
+    return response
 
 
 # Initialize active_program.txt from environment if it doesn't exist
@@ -374,6 +382,15 @@ def chat():
     session_id = request.json.get('session_id', 'default')
     selected_model = request.json.get('model')
 
+    import tools
+    tools.current_session_id.set(session_id)
+    with tools.session_tool_calls_lock:
+        tools.session_tool_calls[session_id] = []
+
+    from runner_interface import cancelled_sessions
+    cancelled_sessions.discard(session_id)
+    start_time = time.time()
+
     try:
         response_text, tool_calls = asyncio.run(
             runner.run_async(
@@ -385,6 +402,7 @@ def chat():
                 media_path=media_path
             )
         )
+        duration = round(time.time() - start_time, 1)
         
         # Apply banned words filter to output response
         from utils.banned_words import sanitize_text
@@ -401,19 +419,33 @@ def chat():
         from utils.program_mood import extract_and_strip_mood
         response_text, state_info = extract_and_strip_mood(response_text)
         inversion_mode = asyncio.run(runner._get_inversion_mode(session_id))
-        import time
         return jsonify({
             'response': response_text,
             'tool_calls': tool_calls,
             'state': state_info,
             'inversion_active': inversion_mode,
-            'timestamp': time.time()
+            'timestamp': time.time(),
+            'duration': duration
+        })
+    except asyncio.CancelledError:
+        print(f"[CANCEL] Chat generation cancelled for session {session_id}")
+        return jsonify({
+            'cancelled': True,
+            'response': '*(Generation cancelled)*',
+            'tool_calls': [],
+            'state': None,
+            'inversion_active': '',
+            'timestamp': time.time(),
+            'duration': round(time.time() - start_time, 1)
         })
     except Exception as e:
         import traceback
         traceback.print_exc()
         print(f"Error occurred in chat: {e}")
         return jsonify({'error': str(e)}), 500
+    finally:
+        from runner_interface import cancelled_sessions
+        cancelled_sessions.discard(session_id)
 
 @app.route('/edit', methods=['POST'])
 @requires_auth
@@ -422,6 +454,15 @@ def edit():
     user_message_index = request.json.get('user_message_index') # 0-based index of user messages
     new_text = request.json.get('new_text') # None means reroll (use original text)
     selected_model = request.json.get('model')
+
+    import tools
+    tools.current_session_id.set(session_id)
+    with tools.session_tool_calls_lock:
+        tools.session_tool_calls[session_id] = []
+
+    from runner_interface import cancelled_sessions
+    cancelled_sessions.discard(session_id)
+    start_time = time.time()
 
     try:
         response_text, tool_calls = asyncio.run(
@@ -432,6 +473,7 @@ def edit():
                 model=selected_model
             )
         )
+        duration = round(time.time() - start_time, 1)
         
         # Apply banned words filter to output response
         from utils.banned_words import sanitize_text
@@ -448,17 +490,31 @@ def edit():
         from utils.program_mood import extract_and_strip_mood
         response_text, state_info = extract_and_strip_mood(response_text)
         inversion_mode = asyncio.run(runner._get_inversion_mode(session_id))
-        import time
         return jsonify({
             'response': response_text,
             'tool_calls': tool_calls,
             'state': state_info,
             'inversion_active': inversion_mode,
-            'timestamp': time.time()
+            'timestamp': time.time(),
+            'duration': duration
+        })
+    except asyncio.CancelledError:
+        print(f"[CANCEL] Edit generation cancelled for session {session_id}")
+        return jsonify({
+            'cancelled': True,
+            'response': '*(Generation cancelled)*',
+            'tool_calls': [],
+            'state': None,
+            'inversion_active': '',
+            'timestamp': time.time(),
+            'duration': round(time.time() - start_time, 1)
         })
     except Exception as e:
         print(f"Error occurred during edit: {e}")
         return jsonify({'error': str(e)}), 500
+    finally:
+        from runner_interface import cancelled_sessions
+        cancelled_sessions.discard(session_id)
 
 def generate_impersonated_message(session_id, user_profile, model):
     # Retrieve history
@@ -622,6 +678,15 @@ def continue_generation():
     session_id = request.json.get('session_id', 'default')
     model = request.json.get('model')
     
+    import tools
+    tools.current_session_id.set(session_id)
+    with tools.session_tool_calls_lock:
+        tools.session_tool_calls[session_id] = []
+
+    from runner_interface import cancelled_sessions
+    cancelled_sessions.discard(session_id)
+    start_time = time.time()
+    
     try:
         history = asyncio.run(runner.get_history(session_id))
         if not history:
@@ -644,6 +709,7 @@ def continue_generation():
                 new_message_text=continue_prompt,
                 model=model
             ))
+            duration = round(time.time() - start_time, 1)
             
             # Delete the temporary turn
             updated_history = asyncio.run(runner.get_history(session_id))
@@ -670,7 +736,8 @@ def continue_generation():
             return jsonify({
                 'status': 'success',
                 'response': merged_text,
-                'tool_calls': tool_calls
+                'tool_calls': tool_calls,
+                'duration': duration
             })
         else:
             user_text = last_msg.get('text', '')
@@ -686,16 +753,29 @@ def continue_generation():
                 media_path=user_image if (user_image and not user_image.startswith('data:')) else None,
                 model=model
             ))
+            duration = round(time.time() - start_time, 1)
             
             return jsonify({
                 'status': 'success',
                 'response': response_text,
-                'tool_calls': tool_calls
+                'tool_calls': tool_calls,
+                'duration': duration
             })
             
+    except asyncio.CancelledError:
+        print(f"[CANCEL] Continuation cancelled for session {session_id}")
+        return jsonify({
+            'cancelled': True,
+            'response': '*(Generation cancelled)*',
+            'tool_calls': [],
+            'duration': round(time.time() - start_time, 1)
+        })
     except Exception as e:
         print(f"Error in continue_generation: {e}")
         return jsonify({'error': str(e)}), 500
+    finally:
+        from runner_interface import cancelled_sessions
+        cancelled_sessions.discard(session_id)
 
 @app.route('/reset', methods=['POST'])
 @requires_auth
@@ -853,14 +933,40 @@ def list_images():
 @requires_auth
 def get_pending_tool_call():
     import tools
+    pending = None
     for call_id, info in tools.pending_tool_calls.items():
         if info['status'] == 'pending':
-            return jsonify({
+            pending = {
                 'call_id': call_id,
                 'tool_name': info['tool_name'],
                 'details': info['details']
-            })
-    return jsonify({'call_id': None})
+            }
+            break
+    active_list = list(tools.active_running_tools.keys())
+    return jsonify({
+        'call_id': pending['call_id'] if pending else None,
+        'tool_name': pending['tool_name'] if pending else None,
+        'details': pending['details'] if pending else None,
+        'active_tools': active_list
+    })
+
+@app.route('/api/cancel_chat', methods=['POST'])
+@requires_auth
+def cancel_chat():
+    session_id = request.json.get('session_id', 'default')
+    from runner_interface import cancelled_sessions
+    cancelled_sessions.add(session_id)
+    print(f"[CANCEL] Session cancellation requested: {session_id}", flush=True)
+    return jsonify({'status': 'success'})
+
+@app.route('/api/session_tool_calls', methods=['GET'])
+@requires_auth
+def get_session_tool_calls():
+    session_id = request.args.get('session_id', 'default')
+    import tools
+    with tools.session_tool_calls_lock:
+        calls = tools.session_tool_calls.get(session_id, [])
+        return jsonify({'tool_calls': list(calls)})
 
 @app.route('/approve_tool', methods=['POST'])
 @requires_auth
@@ -988,6 +1094,93 @@ def get_models():
             "lms_installed": check_lms_cli()
         }
     })
+
+@app.route('/api/project_settings', methods=['GET', 'POST'])
+@requires_auth
+def project_settings():
+    from variables import VARIABLES_DIR
+    import json
+    settings_path = os.path.join(VARIABLES_DIR, "project_settings.json")
+    
+    # Define default settings
+    default_settings = {
+        "folders": [os.getcwd()],
+        "security_preset": "ask_always",
+        "artifact_review_policy": "ask_always",
+        "search_engine": "web_crawling",
+        "searxng_url": ""
+    }
+    
+    if request.method == 'GET':
+        if not os.path.exists(settings_path):
+            try:
+                with open(settings_path, "w", encoding="utf-8") as f:
+                    json.dump(default_settings, f, indent=2)
+                return jsonify(default_settings)
+            except Exception as e:
+                print(f"Error creating default project settings: {e}")
+                return jsonify(default_settings)
+        else:
+            try:
+                with open(settings_path, "r", encoding="utf-8") as f:
+                    settings = json.load(f)
+                # Ensure fields are present
+                dirty = False
+                for k, v in default_settings.items():
+                    if k not in settings:
+                        settings[k] = v
+                        dirty = True
+                if settings.get("search_engine") in ("sovereign_hybrid", "sovereign_search"):
+                    settings["search_engine"] = "web_crawling"
+                    dirty = True
+                if dirty:
+                    with open(settings_path, "w", encoding="utf-8") as f:
+                        json.dump(settings, f, indent=2)
+                return jsonify(settings)
+            except Exception as e:
+                print(f"Error reading project settings: {e}")
+                return jsonify(default_settings)
+                
+    elif request.method == 'POST':
+        try:
+            data = request.get_json() or {}
+            folders = data.get("folders", [])
+            security_preset = data.get("security_preset", "ask_always")
+            artifact_review_policy = data.get("artifact_review_policy", "ask_always")
+            search_engine = data.get("search_engine", "web_crawling")
+            searxng_url = data.get("searxng_url", "")
+            
+            cwd = os.path.normpath(os.getcwd())
+            cleaned_folders = []
+            seen = set()
+            
+            # Ensure cwd is always the first folder
+            cleaned_folders.append(cwd)
+            seen.add(cwd.lower() if os.name == 'nt' else cwd)
+            
+            for folder in folders:
+                if not folder:
+                    continue
+                norm = os.path.normpath(folder)
+                key = norm.lower() if os.name == 'nt' else norm
+                if key not in seen:
+                    cleaned_folders.append(norm)
+                    seen.add(key)
+            
+            new_settings = {
+                "folders": cleaned_folders,
+                "security_preset": security_preset,
+                "artifact_review_policy": artifact_review_policy,
+                "search_engine": search_engine,
+                "searxng_url": searxng_url
+            }
+            
+            with open(settings_path, "w", encoding="utf-8") as f:
+                json.dump(new_settings, f, indent=2)
+            return jsonify({"status": "success", "settings": new_settings})
+        except Exception as e:
+            print(f"Error saving project settings: {e}")
+            return jsonify({"error": str(e)}), 500
 
 @app.route('/api/save_config', methods=['POST'])
 @requires_auth
