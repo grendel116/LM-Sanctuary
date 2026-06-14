@@ -1036,7 +1036,7 @@ def list_images():
 def get_pending_tool_call():
     import tools
     pending = None
-    for call_id, info in tools.pending_tool_calls.items():
+    for call_id, info in list(tools.pending_tool_calls.items()):
         if info['status'] == 'pending':
             pending = {
                 'call_id': call_id,
@@ -1079,6 +1079,9 @@ def approve_tool():
     
     if call_id in tools.pending_tool_calls:
         tools.pending_tool_calls[call_id]['status'] = status
+        event = tools.pending_tool_calls[call_id].get('event')
+        if event:
+            event.set()
         return jsonify({'status': 'success'})
     return jsonify({'error': 'Tool call not found'}), 404
 

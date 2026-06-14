@@ -123,26 +123,27 @@ def confirm_tool_execution(tool_name: str, details: str) -> bool:
 
     print(f"[DEBUG CONFIRM] confirm_tool_execution called for '{tool_name}' with details:\n{details}", flush=True)
     call_id = str(uuid.uuid4())
+    event = threading.Event()
     pending_tool_calls[call_id] = {
         'tool_name': tool_name,
         'details': details,
-        'status': 'pending'
+        'status': 'pending',
+        'event': event
     }
     
     timeout = 90.0  # Allow up to 90 seconds for confirmation
-    start_time = time.time()
-    while time.time() - start_time < timeout:
-        status = pending_tool_calls.get(call_id, {}).get('status')
+    event.wait(timeout)
+    
+    info = pending_tool_calls.get(call_id)
+    if info:
+        status = info.get('status')
+        if call_id in pending_tool_calls:
+            del pending_tool_calls[call_id]
         if status == 'approved':
-            if call_id in pending_tool_calls:
-                del pending_tool_calls[call_id]
             return True
         elif status == 'denied':
-            if call_id in pending_tool_calls:
-                del pending_tool_calls[call_id]
             return False
-        time.sleep(0.5)
-        
+            
     if call_id in pending_tool_calls:
         del pending_tool_calls[call_id]
     return False
@@ -260,125 +261,6 @@ def query_searxng(query: str, base_url: str = None, engines: str = "baidu,yandex
             
     return []
 
-
-def scrape_baidu(query: str) -> list:
-    import requests
-    import json
-    from bs4 import BeautifulSoup
-    url = "https://m.baidu.com/s"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.5"
-    }
-    params = {"word": query}
-    try:
-        response = requests.get(url, headers=headers, params=params, timeout=5)
-        if response.status_code != 200:
-            return []
-        soup = BeautifulSoup(response.text, "html.parser")
-        results = []
-        containers = soup.find_all(class_=lambda x: x and "c-result" in x.split())
-        for container in containers[:6]:
-            link = ""
-            data_log = container.get("data-log", "")
-            if data_log:
-                try:
-                    log_data = json.loads(data_log)
-                    link = log_data.get("mu", "")
-                except Exception:
-                    pass
-            
-            if not link:
-                a_tag = container.find("a")
-                if a_tag:
-                    link = a_tag.get("href", "")
-                    if link and link.startswith("/"):
-                        link = f"https://m.baidu.com{link}"
-            
-            title = ""
-            snippet = ""
-            
-            content_div = container.find(class_=lambda x: x and "c-result-content" in x.split())
-            if content_div:
-                spans = content_div.find_all("span")
-                if spans:
-                    for span in spans:
-                        text = span.get_text().strip()
-                        if text and len(text) > 5:
-                            cls = span.get("class", [])
-                            if not any("summary" in str(c) or "source" in str(c) for c in cls):
-                                title = text
-                                break
-                    
-                    for span in spans:
-                        cls = span.get("class", [])
-                        if any("summary" in str(c) for c in cls):
-                            snippet = span.get_text().strip()
-                            break
-                            
-                    if not snippet and len(spans) > 1:
-                        snippet = spans[-1].get_text().strip()
-            
-            if not title:
-                title = container.get_text().strip()[:50]
-            if not snippet:
-                snippet = container.get_text().strip()[:200]
-                
-            if link:
-                results.append({
-                    "title": title,
-                    "url": link,
-                    "content": snippet
-                })
-        return results
-    except Exception as e:
-        print(f"[Baidu Scrape] Error: {e}")
-        return []
-
-
-def scrape_yandex(query: str) -> list:
-    import requests
-    from bs4 import BeautifulSoup
-    url = "https://yandex.com/search/"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept-Language": "en-US,en;q=0.9"
-    }
-    params = {"text": query}
-    try:
-        response = requests.get(url, headers=headers, params=params, timeout=5)
-        if response.status_code != 200:
-            return []
-        soup = BeautifulSoup(response.text, "html.parser")
-        results = []
-        containers = soup.find_all("li", class_=lambda x: x and "serp-item" in x)
-        for container in containers[:5]:
-            a_tag = container.find("a", class_=lambda x: x and "organic__url" in x)
-            if not a_tag:
-                h2 = container.find("h2")
-                if h2:
-                    a_tag = h2.find("a")
-            if not a_tag:
-                continue
-                
-            title_el = a_tag.find(class_=lambda x: x and "organic__title" in x)
-            title = title_el.get_text().strip() if title_el else a_tag.get_text().strip()
-            link = a_tag.get("href", "")
-            
-            snippet_div = container.find(class_=lambda x: x and ("organic__content-text" in x or "passage" in x))
-            snippet = snippet_div.get_text().strip() if snippet_div else ""
-            
-            if title and link:
-                results.append({
-                    "title": title,
-                    "url": link,
-                    "content": snippet
-                })
-        return results
-    except Exception as e:
-        print(f"[Yandex Scrape] Error: {e}")
-        return []
 
 
 @track_tool_activity
@@ -508,7 +390,7 @@ def web_search(query: str) -> str:
 
     def run_baidu(q):
         try:
-            hits = scrape_baidu(q)
+            hits = query_searxng(q, base_url=searxng_url, engines="baidu")
             return [{
                 "title": h["title"],
                 "url": h["url"],
@@ -516,7 +398,7 @@ def web_search(query: str) -> str:
                 "source": "Baidu"
             } for h in hits]
         except Exception as e:
-            print(f"[Baidu Scrape] Error: {e}")
+            print(f"[Baidu SearXNG] Error: {e}")
             return []
 
     def run_wikipedia(q):
