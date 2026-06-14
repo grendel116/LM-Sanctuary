@@ -384,6 +384,51 @@ class GoogleAdkRunner(BaseProgramRunner):
         from google.adk.runners import InMemoryRunner
         from core import program_config
         
+        try:
+            import google.adk.flows.llm_flows.contents as adk_contents
+            import copy
+            from google.genai import types
+            
+            if not hasattr(adk_contents, '_original_get_contents'):
+                adk_contents._original_get_contents = adk_contents._get_contents
+                adk_contents._original_get_current_turn_contents = adk_contents._get_current_turn_contents
+                
+                def merge_consecutive_contents(contents):
+                    if not contents:
+                        return []
+                    merged = []
+                    for content in contents:
+                        if not merged:
+                            merged.append(copy.deepcopy(content))
+                        else:
+                            last = merged[-1]
+                            last_role = 'user' if last.role == 'user' else 'model'
+                            curr_role = 'user' if content.role == 'user' else 'model'
+                            if last_role == curr_role:
+                                if content.parts:
+                                    for part in content.parts:
+                                        if last.parts and last.parts[-1].text is not None and part.text is not None:
+                                            last.parts[-1].text = f"{last.parts[-1].text}\n\n{part.text}".strip()
+                                        else:
+                                            last.parts.append(copy.deepcopy(part))
+                            else:
+                                merged.append(copy.deepcopy(content))
+                    return merged
+                    
+                def my_get_contents(current_branch, events, agent_name=''):
+                    res = adk_contents._original_get_contents(current_branch, events, agent_name)
+                    return merge_consecutive_contents(res)
+                    
+                def my_get_current_turn_contents(current_branch, events, agent_name=''):
+                    res = adk_contents._original_get_current_turn_contents(current_branch, events, agent_name)
+                    return merge_consecutive_contents(res)
+                    
+                adk_contents._get_contents = my_get_contents
+                adk_contents._get_current_turn_contents = my_get_current_turn_contents
+                print("[MONKEYPATCH] Successfully patched google.adk.flows.llm_flows.contents to merge consecutive messages on-the-fly.", flush=True)
+        except Exception as e:
+            print(f"[MONKEYPATCH ERROR] Failed to patch ADK contents: {e}", flush=True)
+
         self.runner = InMemoryRunner(
             agent=program_config.root_program,
             app_name=self.app_name,
@@ -1391,38 +1436,6 @@ class GoogleAdkRunner(BaseProgramRunner):
             indices_to_delete = {item[0] for item in turn_events}
             events = [ev for i, ev in enumerate(events) if i not in indices_to_delete]
             
-        # Merge consecutive events of same role type
-        i = 0
-        while i < len(events) - 1:
-            role_current = 'user' if events[i].author.lower() == 'user' else 'companion'
-            role_next = 'user' if events[i+1].author.lower() == 'user' else 'companion'
-            if role_current == role_next:
-                txt1 = ""
-                if events[i].content and events[i].content.parts:
-                    txt1 = next((p.text for p in events[i].content.parts if p.text is not None), "")
-                
-                txt2 = ""
-                if events[i+1].content and events[i+1].content.parts:
-                    txt2 = next((p.text for p in events[i+1].content.parts if p.text is not None), "")
-                
-                merged_text = f"{txt1}\n\n{txt2}".strip()
-                
-                updated = False
-                if events[i].content and events[i].content.parts:
-                    for part in events[i].content.parts:
-                        if part.text is not None:
-                            part.text = merged_text
-                            updated = True
-                            break
-                    if not updated:
-                        events[i].content.parts.append(types.Part.from_text(text=merged_text))
-                else:
-                    events[i].content = types.Content(role=events[i].content.role if events[i].content else 'user', parts=[types.Part.from_text(text=merged_text)])
-                
-                del events[i+1]
-            else:
-                i += 1
-                
         storage_session.events = events
         self._save_session_to_disk(session_id)
         return True
@@ -2085,19 +2098,6 @@ class OpenSourceRunner(BaseProgramRunner):
             
         del history[target_abs_index]
         
-        # Merge consecutive events of same role type
-        i = 0
-        while i < len(history) - 1:
-            role_current = 'user' if history[i].get('role') == 'user' else 'companion'
-            role_next = 'user' if history[i+1].get('role') == 'user' else 'companion'
-            if role_current == role_next:
-                txt1 = history[i].get('text', '')
-                txt2 = history[i+1].get('text', '')
-                history[i]['text'] = f"{txt1}\n\n{txt2}".strip()
-                del history[i+1]
-            else:
-                i += 1
-                
         self.sessions_history[session_id] = history
         self._save_session_to_disk(session_id)
         return True
