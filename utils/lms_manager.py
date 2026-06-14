@@ -2,11 +2,18 @@ import os
 import requests
 import re
 import json
+import time
 
 # Thread-safe storage/tracking for downloads
 # download_status = { model_name: { 'status': 'idle'|'downloading'|'completed'|'failed', 'downloaded_bytes': ..., 'total_size_bytes': ..., 'bytes_per_second': ..., 'error': None } }
 download_status = {}
 active_jobs = {}  # model_name: job_id
+
+_lms_cli_cached = None
+_lms_cli_cache_time = 0.0
+
+_daemon_status_cached = None
+_daemon_status_cache_time = 0.0
 
 def get_lms_path():
     """Returns the absolute path to the lms executable if it exists, otherwise 'lms'."""
@@ -22,25 +29,35 @@ def get_lms_path():
     return "lms"
 
 def check_lms_cli():
-    """Checks if the lms executable is functional."""
+    """Checks if the lms executable is functional (cached)."""
+    global _lms_cli_cached, _lms_cli_cache_time
+    now = time.time()
+    if _lms_cli_cached is not None and (now - _lms_cli_cache_time < 30.0):
+        return _lms_cli_cached
     try:
         lms_path = get_lms_path()
         import subprocess
         res = subprocess.run([lms_path, "--version"], capture_output=True, text=True, encoding='utf-8', errors='ignore', shell=False)
-        return res.returncode == 0
+        _lms_cli_cached = (res.returncode == 0)
     except Exception:
-        return False
+        _lms_cli_cached = False
+    _lms_cli_cache_time = now
+    return _lms_cli_cached
 
-def check_daemon_status():
-    """Checks if the LM Studio daemon is running and responsive."""
+def check_daemon_status(force_refresh=False):
+    """Checks if the LM Studio daemon is running and responsive (cached)."""
+    global _daemon_status_cached, _daemon_status_cache_time
+    now = time.time()
+    if not force_refresh and _daemon_status_cached is not None and (now - _daemon_status_cache_time < 3.0):
+        return _daemon_status_cached
     try:
         from variables import LOCAL_MODELS_URL
-        response = requests.get(LOCAL_MODELS_URL, timeout=0.5)
-        if response.status_code == 200:
-            return True
+        response = requests.get(LOCAL_MODELS_URL, timeout=0.2)
+        _daemon_status_cached = (response.status_code == 200)
     except Exception:
-        pass
-    return False
+        _daemon_status_cached = False
+    _daemon_status_cache_time = now
+    return _daemon_status_cached
 
 def start_lms_daemon():
     """Starts the lms server daemon in the background."""
@@ -247,14 +264,46 @@ def update_download_statuses():
     for model_name in to_remove:
         active_jobs.pop(model_name, None)
 
-def list_local_models():
-    """Returns a list of GGUF model keys by scanning the REST API or falling back to disk."""
+_local_models_list_cached = None
+_local_models_list_cache_time = 0.0
+
+def scan_gguf_files_depth_limited(base_dir, max_depth=4):
+    """Recursively scans a directory for GGUF files up to a maximum depth."""
+    models = []
+    base_dir = os.path.normpath(base_dir)
+    
+    def _scan(current_dir, current_depth):
+        if current_depth > max_depth:
+            return
+        try:
+            with os.scandir(current_dir) as it:
+                for entry in it:
+                    if entry.is_file():
+                        if entry.name.lower().endswith(".gguf"):
+                            rel_path = os.path.relpath(entry.path, base_dir)
+                            model_key = rel_path.replace("\\", "/")
+                            models.append(model_key)
+                    elif entry.is_dir():
+                        _scan(entry.path, current_depth + 1)
+        except Exception:
+            pass
+            
+    _scan(base_dir, 1)
+    return models
+
+def list_local_models(force_refresh=False):
+    """Returns a list of GGUF model keys by scanning the REST API or falling back to disk (cached)."""
+    global _local_models_list_cached, _local_models_list_cache_time
+    now = time.time()
+    if not force_refresh and _local_models_list_cached is not None and (now - _local_models_list_cache_time < 5.0):
+        return _local_models_list_cached
+        
     models = []
     # If online, use native REST API to list models
-    if check_daemon_status():
+    if check_daemon_status(force_refresh=force_refresh):
         try:
             url = "http://localhost:1234/api/v1/models"
-            resp = requests.get(url, timeout=3.0)
+            resp = requests.get(url, timeout=0.3)
             if resp.status_code == 200:
                 for m in resp.json().get("models", []):
                     # Only show LLM models, exclude embedding models
@@ -262,7 +311,9 @@ def list_local_models():
                         key = m.get("key")
                         if key:
                             models.append(key)
-                return sorted(list(set(models)))
+                _local_models_list_cached = sorted(list(set(models)))
+                _local_models_list_cache_time = now
+                return _local_models_list_cached
         except Exception as e:
             print(f"[list_local_models] REST API listing failed: {e}")
 
@@ -271,13 +322,11 @@ def list_local_models():
     if user_profile:
         models_dir = os.path.join(user_profile, ".lmstudio", "models")
         if os.path.exists(models_dir):
-            for root, dirs, files in os.walk(models_dir):
-                for file in files:
-                    if file.lower().endswith(".gguf"):
-                        rel_path = os.path.relpath(os.path.join(root, file), models_dir)
-                        model_key = rel_path.replace("\\", "/")
-                        models.append(model_key)
-    return sorted(list(set(models)))
+            models = scan_gguf_files_depth_limited(models_dir, max_depth=4)
+            
+    _local_models_list_cached = sorted(list(set(models)))
+    _local_models_list_cache_time = now
+    return _local_models_list_cached
 
 def load_local_model(model_name):
     """Loads a model into memory via native REST API."""

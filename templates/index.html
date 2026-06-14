@@ -2581,31 +2581,6 @@
             </p>
             
             <div class="settings-grid" style="margin-bottom: 15px;">
-                <!-- Cloud Panel -->
-                <div class="onboarding-option-box cloud-box">
-                    <div class="option-header">
-                        <h4 style="margin: 0; font-size: 1.05rem; font-weight: 600;">Google Gemini (Cloud)</h4>
-                        <span id="modal-gemini-status" class="status-badge status-unconfigured">Unconfigured</span>
-                    </div>
-                    <p class="option-desc" style="font-size: 0.8rem; margin: 8px 0 15px 0;">Requires a Gemini API Key and GCP Project ID inside your env config.</p>
-                    
-                    <div class="input-group" style="margin-bottom: 10px;">
-                        <label style="font-size: 0.72rem; color: var(--text-muted);">Gemini API Key</label>
-                        <input type="password" id="modal-api-key" placeholder="AIzaSy..." class="onboarding-input">
-                    </div>
-                    <div class="input-group" style="margin-bottom: 15px;">
-                        <label style="font-size: 0.72rem; color: var(--text-muted);">GCP Project ID</label>
-                        <input type="text" id="modal-project-id" placeholder="my-gcp-project-123" class="onboarding-input">
-                    </div>
-                    
-                    <button onclick="saveModalConfig()" class="onboarding-btn connect-cloud-btn">Save & Connect Cloud</button>
-                    <div class="helper-text" style="font-size: 0.7rem; margin-top: 10px;">
-                        Get keys at <a href="https://aistudio.google.com/" target="_blank" style="color: var(--primary-accent); text-decoration: none;">Google AI Studio</a>.
-                    </div>
-                </div>
-
-
-
                 <!-- Local Panel -->
                 <div class="onboarding-option-box local-box" id="modal-local-box-container">
                     <div class="option-header">
@@ -2632,6 +2607,39 @@
                     <button onclick="checkModalStatus()" class="onboarding-btn check-local-btn">Check Local Connection</button>
                     <div class="helper-text" style="font-size: 0.7rem; margin-top: 10px;">
                         Server URL: <code class="url-code" style="font-size: 0.7rem;">http://localhost:1234</code>
+                    </div>
+                </div>
+
+                <!-- Cloud Panel -->
+                <div class="onboarding-option-box cloud-box">
+                    <div class="option-header">
+                        <h4 style="margin: 0; font-size: 1.05rem; font-weight: 600;">Google Gemini (Cloud)</h4>
+                        <span id="modal-gemini-status" class="status-badge status-unconfigured">Unconfigured</span>
+                    </div>
+                    <p class="option-desc" style="font-size: 0.8rem; margin: 8px 0 15px 0;">Requires a Gemini API Key and GCP Project ID inside your env config.</p>
+                    
+                    <div class="input-group" style="margin-bottom: 10px;">
+                        <label style="font-size: 0.72rem; color: var(--text-muted);">Gemini API Key</label>
+                        <input type="password" id="modal-api-key" placeholder="AIzaSy..." class="onboarding-input">
+                    </div>
+                    <div class="input-group" style="margin-bottom: 12px;">
+                        <label style="font-size: 0.72rem; color: var(--text-muted);">GCP Project ID</label>
+                        <input type="text" id="modal-project-id" placeholder="my-gcp-project-123" class="onboarding-input">
+                    </div>
+                    <div class="input-group" style="margin-bottom: 15px;">
+                        <label style="font-size: 0.72rem; color: var(--text-muted);">Gemini Model for Offloading</label>
+                        <select id="modal-gemini-model" class="onboarding-input glass-select" style="background: rgba(255,255,255,0.05); color: var(--text-color); border: 1px solid rgba(255,255,255,0.12); padding: 8px; border-radius: 4px; width: 100%; font-size: 0.8rem; height: 36px; outline: none; margin-top: 5px;">
+                            <option value="gemini-3.1-flash-lite">Gemini 3.1 Flash Lite (Default)</option>
+                            <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
+                            <option value="gemini-2.5-pro">Gemini 2.5 Pro</option>
+                            <option value="gemini-1.5-flash">Gemini 1.5 Flash</option>
+                            <option value="gemini-1.5-pro">Gemini 1.5 Pro</option>
+                        </select>
+                    </div>
+                    
+                    <button onclick="saveModalConfig()" class="onboarding-btn connect-cloud-btn">Save & Connect Cloud</button>
+                    <div class="helper-text" style="font-size: 0.7rem; margin-top: 10px;">
+                        Get keys at <a href="https://aistudio.google.com/" target="_blank" style="color: var(--primary-accent); text-decoration: none;">Google AI Studio</a>.
                     </div>
                 </div>
 
@@ -3395,8 +3403,8 @@ function showOnboardingCard() {
         }
 
         // --- saveConfigData ---
-async function saveConfigData(apiKey, projectId) {
-            if (!apiKey && !projectId) {
+async function saveConfigData(apiKey, projectId, geminiModel = null) {
+            if (!apiKey && !projectId && !geminiModel) {
                 showCustomAlert("Validation Error", "Please provide at least one configuration value.");
                 return;
             }
@@ -3404,6 +3412,7 @@ async function saveConfigData(apiKey, projectId) {
                 const bodyObj = {};
                 if (apiKey) bodyObj.gemini_api_key = apiKey;
                 if (projectId) bodyObj.project_id = projectId;
+                if (geminiModel) bodyObj.gemini_model = geminiModel;
 
                 const res = await fetch('/api/save_config', {
                     method: 'POST',
@@ -3440,7 +3449,8 @@ function saveOnboardingConfig() {
 function saveModalConfig() {
             const apiKey = document.getElementById('modal-api-key').value;
             const projectId = document.getElementById('modal-project-id').value;
-            saveConfigData(apiKey, projectId);
+            const geminiModel = document.getElementById('modal-gemini-model').value;
+            saveConfigData(apiKey, projectId, geminiModel);
         }
 
         // --- verifyConnections ---
@@ -4331,10 +4341,29 @@ function updateConnectionStatus(status) {
 function updateConnectionModalStatus() {
             const modalApiKey = document.getElementById('modal-api-key');
             const modalProjectId = document.getElementById('modal-project-id');
+            const modalGeminiModel = document.getElementById('modal-gemini-model');
+            
             if (connectionStatus.gemini_configured) {
                 if (modalApiKey && !modalApiKey.value) modalApiKey.placeholder = "•••••••••••••••• (Configured)";
                 if (modalProjectId && !modalProjectId.value) modalProjectId.placeholder = "Configured";
             }
+            
+            // Populate Gemini models select dropdown dynamically
+            if (modalGeminiModel) {
+                if (connectionStatus.gemini_models_list && connectionStatus.gemini_models_list.length > 0) {
+                    modalGeminiModel.innerHTML = '';
+                    connectionStatus.gemini_models_list.forEach(m => {
+                        const opt = document.createElement('option');
+                        opt.value = m.value;
+                        opt.textContent = m.label;
+                        modalGeminiModel.appendChild(opt);
+                    });
+                }
+                if (connectionStatus.gemini_model) {
+                    modalGeminiModel.value = connectionStatus.gemini_model;
+                }
+            }
+            
             updateConnectionStatus(connectionStatus);
 
             // Rebuild the Local box panel dynamically inside settings modal

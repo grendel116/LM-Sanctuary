@@ -48,13 +48,35 @@ def check_comfy_installed():
     main_py = os.path.join(COMFYUI_DIR, "main.py")
     return os.path.exists(main_py)
 
-def check_comfy_running():
-    """Checks if the ComfyUI server is responsive on port 8188."""
+_comfy_running_cached = None
+_comfy_running_cache_time = 0.0
+
+def check_comfy_running(force_refresh=False):
+    """Checks if the ComfyUI server is responsive on port 8188 (cached)."""
+    global _comfy_running_cached, _comfy_running_cache_time
+    now = time.time()
+    if not force_refresh and _comfy_running_cached is not None and (now - _comfy_running_cache_time < 3.0):
+        return _comfy_running_cached
+        
     try:
-        res = requests.get(f"{COMFYUI_URL}/object_info", timeout=1.0)
-        return res.status_code == 200
+        # Try /system_stats first (very lightweight, ~1KB)
+        res = requests.get(f"{COMFYUI_URL}/system_stats", timeout=0.3)
+        if res.status_code == 200:
+            _comfy_running_cached = True
+            _comfy_running_cache_time = now
+            return True
     except Exception:
-        return False
+        pass
+        
+    try:
+        # Fallback to GET / (static HTML, very lightweight)
+        res = requests.get(f"{COMFYUI_URL}/", timeout=0.3)
+        _comfy_running_cached = (res.status_code == 200)
+    except Exception:
+        _comfy_running_cached = False
+        
+    _comfy_running_cache_time = now
+    return _comfy_running_cached
 
 def install_comfy():
     """Downloads the portable ComfyUI package matching the GPU architecture, extracts it, and registers ComfyUI-Manager."""
@@ -649,19 +671,40 @@ def stop_comfy_daemon():
 
 # --- Checkpoint Management Functions ---
 
-def list_local_checkpoints():
-    """Scans ComfyUI/models/checkpoints/ directory and returns list of available filenames."""
+_local_checkpoints_cached = None
+_local_checkpoints_cache_time = 0.0
+
+def list_local_checkpoints(force_refresh=False):
+    """Scans ComfyUI/models/checkpoints/ directory and returns list of available filenames (cached)."""
+    global _local_checkpoints_cached, _local_checkpoints_cache_time
+    now = time.time()
+    if not force_refresh and _local_checkpoints_cached is not None and (now - _local_checkpoints_cache_time < 5.0):
+        return _local_checkpoints_cached
+        
     checkpoints = []
     checkpoints_dir = os.path.normpath(os.path.join(COMFYUI_DIR, "models", "checkpoints"))
     if os.path.exists(checkpoints_dir):
-        for root, dirs, files in os.walk(checkpoints_dir):
-            for file in files:
-                if file.lower().endswith((".safetensors", ".ckpt", ".sft")):
-                    rel_path = os.path.relpath(os.path.join(root, file), checkpoints_dir)
-                    # Normalize path separators to forward slash
-                    key = rel_path.replace("\\", "/")
-                    checkpoints.append(key)
-    return sorted(list(set(checkpoints)))
+        # Scan with max_depth=4 to prevent runaway directory traversals
+        def _scan(current_dir, current_depth):
+            if current_depth > 4:
+                return
+            try:
+                with os.scandir(current_dir) as it:
+                    for entry in it:
+                        if entry.is_file():
+                            if entry.name.lower().endswith((".safetensors", ".ckpt", ".sft")):
+                                rel_path = os.path.relpath(entry.path, checkpoints_dir)
+                                key = rel_path.replace("\\", "/")
+                                checkpoints.append(key)
+                        elif entry.is_dir():
+                            _scan(entry.path, current_depth + 1)
+            except Exception:
+                pass
+        _scan(checkpoints_dir, 1)
+        
+    _local_checkpoints_cached = sorted(list(set(checkpoints)))
+    _local_checkpoints_cache_time = now
+    return _local_checkpoints_cached
 
 def search_huggingface_checkpoints(query):
     """Searches Hugging Face for text-to-image models and resolves their checkpoint filenames and download links."""
