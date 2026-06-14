@@ -2372,30 +2372,34 @@
                 <!-- Program Settings -->
                 <div style="border-top: 1px solid rgba(255,255,255,0.05); padding-top: 12px;">
                     <h4 style="margin: 0 0 8px 0; font-size: 0.85rem; font-weight: 600; color: var(--text-main);">Program Settings</h4>
-                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; gap: 15px;">
                         <div>
                             <div style="font-size: 0.8rem; color: var(--text-main); font-weight: 500;">Security Preset</div>
                             <div style="font-size: 0.7rem; color: var(--text-muted); margin-top: 2px;">Choose auto-execution policy for shell commands and file operations.</div>
                         </div>
-                        <select id="project-security-preset" onchange="saveProjectSettings()" style="background: rgba(0, 0, 0, 0.3); border: 1px solid var(--border-color); color: var(--text-main); padding: 6px 10px; border-radius: 8px; font-size: 0.8rem; outline: none; cursor: pointer; color-scheme: dark;">
-                            <option value="ask_always">Ask Always</option>
-                            <option value="turbo">Turbo Mode</option>
-                        </select>
+                        <div style="width: 200px; flex-shrink: 0;">
+                            <select id="project-security-preset" class="glass-select" onchange="saveProjectSettings()">
+                                <option value="ask_always">Ask Always</option>
+                                <option value="auto">Auto Mode</option>
+                            </select>
+                        </div>
                     </div>
                 </div>
 
                 <!-- Program Behavior -->
                 <div style="border-top: 1px solid rgba(255,255,255,0.05); padding-top: 12px;">
                     <h4 style="margin: 0 0 8px 0; font-size: 0.85rem; font-weight: 600; color: var(--text-main);">Program Behavior</h4>
-                    <div style="display: flex; justify-content: space-between; align-items: center;">
+                    <div style="display: flex; justify-content: space-between; align-items: center; gap: 15px;">
                         <div>
                             <div style="font-size: 0.8rem; color: var(--text-main); font-weight: 500;">Artifact Review Policy</div>
                             <div style="font-size: 0.7rem; color: var(--text-muted); margin-top: 2px;">Specifies behavior when generating documentation and plans.</div>
                         </div>
-                        <select id="project-review-policy" onchange="saveProjectSettings()" style="background: rgba(0, 0, 0, 0.3); border: 1px solid var(--border-color); color: var(--text-main); padding: 6px 10px; border-radius: 8px; font-size: 0.8rem; outline: none; cursor: pointer; color-scheme: dark;">
-                            <option value="ask_always">Always Ask</option>
-                            <option value="auto_approve">Auto Approve</option>
-                        </select>
+                        <div style="width: 200px; flex-shrink: 0;">
+                            <select id="project-review-policy" class="glass-select" onchange="saveProjectSettings()">
+                                <option value="ask_always">Always Ask</option>
+                                <option value="auto_approve">Auto Approve</option>
+                            </select>
+                        </div>
                     </div>
                 </div>
 
@@ -2403,15 +2407,17 @@
                 <div style="border-top: 1px solid rgba(255,255,255,0.05); padding-top: 12px;">
                     <h4 style="margin: 0 0 8px 0; font-size: 0.85rem; font-weight: 600; color: var(--text-main);">Search Settings</h4>
                     <div style="display: flex; flex-direction: column; gap: 10px;">
-                        <div style="display: flex; justify-content: space-between; align-items: center;">
+                        <div style="display: flex; justify-content: space-between; align-items: center; gap: 15px;">
                             <div>
                                 <div style="font-size: 0.8rem; color: var(--text-main); font-weight: 500;">Search Mode</div>
                                 <div style="font-size: 0.7rem; color: var(--text-muted); margin-top: 2px;">Unified search crawling multiple backends simultaneously.</div>
                             </div>
-                            <select id="project-search-engine" onchange="toggleSearxUrlVisibility(); saveProjectSettings();" style="background: rgba(0, 0, 0, 0.3); border: 1px solid var(--border-color); color: var(--text-main); padding: 6px 10px; border-radius: 8px; font-size: 0.8rem; outline: none; cursor: pointer; color-scheme: dark;">
-                                <option value="web_crawling">Web Crawling (Unified: SearXNG, Baidu, Google, Wikipedia)</option>
-                                <option value="wikipedia">Wikipedia Only</option>
-                            </select>
+                            <div style="width: 240px; flex-shrink: 0;">
+                                <select id="project-search-engine" class="glass-select" onchange="toggleSearxUrlVisibility(); saveProjectSettings();">
+                                    <option value="web_crawling">Web Crawling (Unified)</option>
+                                    <option value="wikipedia">Wikipedia Only</option>
+                                </select>
+                            </div>
                         </div>
                         <div id="searxng-url-container" style="display: flex; justify-content: space-between; align-items: center;">
                             <div>
@@ -7794,7 +7800,9 @@ function showToolConfirmModal(callId, toolName, details) {
                 currentProjectSettings = data;
                 
                 // Populate form controls
-                document.getElementById('project-security-preset').value = data.security_preset || 'ask_always';
+                let secPreset = data.security_preset || 'ask_always';
+                if (secPreset === 'turbo') secPreset = 'auto';
+                document.getElementById('project-security-preset').value = secPreset;
                 document.getElementById('project-review-policy').value = data.artifact_review_policy || 'ask_always';
                 document.getElementById('project-search-engine').value = data.search_engine || 'web_crawling';
                 document.getElementById('project-searxng-url').value = data.searxng_url || '';
