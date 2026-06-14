@@ -5600,6 +5600,345 @@ function toggleThinkingBlock(headerElement) {
             }
         }
 
+        // --- renderCompletedLogs ---
+        function renderCompletedLogs(bubble, toolCalls, duration = null) {
+            if (!toolCalls || toolCalls.length === 0) return;
+
+            let logsContainer = bubble.querySelector('.antigravity-logs-container');
+            if (logsContainer) {
+                logsContainer.innerHTML = '';
+            } else {
+                logsContainer = document.createElement('div');
+                logsContainer.className = 'antigravity-logs-container';
+                bubble.appendChild(logsContainer);
+            }
+
+            const pairedTools = [];
+            const callsMap = {};
+            
+            toolCalls.forEach(tc => {
+                if (tc.type === 'call') {
+                    const callInfo = {
+                        id: tc.id,
+                        name: tc.name,
+                        args: tc.args,
+                        response: null
+                    };
+                    pairedTools.push(callInfo);
+                    callsMap[tc.id] = callInfo;
+                } else if (tc.type === 'response') {
+                    if (callsMap[tc.id]) {
+                        callsMap[tc.id].response = tc.response;
+                    } else {
+                        pairedTools.push({
+                            id: tc.id,
+                            name: tc.name,
+                            args: null,
+                            response: tc.response
+                        });
+                    }
+                }
+            });
+
+            if (pairedTools.length > 0) {
+                const getBasename = (pathStr) => {
+                    if (!pathStr) return '';
+                    if (pathStr.startsWith('http://') || pathStr.startsWith('https://')) {
+                        try {
+                            const url = new URL(pathStr);
+                            return url.hostname + url.pathname;
+                        } catch(e) {
+                            return pathStr;
+                        }
+                    }
+                    const parts = pathStr.split(/[\\/]/);
+                    return parts[parts.length - 1] || pathStr;
+                };
+
+                const parseResultCount = (toolName, responseText) => {
+                    if (!responseText) return null;
+                    const trimmed = responseText.trim();
+                    if (trimmed === "No search results found." || trimmed === "No search results found") {
+                        return 0;
+                    }
+                    if (trimmed.startsWith("Error")) {
+                        return 0;
+                    }
+                    try {
+                        if (trimmed.startsWith('{') || trimmed.trim().startsWith('[')) {
+                            const parsed = JSON.parse(trimmed);
+                            if (Array.isArray(parsed)) return parsed.length;
+                            if (parsed.results && Array.isArray(parsed.results)) return parsed.results.length;
+                            if (parsed.matches && Array.isArray(parsed.matches)) return parsed.matches.length;
+                        }
+                    } catch(e) {}
+                    
+                    if (toolName === 'web_search' || toolName === 'google_search') {
+                        const blocks = responseText.split('\n\n').filter(b => b.trim().length > 0);
+                        return blocks.length;
+                    }
+                    
+                    const lines = responseText.split('\n').filter(l => l.trim().length > 0);
+                    if (lines.length > 0 && lines.length < 50) {
+                        return lines.length;
+                    }
+                    return null;
+                };
+
+                const escapeHtml = (text) => {
+                    if (!text) return '';
+                    return String(text)
+                        .replace(/&/g, '&amp;')
+                        .replace(/</g, '&lt;')
+                        .replace(/>/g, '&gt;')
+                        .replace(/"/g, '&quot;')
+                        .replace(/'/g, '&#039;');
+                };
+
+                const createLogItemElement = (item) => {
+                    const itemEl = document.createElement('div');
+                    itemEl.className = 'antigravity-log-item';
+                    itemEl.innerHTML = `
+                        <span class="ag-log-icon">${item.icon}</span>
+                        <span class="ag-log-action">${item.action}</span>
+                        <span class="ag-log-target">${item.target}</span>
+                        <span class="ag-log-suffix">${item.suffix}</span>
+                    `;
+
+                    const detailEl = document.createElement('div');
+                    detailEl.className = 'antigravity-log-detail';
+                    detailEl.style.display = 'none';
+                    
+                    let argsFormatted = '';
+                    if (item.args && Object.keys(item.args).length > 0) {
+                        argsFormatted = `Parameters:\n${JSON.stringify(item.args, null, 2)}\n\n`;
+                    }
+                    
+                    let responseText = item.response || 'No response data';
+                    
+                    detailEl.innerHTML = `
+                        <pre><code>${argsFormatted}Response:\n${escapeHtml(responseText)}</code></pre>
+                    `;
+
+                    itemEl.onclick = (e) => {
+                        e.stopPropagation();
+                        const isExpanded = detailEl.style.display === 'block';
+                        detailEl.style.display = isExpanded ? 'none' : 'block';
+                    };
+
+                    return { item: itemEl, detail: detailEl };
+                };
+
+                const formattedItems = pairedTools.map(tool => {
+                    let category = 'explore';
+                    let icon = getLogIconSvg('file');
+                    let action = 'Analyzed';
+                    let target = '';
+                    let suffix = '';
+                    let isMutation = false;
+                    
+                    const name = tool.name;
+                    const args = tool.args || {};
+                    
+                    if (name === 'read_file' || name === 'view_file' || name === 'read_webpage') {
+                        category = 'file';
+                        icon = name === 'read_webpage' ? getLogIconSvg('webpage') : getLogIconSvg('file');
+                        action = 'Analyzed';
+                        
+                        let pathVal = args.path || args.AbsolutePath || args.url || '';
+                        target = getBasename(pathVal);
+                        
+                        let start = args.StartLine || args.start_line || '';
+                        let end = args.EndLine || args.end_line || '';
+                        if (start && end) {
+                            suffix = ` #L${start}-${end}`;
+                        } else if (start) {
+                            suffix = ` #L${start}`;
+                        }
+                    } 
+                    else if (name === 'get_workspace_structure' || name === 'list_dir') {
+                        category = 'folder';
+                        icon = getLogIconSvg('folder');
+                        action = 'Analyzed';
+                        let pathVal = args.path || args.DirectoryPath || '';
+                        target = pathVal || 'workspace';
+                        suffix = ' >';
+                    }
+                    else if (name === 'search_codebase' || name === 'grep_search' || name === 'web_search' || name === 'google_search' || name === 'search_github' || name === 'search_arxiv' || name === 'search_hacker_news') {
+                        category = 'search';
+                        icon = getLogIconSvg('search');
+                        action = 'Searched';
+                        target = args.query || args.keyword || args.Query || '';
+                        
+                        if (tool.response) {
+                            let count = parseResultCount(tool.name, tool.response);
+                            if (count !== null) {
+                                suffix = ` ${count} result${count !== 1 ? 's' : ''}`;
+                            }
+                        }
+                    }
+                    else if (name === 'write_file' || name === 'write_to_file') {
+                        category = 'edit';
+                        icon = getLogIconSvg('edit');
+                        isMutation = true;
+                        
+                        let pathVal = args.path || args.TargetFile || '';
+                        target = getBasename(pathVal);
+                        
+                        let contentVal = args.content || args.CodeContent || '';
+                        let linesCount = contentVal ? contentVal.split('\n').length : 0;
+                        
+                        action = args.Overwrite ? 'Edited' : 'Created';
+                        suffix = ` +${linesCount} -0`;
+                    }
+                    else if (name === 'replace_in_file' || name === 'replace_file_content' || name === 'multi_replace_file_content') {
+                        category = 'edit';
+                        icon = getLogIconSvg('edit');
+                        isMutation = true;
+                        
+                        let pathVal = args.path || args.TargetFile || '';
+                        target = getBasename(pathVal);
+                        action = 'Edited';
+                        
+                        let linesAdded = 0;
+                        let linesRemoved = 0;
+                        if (name === 'replace_file_content' && args.ReplacementContent) {
+                            linesAdded = args.ReplacementContent.split('\n').length;
+                        }
+                        if (name === 'replace_file_content' && args.TargetContent) {
+                            linesRemoved = args.TargetContent.split('\n').length;
+                        }
+                        
+                        if (linesAdded || linesRemoved) {
+                            suffix = ` +${linesAdded} -${linesRemoved}`;
+                        }
+                    }
+                    else if (name === 'run_shell_command' || name === 'run_command') {
+                        category = 'command';
+                        icon = getLogIconSvg('command');
+                        isMutation = true;
+                        action = 'Ran';
+                        target = args.command || args.CommandLine || '';
+                        if (target.length > 50) {
+                            target = target.substring(0, 47) + '...';
+                        }
+                    }
+                    else {
+                        category = 'other';
+                        icon = getLogIconSvg('gear');
+                        action = 'Ran';
+                        target = name;
+                        isMutation = true;
+                    }
+                    
+                    return {
+                        id: tool.id || 'call_' + Math.random().toString(36).substring(2, 6),
+                        name: tool.name,
+                        args: tool.args,
+                        response: tool.response,
+                        category,
+                        icon,
+                        action,
+                        target,
+                        suffix,
+                        isMutation
+                    };
+                });
+
+                const explorationItems = formattedItems.filter(item => !item.isMutation);
+                const mutationItems = formattedItems.filter(item => item.isMutation);
+
+                const uniqueFiles = new Set();
+                const uniqueFolders = new Set();
+                let searchesCount = 0;
+
+                explorationItems.forEach(item => {
+                    if (item.category === 'file') {
+                        uniqueFiles.add(item.target);
+                    } else if (item.category === 'folder') {
+                        uniqueFolders.add(item.target);
+                    } else if (item.category === 'search') {
+                        searchesCount++;
+                    }
+                });
+
+                const filesCount = uniqueFiles.size;
+                const foldersCount = uniqueFolders.size;
+                const parts = [];
+                if (filesCount > 0) parts.push(`${filesCount} file${filesCount > 1 ? 's' : ''}`);
+                if (foldersCount > 0) parts.push(`${foldersCount} folder${foldersCount > 1 ? 's' : ''}`);
+                if (searchesCount > 0) parts.push(`${searchesCount} search${searchesCount > 1 ? 'es' : ''}`);
+
+                const subheaderText = parts.length > 0 ? `Explored ${parts.join(', ')}` : 'Explored workspace';
+
+                const logsCard = document.createElement('div');
+                logsCard.className = 'antigravity-logs-card';
+
+                const header = document.createElement('div');
+                header.className = 'antigravity-logs-header';
+                const durationText = duration ? `Worked for ${duration}s` : 'Activity Log';
+                header.innerHTML = `
+                    <span class="ag-timer-icon">${getLogIconSvg('timer')}</span>
+                    <span>${durationText}</span>
+                    <span class="ag-header-chevron">▼</span>
+                `;
+
+                const body = document.createElement('div');
+                body.className = 'antigravity-logs-body';
+                body.style.display = 'none';
+
+                if (explorationItems.length > 0) {
+                    const exploreContainer = document.createElement('div');
+                    exploreContainer.className = 'antigravity-explore-container';
+
+                    const exploreHeader = document.createElement('div');
+                    exploreHeader.className = 'antigravity-explore-header';
+                    exploreHeader.innerHTML = `
+                        <span>${subheaderText}</span>
+                        <span class="ag-explore-chevron">▼</span>
+                    `;
+
+                    const exploreBody = document.createElement('div');
+                    exploreBody.className = 'antigravity-explore-body';
+                    exploreBody.style.display = 'none';
+
+                    explorationItems.forEach(item => {
+                        const itemEl = createLogItemElement(item);
+                        exploreBody.appendChild(itemEl.item);
+                        exploreBody.appendChild(itemEl.detail);
+                    });
+
+                    exploreHeader.onclick = (e) => {
+                        e.stopPropagation();
+                        const isExpanded = exploreBody.style.display === 'flex' || exploreBody.style.display === 'block';
+                        exploreBody.style.display = isExpanded ? 'none' : 'flex';
+                        exploreHeader.querySelector('.ag-explore-chevron').classList.toggle('expanded', !isExpanded);
+                    };
+
+                    exploreContainer.appendChild(exploreHeader);
+                    exploreContainer.appendChild(exploreBody);
+                    body.appendChild(exploreContainer);
+                }
+
+                mutationItems.forEach(item => {
+                    const itemEl = createLogItemElement(item);
+                    itemEl.item.classList.add('mutation-item');
+                    body.appendChild(itemEl.item);
+                    body.appendChild(itemEl.detail);
+                });
+
+                header.onclick = () => {
+                    const isExpanded = body.style.display === 'flex' || body.style.display === 'block';
+                    body.style.display = isExpanded ? 'none' : 'flex';
+                    header.querySelector('.ag-header-chevron').classList.toggle('expanded', !isExpanded);
+                };
+
+                logsCard.appendChild(header);
+                logsCard.appendChild(body);
+                logsContainer.appendChild(logsCard);
+            }
+        }
+
         // --- appendMessage ---
         function appendMessage(role, text, imageUrl = null, toolCalls = null, isLive = false, timestamp = null, duration = null) {
             text = text || '';
@@ -5912,335 +6251,7 @@ function toggleThinkingBlock(headerElement) {
             }
 
             if (toolCalls && toolCalls.length > 0) {
-                const logsContainer = document.createElement('div');
-                logsContainer.className = 'antigravity-logs-container';
-                
-                const pairedTools = [];
-                const callsMap = {};
-                
-                toolCalls.forEach(tc => {
-                    if (tc.type === 'call') {
-                        const callInfo = {
-                            id: tc.id,
-                            name: tc.name,
-                            args: tc.args,
-                            response: null
-                        };
-                        pairedTools.push(callInfo);
-                        callsMap[tc.id] = callInfo;
-                    } else if (tc.type === 'response') {
-                        if (callsMap[tc.id]) {
-                            callsMap[tc.id].response = tc.response;
-                        } else {
-                            pairedTools.push({
-                                id: tc.id,
-                                name: tc.name,
-                                args: null,
-                                response: tc.response
-                            });
-                        }
-                    }
-                });
-
-                if (pairedTools.length > 0) {
-                    const getBasename = (pathStr) => {
-                        if (!pathStr) return '';
-                        if (pathStr.startsWith('http://') || pathStr.startsWith('https://')) {
-                            try {
-                                const url = new URL(pathStr);
-                                return url.hostname + url.pathname;
-                            } catch(e) {
-                                return pathStr;
-                            }
-                        }
-                        const parts = pathStr.split(/[\\/]/);
-                        return parts[parts.length - 1] || pathStr;
-                    };
-
-                    const parseResultCount = (toolName, responseText) => {
-                        if (!responseText) return null;
-                        const trimmed = responseText.trim();
-                        if (trimmed === "No search results found." || trimmed === "No search results found") {
-                            return 0;
-                        }
-                        if (trimmed.startsWith("Error")) {
-                            return 0;
-                        }
-                        try {
-                            if (trimmed.startsWith('{') || trimmed.trim().startsWith('[')) {
-                                const parsed = JSON.parse(trimmed);
-                                if (Array.isArray(parsed)) return parsed.length;
-                                if (parsed.results && Array.isArray(parsed.results)) return parsed.results.length;
-                                if (parsed.matches && Array.isArray(parsed.matches)) return parsed.matches.length;
-                            }
-                        } catch(e) {}
-                        
-                        if (toolName === 'web_search' || toolName === 'google_search') {
-                            const blocks = responseText.split('\n\n').filter(b => b.trim().length > 0);
-                            return blocks.length;
-                        }
-                        
-                        const lines = responseText.split('\n').filter(l => l.trim().length > 0);
-                        if (lines.length > 0 && lines.length < 50) {
-                            return lines.length;
-                        }
-                        return null;
-                    };
-
-                    const escapeHtml = (text) => {
-                        if (!text) return '';
-                        return String(text)
-                            .replace(/&/g, '&amp;')
-                            .replace(/</g, '&lt;')
-                            .replace(/>/g, '&gt;')
-                            .replace(/"/g, '&quot;')
-                            .replace(/'/g, '&#039;');
-                    };
-
-                    const createLogItemElement = (item) => {
-                        const itemEl = document.createElement('div');
-                        itemEl.className = 'antigravity-log-item';
-                        itemEl.innerHTML = `
-                            <span class="ag-log-icon">${item.icon}</span>
-                            <span class="ag-log-action">${item.action}</span>
-                            <span class="ag-log-target">${item.target}</span>
-                            <span class="ag-log-suffix">${item.suffix}</span>
-                        `;
-
-                        const detailEl = document.createElement('div');
-                        detailEl.className = 'antigravity-log-detail';
-                        detailEl.style.display = 'none';
-                        
-                        let argsFormatted = '';
-                        if (item.args && Object.keys(item.args).length > 0) {
-                            argsFormatted = `Parameters:\n${JSON.stringify(item.args, null, 2)}\n\n`;
-                        }
-                        
-                        let responseText = item.response || 'No response data';
-                        
-                        detailEl.innerHTML = `
-                            <pre><code>${argsFormatted}Response:\n${escapeHtml(responseText)}</code></pre>
-                        `;
-
-                        itemEl.onclick = (e) => {
-                            e.stopPropagation();
-                            const isExpanded = detailEl.style.display === 'block';
-                            detailEl.style.display = isExpanded ? 'none' : 'block';
-                        };
-
-                        return { item: itemEl, detail: detailEl };
-                    };
-
-                    const formattedItems = pairedTools.map(tool => {
-                        let category = 'explore';
-                        let icon = getLogIconSvg('file');
-                        let action = 'Analyzed';
-                        let target = '';
-                        let suffix = '';
-                        let isMutation = false;
-                        
-                        const name = tool.name;
-                        const args = tool.args || {};
-                        
-                        if (name === 'read_file' || name === 'view_file' || name === 'read_webpage') {
-                            category = 'file';
-                            icon = name === 'read_webpage' ? getLogIconSvg('webpage') : getLogIconSvg('file');
-                            action = 'Analyzed';
-                            
-                            let pathVal = args.path || args.AbsolutePath || args.url || '';
-                            target = getBasename(pathVal);
-                            
-                            let start = args.StartLine || args.start_line || '';
-                            let end = args.EndLine || args.end_line || '';
-                            if (start && end) {
-                                suffix = ` #L${start}-${end}`;
-                            } else if (start) {
-                                suffix = ` #L${start}`;
-                            }
-                        } 
-                        else if (name === 'get_workspace_structure' || name === 'list_dir') {
-                            category = 'folder';
-                            icon = getLogIconSvg('folder');
-                            action = 'Analyzed';
-                            let pathVal = args.path || args.DirectoryPath || '';
-                            target = pathVal || 'workspace';
-                            suffix = ' >';
-                        }
-                        else if (name === 'search_codebase' || name === 'grep_search' || name === 'web_search' || name === 'google_search' || name === 'search_github' || name === 'search_arxiv' || name === 'search_hacker_news') {
-                            category = 'search';
-                            icon = getLogIconSvg('search');
-                            action = 'Searched';
-                            target = args.query || args.keyword || args.Query || '';
-                            
-                            if (tool.response) {
-                                let count = parseResultCount(tool.name, tool.response);
-                                if (count !== null) {
-                                    suffix = ` ${count} result${count !== 1 ? 's' : ''}`;
-                                }
-                            }
-                        }
-                        else if (name === 'write_file' || name === 'write_to_file') {
-                            category = 'edit';
-                            icon = getLogIconSvg('edit');
-                            isMutation = true;
-                            
-                            let pathVal = args.path || args.TargetFile || '';
-                            target = getBasename(pathVal);
-                            
-                            let contentVal = args.content || args.CodeContent || '';
-                            let linesCount = contentVal ? contentVal.split('\n').length : 0;
-                            
-                            action = args.Overwrite ? 'Edited' : 'Created';
-                            suffix = ` +${linesCount} -0`;
-                        }
-                        else if (name === 'replace_in_file' || name === 'replace_file_content' || name === 'multi_replace_file_content') {
-                            category = 'edit';
-                            icon = getLogIconSvg('edit');
-                            isMutation = true;
-                            
-                            let pathVal = args.path || args.TargetFile || '';
-                            target = getBasename(pathVal);
-                            action = 'Edited';
-                            
-                            let linesAdded = 0;
-                            let linesRemoved = 0;
-                            if (name === 'replace_file_content' && args.ReplacementContent) {
-                                linesAdded = args.ReplacementContent.split('\n').length;
-                            }
-                            if (name === 'replace_file_content' && args.TargetContent) {
-                                linesRemoved = args.TargetContent.split('\n').length;
-                            }
-                            
-                            if (linesAdded || linesRemoved) {
-                                suffix = ` +${linesAdded} -${linesRemoved}`;
-                            }
-                        }
-                        else if (name === 'run_shell_command' || name === 'run_command') {
-                            category = 'command';
-                            icon = getLogIconSvg('command');
-                            isMutation = true;
-                            action = 'Ran';
-                            target = args.command || args.CommandLine || '';
-                            if (target.length > 50) {
-                                target = target.substring(0, 47) + '...';
-                            }
-                        }
-                        else {
-                            category = 'other';
-                            icon = getLogIconSvg('gear');
-                            action = 'Ran';
-                            target = name;
-                            isMutation = true;
-                        }
-                        
-                        return {
-                            id: tool.id || 'call_' + Math.random().toString(36).substring(2, 6),
-                            name: tool.name,
-                            args: tool.args,
-                            response: tool.response,
-                            category,
-                            icon,
-                            action,
-                            target,
-                            suffix,
-                            isMutation
-                        };
-                    });
-
-                    const explorationItems = formattedItems.filter(item => !item.isMutation);
-                    const mutationItems = formattedItems.filter(item => item.isMutation);
-
-                    const uniqueFiles = new Set();
-                    const uniqueFolders = new Set();
-                    let searchesCount = 0;
-
-                    explorationItems.forEach(item => {
-                        if (item.category === 'file') {
-                            uniqueFiles.add(item.target);
-                        } else if (item.category === 'folder') {
-                            uniqueFolders.add(item.target);
-                        } else if (item.category === 'search') {
-                            searchesCount++;
-                        }
-                    });
-
-                    const filesCount = uniqueFiles.size;
-                    const foldersCount = uniqueFolders.size;
-                    const parts = [];
-                    if (filesCount > 0) parts.push(`${filesCount} file${filesCount > 1 ? 's' : ''}`);
-                    if (foldersCount > 0) parts.push(`${foldersCount} folder${foldersCount > 1 ? 's' : ''}`);
-                    if (searchesCount > 0) parts.push(`${searchesCount} search${searchesCount > 1 ? 'es' : ''}`);
-
-                    const subheaderText = parts.length > 0 ? `Explored ${parts.join(', ')}` : 'Explored workspace';
-
-                    const logsCard = document.createElement('div');
-                    logsCard.className = 'antigravity-logs-card';
-
-                    const header = document.createElement('div');
-                    header.className = 'antigravity-logs-header';
-                    const durationText = duration ? `Worked for ${duration}s` : 'Activity Log';
-                    header.innerHTML = `
-                        <span class="ag-timer-icon">${getLogIconSvg('timer')}</span>
-                        <span>${durationText}</span>
-                        <span class="ag-header-chevron">▼</span>
-                    `;
-
-                    const body = document.createElement('div');
-                    body.className = 'antigravity-logs-body';
-                    body.style.display = 'none';
-
-                    if (explorationItems.length > 0) {
-                        const exploreContainer = document.createElement('div');
-                        exploreContainer.className = 'antigravity-explore-container';
-
-                        const exploreHeader = document.createElement('div');
-                        exploreHeader.className = 'antigravity-explore-header';
-                        exploreHeader.innerHTML = `
-                            <span>${subheaderText}</span>
-                            <span class="ag-explore-chevron">▼</span>
-                        `;
-
-                        const exploreBody = document.createElement('div');
-                        exploreBody.className = 'antigravity-explore-body';
-                        exploreBody.style.display = 'none';
-
-                        explorationItems.forEach(item => {
-                            const itemEl = createLogItemElement(item);
-                            exploreBody.appendChild(itemEl.item);
-                            exploreBody.appendChild(itemEl.detail);
-                        });
-
-                        exploreHeader.onclick = (e) => {
-                            e.stopPropagation();
-                            const isExpanded = exploreBody.style.display === 'flex' || exploreBody.style.display === 'block';
-                            exploreBody.style.display = isExpanded ? 'none' : 'flex';
-                            exploreHeader.querySelector('.ag-explore-chevron').classList.toggle('expanded', !isExpanded);
-                        };
-
-                        exploreContainer.appendChild(exploreHeader);
-                        exploreContainer.appendChild(exploreBody);
-                        body.appendChild(exploreContainer);
-                    }
-
-                    mutationItems.forEach(item => {
-                        const itemEl = createLogItemElement(item);
-                        itemEl.item.classList.add('mutation-item');
-                        body.appendChild(itemEl.item);
-                        body.appendChild(itemEl.detail);
-                    });
-
-                    header.onclick = () => {
-                        const isExpanded = body.style.display === 'flex' || body.style.display === 'block';
-                        body.style.display = isExpanded ? 'none' : 'flex';
-                        header.querySelector('.ag-header-chevron').classList.toggle('expanded', !isExpanded);
-                    };
-
-                    logsCard.appendChild(header);
-                    logsCard.appendChild(body);
-                    logsContainer.appendChild(logsCard);
-                }
-                
-                bubble.appendChild(logsContainer);
+                renderCompletedLogs(bubble, toolCalls, duration);
             }
 
 
@@ -7457,6 +7468,37 @@ async function regenerateImage(buttonElement, oldImageUrl, prompt) {
                         regenerateImage(buttonElement, data.new_image_url, prompt);
                     };
                     await loadServerImages();
+
+                    // Re-render Activity Log in completed ("Ran...") state
+                    try {
+                        const bubble = buttonElement.closest('.message.companion');
+                        if (bubble) {
+                            const logRes = await fetch(`/api/session_tool_calls?session_id=${sessionId}`);
+                            const logData = await logRes.json();
+                            if (logData.tool_calls && logData.tool_calls.length > 0) {
+                                // Convert Python session tool calls to Gemini type/format
+                                const geminiToolCalls = [];
+                                logData.tool_calls.forEach(tc => {
+                                    geminiToolCalls.push({
+                                        type: 'call',
+                                        name: tc.name,
+                                        args: tc.args ? { prompt: tc.args } : {},
+                                        id: tc.id
+                                    });
+                                    geminiToolCalls.push({
+                                        type: 'response',
+                                        name: tc.name,
+                                        response: tc.response || '',
+                                        id: tc.id
+                                    });
+                                });
+                                const totalDur = logData.tool_calls.reduce((sum, tc) => sum + (tc.duration || 0), 0);
+                                renderCompletedLogs(bubble, geminiToolCalls, totalDur ? Math.round(totalDur * 10) / 10 : null);
+                            }
+                        }
+                    } catch (err) {
+                        console.error("Error finalizing activity logs after reroll:", err);
+                    }
                 } else {
                     let errorMsg = data.error || 'Unknown error';
                     if (typeof marked !== 'undefined' && marked.parse) {

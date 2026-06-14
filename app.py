@@ -881,6 +881,9 @@ def regenerate_image():
 
     try:
         import tools
+        tools.current_session_id.set(session_id)
+        with tools.session_tool_calls_lock:
+            tools.session_tool_calls[session_id] = []
         # Generate new portrait
         new_markdown = tools.generate_local_image(prompt)
         if new_markdown.startswith("Error"):
