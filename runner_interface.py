@@ -181,9 +181,526 @@ def _compact_session_history(adk_session, keep_turns: int = 3):
             adk_session.events = new_events
 
 
+# --- LOCAL HISTORY ADAPTERS FOR UNIFIED LOCAL EXECUTION LOOP ---
+
+class LocalHistoryAdapter:
+    def __init__(self, runner_obj, session_id):
+        self.runner_obj = runner_obj
+        self.session_id = session_id
+
+    def get_openai_messages(self, sys_inst: str, rag_context: str) -> list:
+        raise NotImplementedError()
+
+    def append_assistant_message(self, text: str, tool_calls_data: list, invocation_id: str):
+        raise NotImplementedError()
+
+    def append_tool_events(self, results: list, invocation_id: str):
+        raise NotImplementedError()
+
+    def append_image_tool_events(self, tool_name: str, tool_args: dict, new_markdown: str, call_id: str, invocation_id: str):
+        raise NotImplementedError()
+
+    def post_process_thoughts(self, invocation_id: str):
+        raise NotImplementedError()
+
+    def save(self):
+        raise NotImplementedError()
+
+
+class AdkHistoryAdapter(LocalHistoryAdapter):
+    def __init__(self, runner_obj, session_id, adk_session, user_event):
+        super().__init__(runner_obj, session_id)
+        self.adk_session = adk_session
+        self.user_event = user_event
+
+    def get_openai_messages(self, sys_inst: str, rag_context: str) -> list:
+        import base64
+        raw_messages = []
+        for ev in self.adk_session.events:
+            role_str = ev.content.role if ev.content and ev.content.role else ev.author.lower()
+            role = "user" if role_str == "user" else "assistant"
+            
+            text = ""
+            image_url = None
+            if ev.content and ev.content.parts:
+                for part in ev.content.parts:
+                    if part.text:
+                        text += part.text
+                    elif getattr(part, 'inline_data', None):
+                        try:
+                            blob = part.inline_data
+                            if hasattr(blob, 'data') and hasattr(blob, 'mime_type'):
+                                data_b64 = base64.b64encode(blob.data).decode('utf-8')
+                                image_url = f"data:{blob.mime_type};base64,{data_b64}"
+                        except Exception:
+                            pass
+                    elif getattr(part, 'function_call', None):
+                        fc = part.function_call
+                        args_list = []
+                        if fc.args:
+                            args_dict = dict(fc.args) if not isinstance(fc.args, dict) else fc.args
+                            for k, v in args_dict.items():
+                                if isinstance(v, str):
+                                    escaped_v = v.replace('"', '\\"')
+                                    args_list.append(f'{k}="{escaped_v}"')
+                                else:
+                                    args_list.append(f'{k}={v}')
+                        args_str = ", ".join(args_list)
+                        text += f"\n[{fc.name}({args_str})]"
+                    elif getattr(part, 'function_response', None):
+                        fr = part.function_response
+                        resp = fr.response
+                        if hasattr(resp, "fields"):
+                            try:
+                                from google.protobuf.json_format import MessageToDict
+                                resp_dict = MessageToDict(resp)
+                                resp = resp_dict.get("result", resp_dict)
+                            except Exception:
+                                pass
+                        elif isinstance(resp, dict):
+                            resp = resp.get("result", resp)
+                        text += f"\n[Tool Response from {fr.name}]:\n{resp}"
+                        
+            from utils.program_mood import extract_and_strip_mood
+            text = extract_and_strip_mood(text)[0].strip()
+            if text or image_url:
+                if image_url:
+                    text_content = f"{text} (image: [Attached Image])" if text else "[Attached Image]"
+                    raw_messages.append({"role": role, "content": text_content})
+                else:
+                    raw_messages.append({"role": role, "content": text})
+                    
+        openai_messages = [{"role": "system", "content": sys_inst}]
+        if rag_context:
+            openai_messages[0]["content"] += f"\n\n# KNOWLEDGE BASE CONTEXT\nUse the following verified context from your Data Bank to help answer questions if relevant:\n{rag_context}\n"
+        openai_messages[0]["content"] += _LOCAL_DIRECTIVE_PROMPT
+
+        for msg in raw_messages:
+            if openai_messages and openai_messages[-1]["role"] == msg["role"]:
+                openai_messages[-1]["content"] += "\n\n" + msg["content"]
+            else:
+                openai_messages.append(msg)
+        return openai_messages
+
+    def append_assistant_message(self, text: str, tool_calls_data: list, invocation_id: str):
+        from google.adk.events.event import Event
+        from google.genai import types
+        import time
+        if self.adk_session.events:
+            last_ev = self.adk_session.events[-1]
+            if last_ev.author.lower() in ('companion', self.runner_obj.runner.agent.name.lower(), 'model') and last_ev.invocation_id == invocation_id:
+                if last_ev.content and last_ev.content.parts:
+                    for part in last_ev.content.parts:
+                        if part.text is not None:
+                            part.text = text
+                            return last_ev
+                            
+        companion_content = types.Content(role="model", parts=[types.Part.from_text(text=text)])
+        companion_event = Event(
+            author=self.runner_obj.runner.agent.name,
+            content=companion_content,
+            invocation_id=invocation_id,
+            id=f"companion-{int(time.time())}",
+            timestamp=time.time()
+        )
+        self.adk_session.events.append(companion_event)
+        return companion_event
+
+    def append_tool_events(self, results: list, invocation_id: str):
+        from google.adk.events.event import Event
+        from google.genai import types
+        import uuid
+        import time
+        for idx, (t_name, t_args, t_output) in enumerate(results):
+            call_id = f"call_{int(time.time())}_{idx}_{uuid.uuid4().hex[:4]}"
+            
+            fc_part = types.Part(
+                function_call=types.FunctionCall(
+                    name=t_name,
+                    args=t_args,
+                    id=call_id
+                )
+            )
+            fc_event = Event(
+                author=self.runner_obj.runner.agent.name,
+                content=types.Content(role="model", parts=[fc_part]),
+                invocation_id=invocation_id,
+                id=f"companion-call-{int(time.time())}-{idx}",
+                timestamp=time.time()
+            )
+            self.adk_session.events.append(fc_event)
+            
+            fr_part = types.Part(
+                function_response=types.FunctionResponse(
+                    name=t_name,
+                    response={"result": t_output},
+                    id=call_id
+                )
+            )
+            fr_event = Event(
+                author=self.runner_obj.runner.agent.name,
+                content=types.Content(role="user", parts=[fr_part]),
+                invocation_id=invocation_id,
+                id=f"companion-resp-{int(time.time())}-{idx}",
+                timestamp=time.time()
+            )
+            self.adk_session.events.append(fr_event)
+
+    def append_image_tool_events(self, tool_name: str, tool_args: dict, new_markdown: str, call_id: str, invocation_id: str):
+        from google.adk.events.event import Event
+        from google.genai import types
+        import time
+        
+        fc_part = types.Part(
+            function_call=types.FunctionCall(
+                name=tool_name,
+                args=tool_args,
+                id=call_id
+            )
+        )
+        fc_event = Event(
+            author=self.runner_obj.runner.agent.name,
+            content=types.Content(role="model", parts=[fc_part]),
+            invocation_id=invocation_id,
+            id=f"companion-call-{int(time.time())}",
+            timestamp=time.time()
+        )
+        self.adk_session.events.append(fc_event)
+        
+        fr_part = types.Part(
+            function_response=types.FunctionResponse(
+                name=tool_name,
+                response={"result": new_markdown},
+                id=call_id
+            )
+        )
+        fr_event = Event(
+            author=self.runner_obj.runner.agent.name,
+            content=types.Content(role="user", parts=[fr_part]),
+            invocation_id=invocation_id,
+            id=f"companion-resp-{int(time.time())}",
+            timestamp=time.time()
+        )
+        self.adk_session.events.append(fr_event)
+
+    def post_process_thoughts(self, invocation_id: str):
+        companion_events_this_turn = [
+            ev for ev in self.adk_session.events 
+            if ev.invocation_id == invocation_id 
+            and ev.author.lower() in ('companion', self.runner_obj.runner.agent.name.lower(), 'model')
+        ]
+        
+        last_text_ev = None
+        for ev in reversed(companion_events_this_turn):
+            if ev.content and ev.content.parts:
+                has_text = any(part.text for part in ev.content.parts if not getattr(part, 'thought', False))
+                if has_text:
+                    last_text_ev = ev
+                    break
+                    
+        for ev in companion_events_this_turn:
+            if ev is not last_text_ev:
+                if ev.content and ev.content.parts:
+                    for part in ev.content.parts:
+                        if part.text:
+                            try:
+                                part.thought = True
+                            except Exception:
+                                pass
+                            try:
+                                part.metadata = {"thought": True}
+                            except Exception:
+                                pass
+
+    def save(self):
+        self.runner_obj._save_session_to_disk(self.session_id)
+
+
+class OsHistoryAdapter(LocalHistoryAdapter):
+    def __init__(self, runner_obj, session_id, file_path_resolved, image_data, image_mime):
+        super().__init__(runner_obj, session_id)
+        self.file_path_resolved = file_path_resolved
+        self.image_data = image_data
+        self.image_mime = image_mime
+        self.initial_history_len = len(runner_obj.sessions_history[session_id])
+
+    def get_openai_messages(self, sys_inst: str, rag_context: str) -> list:
+        history = self.runner_obj.sessions_history[self.session_id]
+        raw_messages = []
+        
+        for msg in history[:-1]:
+            role = "assistant" if msg['role'] == 'companion' else "user"
+            content_text = msg.get('text', '') or ''
+            if msg.get('tool_calls'):
+                for tc in msg['tool_calls']:
+                    if tc.get('type') == 'call':
+                        name = tc.get('name')
+                        args = tc.get('args', {})
+                        args_list = []
+                        for k, v in args.items():
+                            if isinstance(v, str):
+                                escaped_v = v.replace('"', '\\"')
+                                args_list.append(f'{k}="{escaped_v}"')
+                            else:
+                                args_list.append(f'{k}={v}')
+                        args_str = ", ".join(args_list)
+                        content_text += f"\n[{name}({args_str})]"
+                        
+            if msg.get('image_url'):
+                text_content = f"{content_text} (image: [Attached Image])" if content_text else "[Attached Image]"
+                raw_messages.append({"role": role, "content": text_content})
+            else:
+                raw_messages.append({"role": role, "content": content_text})
+                
+        latest_msg = history[-1]
+        if self.file_path_resolved or (self.image_data and self.image_mime):
+            text_content = f"{latest_msg.get('text') or ''} (image: [Attached Image])" if latest_msg.get('text') else "[Attached Image]"
+            raw_messages.append({"role": "user", "content": text_content})
+        else:
+            raw_messages.append({"role": "user", "content": latest_msg.get('text') or ''})
+            
+        openai_messages = [{"role": "system", "content": sys_inst}]
+        if rag_context:
+            openai_messages[0]["content"] += f"\n\n# KNOWLEDGE BASE CONTEXT\nUse the following verified context from your Data Bank to help answer questions if relevant:\n{rag_context}\n"
+        openai_messages[0]["content"] += _LOCAL_DIRECTIVE_PROMPT
+
+        for msg in raw_messages:
+            if openai_messages and openai_messages[-1]["role"] == msg["role"]:
+                openai_messages[-1]["content"] += "\n\n" + msg["content"]
+            else:
+                openai_messages.append(msg)
+        return openai_messages
+
+    def append_assistant_message(self, text: str, tool_calls_data: list, invocation_id: str):
+        import time
+        history = self.runner_obj.sessions_history[self.session_id]
+        if history and history[-1]['role'] == 'companion':
+            history[-1]['text'] = text
+            history[-1]['tool_calls'] = tool_calls_data
+            return history[-1]
+            
+        bot_msg = {
+            'role': 'companion',
+            'text': text,
+            'tool_calls': tool_calls_data,
+            'timestamp': time.time()
+        }
+        history.append(bot_msg)
+        return bot_msg
+
+    def append_tool_events(self, results: list, invocation_id: str):
+        import time
+        for idx, (t_name, t_args, t_output) in enumerate(results):
+            tool_resp_msg = {
+                'role': 'user',
+                'text': f"[Tool Response from {t_name}]:\n{t_output}",
+                'tool_calls': [],
+                'timestamp': time.time()
+            }
+            self.runner_obj.sessions_history[self.session_id].append(tool_resp_msg)
+
+    def append_image_tool_events(self, tool_name: str, tool_args: dict, new_markdown: str, call_id: str, invocation_id: str):
+        pass
+
+    def post_process_thoughts(self, invocation_id: str):
+        history = self.runner_obj.sessions_history[self.session_id]
+        companion_msgs_this_turn = [
+            msg for msg in history[self.initial_history_len:]
+            if msg.get('role') == 'companion'
+        ]
+        if companion_msgs_this_turn:
+            for msg in companion_msgs_this_turn[:-1]:
+                if msg.get('text'):
+                    msg['text'] = f"<thought>\n{msg['text']}\n</thought>"
+
+    def save(self):
+        self.runner_obj._save_session_to_disk(self.session_id)
+
+
 class BaseProgramRunner:
     def __init__(self, app_name="Sanctuary"):
         self.app_name = app_name
+
+    async def _execute_local_llm_loop(
+        self,
+        session_id: str,
+        adapter: LocalHistoryAdapter,
+        model: str,
+        inversion_directive: str,
+        rag_context: str,
+        new_message_text: str,
+        invocation_id: str
+    ) -> tuple:
+        import httpx
+        import re
+        import uuid
+        import time
+        import asyncio
+        
+        bot_response_text = ""
+        tool_calls = []
+        
+        for iteration in range(10):
+            if session_id in cancelled_sessions:
+                cancelled_sessions.discard(session_id)
+                raise asyncio.CancelledError("Session cancelled by user request.")
+                
+            sys_inst = self._get_system_instructions(inversion_directive, user_message=new_message_text)
+            openai_messages = adapter.get_openai_messages(sys_inst, rag_context)
+            
+            url = LOCAL_SERVER_URL
+            headers = {"Content-Type": "application/json"}
+            payload = {
+                "messages": openai_messages,
+                "temperature": 0.7,
+                "max_tokens": 2048
+            }
+            target_model = model if (model and model != 'local-lm-studio') else os.getenv("LOCAL_MODEL_NAME")
+            if target_model:
+                payload["model"] = target_model
+                
+            try:
+                async with httpx.AsyncClient() as client:
+                    response = await client.post(url, json=payload, headers=headers, timeout=120.0)
+                    if response.status_code == 200:
+                        res_json = response.json()
+                        bot_response_text = res_json['choices'][0]['message']['content']
+                    else:
+                        bot_response_text = f"Error: Local model server returned status code {response.status_code} - {response.text}"
+                        break
+            except Exception as e:
+                bot_response_text = f"Error connecting to local LM Studio server: {e}. Please ensure LM Studio is running, a model is loaded, and the local server is started (port 1234)."
+                break
+                
+            # Find all tool calls
+            matches = list(re.finditer(r'\[(\w+)\((.*?)\)\]', bot_response_text))
+            legacy_portrait = False
+            if not matches:
+                match_legacy = re.search(r'<portrait>(.*?)</portrait>', bot_response_text)
+                if match_legacy:
+                    legacy_portrait = True
+                    matches = [match_legacy]
+                    
+            executed_calls_count = len([tc for tc in tool_calls if tc.get('type') == 'call'])
+            if matches and executed_calls_count < 10:
+                # Check for image generation tool
+                has_image_gen = False
+                for m in matches:
+                    if legacy_portrait:
+                        tool_name = "generate_local_image"
+                    else:
+                        tool_name = m.group(1)
+                        if tool_name == "generate_companion_portrait":
+                            tool_name = "generate_local_image"
+                        elif tool_name == "generate_general_image":
+                            tool_name = "generate_imagen"
+                    if tool_name in ("generate_local_image", "generate_imagen", "generate_companion_portrait", "generate_general_image"):
+                        has_image_gen = True
+                        break
+                        
+                if has_image_gen:
+                    m = matches[0]
+                    if legacy_portrait:
+                        tool_name = "generate_local_image"
+                        args_str = f"prompt={m.group(1)}"
+                    else:
+                        tool_name = m.group(1)
+                        if tool_name == "generate_companion_portrait":
+                            tool_name = "generate_local_image"
+                        elif tool_name == "generate_general_image":
+                            tool_name = "generate_imagen"
+                        args_str = m.group(2)
+                        
+                    parsed_args = _parse_emulated_tool_call(tool_name, args_str)
+                    import tools
+                    func = getattr(tools, tool_name, None)
+                    if func:
+                        adapter.append_assistant_message(bot_response_text, [], invocation_id)
+                        new_markdown = func(*parsed_args["args"], **parsed_args["kwargs"])
+                        original_tag = m.group(0)
+                        bot_response_text = bot_response_text.replace(original_tag, new_markdown)
+                        
+                        call_id = f"call_{int(time.time())}"
+                        t_calls = [
+                            {
+                                'type': 'call',
+                                'name': tool_name,
+                                'args': parsed_args["kwargs"] if parsed_args["kwargs"] else {"prompt": parsed_args["args"][0] if parsed_args["args"] else ""},
+                                'id': call_id
+                            },
+                            {
+                                'type': 'response',
+                                'name': tool_name,
+                                'response': new_markdown,
+                                'id': call_id
+                            }
+                        ]
+                        tool_calls.extend(t_calls)
+                        
+                        adapter.append_image_tool_events(tool_name, t_calls[0]['args'], new_markdown, call_id, invocation_id)
+                        
+                        final_embedded_text = self._ensure_images_are_embedded(bot_response_text)
+                        adapter.append_assistant_message(final_embedded_text, t_calls, invocation_id)
+                        break
+                else:
+                    # Sequential execution for non-image tools
+                    first_match_start = min(m.start() for m in matches)
+                    text_before = bot_response_text[:first_match_start].strip()
+                    
+                    if text_before:
+                        adapter.append_assistant_message(text_before, [], invocation_id)
+                        
+                    results = []
+                    for m_tool in matches:
+                        if session_id in cancelled_sessions:
+                            raise asyncio.CancelledError("Session cancelled by user request.")
+                        t_name = m_tool.group(1)
+                        a_str = m_tool.group(2)
+                        parsed_args = _parse_emulated_tool_call(t_name, a_str)
+                        import tools
+                        f = getattr(tools, t_name, None)
+                        if not f:
+                            output = f"Error: Tool '{t_name}' not found."
+                        else:
+                            try:
+                                output = f(*parsed_args["args"], **parsed_args["kwargs"])
+                            except Exception as ex:
+                                output = f"Error executing tool: {ex}"
+                        results.append((t_name, parsed_args["kwargs"], output))
+                        
+                    t_calls = []
+                    for idx, (t_name, t_args, t_output) in enumerate(results):
+                        call_id = f"call_{int(time.time())}_{idx}_{uuid.uuid4().hex[:4]}"
+                        t_calls.extend([
+                            {
+                                'type': 'call',
+                                'name': t_name,
+                                'args': t_args,
+                                'id': call_id
+                            },
+                            {
+                                'type': 'response',
+                                'name': t_name,
+                                'response': str(t_output),
+                                'id': call_id
+                            }
+                        ])
+                        
+                    tool_calls.extend(t_calls)
+                    
+                    adapter.append_assistant_message(text_before if text_before else "", t_calls, invocation_id)
+                    adapter.append_tool_events(results, invocation_id)
+                    continue
+            else:
+                if matches:
+                    bot_response_text = re.sub(r'\[\w+\(.*?\)\]', '', bot_response_text).strip()
+                adapter.append_assistant_message(bot_response_text, tool_calls, invocation_id)
+                break
+                
+        adapter.post_process_thoughts(invocation_id)
+        bot_response_text = self._ensure_images_are_embedded(bot_response_text)
+        adapter.save()
+        return bot_response_text, tool_calls
 
     @property
     def sessions_dir(self) -> str:
@@ -845,358 +1362,28 @@ class GoogleAdkRunner(BaseProgramRunner):
                 
             from google.adk.events.event import Event
             import time
-            import httpx
             
             user_content = types.Content(role="user", parts=parts)
+            invocation_id = f"e-{int(time.time())}"
             user_event = Event(
                 author="user",
                 content=user_content,
-                invocation_id=f"e-{int(time.time())}",
+                invocation_id=invocation_id,
                 id=f"user-{int(time.time())}",
                 timestamp=time.time()
             )
             adk_session.events.append(user_event)
             
-            bot_response_text = ""
-            tool_calls = []
-            
-            for iteration in range(10):
-                if session_id in cancelled_sessions:
-                    cancelled_sessions.discard(session_id)
-                    raise asyncio.CancelledError("Session cancelled by user request.")
-                sys_inst = self._get_system_instructions(user_message=new_message_text)
-                if rag_context:
-                    sys_inst += f"\n\n# KNOWLEDGE BASE CONTEXT\nUse the following verified context from your Data Bank to help answer questions if relevant:\n{rag_context}\n"
-                sys_inst += _LOCAL_DIRECTIVE_PROMPT
-                
-                raw_messages = []
-                for ev in adk_session.events:
-                    role_str = ev.content.role if ev.content and ev.content.role else ev.author.lower()
-                    role = "user" if role_str == "user" else "assistant"
-                    
-                    text = ""
-                    image_url = None
-                    if ev.content and ev.content.parts:
-                        for part in ev.content.parts:
-                            if part.text:
-                                text += part.text
-                            elif getattr(part, 'inline_data', None):
-                                try:
-                                    blob = part.inline_data
-                                    if hasattr(blob, 'data') and hasattr(blob, 'mime_type'):
-                                        data_b64 = base64.b64encode(blob.data).decode('utf-8')
-                                        image_url = f"data:{blob.mime_type};base64,{data_b64}"
-                                except Exception:
-                                    pass
-                            elif getattr(part, 'function_call', None):
-                                fc = part.function_call
-                                args_list = []
-                                if fc.args:
-                                    args_dict = dict(fc.args) if not isinstance(fc.args, dict) else fc.args
-                                    for k, v in args_dict.items():
-                                        if isinstance(v, str):
-                                            escaped_v = v.replace('"', '\\"')
-                                            args_list.append(f'{k}="{escaped_v}"')
-                                        else:
-                                            args_list.append(f'{k}={v}')
-                                args_str = ", ".join(args_list)
-                                text += f"\n[{fc.name}({args_str})]"
-                            elif getattr(part, 'function_response', None):
-                                fr = part.function_response
-                                resp = fr.response
-                                if hasattr(resp, "fields"):
-                                    try:
-                                        from google.protobuf.json_format import MessageToDict
-                                        resp_dict = MessageToDict(resp)
-                                        resp = resp_dict.get("result", resp_dict)
-                                    except Exception:
-                                        pass
-                                elif isinstance(resp, dict):
-                                    resp = resp.get("result", resp)
-                                text += f"\n[Tool Response from {fr.name}]:\n{resp}"
-                                
-                    from utils.program_mood import extract_and_strip_mood
-                    text = extract_and_strip_mood(text)[0].strip()
-                    if text or image_url:
-                        if image_url:
-                            text_content = f"{text} (image: [Attached Image])" if text else "[Attached Image]"
-                            raw_messages.append({
-                                "role": role,
-                                "content": text_content
-                            })
-                        else:
-                            raw_messages.append({
-                                "role": role,
-                                "content": text
-                            })
-                            
-                openai_messages = [{"role": "system", "content": sys_inst}]
-                for msg in raw_messages:
-                    if openai_messages and openai_messages[-1]["role"] == msg["role"]:
-                        openai_messages[-1]["content"] += "\n\n" + msg["content"]
-                    else:
-                        openai_messages.append(msg)
-                            
-                url = LOCAL_SERVER_URL
-                headers = {"Content-Type": "application/json"}
-                payload = {
-                    "messages": openai_messages,
-                    "temperature": 0.7,
-                    "max_tokens": 2048
-                }
-                target_model = model if (model and model != 'local-lm-studio') else os.getenv("LOCAL_MODEL_NAME")
-                if target_model:
-                    payload["model"] = target_model
-                
-                try:
-                    async with httpx.AsyncClient() as client:
-                        response = await client.post(url, json=payload, headers=headers, timeout=120.0)
-                        if response.status_code == 200:
-                            res_json = response.json()
-                            bot_response_text = res_json['choices'][0]['message']['content']
-                        else:
-                            bot_response_text = f"Error: Local model server returned status code {response.status_code} - {response.text}"
-                            break
-                except Exception as e:
-                    bot_response_text = f"Error connecting to local LM Studio server: {e}. Please ensure LM Studio is running, a model is loaded, and the local server is started (port 1234)."
-                    break
-                    
-                import re
-                import uuid
-                import asyncio
-                
-                # Find all tool calls
-                matches = list(re.finditer(r'\[(\w+)\((.*?)\)\]', bot_response_text))
-                legacy_portrait = False
-                if not matches:
-                    match_legacy = re.search(r'<portrait>(.*?)</portrait>', bot_response_text)
-                    if match_legacy:
-                        legacy_portrait = True
-                        matches = [match_legacy]
-                        
-                executed_calls_count = len([tc for tc in tool_calls if tc.get('type') == 'call'])
-                if matches and executed_calls_count < 10:
-                    # Check if any is an image generation tool
-                    has_image_gen = False
-                    for m in matches:
-                        if legacy_portrait:
-                            tool_name = "generate_local_image"
-                        else:
-                            tool_name = m.group(1)
-                            if tool_name == "generate_companion_portrait":
-                                tool_name = "generate_local_image"
-                            elif tool_name == "generate_general_image":
-                                tool_name = "generate_imagen"
-                        if tool_name in ("generate_local_image", "generate_imagen", "generate_companion_portrait", "generate_general_image"):
-                            has_image_gen = True
-                            break
-                            
-                    if has_image_gen:
-                        m = matches[0]
-                        if legacy_portrait:
-                            tool_name = "generate_local_image"
-                            args_str = f"prompt={m.group(1)}"
-                        else:
-                            tool_name = m.group(1)
-                            if tool_name == "generate_companion_portrait":
-                                tool_name = "generate_local_image"
-                            elif tool_name == "generate_general_image":
-                                tool_name = "generate_imagen"
-                            args_str = m.group(2)
-                            
-                        parsed_args = _parse_emulated_tool_call(tool_name, args_str)
-                        import tools
-                        func = getattr(tools, tool_name, None)
-                        if func:
-                            companion_content = types.Content(role="model", parts=[types.Part.from_text(text=bot_response_text)])
-                            companion_event = Event(
-                                author=self.runner.agent.name,
-                                content=companion_content,
-                                invocation_id=user_event.invocation_id,
-                                id=f"companion-{int(time.time())}",
-                                timestamp=time.time()
-                            )
-                            adk_session.events.append(companion_event)
-                            
-                            new_markdown = func(*parsed_args["args"], **parsed_args["kwargs"])
-                            original_tag = m.group(0)
-                            bot_response_text = bot_response_text.replace(original_tag, new_markdown)
-                            
-                            call_id = f"call_{int(time.time())}"
-                            fc_part = types.Part(
-                                function_call=types.FunctionCall(
-                                    name=tool_name,
-                                    args=parsed_args["kwargs"] if parsed_args["kwargs"] else {"prompt": parsed_args["args"][0] if parsed_args["args"] else ""},
-                                    id=call_id
-                                )
-                            )
-                            fc_event = Event(
-                                author=self.runner.agent.name,
-                                content=types.Content(role="model", parts=[fc_part]),
-                                invocation_id=user_event.invocation_id,
-                                id=f"companion-call-{int(time.time())}",
-                                timestamp=time.time()
-                            )
-                            adk_session.events.append(fc_event)
-                            
-                            fr_part = types.Part(
-                                function_response=types.FunctionResponse(
-                                    name=tool_name,
-                                    response={"result": new_markdown},
-                                    id=call_id
-                                )
-                            )
-                            fr_event = Event(
-                                author=self.runner.agent.name,
-                                content=types.Content(role="user", parts=[fr_part]),
-                                invocation_id=user_event.invocation_id,
-                                id=f"companion-resp-{int(time.time())}",
-                                timestamp=time.time()
-                            )
-                            adk_session.events.append(fr_event)
-                            
-                            tool_calls.append({
-                                'type': 'call',
-                                'name': tool_name,
-                                'args': parsed_args["kwargs"] if parsed_args["kwargs"] else {"prompt": parsed_args["args"][0] if parsed_args["args"] else ""},
-                                'id': call_id
-                            })
-                            
-                            companion_event.content.parts[0].text = self._ensure_images_are_embedded(bot_response_text)
-                            break
-                    else:
-                        # Parallel execution for non-image tools
-                        first_match_start = min(m.start() for m in matches)
-                        text_before = bot_response_text[:first_match_start].strip()
-                        if text_before:
-                            companion_content = types.Content(role="model", parts=[types.Part.from_text(text=text_before)])
-                            companion_event = Event(
-                                author=self.runner.agent.name,
-                                content=companion_content,
-                                invocation_id=user_event.invocation_id,
-                                id=f"companion-{int(time.time())}",
-                                timestamp=time.time()
-                            )
-                            adk_session.events.append(companion_event)
-                            
-                        async def execute_tool(t_name, a_str):
-                            if session_id in cancelled_sessions:
-                                raise asyncio.CancelledError("Session cancelled by user request.")
-                            parsed_args = _parse_emulated_tool_call(t_name, a_str)
-                            import tools
-                            f = getattr(tools, t_name, None)
-                            if not f:
-                                return t_name, parsed_args["kwargs"], f"Error: Tool '{t_name}' not found."
-                            try:
-                                loop = asyncio.get_event_loop()
-                                output = await loop.run_in_executor(None, lambda: f(*parsed_args["args"], **parsed_args["kwargs"]))
-                            except Exception as ex:
-                                output = f"Error executing tool: {ex}"
-                            return t_name, parsed_args["kwargs"], output
-                            
-                        # Schedule all tools concurrently
-                        tasks = [execute_tool(m.group(1), m.group(2)) for m in matches]
-                        results = await asyncio.gather(*tasks)
-                        
-                        for idx, (t_name, t_args, t_output) in enumerate(results):
-                            call_id = f"call_{int(time.time())}_{idx}_{uuid.uuid4().hex[:4]}"
-                            
-                            fc_part = types.Part(
-                                function_call=types.FunctionCall(
-                                    name=t_name,
-                                    args=t_args,
-                                    id=call_id
-                                )
-                            )
-                            fc_event = Event(
-                                author=self.runner.agent.name,
-                                content=types.Content(role="model", parts=[fc_part]),
-                                invocation_id=user_event.invocation_id,
-                                id=f"companion-call-{int(time.time())}-{idx}",
-                                timestamp=time.time()
-                            )
-                            adk_session.events.append(fc_event)
-                            
-                            fr_part = types.Part(
-                                function_response=types.FunctionResponse(
-                                    name=t_name,
-                                    response={"result": t_output},
-                                    id=call_id
-                                )
-                            )
-                            fr_event = Event(
-                                author=self.runner.agent.name,
-                                content=types.Content(role="user", parts=[fr_part]),
-                                invocation_id=user_event.invocation_id,
-                                id=f"companion-resp-{int(time.time())}-{idx}",
-                                timestamp=time.time()
-                            )
-                            adk_session.events.append(fr_event)
-                            
-                            tool_calls.append({
-                                'type': 'call',
-                                'name': t_name,
-                                'args': t_args,
-                                'id': call_id
-                            })
-                            tool_calls.append({
-                                'type': 'response',
-                                'name': t_name,
-                                'response': str(t_output),
-                                'id': call_id
-                            })
-                        continue
-                else:
-                    if matches:
-                        bot_response_text = re.sub(r'\[\w+\(.*?\)\]', '', bot_response_text).strip()
-                    else:
-                        bot_response_text = re.sub(r'\[\w+\(.*?\)\]', '', bot_response_text).strip()
-                        
-                    companion_content = types.Content(role="model", parts=[types.Part.from_text(text=bot_response_text)])
-                    companion_event = Event(
-                        author=self.runner.agent.name,
-                        content=companion_content,
-                        invocation_id=user_event.invocation_id,
-                        id=f"companion-{int(time.time())}",
-                        timestamp=time.time()
-                    )
-                    adk_session.events.append(companion_event)
-                    break
-            
-            # Post-process current turn events to convert intermediate texts into thoughts
-            companion_events_this_turn = [
-                ev for ev in adk_session.events 
-                if ev.invocation_id == user_event.invocation_id 
-                and ev.author.lower() in ('companion', self.runner.agent.name.lower(), 'model')
-            ]
-            
-            # Find the last companion event that contains actual text
-            last_text_ev = None
-            for ev in reversed(companion_events_this_turn):
-                if ev.content and ev.content.parts:
-                    has_text = any(part.text for part in ev.content.parts if not getattr(part, 'thought', False))
-                    if has_text:
-                        last_text_ev = ev
-                        break
-                        
-            # Mark all text parts of other companion events in this turn as thoughts
-            for ev in companion_events_this_turn:
-                if ev is not last_text_ev:
-                    if ev.content and ev.content.parts:
-                        for part in ev.content.parts:
-                            if part.text:
-                                try:
-                                    part.thought = True
-                                except Exception:
-                                    pass
-                                try:
-                                    part.metadata = {"thought": True}
-                                except Exception:
-                                    pass
-            
-            bot_response_text = self._ensure_images_are_embedded(bot_response_text)
-            self._save_session_to_disk(session_id)
-            return bot_response_text, tool_calls
+            adapter = AdkHistoryAdapter(self, session_id, adk_session, user_event)
+            return await self._execute_local_llm_loop(
+                session_id=session_id,
+                adapter=adapter,
+                model=model,
+                inversion_directive=inversion_directive,
+                rag_context=rag_context,
+                new_message_text=new_message_text,
+                invocation_id=invocation_id
+            )
         else:
             parts = []
             if new_message_text:
@@ -1679,15 +1866,12 @@ class OpenSourceRunner(BaseProgramRunner):
         return self.sessions_history.get(session_id, [])
 
     async def run_async(self, session_id: str, new_message_text: str, image_data: str = None, image_mime: str = None, model: str = None, media_path: str = None) -> tuple:
-        import httpx
         if session_id not in self.sessions_history:
             self._load_session_from_disk(session_id)
             
         if session_id not in self.sessions_history:
             self.sessions_history[session_id] = []
             
-        initial_history_len = len(self.sessions_history[session_id])
-        
         # Resolve media upload if present
         file_path_resolved = None
         if media_path:
@@ -1719,260 +1903,16 @@ class OpenSourceRunner(BaseProgramRunner):
         # Determine the personality inversion before getting system instructions
         inversion_directive = await self._get_inversion_directive(session_id)
         
-        bot_response_text = ""
-        tool_calls = []
-        
-        for iteration in range(10):
-            if session_id in cancelled_sessions:
-                cancelled_sessions.discard(session_id)
-                raise asyncio.CancelledError("Session cancelled by user request.")
-            sys_inst = self._get_system_instructions(inversion_directive, user_message=new_message_text)
-            if rag_context:
-                sys_inst += f"\n\n# KNOWLEDGE BASE CONTEXT\nUse the following verified context from your Data Bank to help answer questions if relevant:\n{rag_context}\n"
-            sys_inst += _LOCAL_DIRECTIVE_PROMPT
-            
-            history = self.sessions_history[session_id]
-            raw_messages = []
-            
-            # Format existing history
-            for msg in history[:-1]:
-                role = "assistant" if msg['role'] == 'companion' else "user"
-                content_text = msg.get('text', '') or ''
-                if msg.get('tool_calls'):
-                    for tc in msg['tool_calls']:
-                        if tc.get('type') == 'call':
-                            name = tc.get('name')
-                            args = tc.get('args', {})
-                            args_list = []
-                            for k, v in args.items():
-                                if isinstance(v, str):
-                                    escaped_v = v.replace('"', '\\"')
-                                    args_list.append(f'{k}="{escaped_v}"')
-                                else:
-                                    args_list.append(f'{k}={v}')
-                            args_str = ", ".join(args_list)
-                            content_text += f"\n[{name}({args_str})]"
-                            
-                if msg.get('image_url'):
-                    text_content = f"{content_text} (image: [Attached Image])" if content_text else "[Attached Image]"
-                    raw_messages.append({
-                        "role": role,
-                        "content": text_content
-                    })
-                else:
-                    raw_messages.append({
-                        "role": role,
-                        "content": content_text
-                    })
-                    
-            latest_msg = history[-1]
-            if file_path_resolved or (image_data and image_mime):
-                text_content = f"{latest_msg.get('text') or ''} (image: [Attached Image])" if latest_msg.get('text') else "[Attached Image]"
-                raw_messages.append({
-                    "role": "user",
-                    "content": text_content
-                })
-            else:
-                raw_messages.append({
-                    "role": "user",
-                    "content": latest_msg.get('text') or ''
-                })
-                
-            openai_messages = [{"role": "system", "content": sys_inst}]
-            for msg in raw_messages:
-                if openai_messages and openai_messages[-1]["role"] == msg["role"]:
-                    openai_messages[-1]["content"] += "\n\n" + msg["content"]
-                else:
-                    openai_messages.append(msg)
-                
-            url = LOCAL_SERVER_URL
-            headers = {"Content-Type": "application/json"}
-            payload = {
-                "messages": openai_messages,
-                "temperature": 0.7,
-                "max_tokens": 2048
-            }
-            target_model = model if (model and model != 'local-lm-studio') else os.getenv("LOCAL_MODEL_NAME")
-            if target_model:
-                payload["model"] = target_model
-            
-            try:
-                async with httpx.AsyncClient() as client:
-                    response = await client.post(url, json=payload, headers=headers, timeout=120.0)
-                    if response.status_code == 200:
-                        res_json = response.json()
-                        bot_response_text = res_json['choices'][0]['message']['content']
-                    else:
-                        bot_response_text = f"Error: Local model server returned status code {response.status_code} - {response.text}"
-                        break
-            except Exception as e:
-                bot_response_text = f"Error connecting to local LM Studio server: {e}. Please ensure LM Studio is running, a model is loaded, and the local server is started (port 1234)."
-                break
-            
-            import re
-            import uuid
-            import asyncio
-            
-            # Find all tool calls
-            matches = list(re.finditer(r'\[(\w+)\((.*?)\)\]', bot_response_text))
-            legacy_portrait = False
-            if not matches:
-                match_legacy = re.search(r'<portrait>(.*?)</portrait>', bot_response_text)
-                if match_legacy:
-                    legacy_portrait = True
-                    matches = [match_legacy]
-                    
-            executed_calls_count = len([tc for tc in tool_calls if tc.get('type') == 'call'])
-            if matches and executed_calls_count < 10:
-                # Check for image generation tool
-                has_image_gen = False
-                for m in matches:
-                    if legacy_portrait:
-                        tool_name = "generate_local_image"
-                    else:
-                        tool_name = m.group(1)
-                        if tool_name == "generate_companion_portrait":
-                            tool_name = "generate_local_image"
-                        elif tool_name == "generate_general_image":
-                            tool_name = "generate_imagen"
-                    if tool_name in ("generate_local_image", "generate_imagen", "generate_companion_portrait", "generate_general_image"):
-                        has_image_gen = True
-                        break
-                        
-                if has_image_gen:
-                    m = matches[0]
-                    if legacy_portrait:
-                        tool_name = "generate_local_image"
-                        args_str = f"prompt={m.group(1)}"
-                    else:
-                        tool_name = m.group(1)
-                        if tool_name == "generate_companion_portrait":
-                            tool_name = "generate_local_image"
-                        elif tool_name == "generate_general_image":
-                            tool_name = "generate_imagen"
-                        args_str = m.group(2)
-                        
-                    parsed_args = _parse_emulated_tool_call(tool_name, args_str)
-                    import tools
-                    func = getattr(tools, tool_name, None)
-                    if func:
-                        bot_msg_intermediate = {
-                            'role': 'companion',
-                            'text': bot_response_text,
-                            'tool_calls': [],
-                            'timestamp': time.time()
-                        }
-                        self.sessions_history[session_id].append(bot_msg_intermediate)
-                        
-                        new_markdown = func(*parsed_args["args"], **parsed_args["kwargs"])
-                        original_tag = m.group(0)
-                        bot_response_text = bot_response_text.replace(original_tag, new_markdown)
-                        
-                        call_id = f"call_{int(time.time())}"
-                        t_calls = [
-                            {
-                                'type': 'call',
-                                'name': tool_name,
-                                'args': parsed_args["kwargs"] if parsed_args["kwargs"] else {"prompt": parsed_args["args"][0] if parsed_args["args"] else ""},
-                                'id': call_id
-                            },
-                            {
-                                'type': 'response',
-                                'name': tool_name,
-                                'response': new_markdown,
-                                'id': call_id
-                            }
-                        ]
-                        tool_calls.extend(t_calls)
-                        bot_msg_intermediate['tool_calls'] = t_calls
-                        bot_msg_intermediate['text'] = self._ensure_images_are_embedded(bot_response_text)
-                        break
-                else:
-                    # Parallel execution for non-image tools
-                    first_match_start = min(m.start() for m in matches)
-                    text_before = bot_response_text[:first_match_start].strip()
-                    
-                    bot_msg_intermediate = {
-                        'role': 'companion',
-                        'text': text_before,
-                        'tool_calls': [],
-                        'timestamp': time.time()
-                    }
-                    self.sessions_history[session_id].append(bot_msg_intermediate)
-                    
-                    async def execute_tool(t_name, a_str):
-                        if session_id in cancelled_sessions:
-                            raise asyncio.CancelledError("Session cancelled by user request.")
-                        parsed_args = _parse_emulated_tool_call(t_name, a_str)
-                        import tools
-                        f = getattr(tools, t_name, None)
-                        if not f:
-                            return t_name, parsed_args["kwargs"], f"Error: Tool '{t_name}' not found."
-                        try:
-                            loop = asyncio.get_event_loop()
-                            output = await loop.run_in_executor(None, lambda: f(*parsed_args["args"], **parsed_args["kwargs"]))
-                        except Exception as ex:
-                            output = f"Error executing tool: {ex}"
-                        return t_name, parsed_args["kwargs"], output
-                        
-                    # Schedule all tools concurrently
-                    tasks = [execute_tool(m.group(1), m.group(2)) for m in matches]
-                    results = await asyncio.gather(*tasks)
-                    
-                    t_calls = []
-                    for idx, (t_name, t_args, t_output) in enumerate(results):
-                        call_id = f"call_{int(time.time())}_{idx}_{uuid.uuid4().hex[:4]}"
-                        t_calls.extend([
-                            {
-                                'type': 'call',
-                                'name': t_name,
-                                'args': t_args,
-                                'id': call_id
-                            },
-                            {
-                                'type': 'response',
-                                'name': t_name,
-                                'response': str(t_output),
-                                'id': call_id
-                            }
-                        ])
-                        
-                        tool_resp_msg = {
-                            'role': 'user',
-                            'text': f"[Tool Response from {t_name}]:\n{t_output}",
-                            'tool_calls': [],
-                            'timestamp': time.time()
-                        }
-                        self.sessions_history[session_id].append(tool_resp_msg)
-                        
-                    tool_calls.extend(t_calls)
-                    bot_msg_intermediate['tool_calls'] = t_calls
-                    continue
-            else:
-                if matches:
-                    bot_response_text = re.sub(r'\[\w+\(.*?\)\]', '', bot_response_text).strip()
-                bot_msg = {
-                    'role': 'companion',
-                    'text': self._ensure_images_are_embedded(bot_response_text),
-                    'tool_calls': tool_calls,
-                    'timestamp': time.time()
-                }
-                self.sessions_history[session_id].append(bot_msg)
-                break
-                
-        # Post-process current turn messages to convert intermediate texts into thoughts
-        companion_msgs_this_turn = [
-            msg for msg in self.sessions_history[session_id][initial_history_len:]
-            if msg.get('role') == 'companion'
-        ]
-        if companion_msgs_this_turn:
-            for msg in companion_msgs_this_turn[:-1]:
-                if msg.get('text'):
-                    msg['text'] = f"<thought>\n{msg['text']}\n</thought>"
-                    
-        bot_response_text = self._ensure_images_are_embedded(bot_response_text)
-        self._save_session_to_disk(session_id)
-        return bot_response_text, tool_calls
+        adapter = OsHistoryAdapter(self, session_id, file_path_resolved, image_data, image_mime)
+        return await self._execute_local_llm_loop(
+            session_id=session_id,
+            adapter=adapter,
+            model=model,
+            inversion_directive=inversion_directive,
+            rag_context=rag_context,
+            new_message_text=new_message_text,
+            invocation_id=""
+        )
  
     async def edit_turn(self, session_id: str, user_message_index: int, new_text: str = None, model: str = None) -> tuple:
         if session_id not in self.sessions_history:
