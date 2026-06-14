@@ -11,4 +11,5 @@ requests
 httpx
 Pillow
 fal-client
+psutil
 

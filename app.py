@@ -1180,21 +1180,28 @@ def get_models():
     # 1. Fetch dynamic local models (only actively loaded models in LM Studio)
     models = fetch_local_models()
     
-    # 3. If Gemini is configured and we are not in pure opensource mode, fetch dynamic Gemini models
-    if runner_backend != "opensource" and is_gemini_configured:
-        gemini_list = fetch_gemini_models(gemini_key)
-        models.extend(gemini_list)
+    # 3. Remote/cloud models are not appended to the model select dropdown
+    # to keep the interface strictly local-first. Offloading happens automatically in the backend.
         
     # Default fallback: use the first loaded local model if available, otherwise "local-lm-studio"
     default_model = "local-lm-studio"
     if models and models[0]["value"] != "local-lm-studio":
         default_model = models[0]["value"]
         
+    gemini_models_list = []
+    if is_gemini_configured:
+        try:
+            gemini_models_list = fetch_gemini_models(gemini_key)
+        except Exception as e:
+            print(f"Error fetching gemini models list: {e}")
+        
     return jsonify({
         "models": models,
         "default": default_model,
         "status": {
             "gemini_configured": is_gemini_configured,
+            "gemini_model": os.getenv("GEMINI_MODEL", "gemini-3.1-flash-lite"),
+            "gemini_models_list": gemini_models_list,
             "lm_studio_online": is_lm_studio_online,
             "lms_installed": check_lms_cli()
         }
@@ -1294,11 +1301,16 @@ def save_config():
         data = request.get_json() or {}
         gemini_api_key = data.get('gemini_api_key', '').strip()
         project_id = data.get('project_id', '').strip()
+        gemini_model = data.get('gemini_model', '').strip()
         
-        if not gemini_api_key and not project_id:
-            return jsonify({'error': 'No configuration values provided.'}), 400
-            
-        if (gemini_api_key and not project_id) or (project_id and not gemini_api_key):
+        # Check existing values in environment
+        existing_key = os.getenv("GEMINI_API_KEY")
+        existing_project = os.getenv("PROJECT_ID")
+        
+        target_key = gemini_api_key or existing_key
+        target_project = project_id or existing_project
+        
+        if not target_key or not target_project:
             return jsonify({'error': 'GCP Project ID and Gemini API Key must both be provided to configure Google Gemini.'}), 400
             
         base_dir = os.path.dirname(os.path.abspath(__file__))
@@ -1311,6 +1323,7 @@ def save_config():
         updated_key = False
         updated_proj = False
         updated_backend = False
+        updated_model = False
         
         for i, line in enumerate(lines):
             stripped = line.strip()
@@ -1320,35 +1333,41 @@ def save_config():
             elif stripped.startswith('PROJECT_ID=') and project_id:
                 lines[i] = f"PROJECT_ID={project_id}\n"
                 updated_proj = True
-            elif stripped.startswith('RUNNER_BACKEND=') and gemini_api_key and project_id:
+            elif stripped.startswith('RUNNER_BACKEND='):
                 lines[i] = f"RUNNER_BACKEND=google_adk\n"
                 updated_backend = True
+            elif stripped.startswith('GEMINI_MODEL=') and gemini_model:
+                lines[i] = f"GEMINI_MODEL={gemini_model}\n"
+                updated_model = True
                 
-        if gemini_api_key and project_id:
+        if gemini_api_key:
             if not updated_key:
                 lines.append(f"GEMINI_API_KEY={gemini_api_key}\n")
+            os.environ["GEMINI_API_KEY"] = gemini_api_key
+        if project_id:
             if not updated_proj:
                 lines.append(f"PROJECT_ID={project_id}\n")
-            if not updated_backend:
-                lines.append("RUNNER_BACKEND=google_adk\n")
-            
-            # Hot-reload environment variables in current process memory
-            os.environ["GEMINI_API_KEY"] = gemini_api_key
             os.environ["PROJECT_ID"] = project_id
-            os.environ["RUNNER_BACKEND"] = "google_adk"
-            
-            # Invalidate dynamic Gemini models cache
-            global _cached_gemini_models
-            _cached_gemini_models = None
-            
-            # Re-initialize the runner backend dynamically
-            init_runner()
-            
-            # Clear runner sessions history to reload character instructions
-            if hasattr(runner, 'sessions_history'):
-                runner.sessions_history.clear()
-            if hasattr(runner, 'runner') and hasattr(runner.runner, 'session_service'):
-                runner.runner.session_service.sessions.clear()
+        if gemini_model:
+            if not updated_model:
+                lines.append(f"GEMINI_MODEL={gemini_model}\n")
+            os.environ["GEMINI_MODEL"] = gemini_model
+        if not updated_backend:
+            lines.append("RUNNER_BACKEND=google_adk\n")
+        os.environ["RUNNER_BACKEND"] = "google_adk"
+        
+        # Invalidate dynamic Gemini models cache
+        global _cached_gemini_models
+        _cached_gemini_models = None
+        
+        # Re-initialize the runner backend dynamically
+        init_runner()
+        
+        # Clear runner sessions history to reload character instructions
+        if hasattr(runner, 'sessions_history'):
+            runner.sessions_history.clear()
+        if hasattr(runner, 'runner') and hasattr(runner.runner, 'session_service'):
+            runner.runner.session_service.sessions.clear()
                 
         with open(env_path, 'w', encoding='utf-8') as f:
             f.writelines(lines)

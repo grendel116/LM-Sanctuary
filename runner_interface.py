@@ -2,7 +2,7 @@ import sys
 import os
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from variables import PROGRAMS_DIR, LOCAL_SERVER_URL, DEFAULT_LOCAL_MODEL
+from variables import PROGRAMS_DIR, LOCAL_SERVER_URL, DEFAULT_LOCAL_MODEL, DEFAULT_GEMINI_MODEL
 from utils.models import is_local_model
 import asyncio
 import base64
@@ -12,6 +12,11 @@ import time
 from google.genai import types
 
 cancelled_sessions = set()
+
+class LocalOffloadTrigger(Exception):
+    def __init__(self, reason, iteration):
+        self.reason = reason
+        self.iteration = iteration
 
 def _get_safe_local_path(image_url: str) -> str:
     """Converts an image URL into a local path relative to the workspace,
@@ -574,6 +579,31 @@ class BaseProgramRunner:
                 
             # Find all tool calls
             matches = list(re.finditer(r'\[(\w+)\((.*?)\)\]', bot_response_text))
+            
+            # Check for dynamic offloading triggers at execution-time
+            gemini_key = os.getenv("GEMINI_API_KEY")
+            project_id = os.getenv("PROJECT_ID")
+            is_gemini_configured = bool(
+                gemini_key and gemini_key.strip() and gemini_key != "your_gemini_api_key_here" and
+                project_id and project_id.strip() and project_id != "your_gcp_project_id_here"
+            )
+            if is_gemini_configured and matches:
+                # 1. Check for complex tools
+                complex_tools = {
+                    "write_file", "replace_file_content", "multi_replace_file_content", 
+                    "run_shell_command", "run_command_async"
+                }
+                for m_tool in matches:
+                    t_name = m_tool.group(1)
+                    if t_name in complex_tools:
+                        print(f"[OFFLOAD] Local model called complex tool '{t_name}'. Intercepting and offloading to cloud.", flush=True)
+                        raise LocalOffloadTrigger(f"Complex tool call: {t_name}", iteration)
+                
+                # 2. Check for tool loop iteration threshold
+                if iteration >= 2:
+                    print(f"[OFFLOAD] Local model exceeded tool loop iteration threshold ({iteration}). Offloading to cloud.", flush=True)
+                    raise LocalOffloadTrigger(f"Iteration threshold exceeded ({iteration})", iteration)
+
             legacy_portrait = False
             if not matches:
                 match_legacy = re.search(r'<portrait>(.*?)</portrait>', bot_response_text)
@@ -953,6 +983,147 @@ class GoogleAdkRunner(BaseProgramRunner):
         )
 
 
+    def _get_event_text_helper(self, ev) -> str:
+        text = ""
+        if ev.content and ev.content.parts:
+            for part in ev.content.parts:
+                if part.text:
+                    text += part.text
+                elif getattr(part, 'function_call', None):
+                    fc = part.function_call
+                    args_list = []
+                    if fc.args:
+                        args_dict = dict(fc.args) if not isinstance(fc.args, dict) else fc.args
+                        for k, v in args_dict.items():
+                            args_list.append(f'{k}={v}')
+                    args_str = ", ".join(args_list)
+                    text += f"\n[{fc.name}({args_str})]"
+                elif getattr(part, 'function_response', None):
+                    fr = part.function_response
+                    resp = fr.response
+                    text += f"\n[Tool Response from {fr.name}]:\n{resp}"
+        return text
+
+    async def _compact_and_vectorize_session_history(self, session_id: str, adk_session, active_model: str):
+        # 1. Determine size
+        history_text = ""
+        for ev in adk_session.events:
+            history_text += self._get_event_text_helper(ev)
+            
+        # Threshold: 24000 characters (~6,000 tokens)
+        MAX_LOCAL_CONTEXT_CHARS = 24000
+        if len(history_text) <= MAX_LOCAL_CONTEXT_CHARS:
+            return
+            
+        print(f"[COMPACTION] Active context has breached threshold: {len(history_text)} characters. Running compaction...", flush=True)
+        
+        # 2. Find cutoff boundary (keep last 3 user turns)
+        user_event_indices = []
+        for idx, ev in enumerate(adk_session.events):
+            if ev.author.lower() == 'user':
+                is_tool_response = False
+                if ev.content and ev.content.parts:
+                    for part in ev.content.parts:
+                        if getattr(part, 'function_response', None):
+                            is_tool_response = True
+                            break
+                if not is_tool_response:
+                    user_event_indices.append(idx)
+                    
+        if len(user_event_indices) <= 3:
+            return
+            
+        cutoff_idx = user_event_indices[-3]
+        
+        # Extract historical events to summarize
+        historical_turns = adk_session.events[:cutoff_idx]
+        text_to_summarize = ""
+        for ev in historical_turns:
+            role = "User" if ev.author.lower() == "user" else "Companion"
+            text = self._get_event_text_helper(ev).strip()
+            if text:
+                text_to_summarize += f"{role}: {text}\n\n"
+                
+        if not text_to_summarize.strip():
+            return
+            
+        # 3. Generate summary using local model
+        summary = await self._generate_local_summary(text_to_summarize, active_model)
+        if summary.startswith("Memory compaction summary generation failed"):
+            summary = (
+                "Older conversation turns were pruned to free up local memory. The full transcript of these turns "
+                "has been archived in the vector database and remains searchable."
+            )
+        
+        # 4. Ingest raw historical turns to SQLite vector databank
+        try:
+            from core.skills.vectorized_databank.databank import DataBankManager
+            import time
+            db = DataBankManager()
+            db.ingest_text(
+                text=text_to_summarize,
+                name=f"chat_history_archive_{session_id}_{int(time.time())}",
+                source_type="chat_history"
+            )
+            print(f"[COMPACTION] Ingested history to vector database.", flush=True)
+        except Exception as e:
+            print(f"[COMPACTION ERROR] Failed to ingest to vectorized database: {e}", flush=True)
+            
+        # 5. Replace historical turns with summary system-memory event
+        from google.adk.events.event import Event
+        from google.genai import types
+        import time
+        
+        summary_content = types.Content(
+            role="user",
+            parts=[types.Part.from_text(text=f"[System Memory of older conversation turns]:\n{summary}")]
+        )
+        summary_event = Event(
+            author="user",
+            content=summary_content,
+            invocation_id="system-memory",
+            id=f"memory-{int(time.time())}",
+            timestamp=time.time()
+        )
+        
+        adk_session.events = [summary_event] + adk_session.events[cutoff_idx:]
+        self._save_session_to_disk(session_id)
+        print(f"[COMPACTION] Replaced {cutoff_idx} historical events with system memory summary.", flush=True)
+
+    async def _generate_local_summary(self, text_to_summarize: str, active_model: str) -> str:
+        import httpx
+        import os
+        from variables import LOCAL_SERVER_URL
+        
+        prompt = (
+            "You are a memory compaction assistant. Summarize the following chat history between the User and the Companion. "
+            "Extract key facts, user preferences, agreed instructions, file changes, and project details. "
+            "Keep the summary extremely dense, structured, and under 500 words. Do NOT include greetings or conversational filler.\n\n"
+            f"CHAT HISTORY TO SUMMARIZE:\n{text_to_summarize}\n\n"
+            "SUMMARY:"
+        )
+        
+        payload = {
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.3,
+            "max_tokens": 1024
+        }
+        target_model = active_model if (active_model and active_model != 'local-lm-studio') else os.getenv("LOCAL_MODEL_NAME")
+        if target_model:
+            payload["model"] = target_model
+            
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.post(LOCAL_SERVER_URL, json=payload, headers={"Content-Type": "application/json"}, timeout=60.0)
+                if response.status_code == 200:
+                    res_json = response.json()
+                    return res_json['choices'][0]['message']['content'].strip()
+                else:
+                    print(f"Local server returned error for summary: {response.status_code} - {response.text}", flush=True)
+        except Exception as e:
+            print(f"Error generating local summary: {e}", flush=True)
+        return "Memory compaction summary generation failed due to connection error."
+
     def _get_session_path(self, session_id: str) -> str:
         # Sanitize session_id to prevent path traversal
         safe_id = "".join(c for c in session_id if c.isalnum() or c in "-_")
@@ -1309,6 +1480,54 @@ class GoogleAdkRunner(BaseProgramRunner):
             )
         adk_session = session_dict[self.app_name]["user"][session_id]
         
+        # Determine if we should perform hybrid background offloading when a local model is chosen
+        if _is_local_model(model):
+            gemini_key = os.getenv("GEMINI_API_KEY")
+            project_id = os.getenv("PROJECT_ID")
+            is_gemini_configured = bool(
+                gemini_key and gemini_key.strip() and gemini_key != "your_gemini_api_key_here" and
+                project_id and project_id.strip() and project_id != "your_gcp_project_id_here"
+            )
+            
+            if is_gemini_configured:
+                # 1. Compact locally if chat history is too long
+                await self._compact_and_vectorize_session_history(session_id, adk_session, model)
+                
+                # 2. Check routing offload criteria
+                offload = False
+                
+                # Explicit commands: /offload or /cloud
+                clean_msg = new_message_text.strip() if new_message_text else ""
+                if clean_msg.startswith('/offload') or clean_msg.startswith('/cloud'):
+                    offload = True
+                    if clean_msg.startswith('/offload'):
+                        new_message_text = clean_msg[len('/offload'):].strip()
+                    else:
+                        new_message_text = clean_msg[len('/cloud'):].strip()
+                        
+                # Unsupported media type
+                if media_path:
+                    import mimetypes
+                    mime_type, _ = mimetypes.guess_type(media_path)
+                    if mime_type and not mime_type.startswith('image/'):
+                        offload = True
+                        print(f"[OFFLOAD] Routing to remote model due to unsupported local media type: {mime_type}", flush=True)
+                        
+                # Context limit
+                history_text = ""
+                for ev in adk_session.events:
+                    history_text += self._get_event_text_helper(ev)
+                
+                total_chars = len(history_text) + len(new_message_text or "") + len(rag_context or "")
+                if total_chars > 24000:
+                    offload = True
+                    print(f"[OFFLOAD] Routing to remote model due to context size limit ({total_chars} chars)", flush=True)
+                    
+                if offload:
+                    model = DEFAULT_GEMINI_MODEL
+                    print(f"[OFFLOAD] Offloading query execution to remote model: {model}", flush=True)
+                    self._reload_config(model, inversion_directive, rag_context, user_message=new_message_text)
+
         # Run history compaction to keep contexts compact and prevent token blowout
         _compact_session_history(adk_session)
 
@@ -1375,15 +1594,33 @@ class GoogleAdkRunner(BaseProgramRunner):
             adk_session.events.append(user_event)
             
             adapter = AdkHistoryAdapter(self, session_id, adk_session, user_event)
-            return await self._execute_local_llm_loop(
-                session_id=session_id,
-                adapter=adapter,
-                model=model,
-                inversion_directive=inversion_directive,
-                rag_context=rag_context,
-                new_message_text=new_message_text,
-                invocation_id=invocation_id
-            )
+            try:
+                return await self._execute_local_llm_loop(
+                    session_id=session_id,
+                    adapter=adapter,
+                    model=model,
+                    inversion_directive=inversion_directive,
+                    rag_context=rag_context,
+                    new_message_text=new_message_text,
+                    invocation_id=invocation_id
+                )
+            except LocalOffloadTrigger as trigger_exc:
+                print(f"[OFFLOAD] Caught LocalOffloadTrigger: {trigger_exc.reason}. Rolling back local turn and offloading to cloud.", flush=True)
+                # Rollback current assistant events matching this invocation_id
+                adk_session.events = [ev for ev in adk_session.events if ev.invocation_id != invocation_id]
+                
+                # Switch to DEFAULT_GEMINI_MODEL and recursively execute run_async
+                from variables import DEFAULT_GEMINI_MODEL
+                model = DEFAULT_GEMINI_MODEL
+                print(f"[OFFLOAD] Recursively calling run_async with remote model: {model}", flush=True)
+                return await self.run_async(
+                    session_id=session_id,
+                    new_message_text=new_message_text,
+                    image_data=image_data,
+                    image_mime=image_mime,
+                    model=model,
+                    media_path=media_path
+                )
         else:
             parts = []
             if new_message_text:
