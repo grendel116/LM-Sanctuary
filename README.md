@@ -28,7 +28,7 @@ Here is what a Sanctuary session looks like:
 
 ## 🛠️ TOOLS
 
-These are the concrete abilities your companion uses to do work on your machine. Every modifying action requires your explicit confirmation. Active tool execution logs are cataloged in a thread-safe registry, and the UI polls `/api/session_tool_calls` in real-time to display a dynamic, expandable output drawer next to the typing indicator.
+These are the concrete abilities your companion uses to do work on your machine. By default, modifying actions (such as writing/editing files or running terminal commands) require your explicit confirmation in the UI; this can be bypassed by setting your project's security preset to "Turbo" for fully autonomous loop execution. Active tool execution logs are cataloged in a thread-safe registry, and the UI polls `/api/session_tool_calls` in real-time to display a dynamic, expandable output drawer next to the typing indicator.
 
 > [!WARNING]
 > **Security Warning**: Equipping companions with local shell execution (`run_command_async`, `run_shell_command`) and file modification (`replace_file_content`, `write_file`) tools grants them direct access to your operating system. **Be extremely wary of giving these capabilities to untrusted, malicious, or poorly aligned programs/models.** A hostile model could run arbitrary code, delete files, or steal credentials. Always review tool arguments in the approval prompt before confirming execution, and consider running the server in an isolated sandbox.
