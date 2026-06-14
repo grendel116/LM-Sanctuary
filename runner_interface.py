@@ -315,12 +315,18 @@ class BaseProgramRunner:
         return False
 
     def _ensure_images_are_embedded(self, text: str) -> str:
-        """Links portrait images in the text prefixed with '!' so they render as images instead of links."""
+        """Links portrait and media images in the text prefixed with '!' so they render as images instead of links or plain text paths."""
         if not text:
             return text
         import re
-        # Convert [Name](/images/portraits/...) to ![Name](...) if it is not already prefixed with !
-        return re.sub(r'(?<!\!)(\[[^\]]*\]\(/images/portraits/[^)]+\))', r'!\1', text)
+        # Convert [Name](/images/portraits/...) or [Name](/images/media/...) to ![Name](...) if it is not already prefixed with !
+        text = re.sub(r'(?<!\!)(\[[^\]]*\]\(/images/portraits/[^)]+\))', r'!\1', text)
+        text = re.sub(r'(?<!\!)(\[[^\]]*\]\(/images/media/[^)]+\))', r'!\1', text)
+        
+        # Convert raw paths /images/portraits/... or /images/media/... to markdown image format if they are not already in link syntax
+        raw_path_pattern = r'(?<![\([/])(/images/(?:portraits|media)/[a-zA-Z0-9_\-\.]+\.(?:png|jpg|jpeg|webp|gif|mp4))'
+        text = re.sub(raw_path_pattern, r'![Portrait](\1)', text)
+        return text
 
     def _get_system_instructions(self, inversion_directive=None, user_message=None) -> str:
         """Pulls the system prompt directly from <program>.md and skill files."""

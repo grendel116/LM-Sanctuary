@@ -791,19 +791,20 @@ def reset():
 @app.route('/delete_image', methods=['POST'])
 @requires_auth
 def delete_image():
+    session_id = request.json.get('session_id', 'default')
     image_url = request.json.get('image_url')
     if not image_url:
         return jsonify({'error': 'Missing image_url'}), 400
         
     try:
-        # Detach from session log - simply delete the file from the local disk
-        success = runner._delete_local_image(image_url)
+        # Detach from session log - delete the image and remove it from history
+        success = asyncio.run(runner.delete_image_from_session(session_id, image_url))
         if success:
             return jsonify({'status': 'success'})
         else:
-            return jsonify({'error': 'Image file not found on disk'}), 404
+            return jsonify({'error': 'Image file not found in session or disk'}), 404
     except Exception as e:
-        print(f"Error deleting image file {image_url}: {e}")
+        print(f"Error deleting image file {image_url} from session {session_id}: {e}")
         return jsonify({'error': str(e)}), 500
 
 
