@@ -777,6 +777,104 @@ def continue_generation():
         from runner_interface import cancelled_sessions
         cancelled_sessions.discard(session_id)
 
+@app.route('/api/generate_portrait', methods=['POST'])
+@requires_auth
+def generate_portrait():
+    session_id = request.json.get('session_id', 'default')
+    model = request.json.get('model')
+    
+    import tools
+    tools.current_session_id.set(session_id)
+    with tools.session_tool_calls_lock:
+        tools.session_tool_calls[session_id] = []
+        
+    from runner_interface import cancelled_sessions
+    cancelled_sessions.discard(session_id)
+    start_time = time.time()
+    
+    prompt_message = (
+        "[System: Based on the conversation history and your description, "
+        "write a ComfyUI prompt of 15-20 comma-separated tags describing your current appearance, outfit details, pose, expression, and environment. "
+        "Output ONLY the tags (e.g. 'silver hair, purple eyes, smiling, sitting on cushions, castle interior'). "
+        "Do NOT include any conversational text, headers, quotes, or markdown.]"
+    )
+    
+    try:
+        response_text, tool_calls = asyncio.run(
+            runner.run_async(
+                session_id=session_id,
+                new_message_text=prompt_message,
+                model=model
+            )
+        )
+        duration = round(time.time() - start_time, 1)
+        
+        # Clean up response to extract clean tags
+        clean_tags = response_text.strip()
+        if clean_tags.startswith("```"):
+            lines = clean_tags.split("\n")
+            if len(lines) >= 3:
+                clean_tags = "\n".join(lines[1:-1]).strip()
+        for prefix in ["here are the tags:", "tags:", "prompt:", "comfyui prompt:"]:
+            if clean_tags.lower().startswith(prefix):
+                clean_tags = clean_tags[len(prefix):].strip()
+        if clean_tags.startswith('"') and clean_tags.endswith('"'):
+            clean_tags = clean_tags[1:-1].strip()
+        if clean_tags.startswith("'") and clean_tags.endswith("'"):
+            clean_tags = clean_tags[1:-1].strip()
+            
+        # Generate the portrait using ComfyUI
+        new_markdown = tools.generate_local_image(clean_tags)
+        
+        # Update the chat history:
+        # 1. Restore the user message to the original button text
+        # 2. Update the companion message with the generated markdown image link
+        original_user_message = "Send me a portrait of yourself based on the context of our last message/current dialogue!"
+        try:
+            chat_history = asyncio.run(runner.get_history(session_id))
+            user_messages = [msg for msg in chat_history if msg.get('role') == 'user']
+            if user_messages:
+                asyncio.run(runner.update_message_text(session_id, 'user', len(user_messages) - 1, original_user_message))
+                
+            companion_messages = [msg for msg in chat_history if msg.get('role') == 'companion']
+            if companion_messages:
+                asyncio.run(runner.update_message_text(session_id, 'companion', len(companion_messages) - 1, new_markdown))
+        except Exception as he:
+            print(f"Error updating message text in history: {he}")
+            
+        from utils.program_mood import extract_and_strip_mood
+        display_text, state_info = extract_and_strip_mood(new_markdown)
+        inversion_mode = asyncio.run(runner._get_inversion_mode(session_id))
+        
+        return jsonify({
+            'status': 'success',
+            'response': display_text,
+            'tool_calls': [],
+            'state': state_info,
+            'inversion_active': inversion_mode,
+            'timestamp': time.time(),
+            'duration': duration
+        })
+    except asyncio.CancelledError:
+        print(f"[CANCEL] Portrait generation cancelled for session {session_id}")
+        return jsonify({
+            'cancelled': True,
+            'response': '*(Generation cancelled)*',
+            'tool_calls': [],
+            'state': None,
+            'inversion_active': '',
+            'timestamp': time.time(),
+            'duration': round(time.time() - start_time, 1)
+        })
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        print(f"Error occurred in generate_portrait: {e}")
+        return jsonify({'error': str(e)}), 500
+    finally:
+        from runner_interface import cancelled_sessions
+        cancelled_sessions.discard(session_id)
+
 @app.route('/reset', methods=['POST'])
 @requires_auth
 def reset():
