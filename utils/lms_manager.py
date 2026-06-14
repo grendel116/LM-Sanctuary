@@ -328,45 +328,78 @@ def list_local_models(force_refresh=False):
     _local_models_list_cache_time = now
     return _local_models_list_cached
 
+def _update_env_model_name(model_name):
+    try:
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        env_path = os.path.join(base_dir, '.env')
+        if os.path.exists(env_path):
+            with open(env_path, 'r', encoding='utf-8') as f:
+                lines = f.readlines()
+            updated = False
+            for i, line in enumerate(lines):
+                if line.strip().startswith('LOCAL_MODEL_NAME='):
+                    lines[i] = f"LOCAL_MODEL_NAME={model_name}\n"
+                    updated = True
+                    break
+            if not updated:
+                lines.append(f"\nLOCAL_MODEL_NAME={model_name}\n")
+            with open(env_path, 'w', encoding='utf-8') as f:
+                f.writelines(lines)
+        os.environ["LOCAL_MODEL_NAME"] = model_name
+    except Exception as env_err:
+        print(f"[lms_manager] Failed to update LOCAL_MODEL_NAME in env: {env_err}", flush=True)
+
 def load_local_model(model_name):
-    """Loads a model into memory via native REST API."""
+    """Loads a model into memory via CLI or native REST API with GPU offload support."""
     try:
         if not check_daemon_status():
             start_lms_daemon()
 
         lms_context = os.getenv("LMS_CONTEXT")
+        lms_gpu = os.getenv("LMS_GPU")
+        
+        # Try CLI first if functional
+        if check_lms_cli():
+            lms_path = get_lms_path()
+            cmd = [lms_path, "load", model_name]
+            if lms_gpu:
+                cmd.extend(["--gpu", str(lms_gpu)])
+            if lms_context:
+                cmd.extend(["--context-length", str(lms_context)])
+            
+            import subprocess
+            print(f"[lms_manager] Loading model via CLI: {' '.join(cmd)}", flush=True)
+            res = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='ignore', shell=False)
+            if res.returncode == 0:
+                _update_env_model_name(model_name)
+                return True, f"Model {model_name} loaded successfully via CLI (GPU: {lms_gpu})."
+            else:
+                print(f"[lms_manager] CLI loading failed (code {res.returncode}): {res.stderr or res.stdout}. Falling back to REST API...", flush=True)
+
         payload = {"model": model_name}
         if lms_context:
             try:
                 payload["context_length"] = int(lms_context)
             except ValueError:
                 pass
+        
+        if lms_gpu:
+            if lms_gpu == "max":
+                payload["n_gpu_layers"] = -1
+            else:
+                try:
+                    payload["n_gpu_layers"] = int(float(lms_gpu))
+                except ValueError:
+                    pass
+            # Try to offload KV Cache if using GPU
+            if lms_gpu != "off":
+                payload["offload_kv_cache_to_gpu"] = True
 
         url = "http://localhost:1234/api/v1/models/load"
         resp = requests.post(url, json=payload, timeout=30.0)
         if resp.status_code == 200:
-            # Update .env configuration
-            try:
-                base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-                env_path = os.path.join(base_dir, '.env')
-                if os.path.exists(env_path):
-                    with open(env_path, 'r', encoding='utf-8') as f:
-                        lines = f.readlines()
-                    updated = False
-                    for i, line in enumerate(lines):
-                        if line.strip().startswith('LOCAL_MODEL_NAME='):
-                            lines[i] = f"LOCAL_MODEL_NAME={model_name}\n"
-                            updated = True
-                            break
-                    if not updated:
-                        lines.append(f"\nLOCAL_MODEL_NAME={model_name}\n")
-                    with open(env_path, 'w', encoding='utf-8') as f:
-                        f.writelines(lines)
-                os.environ["LOCAL_MODEL_NAME"] = model_name
-            except Exception as env_err:
-                print(f"[lms_manager] Failed to update LOCAL_MODEL_NAME in env: {env_err}")
-
-            return True, f"Model {model_name} loaded successfully."
+            _update_env_model_name(model_name)
+            return True, f"Model {model_name} loaded successfully via API fallback (GPU settings: {lms_gpu})."
         else:
             err = resp.json().get("error", {}).get("message", resp.text)
             return False, f"Failed to load model: {err}"
@@ -374,8 +407,22 @@ def load_local_model(model_name):
         return False, str(e)
 
 def unload_local_model(model_name=None):
-    """Unloads a loaded model or all models from VRAM via native REST API."""
+    """Unloads a loaded model or all models from VRAM via CLI or native REST API."""
     try:
+        if check_lms_cli():
+            lms_path = get_lms_path()
+            if not model_name or model_name == "all":
+                cmd = [lms_path, "unload", "--all"]
+            else:
+                cmd = [lms_path, "unload", model_name]
+            import subprocess
+            print(f"[lms_manager] Unloading model via CLI: {' '.join(cmd)}", flush=True)
+            res = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='ignore', shell=False)
+            if res.returncode == 0:
+                return True, f"Model {model_name or 'all'} unloaded successfully via CLI."
+            else:
+                print(f"[lms_manager] CLI unloading failed (code {res.returncode}): {res.stderr or res.stdout}. Falling back to REST API...", flush=True)
+
         url = "http://localhost:1234/api/v1/models/unload"
         
         # If unloading all
