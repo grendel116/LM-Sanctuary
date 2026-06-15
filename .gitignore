@@ -8,8 +8,7 @@ __pycache__/
 
 # Temporary files
 backups/
-scratch/*
-!scratch/news_deep_research.py
+scratch/
 reports/
 
 # Ignore all runtime and user variables except code dependencies, template examples, and default builder profile
