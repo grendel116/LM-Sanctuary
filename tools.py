@@ -378,6 +378,30 @@ def web_search(query: str) -> str:
                                 "content": title,
                                 "source": "Google"
                             })
+            # Resolve Google search redirects concurrently to find clean target URLs
+            if g_results:
+                def resolve_url(item):
+                    url = item["url"]
+                    if "vertexaisearch.cloud.google.com/grounding-api-redirect" in url:
+                        try:
+                            headers = {
+                                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
+                            }
+                            # Attempt HEAD request first
+                            r = requests.head(url, headers=headers, allow_redirects=True, timeout=2.0)
+                            if r.status_code < 400 and r.url:
+                                item["url"] = r.url
+                                return
+                            # Fallback to GET stream
+                            r = requests.get(url, headers=headers, allow_redirects=True, stream=True, timeout=2.0)
+                            if r.url:
+                                item["url"] = r.url
+                        except Exception:
+                            pass
+                
+                with concurrent.futures.ThreadPoolExecutor(max_workers=len(g_results)) as executor:
+                    executor.map(resolve_url, g_results)
+
             return g_results
         except Exception as e:
             print(f"[Google Grounding] Error: {e}")
@@ -570,7 +594,7 @@ def web_search(query: str) -> str:
                 _search_executor.submit(run_wikipedia, query): "Wikipedia"
             }
 
-            done, not_done = concurrent.futures.wait(futures.keys(), timeout=8.0)
+            done, not_done = concurrent.futures.wait(futures.keys(), timeout=15.0)
             
             for future in done:
                 source_name = futures[future]
@@ -583,7 +607,7 @@ def web_search(query: str) -> str:
                     
             for future in not_done:
                 source_name = futures[future]
-                print(f"[{source_name}] Thread timed out (exceeded 8.0s timeout limit).")
+                print(f"[{source_name}] Thread timed out (exceeded 15.0s timeout limit).")
                         
             # Deduplicate results by URL (collapsing mobile/desktop variations)
             seen_urls = set()
