@@ -5970,6 +5970,12 @@ function toggleThinkingBlock(headerElement) {
 
         // --- appendMessage ---
         function appendMessage(role, text, imageUrl = null, toolCalls = null, isLive = false, timestamp = null, duration = null) {
+            // Remove welcome message/onboarding when any real message is appended
+            const welcome = document.getElementById('welcome-message');
+            if (welcome) welcome.remove();
+            const onboarding = document.getElementById('onboarding-container');
+            if (onboarding) onboarding.remove();
+
             text = text || '';
             
             // Extract ComfyUI prompt if present in toolCalls
@@ -6739,7 +6745,8 @@ async function saveMessageEdit(bubble, newText) {
             const role = isUser ? 'user' : 'companion';
             
             const selector = isUser ? '.message.user' : '.message.companion';
-            const allSameRoleBubbles = Array.from(chatContainer.querySelectorAll(selector));
+            const allSameRoleBubbles = Array.from(chatContainer.querySelectorAll(selector))
+                .filter(el => !el.closest('#welcome-message') && !el.closest('#onboarding-container'));
             const index = allSameRoleBubbles.indexOf(bubble);
             if (index === -1) return;
             
@@ -7436,6 +7443,7 @@ function handleSwipeGesture() {
                 const data = await response.json();
                 if (data.response !== undefined) {
                     appendMessage('companion', data.response, null, data.tool_calls, true, data.timestamp, data.duration);
+                    await softReloadApp();
                 } else if (data.error) {
                     let errMsg = data.error;
                     if (errMsg.includes("429") || errMsg.includes("RESOURCE_EXHAUSTED")) {
