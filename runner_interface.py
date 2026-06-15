@@ -1709,10 +1709,22 @@ class GoogleAdkRunner(BaseProgramRunner):
                     if part.text:
                         query_text += part.text
                         
+        if new_text is None:
+            new_text = "/cloud " + query_text
+            
+        if new_text and (new_text.startswith('/cloud') or new_text.startswith('/offload')):
+            if new_text.startswith('/cloud'):
+                new_text = new_text[len('/cloud'):].strip()
+            else:
+                new_text = new_text[len('/offload'):].strip()
+            model = DEFAULT_GEMINI_MODEL
+            # Update query_text to be clean for configuration and RAG
+            query_text = new_text
+            
         rag_context = _get_rag_context(query_text)
         inversion_directive = await self._get_inversion_directive(session_id)
         self._reload_config(model, inversion_directive, rag_context, user_message=query_text)
-        
+            
         if _is_local_model(model):
             # Extract new text or original text
             text_part = ""
