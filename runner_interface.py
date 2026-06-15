@@ -40,15 +40,28 @@ def _get_safe_local_path(image_url: str) -> str:
 
 
 def _get_rag_context(query_text: str) -> str:
-    """Helper to query the DataBank index for matching context."""
+    """Helper to query the DataBank index for matching context (excluding chat history)."""
     if not query_text:
         return ""
     try:
         from core.skills.vectorized_databank.databank import DataBankManager
         db = DataBankManager()
-        return db.query(query_text)
+        return db.query(query_text, exclude_source_type="chat_history")
     except Exception as e:
         print(f"Error querying data bank for RAG context: {e}")
+        return ""
+
+
+def _get_memory_context(query_text: str) -> str:
+    """Helper to query the DataBank index for matching memory context (chat history only)."""
+    if not query_text:
+        return ""
+    try:
+        from core.skills.vectorized_databank.databank import DataBankManager
+        db = DataBankManager()
+        return db.query(query_text, top_k=3, include_source_type="chat_history")
+    except Exception as e:
+        print(f"Error querying data bank for memory context: {e}")
         return ""
 def _is_local_model(model: str) -> bool:
     return is_local_model(model)
@@ -193,7 +206,7 @@ class LocalHistoryAdapter:
         self.runner_obj = runner_obj
         self.session_id = session_id
 
-    def get_openai_messages(self, sys_inst: str, rag_context: str) -> list:
+    def get_openai_messages(self, sys_inst: str, rag_context: str, memory_context: str = None) -> list:
         raise NotImplementedError()
 
     def append_assistant_message(self, text: str, tool_calls_data: list, invocation_id: str):
@@ -218,7 +231,7 @@ class AdkHistoryAdapter(LocalHistoryAdapter):
         self.adk_session = adk_session
         self.user_event = user_event
 
-    def get_openai_messages(self, sys_inst: str, rag_context: str) -> list:
+    def get_openai_messages(self, sys_inst: str, rag_context: str, memory_context: str = None) -> list:
         import base64
         raw_messages = []
         for ev in self.adk_session.events:
@@ -278,6 +291,8 @@ class AdkHistoryAdapter(LocalHistoryAdapter):
         openai_messages = [{"role": "system", "content": sys_inst}]
         if rag_context:
             openai_messages[0]["content"] += f"\n\n# KNOWLEDGE BASE CONTEXT\nUse the following verified context from your Data Bank to help answer questions if relevant:\n{rag_context}\n"
+        if memory_context:
+            openai_messages[0]["content"] += f"\n\n# ARCHIVED CONVERSATION MEMORY\nThe following is a chronological sequence of messages from earlier in this conversation:\n{memory_context}\n"
         openai_messages[0]["content"] += _LOCAL_DIRECTIVE_PROMPT
 
         for msg in raw_messages:
@@ -429,7 +444,7 @@ class OsHistoryAdapter(LocalHistoryAdapter):
         self.image_mime = image_mime
         self.initial_history_len = len(runner_obj.sessions_history[session_id])
 
-    def get_openai_messages(self, sys_inst: str, rag_context: str) -> list:
+    def get_openai_messages(self, sys_inst: str, rag_context: str, memory_context: str = None) -> list:
         history = self.runner_obj.sessions_history[self.session_id]
         raw_messages = []
         
@@ -467,6 +482,8 @@ class OsHistoryAdapter(LocalHistoryAdapter):
         openai_messages = [{"role": "system", "content": sys_inst}]
         if rag_context:
             openai_messages[0]["content"] += f"\n\n# KNOWLEDGE BASE CONTEXT\nUse the following verified context from your Data Bank to help answer questions if relevant:\n{rag_context}\n"
+        if memory_context:
+            openai_messages[0]["content"] += f"\n\n# ARCHIVED CONVERSATION MEMORY\nThe following is a chronological sequence of messages from earlier in this conversation:\n{memory_context}\n"
         openai_messages[0]["content"] += _LOCAL_DIRECTIVE_PROMPT
 
         for msg in raw_messages:
@@ -533,6 +550,7 @@ class BaseProgramRunner:
         model: str,
         inversion_directive: str,
         rag_context: str,
+        memory_context: str,
         new_message_text: str,
         invocation_id: str
     ) -> tuple:
@@ -551,7 +569,7 @@ class BaseProgramRunner:
                 raise asyncio.CancelledError("Session cancelled by user request.")
                 
             sys_inst = self._get_system_instructions(inversion_directive, user_message=new_message_text)
-            openai_messages = adapter.get_openai_messages(sys_inst, rag_context)
+            openai_messages = adapter.get_openai_messages(sys_inst, rag_context, memory_context)
             
             url = LOCAL_SERVER_URL
             headers = {"Content-Type": "application/json"}
@@ -1052,15 +1070,26 @@ class GoogleAdkRunner(BaseProgramRunner):
         if not text_to_summarize.strip():
             return
             
-        # 3. Generate summary using local model
-        summary = await self._generate_local_summary(text_to_summarize, active_model)
+        # 3. Fetch prior 2 chat history archives to reference in summary generation
+        prior_texts = []
+        try:
+            from core.skills.vectorized_databank.databank import DataBankManager
+            db = DataBankManager()
+            priors = db.get_prior_chat_histories(session_id, limit=2)
+            for p in priors:
+                prior_texts.append(f"--- PRIOR MEMORY ARCHIVE ({p['name']}) ---\n{p['text']}")
+        except Exception as e:
+            print(f"[COMPACTION] Error fetching prior chat histories: {e}", flush=True)
+
+        # 4. Generate summary using local model, referencing prior memories if any exist
+        summary = await self._generate_local_summary(text_to_summarize, active_model, prior_memories=prior_texts)
         if summary.startswith("Memory compaction summary generation failed"):
             summary = (
                 "Older conversation turns were pruned to free up local memory. The full transcript of these turns "
                 "has been archived in the vector database and remains searchable."
             )
         
-        # 4. Ingest raw historical turns to SQLite vector databank
+        # 5. Ingest raw historical turns to SQLite vector databank and prune to keep at most 3
         try:
             from core.skills.vectorized_databank.databank import DataBankManager
             import time
@@ -1070,11 +1099,12 @@ class GoogleAdkRunner(BaseProgramRunner):
                 name=f"chat_history_archive_{session_id}_{int(time.time())}",
                 source_type="chat_history"
             )
-            print(f"[COMPACTION] Ingested history to vector database.", flush=True)
+            db.prune_chat_histories(session_id, keep_limit=3)
+            print(f"[COMPACTION] Ingested history to vector database and pruned to limit.", flush=True)
         except Exception as e:
             print(f"[COMPACTION ERROR] Failed to ingest to vectorized database: {e}", flush=True)
             
-        # 5. Replace historical turns with summary system-memory event
+        # 6. Replace historical turns with summary system-memory event
         from google.adk.events.event import Event
         from google.genai import types
         import time
@@ -1095,16 +1125,24 @@ class GoogleAdkRunner(BaseProgramRunner):
         self._save_session_to_disk(session_id)
         print(f"[COMPACTION] Replaced {cutoff_idx} historical events with system memory summary.", flush=True)
 
-    async def _generate_local_summary(self, text_to_summarize: str, active_model: str) -> str:
+    async def _generate_local_summary(self, text_to_summarize: str, active_model: str, prior_memories: list = None) -> str:
         import httpx
         import os
         from variables import LOCAL_SERVER_URL
         
         prompt = (
-            "You are a memory compaction assistant. Summarize the following chat history between the User and the Companion. "
+            "You are a memory compaction assistant. Summarize the following new chat history between the User and the Companion. "
             "Extract key facts, user preferences, agreed instructions, file changes, and project details. "
             "Keep the summary extremely dense, structured, and under 500 words. Do NOT include greetings or conversational filler.\n\n"
-            f"CHAT HISTORY TO SUMMARIZE:\n{text_to_summarize}\n\n"
+        )
+        if prior_memories:
+            prompt += "To maintain continuity, you are provided with excerpts of the prior conversation memory archives:\n"
+            for pm in prior_memories:
+                prompt += f"{pm}\n\n"
+            prompt += "Reference and build upon these prior memories to ensure the new summary is coherent with previous context.\n\n"
+            
+        prompt += (
+            f"NEW CHAT HISTORY TO SUMMARIZE:\n{text_to_summarize}\n\n"
             "SUMMARY:"
         )
         
@@ -1229,10 +1267,18 @@ class GoogleAdkRunner(BaseProgramRunner):
             except Exception as e:
                 print(f"Error deleting session file {path}: {e}")
                 
+        # Clean up database chat history archives for this session
+        try:
+            from core.skills.vectorized_databank.databank import DataBankManager
+            db = DataBankManager()
+            db.delete_chat_history(session_id)
+        except Exception as e:
+            print(f"Error cleaning up databank history on session reset: {e}")
+                
         from core import program_config
         program_config.set_inversion_directive("")
 
-    def _reload_config(self, model=None, inversion_directive=None, rag_context=None, user_message=None):
+    def _reload_config(self, model=None, inversion_directive=None, rag_context=None, memory_context=None, user_message=None):
         """Reloads tools and character configs dynamically to pick up edits."""
         from google.adk.runners import InMemoryRunner
         from core import program_config
@@ -1247,6 +1293,8 @@ class GoogleAdkRunner(BaseProgramRunner):
             instruction = self._get_system_instructions(inversion_directive, user_message)
             if rag_context:
                 instruction += f"\n\n# KNOWLEDGE BASE CONTEXT\nUse the following verified context from your Data Bank to help answer questions if relevant:\n{rag_context}\n"
+            if memory_context:
+                instruction += f"\n\n# ARCHIVED CONVERSATION MEMORY\nThe following is a chronological sequence of messages from earlier in this conversation:\n{memory_context}\n"
             program_config.root_program.instruction = instruction
             
             if model:
@@ -1466,8 +1514,9 @@ class GoogleAdkRunner(BaseProgramRunner):
 
     async def run_async(self, session_id: str, new_message_text: str, image_data: str = None, image_mime: str = None, model: str = None, media_path: str = None) -> tuple:
         rag_context = _get_rag_context(new_message_text)
+        memory_context = _get_memory_context(new_message_text)
         inversion_directive = await self._get_inversion_directive(session_id)
-        self._reload_config(model, inversion_directive, rag_context, user_message=new_message_text)
+        self._reload_config(model, inversion_directive, rag_context, memory_context, user_message=new_message_text)
         
         # Load from disk if not in memory
         session_dict = self.runner.session_service.sessions
@@ -1535,7 +1584,7 @@ class GoogleAdkRunner(BaseProgramRunner):
                 if offload:
                     model = DEFAULT_GEMINI_MODEL
                     print(f"[OFFLOAD] Offloading query execution to remote model: {model}", flush=True)
-                    self._reload_config(model, inversion_directive, rag_context, user_message=new_message_text)
+                    self._reload_config(model, inversion_directive, rag_context, memory_context, user_message=new_message_text)
 
         # Run history compaction to keep contexts compact and prevent token blowout
         _compact_session_history(adk_session)
@@ -1611,6 +1660,7 @@ class GoogleAdkRunner(BaseProgramRunner):
                     model=model,
                     inversion_directive=inversion_directive,
                     rag_context=rag_context,
+                    memory_context=memory_context,
                     new_message_text=new_message_text,
                     invocation_id=invocation_id
                 )
@@ -1722,8 +1772,9 @@ class GoogleAdkRunner(BaseProgramRunner):
             query_text = new_text
             
         rag_context = _get_rag_context(query_text)
+        memory_context = _get_memory_context(query_text)
         inversion_directive = await self._get_inversion_directive(session_id)
-        self._reload_config(model, inversion_directive, rag_context, user_message=query_text)
+        self._reload_config(model, inversion_directive, rag_context, memory_context, user_message=query_text)
             
         if _is_local_model(model):
             # Extract new text or original text
@@ -2175,8 +2226,9 @@ class OpenSourceRunner(BaseProgramRunner):
         self.sessions_history[session_id].append(user_msg)
         self._save_session_to_disk(session_id)
         
-        # Get RAG context
+        # Get RAG and memory contexts
         rag_context = _get_rag_context(new_message_text)
+        memory_context = _get_memory_context(new_message_text)
         
         # Determine the personality inversion before getting system instructions
         inversion_directive = await self._get_inversion_directive(session_id)
@@ -2188,6 +2240,7 @@ class OpenSourceRunner(BaseProgramRunner):
             model=model,
             inversion_directive=inversion_directive,
             rag_context=rag_context,
+            memory_context=memory_context,
             new_message_text=new_message_text,
             invocation_id=""
         )
@@ -2252,6 +2305,14 @@ class OpenSourceRunner(BaseProgramRunner):
                 os.remove(path)
             except Exception as e:
                 print(f"Error deleting OS session file {path}: {e}")
+                
+        # Clean up database chat history archives for this session
+        try:
+            from core.skills.vectorized_databank.databank import DataBankManager
+            db = DataBankManager()
+            db.delete_chat_history(session_id)
+        except Exception as e:
+            print(f"Error cleaning up databank history on session reset: {e}")
                 
         from core import program_config
         program_config.set_inversion_directive("")

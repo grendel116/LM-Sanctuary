@@ -12,4 +12,5 @@ httpx
 Pillow
 fal-client
 psutil
+markdownify
 

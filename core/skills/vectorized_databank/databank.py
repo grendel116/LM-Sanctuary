@@ -224,7 +224,7 @@ class DataBankManager:
         return self.ingest_text(clean_text, name, "url")
 
     def list_documents(self) -> list:
-        """Lists all documents registered in the database."""
+        """Lists all documents registered in the database (excluding chat history memory)."""
         with sqlite3.connect(self.db_path) as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
@@ -232,6 +232,7 @@ class DataBankManager:
                 SELECT d.id, d.name, d.source_type, d.size, d.timestamp, COUNT(c.id) as chunk_count
                 FROM documents d
                 LEFT JOIN chunks c ON d.id = c.doc_id
+                WHERE d.source_type != 'chat_history'
                 GROUP BY d.id
                 ORDER BY d.timestamp DESC
             """)
@@ -247,6 +248,61 @@ class DataBankManager:
             deleted = cursor.rowcount > 0
         return deleted
 
+    def delete_chat_history(self, session_id: str):
+        """Deletes all chat history archives associated with the session."""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            # Find document IDs to delete
+            cursor.execute("SELECT id FROM documents WHERE source_type = 'chat_history' AND name LIKE ?", (f"chat_history_archive_{session_id}_%",))
+            doc_ids = [row[0] for row in cursor.fetchall()]
+            if doc_ids:
+                placeholders = ",".join("?" for _ in doc_ids)
+                cursor.execute(f"DELETE FROM chunks WHERE doc_id IN ({placeholders})", doc_ids)
+                cursor.execute(f"DELETE FROM documents WHERE id IN ({placeholders})", doc_ids)
+                conn.commit()
+            print(f"[Data Bank] Deleted {len(doc_ids)} chat history archives for session '{session_id}'.")
+
+    def get_prior_chat_histories(self, session_id: str, limit: int = 2) -> list:
+        """Retrieves the text contents of the prior N chat history archives for the session."""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT d.id, d.name
+                FROM documents d
+                WHERE d.source_type = 'chat_history' AND d.name LIKE ?
+                ORDER BY d.timestamp DESC
+                LIMIT ?
+            """, (f"chat_history_archive_{session_id}_%", limit))
+            rows = cursor.fetchall()
+            
+            archives = []
+            for doc_id, name in rows:
+                cursor.execute("SELECT text FROM chunks WHERE doc_id = ? ORDER BY chunk_index ASC", (doc_id,))
+                chunks = [r[0] for r in cursor.fetchall()]
+                archives.append({
+                    "name": name,
+                    "text": "\n".join(chunks)
+                })
+            return archives
+
+    def prune_chat_histories(self, session_id: str, keep_limit: int = 3):
+        """Prunes older chat history archives to keep at most keep_limit archives for the session."""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT id FROM documents 
+                WHERE source_type = 'chat_history' AND name LIKE ?
+                ORDER BY timestamp DESC
+            """, (f"chat_history_archive_{session_id}_%",))
+            rows = cursor.fetchall()
+            if len(rows) > keep_limit:
+                to_delete = [r[0] for r in rows[keep_limit:]]
+                placeholders = ",".join("?" for _ in to_delete)
+                cursor.execute(f"DELETE FROM chunks WHERE doc_id IN ({placeholders})", to_delete)
+                cursor.execute(f"DELETE FROM documents WHERE id IN ({placeholders})", to_delete)
+                conn.commit()
+                print(f"[Data Bank] Pruned {len(to_delete)} older chat history archives for session '{session_id}'.")
+
     def purge_all(self):
         """Purges the database, removing all files and chunks."""
         with sqlite3.connect(self.db_path) as conn:
@@ -256,15 +312,28 @@ class DataBankManager:
             conn.commit()
         print("[Data Bank] Purged all documents and vectors.")
 
-    def query(self, query_text: str, top_k: int = 5, score_threshold: float = 0.25) -> str:
+    def query(self, query_text: str, top_k: int = 5, score_threshold: float = 0.25, exclude_source_type: str = None, include_source_type: str = None) -> str:
         """Queries the vector index and returns clean contextual matching chunks."""
+        query_sql = "SELECT d.name, c.text, c.vector FROM chunks c JOIN documents d ON c.doc_id = d.id"
+        params = []
+        conditions = []
+        if exclude_source_type:
+            conditions.append("d.source_type != ?")
+            params.append(exclude_source_type)
+        if include_source_type:
+            conditions.append("d.source_type = ?")
+            params.append(include_source_type)
+            
+        if conditions:
+            query_sql += " WHERE " + " AND ".join(conditions)
+
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT COUNT(*) FROM chunks")
             if cursor.fetchone()[0] == 0:
                 return ""
                 
-            cursor.execute("SELECT d.name, c.text, c.vector FROM chunks c JOIN documents d ON c.doc_id = d.id")
+            cursor.execute(query_sql, params)
             rows = cursor.fetchall()
             
         if not rows:
@@ -301,7 +370,11 @@ class DataBankManager:
             
         # Format the retrieved chunks for prompt injection
         formatted_context = []
-        for idx, (score, doc_name, text) in enumerate(top_results):
-            formatted_context.append(f"[{idx+1}] Source: {doc_name} (Similarity: {score:.2f})\n{text.strip()}")
-            
-        return "\n\n".join(formatted_context)
+        if include_source_type == 'chat_history':
+            for score, doc_name, text in top_results:
+                formatted_context.append(text.strip())
+            return "\n\n---\n\n".join(formatted_context)
+        else:
+            for idx, (score, doc_name, text) in enumerate(top_results):
+                formatted_context.append(f"[{idx+1}] Source: {doc_name} (Similarity: {score:.2f})\n{text.strip()}")
+            return "\n\n".join(formatted_context)

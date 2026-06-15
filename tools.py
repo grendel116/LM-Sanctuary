@@ -153,18 +153,21 @@ def confirm_tool_execution(tool_name: str, details: str) -> bool:
 
 @track_tool_activity
 def read_webpage(url: str) -> str:
-    """Fetches and extracts the readable text content of a specific webpage URL.
+    """Fetches and extracts the readable text content of a specific webpage URL as structured Markdown.
     Use this when the user shares a URL/link in the chat and asks you to read, review, or analyze it.
 
     Args:
         url: The web address (HTTP/HTTPS URL) to fetch and read.
 
     Returns:
-        The extracted clean text content of the webpage, or an error message.
+        The extracted clean Markdown content of the webpage, or an error message.
     """
     import requests
     from bs4 import BeautifulSoup
     import urllib3
+    from markdownify import markdownify as md
+    import re
+    
     urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
     if not url.startswith(("http://", "https://")):
@@ -184,23 +187,27 @@ def read_webpage(url: str) -> str:
 
         soup = BeautifulSoup(html_content, 'html.parser')
 
-        for element in soup(["script", "style", "nav", "header", "footer", "meta", "noscript", "svg", "iframe"]):
+        for element in soup(["script", "style", "nav", "header", "footer", "meta", "noscript", "svg", "iframe", "form", "aside"]):
             element.decompose()
 
-        text = soup.get_text(separator='\n')
+        content_area = soup.find("main") or soup.find("article") or soup.find("body") or soup
 
-        lines = (line.strip() for line in text.splitlines())
-        chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
-        clean_text = '\n'.join(chunk for chunk in chunks if chunk)
+        markdown_text = md(
+            str(content_area),
+            heading_style="ATX",
+            bullets="-"
+        )
+
+        markdown_text = re.sub(r'\n{3,}', '\n\n', markdown_text).strip()
 
         limit = 12000
-        if len(clean_text) > limit:
-            return clean_text[:limit] + f"\n\n... [Content truncated, total length: {len(clean_text)} characters] ..."
+        if len(markdown_text) > limit:
+            return markdown_text[:limit] + f"\n\n... [Content truncated, total length: {len(markdown_text)} characters] ..."
 
-        if not clean_text.strip():
-            return "Error: Webpage loaded, but no readable text content could be extracted."
+        if not markdown_text.strip():
+            return "Error: Webpage loaded, but no readable content could be extracted."
 
-        return clean_text
+        return markdown_text
 
     except requests.exceptions.Timeout:
         return "Error: Connection timed out while attempting to load the webpage."
@@ -322,21 +329,9 @@ def web_search(query: str) -> str:
             )
             
             g_results = []
-            metadata = response.candidates[0].grounding_metadata if (response.candidates and response.candidates[0]) else None
-            if metadata and hasattr(metadata, 'grounding_chunks') and metadata.grounding_chunks:
-                for chunk in metadata.grounding_chunks:
-                    web = getattr(chunk, 'web', None)
-                    if web and web.uri:
-                        title = web.title or "Web Result"
-                        g_results.append({
-                            "title": title,
-                            "url": web.uri,
-                            "content": chunk.web.title if hasattr(chunk.web, 'title') else '',
-                            "source": "Google"
-                        })
             
-            # Fallback parser if structured metadata was missing
-            if not g_results and response.text:
+            # Parse text response first for clean, original URLs and rich snippets
+            if response.text:
                 import re
                 lines = response.text.split('\n')
                 i = 0
@@ -368,6 +363,21 @@ def web_search(query: str) -> str:
                             })
                             i = j - 1
                     i += 1
+                    
+            # Fall back to metadata chunks if text parsing was empty
+            if not g_results:
+                metadata = response.candidates[0].grounding_metadata if (response.candidates and response.candidates[0]) else None
+                if metadata and hasattr(metadata, 'grounding_chunks') and metadata.grounding_chunks:
+                    for chunk in metadata.grounding_chunks:
+                        web = getattr(chunk, 'web', None)
+                        if web and web.uri:
+                            title = web.title or "Web Result"
+                            g_results.append({
+                                "title": title,
+                                "url": web.uri,
+                                "content": title,
+                                "source": "Google"
+                            })
             return g_results
         except Exception as e:
             print(f"[Google Grounding] Error: {e}")
@@ -695,6 +705,10 @@ def replace_in_file(path: str, old_text: str, new_text: str) -> str:
 @track_tool_activity
 def run_shell_command(command: str) -> str:
     """Runs a shell command in the local workspace directory and returns its output.
+
+    Ensure commands complete within 30 seconds. Use targeted listing and search commands
+    instead of recursive directory operations (like 'dir /s', 'find .', or 'grep -r')
+    to prevent timeout errors.
 
     Args:
         command: The shell command to run.
@@ -1522,6 +1536,37 @@ def multi_replace_file_content(path: str, replacement_chunks: list[dict]) -> str
         return f"Successfully applied {len(replacement_chunks)} replacements to '{path}'."
     except Exception as e:
         return f"Error modifying file '{path}': {e}"
+
+
+@track_tool_activity
+def news_research(prompt: str) -> str:
+    """Runs the custom deep research agent to gather facts and synthesize a report on working-class, labor, and indigenous news.
+
+    Args:
+        prompt: The research topic or query (e.g. 'labor news', 'indigenous actions').
+
+    Returns:
+        The generated report content.
+    """
+    import subprocess
+    import sys
+    import os
+
+    # Target our news_deep_research.py script
+    base_core = os.path.dirname(os.path.abspath(__file__))
+    script_path = os.path.join(base_core, "scratch", "news_deep_research.py")
+    python_exe = sys.executable
+
+    try:
+        # Run the script synchronously with a longer timeout since deep research is iterative
+        cmd = [python_exe, "-X", "utf8", script_path, prompt]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300, encoding='utf-8', errors='replace')
+        if result.returncode == 0:
+            return result.stdout or "Error: Deep research script succeeded but returned no output."
+        else:
+            return f"Error running deep research script: {result.stderr or result.stdout}"
+    except Exception as e:
+        return f"Failed to execute deep research loop: {e}"
 
 
 

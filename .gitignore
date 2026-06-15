@@ -6,8 +6,11 @@ __pycache__/
 # Local Config (contains credentials)
 .env
 
-# Backups
+# Temporary files
 backups/
+scratch/*
+!scratch/news_deep_research.py
+reports/
 
 # Ignore all runtime and user variables except code dependencies, template examples, and default builder profile
 variables/*
@@ -40,7 +43,3 @@ core/skills/speech_generation/speech_cache/
 
 # Runtime logs
 *.log
-
-# Temporary test files
-scratch/
-scratch_veo_test.mp4

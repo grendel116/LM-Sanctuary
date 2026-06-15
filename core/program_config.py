@@ -10,7 +10,7 @@ from tools import (
     get_workspace_structure, search_codebase, read_webpage, google_search,
     web_search, apply_comfy_workflow, generate_local_image, generate_imagen,
     replace_file_content, multi_replace_file_content, run_command_async,
-    manage_task, wait_task
+    manage_task, wait_task, news_research
 )
 
 # Ensure the parent directory is in sys.path so we can import variables package
@@ -96,6 +96,7 @@ def load_dynamic_runtime_context() -> str:
         "### SYSTEM ENVIRONMENT CONTEXT\n"
         f"- Active Engine Backend: {backend_mode}\n"
         f"- Host OS: Windows\n"
+        f"- Active Python Executable: {sys.executable}\n"
     )
     
     return (
@@ -205,8 +206,7 @@ root_program = LlmProgram(
         google_search, web_search, read_file, write_file, replace_in_file, 
         run_shell_command, get_workspace_structure, search_codebase, 
         read_webpage, apply_comfy_workflow, generate_local_image, 
-        generate_imagen,
         replace_file_content, multi_replace_file_content, run_command_async,
-        manage_task, wait_task
+        manage_task, wait_task, news_research
     ],
 )
