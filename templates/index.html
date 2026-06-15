@@ -7699,21 +7699,27 @@ async function regenerateImage(buttonElement, oldImageUrl, prompt) {
                             const avatarContainer = row.querySelector('.avatar-container');
                             if (avatarContainer) {
                                 let excl = avatarContainer.querySelector('.activity-exclamation');
-                                if (!excl) {
-                                    excl = document.createElement('div');
-                                    excl.className = 'activity-exclamation';
-                                    excl.textContent = '!';
-                                    avatarContainer.appendChild(excl);
-                                }
-                                
                                 if (data.active_tools && data.active_tools.length > 0) {
+                                    if (!excl) {
+                                        excl = document.createElement('div');
+                                        excl.className = 'activity-exclamation';
+                                        excl.textContent = '!';
+                                        avatarContainer.appendChild(excl);
+                                    } else {
+                                        // Reset CSS animation to trigger the quick-ping effect again
+                                        excl.style.animation = 'none';
+                                        excl.offsetHeight; // trigger reflow
+                                        excl.style.animation = '';
+                                    }
                                     excl.style.display = 'flex';
                                     const toolsNames = data.active_tools.map(t => {
                                         return t.split('_').map(word => word.charAt(0).toUpperCase() + word.slice(1)).join(' ');
                                     }).join(', ');
                                     excl.title = `Running: ${toolsNames}`;
                                 } else {
-                                    excl.style.display = 'none';
+                                    if (excl) {
+                                        excl.remove();
+                                    }
                                 }
                             }
                         }

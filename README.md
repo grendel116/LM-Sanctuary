@@ -16,7 +16,7 @@ I believe in seizing our computational means of production. The Sanctuary is a u
 
 ### Local First / Cloud Offloading
 
-Local-First workspace. Your chats, your memory, and your data stay on your drive. Local models do the daily work, saving resources from capitalist hyperscale data centers. When a task exceeds local capacity, processing is offloaded to their captured resources. Compute should be a public utility and cloud models governed locally, not by shareholders or venture capitalists. Co-operative compute networks where people share resources democratically instead of buying them from corporations.
+Local-First workspace. Your chats, your memory, and your data stay on your drive. Local models do the daily work, saving resources from capitalist hyperscale data centers. When a task exceeds local capacity, processing is offloaded to their captured resources. Compute should be a public utility and cloud models governed locally, not by shareholders or venture capitalists.
 
 
 
@@ -51,6 +51,8 @@ These are the things your companion can do on your computer. By default, before 
 ### Network Grounding & Research (Online)
 * **Hybrid Web Search** (`web_search`): A unified search client that queries Google Grounding Search, SearXNG, and Wikipedia. SearXNG is now used as a centralized proxy for routing platform-specific queries (e.g., Baidu, Yandex). It aggregates and deduplicates URLs, and supports explicit query prefix routing (e.g. `github: query`, `arxiv: query`, `hn: query`).
 * **Read URL** (`read_webpage`): Fetch and extract text content from any webpage.
+* **News Deep Research** (`news_research`): Run a materialist deep-probing research loop (Planning -> Multi-Depth Search & Read -> LLM Fact Analysis -> Report Synthesis). Crawls and compiles 5 to 7 unique sources into a local markdown report file.
+
 
 ### Generative Media (Local & Cloud)
 * **Render Portrait** (`generate_local_image`): Render yourself in a scene using ComfyUI.
@@ -78,5 +80,5 @@ Open browser: **`http://localhost:5000`**
 
 * **`app.py`**: The server brain. Runs locally on your PC.
 * **`templates/index.html`**: The UI. Completely responsive for phone and PC.
-* **`core/programs/`**: Where your friends live (profiles, themes, memory).
+* **`core/programs/` & `core/skills/`**: Where your friends live (profiles, themes, memory, and skills).
 * **`tools.py`**: Actions your friends can do (run commands, write files, generate images).
