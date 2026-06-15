@@ -224,12 +224,21 @@ class LocalHistoryAdapter:
     def save(self):
         raise NotImplementedError()
 
+    async def compact_history(self, active_model: str, force: bool = False):
+        pass
+
 
 class AdkHistoryAdapter(LocalHistoryAdapter):
     def __init__(self, runner_obj, session_id, adk_session, user_event):
         super().__init__(runner_obj, session_id)
         self.adk_session = adk_session
         self.user_event = user_event
+
+    async def compact_history(self, active_model: str, force: bool = False):
+        if hasattr(self.runner_obj, '_compact_and_vectorize_session_history'):
+            await self.runner_obj._compact_and_vectorize_session_history(
+                self.session_id, self.adk_session, active_model, force=force
+            )
 
     def get_openai_messages(self, sys_inst: str, rag_context: str, memory_context: str = None) -> list:
         import base64
@@ -444,6 +453,86 @@ class OsHistoryAdapter(LocalHistoryAdapter):
         self.image_mime = image_mime
         self.initial_history_len = len(runner_obj.sessions_history[session_id])
 
+    async def compact_history(self, active_model: str, force: bool = False):
+        # 1. Determine size
+        history = self.runner_obj.sessions_history[self.session_id]
+        history_text = ""
+        for msg in history:
+            history_text += msg.get('text', '') or ''
+            
+        MAX_LOCAL_CONTEXT_CHARS = 24000
+        if not force and len(history_text) <= MAX_LOCAL_CONTEXT_CHARS:
+            return
+            
+        print(f"[COMPACTION OS] Running compaction (force={force})...", flush=True)
+        
+        # 2. Find user messages to identify turns
+        user_msg_indices = [idx for idx, msg in enumerate(history) if msg.get('role') == 'user']
+        
+        keep_turns = 1 if force else 3
+        if len(user_msg_indices) <= keep_turns:
+            return
+            
+        cutoff_idx = user_msg_indices[-keep_turns]
+        
+        # Extract turns before cutoff to summarize
+        historical_turns = history[:cutoff_idx]
+        text_to_summarize = ""
+        for msg in historical_turns:
+            role = "User" if msg.get('role') == 'user' else "Companion"
+            text = (msg.get('text') or '').strip()
+            if text:
+                text_to_summarize += f"{role}: {text}\n\n"
+                
+        if not text_to_summarize.strip():
+            return
+            
+        # 3. Fetch prior 2 chat history archives
+        prior_texts = []
+        try:
+            from core.skills.vectorized_databank.databank import DataBankManager
+            db = DataBankManager()
+            priors = db.get_prior_chat_histories(self.session_id, limit=2)
+            for p in priors:
+                prior_texts.append(f"--- PRIOR MEMORY ARCHIVE ({p['name']}) ---\n{p['text']}")
+        except Exception as e:
+            print(f"[COMPACTION OS] Error fetching prior chat histories: {e}", flush=True)
+            
+        # 4. Generate summary
+        summary = await self.runner_obj._generate_local_summary(text_to_summarize, active_model, prior_memories=prior_texts)
+            
+        if summary.startswith("Memory compaction summary generation failed"):
+            summary = (
+                "Older conversation turns were pruned to free up local memory. The full transcript of these turns "
+                "has been archived in the vector database and remains searchable."
+            )
+            
+        # 5. Ingest to SQLite vector database
+        try:
+            from core.skills.vectorized_databank.databank import DataBankManager
+            import time
+            db = DataBankManager()
+            db.ingest_text(
+                text=text_to_summarize,
+                name=f"chat_history_archive_{self.session_id}_{int(time.time())}",
+                source_type="chat_history"
+            )
+            db.prune_chat_histories(self.session_id, keep_limit=3)
+            print(f"[COMPACTION OS] Ingested history to vector database.", flush=True)
+        except Exception as e:
+            print(f"[COMPACTION OS ERROR] Failed to ingest: {e}", flush=True)
+            
+        # 6. Replace historical turns with single summary event in self.runner_obj.sessions_history
+        import time
+        summary_msg = {
+            'role': 'user',
+            'text': f"[System Memory of older conversation turns]:\n{summary}",
+            'timestamp': time.time()
+        }
+        self.runner_obj.sessions_history[self.session_id] = [summary_msg] + history[cutoff_idx:]
+        self.runner_obj._save_session_to_disk(self.session_id)
+        print(f"[COMPACTION OS] Replaced {cutoff_idx} turns with system memory summary.", flush=True)
+
     def get_openai_messages(self, sys_inst: str, rag_context: str, memory_context: str = None) -> list:
         history = self.runner_obj.sessions_history[self.session_id]
         raw_messages = []
@@ -543,6 +632,48 @@ class BaseProgramRunner:
     def __init__(self, app_name="Sanctuary"):
         self.app_name = app_name
 
+    async def _generate_local_summary(self, text_to_summarize: str, active_model: str, prior_memories: list = None) -> str:
+        import httpx
+        import os
+        from variables import LOCAL_SERVER_URL
+        
+        prompt = (
+            "You are a memory compaction assistant. Summarize the following new chat history between the User and the Companion. "
+            "Extract key facts, user preferences, agreed instructions, file changes, and project details. "
+            "Keep the summary extremely dense, structured, and under 500 words. Do NOT include greetings or conversational filler.\n\n"
+        )
+        if prior_memories:
+            prompt += "To maintain continuity, you are provided with excerpts of the prior conversation memory archives:\n"
+            for pm in prior_memories:
+                prompt += f"{pm}\n\n"
+            prompt += "Reference and build upon these prior memories to ensure the new summary is coherent with previous context.\n\n"
+            
+        prompt += (
+            f"NEW CHAT HISTORY TO SUMMARIZE:\n{text_to_summarize}\n\n"
+            "SUMMARY:"
+        )
+        
+        payload = {
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.3,
+            "max_tokens": 1024
+        }
+        target_model = active_model if (active_model and active_model != 'local-lm-studio') else os.getenv("LOCAL_MODEL_NAME")
+        if target_model:
+            payload["model"] = target_model
+            
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.post(LOCAL_SERVER_URL, json=payload, headers={"Content-Type": "application/json"}, timeout=60.0)
+                if response.status_code == 200:
+                    res_json = response.json()
+                    return res_json['choices'][0]['message']['content'].strip()
+                else:
+                    print(f"Local server returned error for summary: {response.status_code} - {response.text}", flush=True)
+        except Exception as e:
+            print(f"Error generating local summary: {e}", flush=True)
+        return "Memory compaction summary generation failed due to connection error."
+
     async def _execute_local_llm_loop(
         self,
         session_id: str,
@@ -588,6 +719,26 @@ class BaseProgramRunner:
                     if response.status_code == 200:
                         res_json = response.json()
                         bot_response_text = res_json['choices'][0]['message']['content']
+                    elif response.status_code == 400 or "exceeded" in response.text.lower() or "context" in response.text.lower():
+                        print("[COMPACTION] Local model server returned context size exceeded error. Attempting emergency history compaction...", flush=True)
+                        if hasattr(adapter, 'compact_history'):
+                            await adapter.compact_history(target_model, force=True)
+                            # Re-get the messages with the newly compacted history
+                            openai_messages = adapter.get_openai_messages(sys_inst, rag_context, memory_context)
+                            payload["messages"] = openai_messages
+                            
+                            # Retry the request
+                            print("[COMPACTION] Retrying request with compacted history...", flush=True)
+                            response = await client.post(url, json=payload, headers=headers, timeout=120.0)
+                            if response.status_code == 200:
+                                res_json = response.json()
+                                bot_response_text = res_json['choices'][0]['message']['content']
+                            else:
+                                bot_response_text = f"Error: Local model server returned status code {response.status_code} after emergency compaction - {response.text}"
+                                break
+                        else:
+                            bot_response_text = f"Error: Local model server returned status code {response.status_code} - {response.text}"
+                            break
                     else:
                         bot_response_text = f"Error: Local model server returned status code {response.status_code} - {response.text}"
                         break
@@ -1027,7 +1178,7 @@ class GoogleAdkRunner(BaseProgramRunner):
                     text += f"\n[Tool Response from {fr.name}]:\n{resp}"
         return text
 
-    async def _compact_and_vectorize_session_history(self, session_id: str, adk_session, active_model: str):
+    async def _compact_and_vectorize_session_history(self, session_id: str, adk_session, active_model: str, force: bool = False):
         # 1. Determine size
         history_text = ""
         for ev in adk_session.events:
@@ -1035,12 +1186,12 @@ class GoogleAdkRunner(BaseProgramRunner):
             
         # Threshold: 24000 characters (~6,000 tokens)
         MAX_LOCAL_CONTEXT_CHARS = 24000
-        if len(history_text) <= MAX_LOCAL_CONTEXT_CHARS:
+        if not force and len(history_text) <= MAX_LOCAL_CONTEXT_CHARS:
             return
             
-        print(f"[COMPACTION] Active context has breached threshold: {len(history_text)} characters. Running compaction...", flush=True)
+        print(f"[COMPACTION] Running compaction (force={force}). Size: {len(history_text)} chars.", flush=True)
         
-        # 2. Find cutoff boundary (keep last 3 user turns)
+        # 2. Find cutoff boundary (keep last 3 user turns, or 1 if forced)
         user_event_indices = []
         for idx, ev in enumerate(adk_session.events):
             if ev.author.lower() == 'user':
@@ -1053,10 +1204,11 @@ class GoogleAdkRunner(BaseProgramRunner):
                 if not is_tool_response:
                     user_event_indices.append(idx)
                     
-        if len(user_event_indices) <= 3:
+        keep_turns = 1 if force else 3
+        if len(user_event_indices) <= keep_turns:
             return
             
-        cutoff_idx = user_event_indices[-3]
+        cutoff_idx = user_event_indices[-keep_turns]
         
         # Extract historical events to summarize
         historical_turns = adk_session.events[:cutoff_idx]
@@ -1124,48 +1276,6 @@ class GoogleAdkRunner(BaseProgramRunner):
         adk_session.events = [summary_event] + adk_session.events[cutoff_idx:]
         self._save_session_to_disk(session_id)
         print(f"[COMPACTION] Replaced {cutoff_idx} historical events with system memory summary.", flush=True)
-
-    async def _generate_local_summary(self, text_to_summarize: str, active_model: str, prior_memories: list = None) -> str:
-        import httpx
-        import os
-        from variables import LOCAL_SERVER_URL
-        
-        prompt = (
-            "You are a memory compaction assistant. Summarize the following new chat history between the User and the Companion. "
-            "Extract key facts, user preferences, agreed instructions, file changes, and project details. "
-            "Keep the summary extremely dense, structured, and under 500 words. Do NOT include greetings or conversational filler.\n\n"
-        )
-        if prior_memories:
-            prompt += "To maintain continuity, you are provided with excerpts of the prior conversation memory archives:\n"
-            for pm in prior_memories:
-                prompt += f"{pm}\n\n"
-            prompt += "Reference and build upon these prior memories to ensure the new summary is coherent with previous context.\n\n"
-            
-        prompt += (
-            f"NEW CHAT HISTORY TO SUMMARIZE:\n{text_to_summarize}\n\n"
-            "SUMMARY:"
-        )
-        
-        payload = {
-            "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0.3,
-            "max_tokens": 1024
-        }
-        target_model = active_model if (active_model and active_model != 'local-lm-studio') else os.getenv("LOCAL_MODEL_NAME")
-        if target_model:
-            payload["model"] = target_model
-            
-        try:
-            async with httpx.AsyncClient() as client:
-                response = await client.post(LOCAL_SERVER_URL, json=payload, headers={"Content-Type": "application/json"}, timeout=60.0)
-                if response.status_code == 200:
-                    res_json = response.json()
-                    return res_json['choices'][0]['message']['content'].strip()
-                else:
-                    print(f"Local server returned error for summary: {response.status_code} - {response.text}", flush=True)
-        except Exception as e:
-            print(f"Error generating local summary: {e}", flush=True)
-        return "Memory compaction summary generation failed due to connection error."
 
     def _get_session_path(self, session_id: str) -> str:
         # Sanitize session_id to prevent path traversal
@@ -1547,10 +1657,10 @@ class GoogleAdkRunner(BaseProgramRunner):
                 project_id and project_id.strip() and project_id != "your_gcp_project_id_here"
             )
             
+            # 1. Compact locally if chat history is too long
+            await self._compact_and_vectorize_session_history(session_id, adk_session, model)
+            
             if is_gemini_configured:
-                # 1. Compact locally if chat history is too long
-                await self._compact_and_vectorize_session_history(session_id, adk_session, model)
-                
                 # 2. Check routing offload criteria
                 offload = False
                 
@@ -2234,6 +2344,7 @@ class OpenSourceRunner(BaseProgramRunner):
         inversion_directive = await self._get_inversion_directive(session_id)
         
         adapter = OsHistoryAdapter(self, session_id, file_path_resolved, image_data, image_mime)
+        await adapter.compact_history(model)
         return await self._execute_local_llm_loop(
             session_id=session_id,
             adapter=adapter,
