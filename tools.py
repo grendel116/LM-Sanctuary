@@ -1554,7 +1554,7 @@ def news_research(prompt: str) -> str:
 
     # Target our news_deep_research.py script
     base_core = os.path.dirname(os.path.abspath(__file__))
-    script_path = os.path.join(base_core, "scratch", "news_deep_research.py")
+    script_path = os.path.join(base_core, "utils", "news_deep_research.py")
     python_exe = sys.executable
 
     try:
