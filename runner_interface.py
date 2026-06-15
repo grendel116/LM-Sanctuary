@@ -802,8 +802,15 @@ class BaseProgramRunner:
             # Scan history chronologically to simulate personality state machine
             for msg in history:
                 if msg.get('role') == 'companion':
-                    text = msg.get('text', '')
-                    if text:
+                    mood_details = msg.get('mood')
+                    mood = mood_details.get('name') if isinstance(mood_details, dict) else None
+                    if not mood:
+                        text = msg.get('text', '')
+                        if text:
+                            state = analyze_emotional_state(text)
+                            mood = state.get('name')
+                    
+                    if mood:
                         if active_inversion:
                             # Inversion is active, count down the turns
                             inversion_turns_remaining -= 1
@@ -814,8 +821,6 @@ class BaseProgramRunner:
                                     counts[k] = 0
                         else:
                             # Count up mood frequency to check against threshold
-                            state = analyze_emotional_state(text)
-                            mood = state.get('name')
                             if mood in counts:
                                 counts[mood] += 1
                                 if counts[mood] >= threshold:
@@ -2104,7 +2109,26 @@ class OpenSourceRunner(BaseProgramRunner):
     async def get_history(self, session_id: str) -> list:
         if session_id not in self.sessions_history:
             self._load_session_from_disk(session_id)
-        return self.sessions_history.get(session_id, [])
+        raw_history = self.sessions_history.get(session_id, [])
+        
+        from utils.program_mood import extract_and_strip_mood
+        updated_any = False
+        for msg in raw_history:
+            if msg.get('role') == 'companion' and 'mood' not in msg:
+                m_text = msg.get('text', '')
+                if m_text:
+                    clean_text, mood_details = extract_and_strip_mood(m_text)
+                    msg['text'] = clean_text
+                    msg['mood'] = mood_details
+                    updated_any = True
+                    
+        if updated_any:
+            self._save_session_to_disk(session_id)
+            
+        chat_history = []
+        for msg in raw_history:
+            chat_history.append(msg.copy())
+        return chat_history
 
     async def run_async(self, session_id: str, new_message_text: str, image_data: str = None, image_mime: str = None, model: str = None, media_path: str = None) -> tuple:
         if session_id not in self.sessions_history:
