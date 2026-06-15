@@ -1562,36 +1562,6 @@ def multi_replace_file_content(path: str, replacement_chunks: list[dict]) -> str
         return f"Error modifying file '{path}': {e}"
 
 
-@track_tool_activity
-def news_research(prompt: str) -> str:
-    """Runs the custom deep research agent to gather facts and synthesize a report on working-class, labor, and indigenous news.
-
-    Args:
-        prompt: The research topic or query (e.g. 'labor news', 'indigenous actions').
-
-    Returns:
-        The generated report content.
-    """
-    import subprocess
-    import sys
-    import os
-
-    # Target our news_deep_research.py script
-    base_core = os.path.dirname(os.path.abspath(__file__))
-    script_path = os.path.join(base_core, "utils", "news_deep_research.py")
-    python_exe = sys.executable
-
-    try:
-        # Run the script synchronously with a longer timeout since deep research is iterative
-        cmd = [python_exe, "-X", "utf8", script_path, prompt]
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300, encoding='utf-8', errors='replace')
-        if result.returncode == 0:
-            return result.stdout or "Error: Deep research script succeeded but returned no output."
-        else:
-            return f"Error running deep research script: {result.stderr or result.stdout}"
-    except Exception as e:
-        return f"Failed to execute deep research loop: {e}"
-
 
 
 
