@@ -51,8 +51,6 @@ These are the things your companion can do on your computer. By default, before 
 ### Network Grounding & Research (Online)
 * **Hybrid Web Search** (`web_search`): A unified search client that queries Google Grounding Search, SearXNG, and Wikipedia. SearXNG is now used as a centralized proxy for routing platform-specific queries (e.g., Baidu, Yandex). It aggregates and deduplicates URLs, and supports explicit query prefix routing (e.g. `github: query`, `arxiv: query`, `hn: query`).
 * **Read URL** (`read_webpage`): Fetch and extract text content from any webpage.
-* **News Deep Research** (`news_research`): Run a materialist deep-probing research loop (Planning -> Multi-Depth Search & Read -> LLM Fact Analysis -> Report Synthesis). Crawls and compiles 5 to 7 unique sources into a local markdown report file.
-
 
 ### Generative Media (Local & Cloud)
 * **Render Portrait** (`generate_local_image`): Render yourself in a scene using ComfyUI.
