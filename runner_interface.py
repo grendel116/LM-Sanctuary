@@ -274,7 +274,7 @@ class AdkHistoryAdapter(LocalHistoryAdapter):
             if ev.author == 'voice-call' or getattr(ev, 'compacted', False):
                 continue
             role_str = ev.content.role if ev.content and ev.content.role else ev.author.lower()
-            role = "user" if role_str == "user" else "assistant"
+            role = "user" if role_str in ("user", "system-memory") else "assistant"
             
             text = ""
             image_url = None
@@ -496,7 +496,7 @@ class OsHistoryAdapter(LocalHistoryAdapter):
         print(f"[COMPACTION OS] Running compaction (force={force})...", flush=True)
         
         # 2. Find user messages to identify turns
-        user_msg_indices = [idx for idx, msg in enumerate(history) if msg.get('role') == 'user']
+        user_msg_indices = [idx for idx, msg in enumerate(history) if msg.get('role') == 'user' and not msg.get('compacted')]
         
         keep_turns = 1 if force else 3
         if len(user_msg_indices) <= keep_turns:
@@ -756,7 +756,7 @@ class BaseProgramRunner:
             payload = {
                 "messages": openai_messages,
                 "temperature": temperature,
-                "max_tokens": 2048
+                "max_tokens": 1024
             }
             target_model = model if (model and model != 'local-lm-studio') else os.getenv("LOCAL_MODEL_NAME")
             if target_model:
@@ -1001,6 +1001,10 @@ class BaseProgramRunner:
 
     async def clone_history(self, src_id: str, dest_id: str, messages: list) -> bool:
         """Clones message history from src_id to dest_id."""
+        raise NotImplementedError()
+
+    async def delete_system_memory(self, session_id: str, timestamp: float) -> bool:
+        """Deletes a consolidated system-memory block from active history and the vector database."""
         raise NotImplementedError()
 
     async def update_message_text(self, session_id: str, role: str, index: int, new_text: str) -> bool:
@@ -1395,9 +1399,10 @@ class GoogleAdkRunner(BaseProgramRunner):
             
         print(f"[COMPACTION] Running compaction (force={force}). Size: {len(history_text)} chars.", flush=True)
         
-        # 2. Find cutoff boundary (keep last 3 user turns, or 1 if forced)
         user_event_indices = []
         for idx, ev in enumerate(adk_session.events):
+            if getattr(ev, 'compacted', False):
+                continue
             if ev.author.lower() == 'user':
                 is_tool_response = False
                 if ev.content and ev.content.parts:
@@ -1597,6 +1602,57 @@ class GoogleAdkRunner(BaseProgramRunner):
                 
         from core import program_config
         program_config.set_inversion_directive("")
+
+    async def delete_system_memory(self, session_id: str, timestamp: float) -> bool:
+        session_dict = self.runner.session_service.sessions
+        user_id = "user"
+        if not (self.app_name in session_dict and 
+                user_id in session_dict[self.app_name] and 
+                session_id in session_dict[self.app_name][user_id]):
+            self._load_session_from_disk(session_id)
+            
+        adk_session = session_dict.get(self.app_name, {}).get("user", {}).get(session_id, None)
+        marked_compacted = False
+        if adk_session:
+            for ev in adk_session.events:
+                if ev.author == 'system-memory' and abs(ev.timestamp - timestamp) < 1.0:
+                    object.__setattr__(ev, 'compacted', True)
+                    marked_compacted = True
+                    print(f"[MEMORY DELETE] Marked ADK event {ev.id} as compacted.", flush=True)
+            if marked_compacted:
+                self._save_session_to_disk(session_id)
+            
+        # Delete from memories.json vector database
+        from core.program_config import get_active_program
+        active_program = get_active_program()
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        memories_path = os.path.join(base_dir, "core", "programs", active_program, "memories.json")
+        deleted_from_db = False
+        if os.path.exists(memories_path):
+            try:
+                with open(memories_path, "r", encoding="utf-8") as f:
+                    m_data = json.load(f)
+                docs = m_data.get("documents", [])
+                chunks = m_data.get("chunks", [])
+                
+                prefix = f"chat_history_archive_{session_id}_"
+                matching_ids = []
+                for doc in docs:
+                    doc_name = doc.get("name", "")
+                    if doc.get("source_type") == "chat_history" and doc_name.startswith(prefix) and abs(doc.get("timestamp", 0) - timestamp) < 10.0:
+                        matching_ids.append(doc.get("id"))
+                        
+                if matching_ids:
+                    m_data["documents"] = [d for d in docs if d.get("id") not in matching_ids]
+                    m_data["chunks"] = [c for c in chunks if c.get("doc_id") not in matching_ids]
+                    with open(memories_path, "w", encoding="utf-8") as f:
+                        json.dump(m_data, f, indent=2, ensure_ascii=False)
+                    deleted_from_db = True
+                    print(f"[MEMORY DELETE] Deleted docs {matching_ids} from memories.json.", flush=True)
+            except Exception as e:
+                print(f"[MEMORY DELETE ERROR] Failed to clean memories.json: {e}", flush=True)
+                
+        return marked_compacted or deleted_from_db
 
     def _reload_config(self, session_id, model=None, inversion_directive=None, rag_context=None, memory_context=None, user_message=None):
         """Reloads tools and character configs dynamically to pick up edits."""
@@ -2378,7 +2434,6 @@ class GoogleAdkRunner(BaseProgramRunner):
             
         storage_session = session_dict[self.app_name][user_id][session_id]
         events = list(storage_session.events)
-        from google.genai import types
         
         if role == 'voice-call':
             voice_event_indices = [i for i, ev in enumerate(events) if ev.author == 'voice-call']
@@ -2386,12 +2441,31 @@ class GoogleAdkRunner(BaseProgramRunner):
                 return False
             target_idx = voice_event_indices[index]
             del events[target_idx]
-        elif role == 'user':
-            user_event_indices = [i for i, ev in enumerate(events) if ev.author.lower() == 'user']
-            if index >= len(user_event_indices):
-                return False
-            target_idx = user_event_indices[index]
-            del events[target_idx]
+            storage_session.events = events
+            self._save_session_to_disk(session_id)
+            return True
+            
+        chat_history = await self.get_history(session_id)
+        new_history = [msg for msg in chat_history if msg.get('role') not in ('system-memory', 'system')]
+        target_role = 'user' if role == 'user' else 'companion'
+        same_role_msgs = [msg for msg in new_history if msg.get('role') == target_role]
+        if index >= len(same_role_msgs):
+            return False
+            
+        target_msg = same_role_msgs[index]
+        ts = target_msg.get('timestamp')
+        
+        if target_role == 'user':
+            target_idx = -1
+            for i, ev in enumerate(events):
+                if ev.author.lower() == 'user' and ev.timestamp == ts:
+                    target_idx = i
+                    break
+            if target_idx != -1:
+                del events[target_idx]
+                storage_session.events = events
+                self._save_session_to_disk(session_id)
+                return True
         else:
             companion_turns = []
             current_turn = []
@@ -2410,16 +2484,19 @@ class GoogleAdkRunner(BaseProgramRunner):
             if current_turn:
                 companion_turns.append(current_turn)
                 
-            if index >= len(companion_turns):
-                return False
+            target_turn = None
+            for turn in companion_turns:
+                if turn and turn[0][1].timestamp == ts:
+                    target_turn = turn
+                    break
+            if target_turn:
+                indices_to_delete = {item[0] for item in target_turn}
+                events = [ev for i, ev in enumerate(events) if i not in indices_to_delete]
+                storage_session.events = events
+                self._save_session_to_disk(session_id)
+                return True
                 
-            turn_events = companion_turns[index]
-            indices_to_delete = {item[0] for item in turn_events}
-            events = [ev for i, ev in enumerate(events) if i not in indices_to_delete]
-            
-        storage_session.events = events
-        self._save_session_to_disk(session_id)
-        return True
+        return False
 
     async def delete_image_from_session(self, session_id: str, image_url: str) -> bool:
         # Load from disk if not in memory
@@ -2608,13 +2685,12 @@ class GoogleAdkRunner(BaseProgramRunner):
                 
         self._save_session_to_disk(dest_id)
         return True
-
     async def update_message_text(self, session_id: str, role: str, index: int, new_text: str) -> bool:
         session_dict = self.runner.session_service.sessions
         user_id = "user"
         in_memory = (self.app_name in session_dict and 
-                     user_id in session_dict[self.app_name] and 
-                     session_id in session_dict[self.app_name][user_id])
+                      user_id in session_dict[self.app_name] and 
+                      session_id in session_dict[self.app_name][user_id])
         if not in_memory:
             self._load_session_from_disk(session_id)
             
@@ -2624,12 +2700,23 @@ class GoogleAdkRunner(BaseProgramRunner):
         storage_session = session_dict[self.app_name][user_id][session_id]
         events = storage_session.events
         
+        chat_history = await self.get_history(session_id)
+        new_history = [msg for msg in chat_history if msg.get('role') not in ('system-memory', 'system')]
         target_role = 'user' if role == 'user' else 'companion'
+        same_role_msgs = [msg for msg in new_history if msg.get('role') == target_role]
+        if index >= len(same_role_msgs):
+            return False
+            
+        target_msg = same_role_msgs[index]
+        ts = target_msg.get('timestamp')
         
         if target_role == 'user':
-            user_events = [ev for ev in events if ev.author.lower() == 'user']
-            if index < len(user_events):
-                target_event = user_events[index]
+            target_event = None
+            for ev in events:
+                if ev.author.lower() == 'user' and ev.timestamp == ts:
+                    target_event = ev
+                    break
+            if target_event:
                 updated = False
                 if target_event.content and target_event.content.parts:
                     for part in target_event.content.parts:
@@ -2645,11 +2732,15 @@ class GoogleAdkRunner(BaseProgramRunner):
                 self._save_session_to_disk(session_id)
                 return True
         else:
-            # Group events into companion turns corresponding to companion messages in history
             companion_turns = []
             current_turn = []
             for ev in events:
-                if ev.author.lower() == 'user':
+                role_lower = ev.author.lower()
+                if role_lower == 'user':
+                    if current_turn:
+                        companion_turns.append(current_turn)
+                        current_turn = []
+                elif role_lower in ('voice-call', 'system-memory'):
                     if current_turn:
                         companion_turns.append(current_turn)
                         current_turn = []
@@ -2658,10 +2749,14 @@ class GoogleAdkRunner(BaseProgramRunner):
             if current_turn:
                 companion_turns.append(current_turn)
                 
-            if index < len(companion_turns):
-                turn_events = companion_turns[index]
+            target_turn = None
+            for turn in companion_turns:
+                if turn and turn[0].timestamp == ts:
+                    target_turn = turn
+                    break
+            if target_turn:
                 first_text_updated = False
-                for ev in turn_events:
+                for ev in target_turn:
                     if ev.content and ev.content.parts:
                         for part in ev.content.parts:
                             if part.text is not None:
@@ -2672,7 +2767,7 @@ class GoogleAdkRunner(BaseProgramRunner):
                                     part.text = ""
                 
                 if not first_text_updated:
-                    model_events = [ev for ev in turn_events if ev.content]
+                    model_events = [ev for ev in target_turn if ev.content]
                     if model_events:
                         target_ev = model_events[-1]
                         if target_ev.content.parts:
@@ -2920,6 +3015,53 @@ class OpenSourceRunner(BaseProgramRunner):
         from core import program_config
         program_config.set_inversion_directive("")
 
+    async def delete_system_memory(self, session_id: str, timestamp: float) -> bool:
+        if session_id not in self.sessions_history:
+            self._load_session_from_disk(session_id)
+            
+        marked_compacted = False
+        if session_id in self.sessions_history:
+            history = self.sessions_history[session_id]
+            for msg in history:
+                if msg.get('role') == 'system-memory' and abs(msg.get('timestamp', 0) - timestamp) < 1.0:
+                    msg['compacted'] = True
+                    marked_compacted = True
+                    print(f"[MEMORY DELETE] Marked OS message as compacted.", flush=True)
+            if marked_compacted:
+                self._save_session_to_disk(session_id)
+                
+        # Delete from memories.json vector database
+        from core.program_config import get_active_program
+        active_program = get_active_program()
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        memories_path = os.path.join(base_dir, "core", "programs", active_program, "memories.json")
+        deleted_from_db = False
+        if os.path.exists(memories_path):
+            try:
+                with open(memories_path, "r", encoding="utf-8") as f:
+                    m_data = json.load(f)
+                docs = m_data.get("documents", [])
+                chunks = m_data.get("chunks", [])
+                
+                prefix = f"chat_history_archive_{session_id}_"
+                matching_ids = []
+                for doc in docs:
+                    doc_name = doc.get("name", "")
+                    if doc.get("source_type") == "chat_history" and doc_name.startswith(prefix) and abs(doc.get("timestamp", 0) - timestamp) < 10.0:
+                        matching_ids.append(doc.get("id"))
+                        
+                if matching_ids:
+                    m_data["documents"] = [d for d in docs if d.get("id") not in matching_ids]
+                    m_data["chunks"] = [c for c in chunks if c.get("doc_id") not in matching_ids]
+                    with open(memories_path, "w", encoding="utf-8") as f:
+                        json.dump(m_data, f, indent=2, ensure_ascii=False)
+                    deleted_from_db = True
+                    print(f"[MEMORY DELETE] Deleted docs {matching_ids} from memories.json.", flush=True)
+            except Exception as e:
+                print(f"[MEMORY DELETE ERROR] Failed to clean memories.json: {e}", flush=True)
+                
+        return marked_compacted or deleted_from_db
+
     async def delete_turn(self, session_id: str, user_message_index: int) -> bool:
         if session_id not in self.sessions_history:
             self._load_session_from_disk(session_id)
@@ -2964,38 +3106,40 @@ class OpenSourceRunner(BaseProgramRunner):
         if session_id not in self.sessions_history:
             return False
             
-        history = list(self.sessions_history[session_id])
-        
         if role == 'voice-call':
-            voice_indices = [i for i, msg in enumerate(history) if msg.get('role') == 'voice-call']
+            voice_indices = [i for i, msg in enumerate(self.sessions_history[session_id]) if msg.get('role') == 'voice-call']
             if index >= len(voice_indices):
                 return False
             target_idx = voice_indices[index]
-            del history[target_idx]
-            self.sessions_history[session_id] = history
+            del self.sessions_history[session_id][target_idx]
             self._save_session_to_disk(session_id)
             return True
             
-        target_abs_index = -1
-        role_count = 0
-        for i, msg in enumerate(history):
+        chat_history = await self.get_history(session_id)
+        new_history = [msg for msg in chat_history if msg.get('role') not in ('system-memory', 'system')]
+        target_role = 'user' if role == 'user' else 'companion'
+        same_role_msgs = [msg for msg in new_history if msg.get('role') == target_role]
+        if index >= len(same_role_msgs):
+            return False
+            
+        target_msg = same_role_msgs[index]
+        ts = target_msg.get('timestamp')
+        
+        real_history = self.sessions_history[session_id]
+        found_idx = -1
+        for i, msg in enumerate(real_history):
             msg_role = msg.get('role')
             if msg_role in ('companion', 'model'):
                 msg_role = 'companion'
-            if msg_role == role:
-                if role_count == index:
-                    target_abs_index = i
-                    break
-                role_count += 1
+            if msg_role == target_role and msg.get('timestamp') == ts:
+                found_idx = i
+                break
                 
-        if target_abs_index == -1:
-            return False
-            
-        del history[target_abs_index]
-        
-        self.sessions_history[session_id] = history
-        self._save_session_to_disk(session_id)
-        return True
+        if found_idx != -1:
+            del real_history[found_idx]
+            self._save_session_to_disk(session_id)
+            return True
+        return False
 
     async def delete_image_from_session(self, session_id: str, image_url: str) -> bool:
         if session_id not in self.sessions_history:
@@ -3125,20 +3269,28 @@ class OpenSourceRunner(BaseProgramRunner):
         if session_id not in self.sessions_history:
             return False
             
-        history = self.sessions_history[session_id]
+        chat_history = await self.get_history(session_id)
+        new_history = [msg for msg in chat_history if msg.get('role') not in ('system-memory', 'system')]
         target_role = 'user' if role == 'user' else 'companion'
-        match_count = 0
-        target_msg = None
-        for msg in history:
-            msg_role = 'user' if msg.get('role') == 'user' else 'companion'
-            if msg_role == target_role:
-                if match_count == index:
-                    target_msg = msg
-                    break
-                match_count += 1
+        same_role_msgs = [msg for msg in new_history if msg.get('role') == target_role]
+        if index >= len(same_role_msgs):
+            return False
+            
+        target_msg = same_role_msgs[index]
+        ts = target_msg.get('timestamp')
+        
+        real_history = self.sessions_history[session_id]
+        found = False
+        for msg in real_history:
+            msg_role = msg.get('role')
+            if msg_role in ('companion', 'model'):
+                msg_role = 'companion'
+            if msg_role == target_role and msg.get('timestamp') == ts:
+                msg['text'] = new_text
+                found = True
+                break
                 
-        if target_msg:
-            target_msg['text'] = new_text
+        if found:
             self._save_session_to_disk(session_id)
             return True
         return False
