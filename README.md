@@ -62,7 +62,7 @@ These are the things your companion can do on your computer. By default, before 
 
 * **Interactive Voice Calls / Chat**: Speak with companions in real-time. Powering Kokoro ONNX voice generation, companion-specific voices, and call transcript saving.
 * **Procedural Journals & Memories**: Companions build dynamic memory structures (`memories.json`) and journal logs (`journals.json`), preserving context and relationships across sessions.
-* **Quest Log & Objectives**: Integrated quest system to dynamically track, update, and display companion and user objectives.
+* **Quest Log & Objectives**: Integrated quest system to dynamically track, update, and display user objectives.
 * **Companion Editing & Imports**: Profile updating, and support for importing custom Tavern cards.
 * **Character Accent Palette**: Colors saved in `project_settings.json` that dynamically generates and update themed CSS variables, buttons, highlights, and more.
 * **Idle Thoughts**: Inline monologue bubbles (`.thought-row`) showing a companion's thoughts during inactivity.
