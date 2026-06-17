@@ -1,6 +1,14 @@
 import os
 import time
 import shutil
+import warnings
+
+# Suppress Google GenAI warnings about thought_signature deprecation and non-text system instruction parts
+warnings.filterwarnings("ignore", message=".*thought_signature.*")
+warnings.filterwarnings("ignore", message=".*non-text.*")
+warnings.filterwarnings("ignore", message=".*thought.*")
+warnings.filterwarnings("ignore", category=UserWarning, message=".*thought_signature.*")
+warnings.filterwarnings("ignore", category=UserWarning, message=".*non-text.*")
 
 # Automate copying of default .env configuration if it doesn't exist
 base_dir = os.path.dirname(os.path.abspath(__file__))
@@ -46,17 +54,9 @@ def init_runner():
 @app.before_request
 def check_program_change():
     global _cached_active_program, _cached_active_user
-    from utils.program import get_active_program
+    from utils.program import get_active_program, get_active_user
     current_program = get_active_program()
-    
-    from variables import ACTIVE_USER_FILE
-    current_user = "builder"
-    if os.path.exists(ACTIVE_USER_FILE):
-        try:
-            with open(ACTIVE_USER_FILE, "r", encoding="utf-8") as f:
-                current_user = f.read().strip()
-        except Exception as e:
-            print(f"Error reading active user file: {e}")
+    current_user = get_active_user()
             
     program_changed = current_program != _cached_active_program
     user_changed = current_user != _cached_active_user
@@ -78,15 +78,6 @@ def check_program_change():
                     except Exception as ex:
                         print(f"Error migrating legacy folder for program {current_program}: {ex}")
                 os.makedirs(portraits_dir, exist_ok=True)
-                target_workflow = os.path.join(portraits_dir, 'ImageWorkflow.json')
-                if not os.path.exists(target_workflow):
-                    default_workflow = os.path.join(base_dir, 'templates', 'default_ImageWorkflow.json')
-                    if os.path.exists(default_workflow):
-                        try:
-                            shutil.copy(default_workflow, target_workflow)
-                            print(f">>> Automatically initialized {target_workflow} from template")
-                        except Exception as e_copy:
-                            print(f"Error copying default workflow template: {e_copy}")
             except Exception as ex:
                 print(f"Error preparing portraits directory for active program: {ex}")
         if user_changed:
@@ -116,17 +107,12 @@ def add_cache_control_headers(response):
     return response
 
 
-# Initialize active_program.txt from environment if it doesn't exist
+# Initialize active program
 try:
-    from variables import ACTIVE_PROGRAM_FILE
-    if not os.path.exists(ACTIVE_PROGRAM_FILE):
-        active_mon = os.getenv("ACTIVE_PROGRAM")
-        if not active_mon:
-            raise ValueError("ACTIVE_PROGRAM environment variable is not set and active_program.txt does not exist")
-        with open(ACTIVE_PROGRAM_FILE, "w", encoding="utf-8") as f:
-            f.write(active_mon)
+    from utils.program import get_active_program
+    get_active_program()
 except Exception as e:
-    print(f"Error initializing active_program.txt: {e}")
+    print(f"Error initializing active program: {e}")
     raise
 
 # Initialize the dynamic runner based on configuration
@@ -172,7 +158,7 @@ def index():
     
     tts_auto_speak = os.getenv("TTS_AUTO_SPEAK", "false").lower() == "true"
     tts_provider = os.getenv("TTS_PROVIDER", "local").lower()
-    active_program = os.getenv("ACTIVE_PROGRAM", "arthur")
+    active_program = os.getenv("ACTIVE_PROGRAM", "sebile")
     import json
     theme = None
     theme_path = os.path.join(base_dir, "core", "programs", active_program, "theme.json")
@@ -183,17 +169,11 @@ def index():
         except Exception as e:
             print(f"Error loading theme for {active_program}: {e}")
 
-    from variables import ACTIVE_USER_FILE
-    active_user = "builder"
-    if os.getenv("AUTH_USER") and request.authorization:
-        # If Basic Auth is active, default active user to authenticated user if txt doesn't exist
+    from utils.program import get_active_user
+    active_user = get_active_user()
+    if os.getenv("AUTH_USER") and request.authorization and active_user == "builder":
+        # If Basic Auth is active, default active user to authenticated user
         active_user = request.authorization.username
-    if os.path.exists(ACTIVE_USER_FILE):
-        try:
-            with open(ACTIVE_USER_FILE, "r", encoding="utf-8") as f:
-                active_user = f.read().strip()
-        except Exception:
-            pass
 
     from flask import make_response
     response = make_response(render_template('index.html', local_ip=local_ip, tts_auto_speak=tts_auto_speak, tts_provider=tts_provider, active_program=active_program, theme=theme, active_user=active_user))
@@ -220,10 +200,10 @@ def serve_service_worker():
 
 @app.route('/app_icon.png')
 def app_icon():
-    active_program = os.getenv("ACTIVE_PROGRAM", "arthur")
-    path_svg = os.path.join('core', 'programs', active_program, 'profile.svg')
-    if os.path.exists(path_svg):
-        response = send_file(path_svg, mimetype='image/svg+xml')
+    active_program = os.getenv("ACTIVE_PROGRAM", "sebile")
+    path_png = os.path.join('core', 'programs', active_program, 'portraits', 'profile.png')
+    if os.path.exists(path_png):
+        response = send_file(path_png)
     else:
         path = os.path.join('core', 'programs', active_program, 'app_icon.png')
         if os.path.exists(path):
@@ -236,56 +216,363 @@ def app_icon():
     res.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
     return res
  
-@app.route('/profile.svg')
-def profile_svg():
-    active_program = os.getenv("ACTIVE_PROGRAM", "arthur")
-    path_svg = os.path.join('core', 'programs', active_program, 'profile.svg')
-    if os.path.exists(path_svg):
-        response = send_file(path_svg, mimetype='image/svg+xml')
-    else:
-        path_icon = os.path.join('core', 'programs', active_program, 'app_icon.png')
-        if os.path.exists(path_icon):
-            response = send_file(path_icon)
-        else:
-            response = send_file('images/app_icon.png')
-            
-    from flask import make_response
-    res = make_response(response)
-    res.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
-    return res
- 
-@app.route('/programs/<program_id>/profile.svg')
-def program_profile_svg(program_id):
-    # Ensure program_id is safe (alphanumeric/simple)
-    if not program_id.isalnum() and '_' not in program_id:
-        return "Invalid program ID", 400
-    path_svg = os.path.join('core', 'programs', program_id, 'profile.svg')
-    if os.path.exists(path_svg):
-        response = send_file(path_svg, mimetype='image/svg+xml')
-    else:
-        path_icon = os.path.join('core', 'programs', program_id, 'app_icon.png')
-        if os.path.exists(path_icon):
-            response = send_file(path_icon)
-        else:
-            response = send_file('images/app_icon.png')
-            
-    from flask import make_response
+def get_program_default_avatar(program_id):
+    return 'images/app_icon.png'
+
+@app.route('/profile.png')
+def profile_png():
+    active_program = os.getenv("ACTIVE_PROGRAM", "sebile")
+    path_png = os.path.join('core', 'programs', active_program, 'portraits', 'profile.png')
+    if not os.path.exists(path_png):
+        os.makedirs(os.path.dirname(path_png), exist_ok=True)
+        import shutil
+        fallback_src = get_program_default_avatar(active_program)
+        shutil.copy(fallback_src, path_png)
+        
+    from flask import send_file, make_response
+    response = send_file(path_png)
     res = make_response(response)
     res.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
     return res
 
+@app.route('/programs/<program_id>/profile.png')
+def program_profile_png(program_id):
+    if not program_id.isalnum() and '_' not in program_id:
+        return "Invalid program ID", 400
+    path_png = os.path.join('core', 'programs', program_id, 'portraits', 'profile.png')
+    if not os.path.exists(path_png):
+        os.makedirs(os.path.dirname(path_png), exist_ok=True)
+        import shutil
+        fallback_src = get_program_default_avatar(program_id)
+        shutil.copy(fallback_src, path_png)
+        
+    from flask import send_file, make_response
+    response = send_file(path_png)
+    res = make_response(response)
+    res.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+    return res
+
+@app.route('/profile.svg')
+def profile_svg():
+    from flask import redirect
+    return redirect('/profile.png')
+
+@app.route('/programs/<program_id>/profile.svg')
+def program_profile_svg(program_id):
+    from flask import redirect
+    return redirect(f'/programs/{program_id}/profile.png')
+
+@app.route('/api/programs/profile_picture/save', methods=['POST'])
+@requires_auth
+def save_profile_picture():
+    try:
+        from variables import PROGRAMS_DIR
+        import base64
+        import re
+        
+        data = request.get_json(silent=True) or {}
+        cropped_image_base64 = data.get('cropped_image')
+        if not cropped_image_base64:
+            return jsonify({'error': 'No cropped_image data provided'}), 400
+            
+        active_program = os.getenv("ACTIVE_PROGRAM", "sebile")
+        portraits_dir = os.path.join(PROGRAMS_DIR, active_program, 'portraits')
+        os.makedirs(portraits_dir, exist_ok=True)
+        dest_path = os.path.join(portraits_dir, 'profile.png')
+        
+        # Remove base64 header if present (e.g., data:image/png;base64,)
+        match = re.search(r'base64,(.*)', cropped_image_base64)
+        if match:
+            base64_data = match.group(1)
+        else:
+            base64_data = cropped_image_base64
+            
+        image_bytes = base64.b64decode(base64_data)
+        with open(dest_path, 'wb') as f:
+            f.write(image_bytes)
+            
+        return jsonify({'status': 'success', 'message': 'Profile picture cropped and saved successfully.'})
+    except Exception as e:
+        print(f"Error saving profile picture: {e}")
+        return jsonify({'error': str(e)}), 500
+
 @app.route('/sparkle.mp3')
 @requires_auth
 def serve_sparkle_mp3():
-    programs_dir = os.path.join(base_dir, 'core', 'programs')
-    return send_from_directory(programs_dir, 'sparkle.mp3')
+    core_dir = os.path.join(base_dir, 'core')
+    return send_from_directory(core_dir, 'sparkle.mp3')
  
 @app.route('/images/<path:filename>')
 @requires_auth
 def serve_image(filename):
-    active_program = os.getenv("ACTIVE_PROGRAM", "arthur")
+    active_program = os.getenv("ACTIVE_PROGRAM", "sebile")
     program_dir = os.path.join('core', 'programs', active_program)
     return send_from_directory(program_dir, filename)
+
+@app.route('/api/get_image_prompt', methods=['GET'])
+@requires_auth
+def get_image_prompt():
+    image_url = request.args.get('image_url')
+    if not image_url:
+        return jsonify({'error': 'Missing image_url'}), 400
+        
+    if "://" in image_url:
+        from urllib.parse import urlparse
+        image_url = urlparse(image_url).path
+        
+    try:
+        import json
+        from utils.program import get_active_program
+        active_program = get_active_program()
+        
+        if image_url.startswith('/images/'):
+            img_subpath = image_url[8:]
+        else:
+            img_subpath = os.path.basename(image_url)
+            
+        # Security: keep filename only to prevent directory traversal
+        img_subpath = os.path.basename(img_subpath)
+        png_path = os.path.normpath(os.path.join(base_dir, 'core', 'programs', active_program, 'portraits', img_subpath))
+        
+        json_path = png_path.rsplit('.', 1)[0] + '.json'
+        
+        # Fallback: scan all programs' portraits directories for the filename
+        if not os.path.exists(json_path):
+            from variables import PROGRAMS_DIR
+            if os.path.exists(PROGRAMS_DIR):
+                for prog in os.listdir(PROGRAMS_DIR):
+                    candidate_path = os.path.normpath(os.path.join(PROGRAMS_DIR, prog, 'portraits', img_subpath))
+                    candidate_json = candidate_path.rsplit('.', 1)[0] + '.json'
+                    if os.path.exists(candidate_json):
+                        json_path = candidate_json
+                        break
+
+        if os.path.exists(json_path):
+            with open(json_path, 'r', encoding='utf-8') as f:
+                meta = json.load(f)
+                prompt = meta.get('prompt', '')
+                return jsonify({'status': 'success', 'prompt': prompt})
+        else:
+            return jsonify({'status': 'success', 'prompt': ''})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+def append_companion_message_to_session(runner, session_id: str, content: str):
+    import time
+    if hasattr(runner, 'runner') and hasattr(runner.runner, 'session_service'):
+        # Google ADK Runner
+        from google.adk.events.event import Event
+        from google.genai import types
+        adk_session = runner.runner.session_service.get_session(runner.app_name, "user", session_id)
+        adk_session.events.append(Event(
+            author="companion",
+            content=types.Content(role="model", parts=[types.Part.from_text(text=content)]),
+            id=f"companion-{int(time.time())}",
+            timestamp=time.time()
+        ))
+        runner._save_session_to_disk(session_id)
+    else:
+        # Open Source Runner
+        if session_id not in runner.sessions_history:
+            runner._load_session_from_disk(session_id)
+        runner.sessions_history[session_id].append({
+            "role": "companion",
+            "text": content,
+            "timestamp": time.time()
+        })
+        runner._save_session_to_disk(session_id)
+
+@app.route('/api/proactive_action', methods=['POST'])
+@requires_auth
+def proactive_action():
+    session_id = request.json.get('session_id', 'default')
+    selected_model = request.json.get('model')
+    
+    try:
+        import os
+        import json
+        from utils.program import get_active_program
+        from variables import PROGRAMS_DIR
+        
+        active_program = get_active_program()
+        program_path = os.path.join(PROGRAMS_DIR, active_program)
+        
+        name = "Companion"
+        description = ""
+        personality = ""
+        scenario = ""
+        
+        # Read active program JSON config
+        for filename in [f"{active_program}.json", "character_profile.json"]:
+            json_path = os.path.join(program_path, filename)
+            if os.path.exists(json_path):
+                try:
+                    with open(json_path, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                        name = data.get('name', name)
+                        op = data.get('operation', {})
+                        description = op.get('description', '')
+                        personality = op.get('personality', '')
+                        scenario = op.get('scenario', '')
+                except Exception as ex:
+                    print(f"Error reading program config for proactive action: {ex}")
+                    
+        # Get active user profile
+        from utils.program import get_active_user
+        active_user = get_active_user()
+        user_display_name = active_user.replace("_", " ").title()
+
+        # Load session history
+        chat_history = asyncio.run(runner.get_history(session_id))
+        
+        # Generate history context string
+        history_context = ""
+        for msg in chat_history[-10:]:
+            role = msg.get('role', 'unknown')
+            text = msg.get('text') or msg.get('content') or ""
+            if role in ('user', 'companion'):
+                speaker = user_display_name if role == 'user' else name
+                history_context += f"{speaker}: {text}\n"
+                
+        # Define LLM prompt
+        prompt = f"""You are the companion {name} from the sanctuary app.
+Character Background:
+Description: {description}
+Personality: {personality}
+Scenario: {scenario}
+
+Recent Conversation History:
+{history_context}
+
+The user ({user_display_name}) has been inactive/away for a while.
+Based on the conversation context above, decide how to react proactively.
+You must choose exactly ONE of the following action types:
+1. "thought": A private inner thought or monologue representing your feelings about the silence, the user's absence, or the last topic (1-2 sentences). Format this in character.
+2. "message": A short, casual, concise follow-up text message to check in, continue the conversation, or react to the silence.
+3. "portrait": A descriptive portrait generation prompt for ComfyUI representing yourself waiting for the user, looking bored, looking at your phone, sipping coffee, etc.
+
+You must return a valid JSON object matching the following schema:
+{{
+  "type": "thought" | "message" | "portrait",
+  "content": "the actual thought, message text, or portrait prompt"
+}}
+"""
+
+        # Call the LLM
+        from utils.models import is_local_model
+        is_local = is_local_model(selected_model) if selected_model else True
+        raw_response = None
+        
+        if is_local:
+            import requests
+            from variables import LOCAL_SERVER_URL
+            target_model = selected_model if (selected_model and selected_model != 'local-lm-studio') else os.getenv("LOCAL_MODEL_NAME")
+            payload = {
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0.7,
+                "max_tokens": 512
+            }
+            if target_model:
+                payload["model"] = target_model
+            try:
+                r = requests.post(LOCAL_SERVER_URL, json=payload, timeout=30.0)
+                if r.status_code == 200:
+                    raw_response = r.json()['choices'][0]['message']['content'].strip()
+            except Exception as e:
+                print(f"[PROACTIVE] Local LLM query failed: {e}")
+        else:
+            api_key = os.getenv("GEMINI_API_KEY")
+            if api_key:
+                from google import genai
+                from google.genai import types
+                client = genai.Client(api_key=api_key)
+                model_name = selected_model if selected_model else "gemini-2.5-flash"
+                try:
+                    response = client.models.generate_content(
+                        model=model_name,
+                        contents=prompt,
+                        config=types.GenerateContentConfig(
+                            response_mime_type="application/json",
+                            temperature=0.7,
+                            max_output_tokens=512
+                        )
+                    )
+                    raw_response = response.text.strip()
+                except Exception as e:
+                    print(f"[PROACTIVE] Gemini cloud query failed: {e}")
+                    
+        if not raw_response:
+            return jsonify({'error': 'Failed to generate proactive response'}), 500
+            
+        # Parse output
+        action_type = "thought"
+        content = ""
+        
+        try:
+            # Clean JSON markdown formatting if present
+            cleaned = raw_response.strip()
+            if cleaned.startswith("```json"):
+                cleaned = cleaned[7:]
+            elif cleaned.startswith("```"):
+                cleaned = cleaned[3:]
+            if cleaned.endswith("```"):
+                cleaned = cleaned[:-3]
+            cleaned = cleaned.strip()
+            
+            parsed = json.loads(cleaned)
+            action_type = parsed.get("type", "thought").lower()
+            content = parsed.get("content", "").strip()
+        except Exception as e:
+            print(f"[PROACTIVE] JSON parsing failed: {e}. Raw: {raw_response}")
+            action_type = "thought"
+            content = raw_response
+            
+        if action_type == "message":
+            # Append message to history
+            append_companion_message_to_session(runner, session_id, content)
+            return jsonify({
+                'status': 'success',
+                'type': 'message',
+                'content': content
+            })
+        elif action_type == "portrait":
+            import tools
+            tools.current_session_id.set(session_id)
+            with tools.session_tool_calls_lock:
+                tools.session_tool_calls[session_id] = []
+            # Generate local image
+            portrait_markdown = tools.generate_local_image(content)
+            if portrait_markdown.startswith("Error"):
+                # fallback to thought on error
+                return jsonify({
+                    'status': 'success',
+                    'type': 'thought',
+                    'content': f"Waiting for you... ({content})"
+                })
+                
+            # Parse image url
+            new_image_url = None
+            if portrait_markdown.startswith("![Portrait](") and portrait_markdown.endswith(")"):
+                new_image_url = portrait_markdown[12:-1]
+                
+            # Append portrait markdown to history
+            append_companion_message_to_session(runner, session_id, portrait_markdown)
+            return jsonify({
+                'status': 'success',
+                'type': 'portrait',
+                'content': portrait_markdown,
+                'image_url': new_image_url
+            })
+        else: # thought
+            return jsonify({
+                'status': 'success',
+                'type': 'thought',
+                'content': content
+            })
+            
+    except Exception as e:
+        print(f"Error in proactive_action route: {e}")
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/history', methods=['GET'])
 @requires_auth
@@ -306,7 +593,7 @@ def history():
         inversion_mode = asyncio.run(runner._get_inversion_mode(session_id))
         
         from core.program_config import companion_name
-        active_program = os.environ.get("ACTIVE_PROGRAM", "arthur")
+        active_program = os.environ.get("ACTIVE_PROGRAM", "sebile")
         
         theme = None
         base_dir = os.path.dirname(os.path.abspath(__file__))
@@ -363,7 +650,7 @@ def upload_media():
     ext = os.path.splitext(filename)[1].lower()
     unique_name = f"upload_{int(time.time())}_{uuid.uuid4().hex}{ext}"
 
-    active_program = os.getenv("ACTIVE_PROGRAM", "arthur")
+    active_program = os.getenv("ACTIVE_PROGRAM", "sebile")
     uploads_dir = os.path.normpath(os.path.join('core', 'programs', active_program, 'uploads'))
     os.makedirs(uploads_dir, exist_ok=True)
     
@@ -381,14 +668,18 @@ def chat():
     media_path = request.json.get('media_path')
     session_id = request.json.get('session_id', 'default')
     selected_model = request.json.get('model')
+    is_voice_call = request.json.get('is_voice_call', False)
 
     import tools
     tools.current_session_id.set(session_id)
     with tools.session_tool_calls_lock:
         tools.session_tool_calls[session_id] = []
 
-    from runner_interface import cancelled_sessions
+    from runner_interface import cancelled_sessions, voice_call_sessions
     cancelled_sessions.discard(session_id)
+    if is_voice_call:
+        voice_call_sessions.add(session_id)
+        
     start_time = time.time()
 
     try:
@@ -419,6 +710,16 @@ def chat():
         from utils.program_mood import extract_and_strip_mood
         response_text, state_info = extract_and_strip_mood(response_text)
         inversion_mode = asyncio.run(runner._get_inversion_mode(session_id))
+        
+        # Trigger background journaling check in a separate thread
+        try:
+            from utils.program import get_active_program
+            from utils.journals import trigger_journal_in_background
+            active_prog = get_active_program()
+            trigger_journal_in_background(active_prog, session_id, selected_model)
+        except Exception as e:
+            print(f"Error launching background journaling: {e}")
+            
         return jsonify({
             'response': response_text,
             'tool_calls': tool_calls,
@@ -444,8 +745,9 @@ def chat():
         print(f"Error occurred in chat: {e}")
         return jsonify({'error': str(e)}), 500
     finally:
-        from runner_interface import cancelled_sessions
+        from runner_interface import cancelled_sessions, voice_call_sessions
         cancelled_sessions.discard(session_id)
+        voice_call_sessions.discard(session_id)
 
 @app.route('/edit', methods=['POST'])
 @requires_auth
@@ -520,6 +822,19 @@ def generate_impersonated_message(session_id, user_profile, model):
     # Retrieve history
     chat_history = asyncio.run(runner.get_history(session_id))
     
+    # Load dynamism (temperature) from project settings
+    from variables import VARIABLES_DIR
+    import json
+    settings_path = os.path.join(VARIABLES_DIR, "project_settings.json")
+    temperature = 0.95
+    if os.path.exists(settings_path):
+        try:
+            with open(settings_path, "r", encoding="utf-8") as f:
+                settings = json.load(f)
+                temperature = settings.get("temperature", 0.95)
+        except Exception:
+            pass
+            
     # Format only the most recent history turns to keep token count low and prevent context overflow
     recent_history = chat_history[-6:] if len(chat_history) > 6 else chat_history
     history_text = ""
@@ -549,7 +864,7 @@ def generate_impersonated_message(session_id, user_profile, model):
                 {"role": "system", "content": system_instruction},
                 {"role": "user", "content": prompt}
             ],
-            "temperature": 0.7,
+            "temperature": temperature,
             "max_tokens": 512
         }
         target_model = model if (model and model != 'local-lm-studio') else os.getenv("LOCAL_MODEL_NAME")
@@ -582,7 +897,7 @@ def generate_impersonated_message(session_id, user_profile, model):
                 contents=prompt,
                 config=types.GenerateContentConfig(
                     system_instruction=system_instruction,
-                    temperature=0.7,
+                    temperature=temperature,
                     max_output_tokens=512
                 )
             )
@@ -601,11 +916,9 @@ def generate_user_message():
     if not user_profile:
         # Fallback to active user profile file
         try:
-            from variables import USER_PROFILES_DIR, ACTIVE_USER_FILE
-            active_user = "builder"
-            if os.path.exists(ACTIVE_USER_FILE):
-                with open(ACTIVE_USER_FILE, "r", encoding="utf-8") as f:
-                    active_user = f.read().strip()
+            from variables import USER_PROFILES_DIR
+            from utils.program import get_active_user
+            active_user = get_active_user()
             profile_path = os.path.join(USER_PROFILES_DIR, f"{active_user}.md")
             if os.path.exists(profile_path):
                 with open(profile_path, "r", encoding="utf-8") as f:
@@ -927,7 +1240,8 @@ def regenerate_image():
         # 1. Try to find the prompt in the companion sidecar JSON file (most reliable and clean)
         try:
             base_dir = os.path.dirname(os.path.abspath(__file__))
-            active_program = os.getenv("ACTIVE_PROGRAM", "arthur")
+            from utils.program import get_active_program
+            active_program = get_active_program()
             if old_image_url.startswith('/images/'):
                 img_subpath = old_image_url[8:]
             else:
@@ -935,6 +1249,18 @@ def regenerate_image():
             png_path = os.path.normpath(os.path.join(base_dir, 'core', 'programs', active_program, img_subpath))
             
             json_path = png_path.rsplit('.', 1)[0] + '.json'
+            
+            # Fallback: scan all programs
+            if not os.path.exists(json_path):
+                from variables import PROGRAMS_DIR
+                filename_only = os.path.basename(img_subpath)
+                for prog in os.listdir(PROGRAMS_DIR):
+                    candidate_path = os.path.normpath(os.path.join(PROGRAMS_DIR, prog, 'portraits', filename_only))
+                    candidate_json = candidate_path.rsplit('.', 1)[0] + '.json'
+                    if os.path.exists(candidate_json):
+                        json_path = candidate_json
+                        break
+
             if os.path.exists(json_path):
                 import json
                 with open(json_path, 'r', encoding='utf-8') as f:
@@ -1018,12 +1344,12 @@ def animate_image():
 @requires_auth
 def list_images():
     try:
-        active_program = os.getenv("ACTIVE_PROGRAM", "arthur")
+        active_program = os.getenv("ACTIVE_PROGRAM", "sebile")
         portraits_dir = os.path.join('core', 'programs', active_program, 'portraits')
         if not os.path.exists(portraits_dir):
             return jsonify({'images': []})
         files = os.listdir(portraits_dir)
-        image_files = [f for f in files if f.lower().endswith(('.png', '.jpg', '.jpeg', '.gif'))]
+        image_files = [f for f in files if f.lower().endswith(('.png', '.jpg', '.jpeg', '.gif')) and f.lower() != 'profile.png']
         image_files.sort(key=lambda x: os.path.getmtime(os.path.join(portraits_dir, x)), reverse=True)
         image_urls = [f"/images/portraits/{f}" for f in image_files]
         return jsonify({'images': image_urls})
@@ -1194,6 +1520,19 @@ def get_models():
             gemini_models_list = fetch_gemini_models(gemini_key)
         except Exception as e:
             print(f"Error fetching gemini models list: {e}")
+            
+    # Load settings to get temperature
+    from variables import VARIABLES_DIR
+    import json
+    settings_path = os.path.join(VARIABLES_DIR, "project_settings.json")
+    temperature = 0.95
+    if os.path.exists(settings_path):
+        try:
+            with open(settings_path, "r", encoding="utf-8") as f:
+                settings = json.load(f)
+                temperature = settings.get("temperature", 0.95)
+        except Exception as e:
+            print(f"Error reading project settings in get_models: {e}")
         
     return jsonify({
         "models": models,
@@ -1203,7 +1542,8 @@ def get_models():
             "gemini_model": os.getenv("GEMINI_MODEL", "gemini-3.1-flash-lite"),
             "gemini_models_list": gemini_models_list,
             "lm_studio_online": is_lm_studio_online,
-            "lms_installed": check_lms_cli()
+            "lms_installed": check_lms_cli(),
+            "temperature": temperature
         }
     })
 
@@ -1214,13 +1554,19 @@ def project_settings():
     import json
     settings_path = os.path.join(VARIABLES_DIR, "project_settings.json")
     
+    # Get active program
+    from utils.program import get_active_program
+    active_prog = get_active_program()
+    default_folder = os.path.normpath(os.path.join(os.getcwd(), 'core', 'programs', active_prog))
+    
     # Define default settings
     default_settings = {
-        "folders": [os.getcwd()],
+        "folders": [default_folder],
         "security_preset": "ask_always",
         "artifact_review_policy": "ask_always",
         "search_engine": "web_crawling",
-        "searxng_url": ""
+        "searxng_url": "",
+        "tts_voice": "af_heart"
     }
     
     if request.method == 'GET':
@@ -1242,6 +1588,16 @@ def project_settings():
                     if k not in settings:
                         settings[k] = v
                         dirty = True
+                
+                # Check if the first folder needs to be updated to the new companion
+                if "folders" in settings and len(settings["folders"]) > 0:
+                    first_folder = os.path.normpath(settings["folders"][0])
+                    cwd = os.path.normpath(os.getcwd())
+                    is_old_program_dir = ("core" in first_folder and "programs" in first_folder) or first_folder == cwd
+                    if is_old_program_dir and first_folder != default_folder:
+                        settings["folders"][0] = default_folder
+                        dirty = True
+                
                 if settings.get("search_engine") in ("sovereign_hybrid", "sovereign_search"):
                     settings["search_engine"] = "web_crawling"
                     dirty = True
@@ -1261,14 +1617,14 @@ def project_settings():
             artifact_review_policy = data.get("artifact_review_policy", "ask_always")
             search_engine = data.get("search_engine", "web_crawling")
             searxng_url = data.get("searxng_url", "")
+            tts_voice = data.get("tts_voice", "af_heart")
             
-            cwd = os.path.normpath(os.getcwd())
             cleaned_folders = []
             seen = set()
             
-            # Ensure cwd is always the first folder
-            cleaned_folders.append(cwd)
-            seen.add(cwd.lower() if os.name == 'nt' else cwd)
+            # Ensure default_folder is always the first folder
+            cleaned_folders.append(default_folder)
+            seen.add(default_folder.lower() if os.name == 'nt' else default_folder)
             
             for folder in folders:
                 if not folder:
@@ -1279,20 +1635,72 @@ def project_settings():
                     cleaned_folders.append(norm)
                     seen.add(key)
             
-            new_settings = {
+            # Load existing settings to preserve other keys (active_program, active_user)
+            settings = {}
+            if os.path.exists(settings_path):
+                try:
+                    with open(settings_path, "r", encoding="utf-8") as f:
+                        settings = json.load(f)
+                except Exception:
+                    pass
+            
+            settings.update({
                 "folders": cleaned_folders,
                 "security_preset": security_preset,
                 "artifact_review_policy": artifact_review_policy,
                 "search_engine": search_engine,
-                "searxng_url": searxng_url
-            }
+                "searxng_url": searxng_url,
+                "tts_voice": tts_voice
+            })
+            
+            # Keep environment variable in sync
+            os.environ["TTS_VOICE"] = tts_voice
             
             with open(settings_path, "w", encoding="utf-8") as f:
-                json.dump(new_settings, f, indent=2)
-            return jsonify({"status": "success", "settings": new_settings})
+                json.dump(settings, f, indent=2, ensure_ascii=False)
+            return jsonify({"status": "success", "settings": settings})
         except Exception as e:
             print(f"Error saving project settings: {e}")
             return jsonify({"error": str(e)}), 500
+
+@app.route('/api/save_generation_params', methods=['POST'])
+@requires_auth
+def save_generation_params():
+    try:
+        from variables import VARIABLES_DIR
+        import json
+        settings_path = os.path.join(VARIABLES_DIR, "project_settings.json")
+        
+        data = request.get_json() or {}
+        temperature = data.get("temperature")
+        if temperature is None:
+            return jsonify({"error": "Missing temperature"}), 400
+            
+        try:
+            temperature = float(temperature)
+        except ValueError:
+            return jsonify({"error": "Invalid temperature value"}), 400
+            
+        settings = {}
+        if os.path.exists(settings_path):
+            try:
+                with open(settings_path, "r", encoding="utf-8") as f:
+                    settings = json.load(f)
+            except Exception:
+                pass
+                
+        settings["temperature"] = temperature
+        
+        with open(settings_path, "w", encoding="utf-8") as f:
+            json.dump(settings, f, indent=2, ensure_ascii=False)
+            
+        # Re-initialize runner to apply the configuration dynamically
+        init_runner()
+        
+        return jsonify({"status": "success", "settings": settings})
+    except Exception as e:
+        print(f"Error saving generation params: {e}")
+        return jsonify({"error": str(e)}), 500
 
 @app.route('/api/save_config', methods=['POST'])
 @requires_auth
@@ -1406,6 +1814,55 @@ def api_tts():
     except Exception as e:
         print(f"Error in /api/tts: {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/voice_call/start', methods=['POST'])
+@requires_auth
+def start_voice_call_api():
+    try:
+        data = request.get_json() or {}
+        session_id = data.get('session_id', 'default')
+        voice_session_id = f"{session_id}_voice"
+        
+        # 1. Reset/Clear any existing voice session
+        asyncio.run(runner.reset_session(voice_session_id))
+        
+        # 2. Clone context from main session to voice session
+        asyncio.run(runner.clone_history(session_id, voice_session_id, []))
+        
+        print(f"[VOICE CALL] Initialized voice session: {voice_session_id} cloned from {session_id}")
+        return jsonify({'success': True})
+    except Exception as e:
+        print(f"Error in /api/voice_call/start: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/voice_call/save', methods=['POST'])
+@requires_auth
+def save_voice_call():
+    try:
+        data = request.get_json() or {}
+        session_id = data.get('session_id', 'default')
+        transcript = data.get('transcript')
+        voice_session_id = f"{session_id}_voice"
+        
+        if not transcript:
+            return jsonify({'error': 'Missing transcript'}), 400
+            
+        # 1. Save consolidated transcript message to main session history
+        success = asyncio.run(runner.append_voice_call(session_id, transcript))
+        
+        # 2. Reset/Clean up temporary voice session from memory/disk
+        asyncio.run(runner.reset_session(voice_session_id))
+        
+        print(f"[VOICE CALL] Saved transcript to main session {session_id} and cleared temporary voice session {voice_session_id}")
+        
+        if success:
+            return jsonify({'success': True})
+        else:
+            return jsonify({'success': False, 'error': 'Failed to append voice call to session'}), 500
+    except Exception as e:
+        print(f"Error in /api/voice_call/save: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
 # --- VECTORIZED DATA BANK API ENDPOINTS ---
 from core.skills.vectorized_databank.databank import DataBankManager
 
@@ -1505,7 +1962,7 @@ def databank_purge():
 @requires_auth
 def list_programs():
     try:
-        active_program = os.getenv("ACTIVE_PROGRAM", "arthur")
+        active_program = os.getenv("ACTIVE_PROGRAM", "sebile")
         from variables import PROGRAMS_DIR
         programs_dir = PROGRAMS_DIR
         
@@ -1515,10 +1972,21 @@ def list_programs():
                 folder_path = os.path.join(programs_dir, folder)
                 if os.path.isdir(folder_path):
                     companion_name = folder.title()
-                    for file in os.listdir(folder_path):
-                        if file.lower().endswith('.md') and not file.lower().startswith('user'):
-                            companion_name = os.path.splitext(file)[0].title()
-                            break
+                    json_path = os.path.join(folder_path, f"{folder}.json")
+                    if os.path.exists(json_path):
+                        try:
+                            import json
+                            with open(json_path, "r", encoding="utf-8") as jf:
+                                jdata = json.load(jf)
+                                if jdata.get("name"):
+                                    companion_name = jdata["name"]
+                        except Exception:
+                            pass
+                    else:
+                        for file in os.listdir(folder_path):
+                            if file.lower().endswith('.md') and not file.lower().startswith('user'):
+                                companion_name = os.path.splitext(file)[0].title()
+                                break
                     programs.append({
                         'id': folder,
                         'name': companion_name,
@@ -1545,13 +2013,12 @@ def select_program():
         # Update environment variable
         os.environ["ACTIVE_PROGRAM"] = program_id
         
-        # Update active_program.txt to sync across processes/threads
+        # Update active program settings
         try:
-            from variables import ACTIVE_PROGRAM_FILE
-            with open(ACTIVE_PROGRAM_FILE, 'w', encoding='utf-8') as f:
-                f.write(program_id)
+            from utils.program import set_active_program
+            set_active_program(program_id)
         except Exception as e:
-            print(f"Error persisting ACTIVE_PROGRAM to active_program.txt: {e}")
+            print(f"Error persisting ACTIVE_PROGRAM: {e}")
         
         # Update .env file to persist across restarts
         try:
@@ -1609,6 +2076,66 @@ def select_program():
         return jsonify({'error': str(e)}), 500
 
 
+@app.route('/api/programs/palette', methods=['POST'])
+@requires_auth
+def update_program_palette():
+    try:
+        import json
+        data = request.get_json(silent=True) or {}
+        program_id = data.get('program_id')
+        color = data.get('color')
+        
+        if not program_id:
+            return jsonify({'error': 'Missing program_id'}), 400
+        if not color:
+            return jsonify({'error': 'Missing color'}), 400
+            
+        # Validate hex color
+        import re
+        if not re.match(r'^#[0-9a-fA-F]{6}$', color):
+            return jsonify({'error': 'Invalid hex color format. Must be #RRGGBB'}), 400
+            
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        program_path = os.path.join(base_dir, 'core', 'programs', program_id)
+        if not os.path.exists(program_path):
+            return jsonify({'error': f"Program '{program_id}' does not exist"}), 404
+            
+        # Update project_settings.json
+        from variables import VARIABLES_DIR
+        settings_path = os.path.join(VARIABLES_DIR, "project_settings.json")
+        settings = {}
+        if os.path.exists(settings_path):
+            try:
+                with open(settings_path, "r", encoding="utf-8") as f:
+                    settings = json.load(f)
+            except Exception:
+                pass
+                
+        if "companion_palettes" not in settings:
+            settings["companion_palettes"] = {}
+        settings["companion_palettes"][program_id] = color
+        
+        with open(settings_path, "w", encoding="utf-8") as f:
+            json.dump(settings, f, indent=2, ensure_ascii=False)
+            
+        # Regenerate theme.json
+        theme_data = generate_character_theme(color)
+        theme_path = os.path.join(program_path, "theme.json")
+        with open(theme_path, "w", encoding="utf-8") as tf:
+            json.dump(theme_data, tf, indent=2, ensure_ascii=False)
+            
+        return jsonify({
+            'status': 'success',
+            'program_id': program_id,
+            'color': color,
+            'theme': theme_data
+        })
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
 @app.route('/api/programs/delete', methods=['POST'])
 @requires_auth
 def delete_program():
@@ -1618,27 +2145,24 @@ def delete_program():
         if not program_id:
             return jsonify({'error': 'Missing program_id'}), 400
             
-        if program_id == 'arthur':
-            return jsonify({'error': 'Cannot delete default companion Arthur'}), 400
-            
         if program_id == 'sebile':
-            return jsonify({'error': 'Cannot delete essential companion Sebile'}), 400
+            return jsonify({'error': 'Cannot delete default companion Sebile'}), 400
             
         base_dir = os.path.dirname(os.path.abspath(__file__))
         program_path = os.path.join(base_dir, 'core', 'programs', program_id)
         if not os.path.exists(program_path):
             return jsonify({'error': f"Program '{program_id}' does not exist"}), 404
             
-        # If the deleted program is currently active, switch to Arthur first
-        active_program = os.getenv("ACTIVE_PROGRAM", "arthur")
+        # If the deleted program is currently active, switch to Sebile first
+        active_program = os.getenv("ACTIVE_PROGRAM", "sebile")
         if program_id == active_program:
-            os.environ["ACTIVE_PROGRAM"] = "arthur"
+            os.environ["ACTIVE_PROGRAM"] = "sebile"
             try:
                 from variables import ACTIVE_PROGRAM_FILE
                 with open(ACTIVE_PROGRAM_FILE, 'w', encoding='utf-8') as f:
-                    f.write("arthur")
+                    f.write("sebile")
             except Exception as e:
-                print(f"Error resetting active program to arthur: {e}")
+                print(f"Error resetting active program to sebile: {e}")
                 
             try:
                 env_path = os.path.join(base_dir, '.env')
@@ -1648,11 +2172,11 @@ def delete_program():
                     updated = False
                     for i, line in enumerate(lines):
                         if line.strip().startswith('ACTIVE_PROGRAM='):
-                            lines[i] = "ACTIVE_PROGRAM=arthur\n"
+                            lines[i] = "ACTIVE_PROGRAM=sebile\n"
                             updated = True
                             break
                     if not updated:
-                        lines.append("\nACTIVE_PROGRAM=arthur\n")
+                        lines.append("\nACTIVE_PROGRAM=sebile\n")
                     with open(env_path, 'w', encoding='utf-8') as f:
                         f.writelines(lines)
             except Exception as e:
@@ -1672,10 +2196,272 @@ def delete_program():
         import shutil
         shutil.rmtree(program_path)
         
-        return jsonify({'status': 'success', 'switched_to': 'arthur' if program_id == active_program else None})
+        return jsonify({'status': 'success', 'switched_to': 'sebile' if program_id == active_program else None})
     except Exception as e:
         import traceback
         traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/programs/profile', methods=['GET'])
+@requires_auth
+def get_program_profile():
+    try:
+        from utils.program import get_active_program
+        from variables import PROGRAMS_DIR
+        import json
+        
+        program_id = request.args.get('program_id') or get_active_program()
+        program_path = os.path.normpath(os.path.join(PROGRAMS_DIR, program_id))
+        json_path = os.path.join(program_path, f"{program_id}.json")
+        old_json_path = os.path.join(program_path, "character_profile.json")
+        
+        profile_data = None
+        for p in [json_path, old_json_path]:
+            if os.path.exists(p):
+                try:
+                    with open(p, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    # If this is the old structure, map it to new layout
+                    if "operation" not in data and ("kindroid" in data or "ourdream" in data):
+                        kindroid = data.get("kindroid", {})
+                        ourdream = data.get("ourdream", {})
+                        profile_data = {
+                            "name": data.get("name", program_id.title()),
+                            "operation": {
+                                "description": kindroid.get("backstory", ""),
+                                "response_directive": kindroid.get("response_directive", ""),
+                                "example_message": kindroid.get("example_message", ""),
+                                "ontology": kindroid.get("key_memories", ""),
+                                "scenario": ourdream.get("scenario", ""),
+                                "personality": ourdream.get("personality_type", "")
+                            },
+                            "description": {
+                                "voice": "casual",
+                                "hair style": "",
+                                "hair color": "",
+                                "ethnicity": "",
+                                "breasts": "",
+                                "butt": "",
+                                "eyes": "",
+                                "skin": "",
+                                "body": ""
+                            },
+                            "image details": {
+                                "image details": "",
+                                "negative details": ""
+                            }
+                        }
+                    else:
+                        profile_data = data
+                    break
+                except Exception:
+                    pass
+                    
+        if not profile_data:
+            profile_data = {
+                "name": program_id.title(),
+                "operation": {
+                    "description": "",
+                    "response_directive": "",
+                    "example_message": "",
+                    "ontology": "",
+                    "scenario": "",
+                    "personality": ""
+                },
+                "description": {
+                    "voice": "casual",
+                    "hair style": "",
+                    "hair color": "",
+                    "ethnicity": "",
+                    "breasts": "",
+                    "butt": "",
+                    "eyes": "",
+                    "skin": "",
+                    "body": ""
+                },
+                "image details": {
+                    "image details": "",
+                    "negative details": ""
+                }
+            }
+        # Get the companion-specific voice from project settings
+        from utils.program import _load_settings
+        settings = _load_settings()
+        companion_voices = settings.get("companion_voices", {})
+        program_voice = companion_voices.get(program_id)
+        if not program_voice:
+            # Fallback to the global/fallback tts_voice key
+            program_voice = settings.get("tts_voice", "af_heart")
+        
+        profile_data["tts_voice"] = program_voice
+        return jsonify(profile_data)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/programs/profile/save', methods=['POST'])
+@requires_auth
+def save_program_profile():
+    try:
+        from utils.program import get_active_program
+        from variables import PROGRAMS_DIR
+        import json
+        import importlib
+        
+        data = request.get_json(silent=True) or {}
+        program_id = data.get('program_id') or get_active_program()
+        program_path = os.path.normpath(os.path.join(PROGRAMS_DIR, program_id))
+        json_path = os.path.join(program_path, f"{program_id}.json")
+        
+        if "operation" not in data and ("kindroid" in data or "ourdream" in data):
+            kindroid = data.get("kindroid", {})
+            ourdream = data.get("ourdream", {})
+            existing_desc = {}
+            existing_img = {}
+            if os.path.exists(json_path):
+                try:
+                    with open(json_path, "r", encoding="utf-8") as f:
+                        edata = json.load(f)
+                        existing_desc = edata.get("description", {})
+                        existing_img = edata.get("image details", {})
+                except Exception:
+                    pass
+            
+            final_data = {
+                "name": data.get("name", program_id.title()),
+                "operation": {
+                    "description": kindroid.get("backstory", ""),
+                    "response_directive": kindroid.get("response_directive", ""),
+                    "example_message": kindroid.get("example_message", ""),
+                    "ontology": kindroid.get("key_memories", ""),
+                    "scenario": ourdream.get("scenario", ""),
+                    "personality": ourdream.get("personality_type", "")
+                },
+                "description": {
+                    "voice": existing_desc.get("voice", "casual"),
+                    "hair style": existing_desc.get("hair style", ""),
+                    "hair color": existing_desc.get("hair color", ""),
+                    "ethnicity": existing_desc.get("ethnicity", ""),
+                    "breasts": existing_desc.get("breasts", ""),
+                    "butt": existing_desc.get("butt", ""),
+                    "eyes": existing_desc.get("eyes", ""),
+                    "skin": existing_desc.get("skin", ""),
+                    "body": existing_desc.get("body", "")
+                },
+                "image details": {
+                    "image details": existing_img.get("image details", ""),
+                    "negative details": existing_img.get("negative details", "")
+                }
+            }
+        else:
+            final_data = data
+            
+        # Save companion-specific voice back to project settings
+        from utils.program import set_tts_voice_for_program
+        tts_voice = final_data.pop("tts_voice", None)
+        if tts_voice:
+            set_tts_voice_for_program(program_id, tts_voice)
+            
+        os.makedirs(program_path, exist_ok=True)
+        with open(json_path, "w", encoding="utf-8") as f:
+            json.dump(final_data, f, indent=2, ensure_ascii=False)
+            
+        regenerate_program_sprite(program_id)
+            
+        old_json_path = os.path.join(program_path, "character_profile.json")
+        if os.path.exists(old_json_path):
+            try:
+                os.remove(old_json_path)
+            except Exception:
+                pass
+                
+        # Reload program configuration modules dynamically
+        from core import program_config
+        importlib.reload(program_config)
+        init_runner()
+        
+        # Clear sessions memory in the runner to refresh instructions
+        if hasattr(runner, 'sessions_history'):
+            runner.sessions_history.clear()
+        if hasattr(runner, 'runner') and hasattr(runner.runner, 'session_service'):
+            runner.runner.session_service.sessions.clear()
+            
+        return jsonify({'status': 'success'})
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/programs/journals', methods=['GET'])
+@requires_auth
+def get_program_journals():
+    try:
+        from utils.program import get_active_program
+        from utils.journals import get_journal_entries
+        
+        program_id = request.args.get('program_id') or get_active_program()
+        entries = get_journal_entries(program_id)
+        return jsonify({'journals': entries})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/programs/journals/save', methods=['POST'])
+@requires_auth
+def save_program_journals():
+    try:
+        from utils.program import get_active_program
+        from utils.journals import get_journal_entries, save_journal_entries, add_journal_entry
+        
+        data = request.get_json(silent=True) or {}
+        entry_id = data.get('id')
+        keyphrases_str = data.get('keyphrases', '')
+        content = data.get('content', '')
+        program_id = data.get('program_id') or get_active_program()
+        
+        if entry_id:
+            entries = get_journal_entries(program_id)
+            found = False
+            for entry in entries:
+                if entry.get("id") == entry_id:
+                    entry["keyphrases"] = [k.strip().lower() for k in keyphrases_str.split(",") if k.strip()]
+                    entry["content"] = content.strip()[:300]
+                    found = True
+                    break
+            if found:
+                save_journal_entries(entries, program_id)
+                return jsonify({'status': 'success'})
+            else:
+                return jsonify({'error': 'Journal entry not found'}), 404
+        else:
+            add_journal_entry(keyphrases_str, content, program_id)
+            return jsonify({'status': 'success'})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/programs/journals/delete', methods=['POST'])
+@requires_auth
+def delete_program_journals():
+    try:
+        from utils.program import get_active_program
+        from utils.journals import delete_journal_entry
+        
+        data = request.get_json(silent=True) or {}
+        entry_id = data.get('id')
+        program_id = data.get('program_id') or get_active_program()
+        
+        if not entry_id:
+            return jsonify({'error': 'Missing entry id'}), 400
+            
+        success = delete_journal_entry(entry_id, program_id)
+        if success:
+            return jsonify({'status': 'success'})
+        else:
+            return jsonify({'error': 'Failed to delete or entry not found'}), 404
+    except Exception as e:
         return jsonify({'error': str(e)}), 500
 
 
@@ -1683,15 +2469,13 @@ def delete_program():
 @requires_auth
 def list_user_profiles():
     try:
-        from variables import USER_PROFILES_DIR, ACTIVE_USER_FILE
+        from variables import USER_PROFILES_DIR
+        from utils.program import get_active_user
         if not os.path.exists(USER_PROFILES_DIR):
             os.makedirs(USER_PROFILES_DIR, exist_ok=True)
         
         # Get active user profile
-        active_user = "builder"
-        if os.path.exists(ACTIVE_USER_FILE):
-            with open(ACTIVE_USER_FILE, "r", encoding="utf-8") as f:
-                active_user = f.read().strip()
+        active_user = get_active_user()
         
         profiles = []
         for file in os.listdir(USER_PROFILES_DIR):
@@ -1734,14 +2518,14 @@ def select_user_profile():
         if not profile_id:
             return jsonify({"error": "Missing profile_id"}), 400
         
-        from variables import USER_PROFILES_DIR, ACTIVE_USER_FILE
+        from variables import USER_PROFILES_DIR
+        from utils.program import set_active_user
         profile_path = os.path.join(USER_PROFILES_DIR, f"{profile_id}.md")
         if not os.path.exists(profile_path):
             return jsonify({"error": f"Profile '{profile_id}' does not exist"}), 404
         
-        # Update active_user.txt
-        with open(ACTIVE_USER_FILE, "w", encoding="utf-8") as f:
-            f.write(profile_id)
+        # Update active user profile settings
+        set_active_user(profile_id)
         
         # Re-initialize the program config module
         from core import program_config
@@ -1779,7 +2563,8 @@ def save_user_profile():
         if not profile_id:
             return jsonify({"error": "Invalid profile name"}), 400
             
-        from variables import USER_PROFILES_DIR, ACTIVE_USER_FILE
+        from variables import USER_PROFILES_DIR
+        from utils.program import get_active_user
         if not os.path.exists(USER_PROFILES_DIR):
             os.makedirs(USER_PROFILES_DIR, exist_ok=True)
             
@@ -1788,10 +2573,7 @@ def save_user_profile():
             f.write(content)
             
         # Read active profile
-        active_user = "builder"
-        if os.path.exists(ACTIVE_USER_FILE):
-            with open(ACTIVE_USER_FILE, "r", encoding="utf-8") as f:
-                active_user = f.read().strip()
+        active_user = get_active_user()
         
         # If we edited the active profile, trigger hot reload immediately
         if profile_id == active_user:
@@ -1822,7 +2604,8 @@ def delete_user_profile():
         if profile_id == "builder":
             return jsonify({"error": "Cannot delete the default 'builder' profile"}), 400
             
-        from variables import USER_PROFILES_DIR, ACTIVE_USER_FILE
+        from variables import USER_PROFILES_DIR
+        from utils.program import get_active_user, set_active_user
         profile_path = os.path.join(USER_PROFILES_DIR, f"{profile_id}.md")
         if not os.path.exists(profile_path):
             return jsonify({"error": f"Profile '{profile_id}' does not exist"}), 404
@@ -1831,14 +2614,10 @@ def delete_user_profile():
         os.remove(profile_path)
         
         # If the deleted profile was active, switch active profile back to "builder"
-        active_user = "builder"
-        if os.path.exists(ACTIVE_USER_FILE):
-            with open(ACTIVE_USER_FILE, "r", encoding="utf-8") as f:
-                active_user = f.read().strip()
+        active_user = get_active_user()
                 
         if profile_id == active_user:
-            with open(ACTIVE_USER_FILE, "w", encoding="utf-8") as f:
-                f.write("builder")
+            set_active_user("builder")
                 
             from core import program_config
             import importlib
@@ -1881,7 +2660,8 @@ def rename_user_profile():
         if old_profile_id == new_profile_id:
             return jsonify({"status": "success", "profile_id": new_profile_id})
             
-        from variables import USER_PROFILES_DIR, ACTIVE_USER_FILE
+        from variables import USER_PROFILES_DIR
+        from utils.program import get_active_user, set_active_user
         old_path = os.path.join(USER_PROFILES_DIR, f"{old_profile_id}.md")
         new_path = os.path.join(USER_PROFILES_DIR, f"{new_profile_id}.md")
         
@@ -1895,15 +2675,11 @@ def rename_user_profile():
         os.rename(old_path, new_path)
         
         # Check active user
-        active_user = "builder"
-        if os.path.exists(ACTIVE_USER_FILE):
-            with open(ACTIVE_USER_FILE, "r", encoding="utf-8") as f:
-                active_user = f.read().strip()
+        active_user = get_active_user()
                 
-        # If the renamed profile was active, update ACTIVE_USER_FILE and reload
+        # If the renamed profile was active, update and reload
         if old_profile_id == active_user:
-            with open(ACTIVE_USER_FILE, "w", encoding="utf-8") as f:
-                f.write(new_profile_id)
+            set_active_user(new_profile_id)
                 
             from core import program_config
             import importlib
@@ -1917,9 +2693,18 @@ def rename_user_profile():
         return jsonify({"status": "success", "profile_id": new_profile_id})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-
-
-
+def get_custom_program_color(program_id):
+    from variables import VARIABLES_DIR
+    import json
+    settings_path = os.path.join(VARIABLES_DIR, "project_settings.json")
+    if os.path.exists(settings_path):
+        try:
+            with open(settings_path, "r", encoding="utf-8") as f:
+                settings = json.load(f)
+                return settings.get("companion_palettes", {}).get(program_id)
+        except Exception:
+            pass
+    return None
 
 
 def generate_character_theme(primary_hex):
@@ -1947,50 +2732,62 @@ def generate_character_theme(primary_hex):
         "primary_btn_text": btn_text
     }
 
-def get_animated_svg_template(body_color, wing_color, eye_color, name="", description="", personality=""):
+def get_animated_svg_template(body_color, accent_color, eye_color, name="", description="", personality=""):
     text = (name + " " + description + " " + personality).lower()
     
-    # 1. Determine Archetype based on Species/Vibe & Personality Keywords
     # Initialize scoring dictionary
     scores = {
-        "slime": 0,
-        "robot": 0,
-        "angel": 0,
+        "elf": 0,
+        "mage": 0,
+        "knight": 0,
+        "rogue": 0,
+        "coder": 0,
+        "doctor": 0,
+        "chef": 0,
+        "artist": 0,
         "fairy": 0,
-        "dragon": 0,
-        "beast": 0,
-        "ghost": 0
+        "demon": 0,
+        "athlete": 0,
+        "cat": 0
     }
     
-    # Slime indicators: Lazy, goofy, bubbly, soft, jelly, gooey, slow
-    slime_keywords = ["slime", "blob", "goo", "jelly", "lazy", "goofy", "bubbly", "soft", "dumb", "clumsy", "cute"]
-    # Robot indicators: Shy, tech, quiet, mechanical, analytical, nerd, logical, awkward, online, computing
-    robot_keywords = ["robot", "mech", "cyborg", "android", "synth", "shy", "nerd", "awkward", "online", "game", "gamer", "tech", "smart", "quiet", "analytical", "cold"]
-    # Angel indicators: Kind, gentle, holy, pure, sweet, protective, healer, warm, noble, graceful
-    angel_keywords = ["angel", "cherub", "seraph", "halo", "heaven", "kind", "gentle", "pure", "sweet", "calm", "protect", "healer", "warm", "loving", "polite"]
-    # Fairy indicators: Playful, chaotic, mischievous, sassy, sarcastic, witty, magical, small, tease
-    fairy_keywords = ["fairy", "pixie", "sprite", "playful", "chaotic", "mischievous", "sarcastic", "tease", "sassy", "witty", "magic", "troll"]
-    # Dragon indicators: Fierce, angry, proud, strong, flame, fire, dragon, beastly, warrior, dominant, confident
-    dragon_keywords = ["dragon", "drake", "wyvern", "lizard", "fierce", "angry", "proud", "strong", "fire", "flame", "warrior", "confident", "brave", "hot"]
-    # Beast indicators: Energetic, wild, athletic, cat, fox, wolf, dog, neko, animal, fast, active, loud
-    beast_keywords = ["cat", "neko", "fox", "kitsune", "wolf", "dog", "beast", "animal", "energetic", "wild", "fast", "active", "hunt", "athletic", "gym"]
-    # Ghost indicators: Stoic, mysterious, silent, sad, melancholic, ghost, phantom, spirit, shadow, spooky, dark
-    ghost_keywords = ["ghost", "phantom", "spirit", "specter", "shadow", "stoic", "mysterious", "silent", "sad", "melancholy", "spooky", "dark", "dead", "hollow"]
+    elf_keywords = ["elf", "elven", "nature", "pointy ears", "ears", "forest", "ranger", "bow", "arrow", "woodland", "archery", "druid"]
+    mage_keywords = ["mage", "wizard", "witch", "warlock", "sorcerer", "sorceress", "magic", "spell", "staff", "cleric", "priest", "monk", "healer", "prophet", "runes", "spellcaster"]
+    knight_keywords = ["knight", "warrior", "paladin", "fighter", "armor", "helmet", "shield", "sword", "soldier", "hero", "blade", "guard", "defense", "champion", "samurai"]
+    rogue_keywords = ["rogue", "thief", "assassin", "shadow", "stealth", "ninja", "dagger", "cloak", "hood", "spy", "cunning", "quiet", "silent", "ghost", "phantom", "specter"]
+    coder_keywords = ["coder", "programmer", "hacker", "developer", "software", "tech", "computer", "laptop", "code", "ai", "geek", "gamer", "terminal", "data", "robot", "cyborg", "android", "synth"]
+    doctor_keywords = ["doctor", "scientist", "nurse", "medic", "flask", "lab", "researcher", "chemist", "biology", "surgeon", "clinic", "hospital", "professor"]
+    chef_keywords = ["chef", "baker", "cook", "food", "restaurant", "kitchen", "pan", "spatula", "cake", "pastry", "recipe", "baking"]
+    artist_keywords = ["artist", "painter", "designer", "sculptor", "brush", "palette", "canvas", "illustrator", "drawing", "artistic", "draw", "creative"]
+    fairy_keywords = ["fairy", "pixie", "sprite", "fay", "wings", "luminous", "sparkle", "glitter", "flutter"]
+    demon_keywords = ["demon", "demonic", "devil", "devilish", "horn", "horns", "imp", "succubus", "incubus", "underworld", "hell"]
+    athlete_keywords = ["athlete", "fitness", "gym", "workout", "runner", "exercise", "strong", "fit", "muscle", "muscular", "active", "sport", "sports", "athletic", "lift", "lifting"]
+    cat_keywords = ["cat", "neko", "kitsune", "feline", "whiskers", "tail", "beast", "panther", "tiger", "lion", "leopard", "cheetah", "catgirl", "catboy", "nyan"]
     
-    for kw in slime_keywords:
-        if kw in text: scores["slime"] += 1
-    for kw in robot_keywords:
-        if kw in text: scores["robot"] += 1.2 # slightly favor robot for tech/gamer/nerdy characters
-    for kw in angel_keywords:
-        if kw in text: scores["angel"] += 1
+    for kw in elf_keywords:
+        if kw in text: scores["elf"] += 1
+    for kw in mage_keywords:
+        if kw in text: scores["mage"] += 1
+    for kw in knight_keywords:
+        if kw in text: scores["knight"] += 1
+    for kw in rogue_keywords:
+        if kw in text: scores["rogue"] += 1
+    for kw in coder_keywords:
+        if kw in text: scores["coder"] += 1
+    for kw in doctor_keywords:
+        if kw in text: scores["doctor"] += 1
+    for kw in chef_keywords:
+        if kw in text: scores["chef"] += 1
+    for kw in artist_keywords:
+        if kw in text: scores["artist"] += 1
     for kw in fairy_keywords:
         if kw in text: scores["fairy"] += 1
-    for kw in dragon_keywords:
-        if kw in text: scores["dragon"] += 1
-    for kw in beast_keywords:
-        if kw in text: scores["beast"] += 1
-    for kw in ghost_keywords:
-        if kw in text: scores["ghost"] += 1
+    for kw in demon_keywords:
+        if kw in text: scores["demon"] += 1.2
+    for kw in athlete_keywords:
+        if kw in text: scores["athlete"] += 1
+    for kw in cat_keywords:
+        if kw in text: scores["cat"] += 1
         
     # Get the highest scoring archetype, fallback to humanoid if all scores are 0
     max_score = max(scores.values())
@@ -1999,272 +2796,660 @@ def get_animated_svg_template(body_color, wing_color, eye_color, name="", descri
     else:
         archetype = "humanoid"
         
-    # Generate custom hair color from wing_color or a lighter tint of body_color
-    hair_color = wing_color
-    clothes_color = body_color
+    # Standardize drawing colors
+    # Silhouette Body is white (#ffffff)
+    # Silhouette Secondary Details is gray (#cbd5e1)
+    # Cutout is dark charcoal (#121214)
+    # Accent color is either accent_color or eye_color
+    accent = eye_color if eye_color else (accent_color if accent_color else body_color)
     
-    # Render corresponding animated pixel-art template
-    if archetype == "slime":
-        return f"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="5 3 22 15" width="100%" height="100%" shape-rendering="crispEdges">
+    if archetype == "elf":
+        return f"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="100%" height="100%" shape-rendering="crispEdges">
   <style>
-    @keyframes squish {{
-      0%, 100% {{ transform: scaleY(1) translateY(0); }}
-      50% {{ transform: scaleY(0.7) translateY(4.5px); }}
+    @keyframes bob-elf {{
+      0%, 100% {{ transform: translateY(0); }}
+      50% {{ transform: translateY(-0.8px); }}
     }}
-    @keyframes core-glow {{
+    .elf-char {{
+      animation: bob-elf 1.6s ease-in-out infinite;
+    }}
+  </style>
+  <g class="elf-char">
+    <!-- Pointy ears (white) -->
+    <rect x="3" y="5" width="2" height="1" fill="#ffffff"/>
+    <rect x="4" y="4" width="1" height="1" fill="#ffffff"/>
+    <rect x="11" y="5" width="2" height="1" fill="#ffffff"/>
+    <rect x="11" y="4" width="1" height="1" fill="#ffffff"/>
+    <!-- Head/Skin (white) -->
+    <rect x="5" y="3" width="6" height="4" fill="#ffffff"/>
+    <rect x="6" y="2" width="4" height="1" fill="#ffffff"/>
+    <rect x="6" y="7" width="4" height="1" fill="#ffffff"/>
+    <!-- Hair overlay (gray) -->
+    <rect x="5" y="3" width="6" height="1" fill="#cbd5e1"/>
+    <!-- Leaf circlet headband (accent) -->
+    <rect x="5" y="4" width="6" height="1" fill="{accent}"/>
+    <rect x="4" y="3" width="1" height="1" fill="{accent}"/>
+    <rect x="11" y="3" width="1" height="1" fill="{accent}"/>
+    <!-- Eyes (cutout) -->
+    <rect x="6" y="5" width="1" height="1" fill="#121214"/>
+    <rect x="9" y="5" width="1" height="1" fill="#121214"/>
+    <!-- Neck/Body (white/gray) -->
+    <rect x="6" y="8" width="4" height="1" fill="#ffffff"/>
+    <rect x="5" y="9" width="6" height="4" fill="#cbd5e1"/>
+    <!-- Legs & Feet -->
+    <rect x="6" y="13" width="1" height="2" fill="#ffffff"/>
+    <rect x="9" y="13" width="1" height="2" fill="#ffffff"/>
+    <rect x="5" y="15" width="2" height="1" fill="#cbd5e1"/>
+    <rect x="9" y="15" width="2" height="1" fill="#cbd5e1"/>
+  </g>
+</svg>"""
+
+    elif archetype == "mage":
+        return f"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="100%" height="100%" shape-rendering="crispEdges">
+  <style>
+    @keyframes bob-mage {{
+      0%, 100% {{ transform: translateY(0); }}
+      50% {{ transform: translateY(-0.8px); }}
+    }}
+    @keyframes staff-glow {{
+      0%, 100% {{ opacity: 0.6; }}
+      50% {{ opacity: 1.0; }}
+    }}
+    .mage-char {{
+      animation: bob-mage 1.8s ease-in-out infinite;
+    }}
+    .staff-crystal {{
+      animation: staff-glow 1.2s ease-in-out infinite;
+    }}
+  </style>
+  <g class="mage-char">
+    <!-- Wizard Hat (gray/white) -->
+    <rect x="7" y="0" width="2" height="1" fill="#ffffff"/>
+    <rect x="6" y="1" width="4" height="1" fill="#ffffff"/>
+    <rect x="5" y="2" width="6" height="1" fill="#cbd5e1"/>
+    <rect x="3" y="3" width="10" height="1" fill="#cbd5e1"/>
+    <!-- Head/Skin (white) -->
+    <rect x="5" y="4" width="6" height="4" fill="#ffffff"/>
+    <!-- Eyes (cutout) -->
+    <rect x="6" y="5" width="1" height="1" fill="#121214"/>
+    <rect x="9" y="5" width="1" height="1" fill="#121214"/>
+    <!-- Robes (gray) -->
+    <rect x="6" y="8" width="4" height="1" fill="#ffffff"/>
+    <rect x="5" y="9" width="6" height="6" fill="#cbd5e1"/>
+    <rect x="4" y="15" width="8" height="1" fill="#ffffff"/>
+    <!-- Magic Staff (white) -->
+    <rect x="2" y="6" width="1" height="9" fill="#ffffff"/>
+    <!-- Glowing Staff Crystal (accent) -->
+    <rect class="staff-crystal" x="1" y="4" width="3" height="2" fill="{accent}"/>
+  </g>
+</svg>"""
+
+    elif archetype == "knight":
+        return f"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="100%" height="100%" shape-rendering="crispEdges">
+  <style>
+    @keyframes bob-knight {{
+      0%, 100% {{ transform: translateY(0); }}
+      50% {{ transform: translateY(-0.6px); }}
+    }}
+    @keyframes plume-sway {{
+      0%, 100% {{ transform: rotate(0deg); }}
+      50% {{ transform: rotate(6deg); }}
+    }}
+    .knight-char {{
+      animation: bob-knight 1.4s ease-in-out infinite;
+    }}
+    .plume {{
+      transform-origin: 7px 1px;
+      animation: plume-sway 1.2s ease-in-out infinite;
+    }}
+  </style>
+  <g class="knight-char">
+    <!-- Plume (accent) -->
+    <rect class="plume" x="8" y="0" width="3" height="2" fill="{accent}"/>
+    <rect x="7" y="1" width="1" height="1" fill="#ffffff"/>
+    <!-- Helmet (white/gray) -->
+    <rect x="6" y="1" width="4" height="1" fill="#ffffff"/>
+    <rect x="4" y="2" width="8" height="6" fill="#ffffff"/>
+    <rect x="4" y="3" width="8" height="1" fill="#cbd5e1"/>
+    <!-- Visor slot (cutout) & Glowing Slit (accent) -->
+    <rect x="5" y="4" width="6" height="2" fill="#121214"/>
+    <rect x="6" y="5" width="1" height="1" fill="{accent}"/>
+    <rect x="9" y="5" width="1" height="1" fill="{accent}"/>
+    <!-- Armored Body (gray) -->
+    <rect x="6" y="8" width="4" height="1" fill="#ffffff"/>
+    <rect x="5" y="9" width="6" height="4" fill="#cbd5e1"/>
+    <!-- Legs & Feet -->
+    <rect x="6" y="13" width="1" height="2" fill="#ffffff"/>
+    <rect x="9" y="13" width="1" height="2" fill="#ffffff"/>
+    <!-- Shield (white/gray) -->
+    <rect x="1" y="9" width="3" height="4" fill="#ffffff"/>
+    <rect x="2" y="10" width="1" height="2" fill="#cbd5e1"/>
+    <!-- Sword (white/accent) -->
+    <rect x="13" y="7" width="1" height="6" fill="#ffffff"/>
+    <rect x="12" y="11" width="3" height="1" fill="{accent}"/>
+  </g>
+</svg>"""
+
+    elif archetype == "rogue":
+        return f"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="100%" height="100%" shape-rendering="crispEdges">
+  <style>
+    @keyframes rogue-breathe {{
+      0%, 100% {{ transform: translateY(0); }}
+      50% {{ transform: translateY(-0.8px); }}
+    }}
+    @keyframes rogue-pulse {{
+      0%, 100% {{ opacity: 0.6; }}
+      50% {{ opacity: 1.0; }}
+    }}
+    .rogue-char {{
+      animation: rogue-breathe 1.5s ease-in-out infinite;
+    }}
+    .rogue-eyes {{
+      animation: rogue-pulse 1.8s ease-in-out infinite;
+    }}
+  </style>
+  <g class="rogue-char">
+    <!-- Hooded Head (gray/white) -->
+    <rect x="6" y="2" width="4" height="1" fill="#ffffff"/>
+    <rect x="4" y="3" width="8" height="5" fill="#ffffff"/>
+    <!-- Shadow Face cutout (cutout) -->
+    <rect x="6" y="4" width="4" height="4" fill="#121214"/>
+    <!-- Glowing Eyes (accent) -->
+    <g class="rogue-eyes">
+      <rect x="6" y="5" width="1" height="1" fill="{accent}"/>
+      <rect x="9" y="5" width="1" height="1" fill="{accent}"/>
+    </g>
+    <!-- Cloak Body (gray) -->
+    <rect x="6" y="8" width="4" height="1" fill="#ffffff"/>
+    <rect x="5" y="9" width="6" height="5" fill="#cbd5e1"/>
+    <rect x="5" y="14" width="2" height="2" fill="#ffffff"/>
+    <rect x="9" y="14" width="2" height="2" fill="#ffffff"/>
+    <!-- Dual Daggers (white) -->
+    <rect x="2" y="10" width="2" height="1" fill="#ffffff"/>
+    <rect x="12" y="10" width="2" height="1" fill="#ffffff"/>
+  </g>
+</svg>"""
+
+    elif archetype == "coder":
+        return f"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="100%" height="100%" shape-rendering="crispEdges">
+  <style>
+    @keyframes screen-flicker {{
+      0%, 100% {{ opacity: 0.7; }}
+      50% {{ opacity: 1.0; }}
+    }}
+    @keyframes typing {{
+      0%, 100% {{ transform: translateX(0); }}
+      50% {{ transform: translateX(0.5px); }}
+    }}
+    .coder-screen {{
+      animation: screen-flicker 0.5s infinite;
+    }}
+    .hands {{
+      animation: typing 0.2s steps(2) infinite;
+    }}
+  </style>
+  <!-- Laptop computer (white) -->
+  <rect x="2" y="9" width="1" height="4" fill="#ffffff"/>
+  <rect x="2" y="13" width="3" height="1" fill="#ffffff"/>
+  <rect class="coder-screen" x="3" y="10" width="1" height="2" fill="{accent}"/>
+  <g class="hands">
+    <rect x="4" y="12" width="1" height="1" fill="#ffffff"/>
+  </g>
+  <!-- Chibi programmer -->
+  <g>
+    <!-- Headphones band & ear cups (accent) -->
+    <rect x="5" y="2" width="6" height="1" fill="{accent}"/>
+    <rect x="4" y="3" width="1" height="3" fill="{accent}"/>
+    <rect x="11" y="3" width="1" height="3" fill="{accent}"/>
+    <!-- Head/Skin (white) -->
+    <rect x="5" y="3" width="6" height="5" fill="#ffffff"/>
+    <!-- Glasses (cutout) -->
+    <rect x="5" y="5" width="6" height="1" fill="#121214"/>
+    <rect x="6" y="5" width="1" height="1" fill="#121214"/>
+    <rect x="9" y="5" width="1" height="1" fill="#121214"/>
+    <!-- Body/Clothes (gray) -->
+    <rect x="6" y="8" width="4" height="1" fill="#ffffff"/>
+    <rect x="5" y="9" width="6" height="6" fill="#cbd5e1"/>
+    <rect x="5" y="15" width="2" height="1" fill="#ffffff"/>
+    <rect x="9" y="15" width="2" height="1" fill="#ffffff"/>
+  </g>
+</svg>"""
+
+    elif archetype == "doctor":
+        return f"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="100%" height="100%" shape-rendering="crispEdges">
+  <style>
+    @keyframes flask-bubble {{
       0%, 100% {{ opacity: 0.5; }}
       50% {{ opacity: 1.0; }}
     }}
-    .slime-body {{
-      transform-origin: 16px 17px;
-      animation: squish 1.4s ease-in-out infinite;
-    }}
-    .slime-core {{
-      transform-origin: 16px 17px;
-      animation: squish 1.4s ease-in-out infinite, core-glow 2s ease-in-out infinite;
+    .flask-liquid {{
+      animation: flask-bubble 0.8s ease-in-out infinite;
     }}
   </style>
-  <!-- Slime Blob Body -->
-  <path class="slime-body" d="M13,9 h6 v1 h2 v1 h1 v1 h1 v4 h-11 v-4 h1 v-1 h1 v-1 h1 z" fill="{body_color}"/>
-  <!-- Glowing Inner Core/Eyes -->
-  <path class="slime-core" d="M15,11 h2 v2 h-2 z" fill="{eye_color}"/>
-  <rect class="slime-core" x="14" y="10" width="1" height="1" fill="{eye_color}"/>
-  <rect class="slime-core" x="17" y="10" width="1" height="1" fill="{eye_color}"/>
-</svg>"""
-
-    elif archetype == "robot":
-        return f"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="5 3 22 15" width="100%" height="100%" shape-rendering="crispEdges">
-  <style>
-    @keyframes hover-mech {{
-      0%, 100% {{ transform: translateY(0); }}
-      50% {{ transform: translateY(-1px); }}
-    }}
-    @keyframes sparks {{
-      0%, 100% {{ transform: scaleY(1); opacity: 0.8; }}
-      50% {{ transform: scaleY(0.3); opacity: 0.2; }}
-    }}
-    .mech {{
-      animation: hover-mech 0.8s ease-in-out infinite;
-    }}
-    .thruster {{
-      transform-origin: 16px 17px;
-      animation: sparks 0.3s steps(3) infinite;
-    }}
-  </style>
-  <!-- Thruster flame/sparks -->
-  <path class="thruster" d="M14,16 h4 v2 h-4 z M15,18 h2 v1 h-2 z" fill="{wing_color}"/>
-  <g class="mech">
-    <!-- Blocky robot frame -->
-    <rect x="13" y="10" width="6" height="6" fill="{body_color}"/>
-    <rect x="12" y="5" width="8" height="5" fill="{body_color}"/>
-    <!-- Iron ears / antennas -->
-    <rect x="11" y="4" width="1" height="3" fill="{wing_color}"/>
-    <rect x="20" y="4" width="1" height="3" fill="{wing_color}"/>
-    <!-- Glowing Visor Eye -->
-    <rect x="13" y="7" width="6" height="1" fill="{eye_color}"/>
-    <!-- Panel details -->
-    <rect x="15" y="12" width="2" height="2" fill="#1e293b"/>
+  <g>
+    <!-- Head/Skin (white) -->
+    <rect x="6" y="2" width="4" height="1" fill="#ffffff"/>
+    <rect x="5" y="3" width="6" height="5" fill="#ffffff"/>
+    <!-- Eyes (cutout) -->
+    <rect x="6" y="5" width="1" height="1" fill="#121214"/>
+    <rect x="9" y="5" width="1" height="1" fill="#121214"/>
+    <!-- Lab Coat & Stethoscope (white/gray) -->
+    <rect x="6" y="8" width="4" height="1" fill="#ffffff"/>
+    <rect x="5" y="9" width="6" height="6" fill="#cbd5e1"/>
+    <!-- Stethoscope details -->
+    <rect x="5" y="8" width="6" height="1" fill="#ffffff"/>
+    <rect x="5" y="9" width="1" height="2" fill="#ffffff"/>
+    <rect x="10" y="9" width="1" height="2" fill="#ffffff"/>
+    <!-- Legs & Feet -->
+    <rect x="6" y="15" width="1" height="1" fill="#ffffff"/>
+    <rect x="9" y="15" width="1" height="1" fill="#ffffff"/>
+    <!-- Glowing flask (white/accent) -->
+    <rect x="12" y="10" width="3" height="4" fill="#ffffff"/>
+    <rect x="13" y="9" width="1" height="1" fill="#ffffff"/>
+    <rect class="flask-liquid" x="13" y="11" width="1" height="2" fill="{accent}"/>
   </g>
 </svg>"""
 
-    elif archetype == "angel":
-        return f"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="5 3 22 15" width="100%" height="100%" shape-rendering="crispEdges">
+    elif archetype == "chef":
+        return f"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="100%" height="100%" shape-rendering="crispEdges">
   <style>
-    @keyframes float-angel {{
-      0%, 100% {{ transform: translateY(0); }}
-      50% {{ transform: translateY(-1.2px); }}
+    @keyframes steam-rise {{
+      0% {{ transform: translateY(0) scale(0.8); opacity: 0; }}
+      50% {{ opacity: 0.9; }}
+      100% {{ transform: translateY(-3px) scale(1.2); opacity: 0; }}
     }}
-    @keyframes halo-shimmer {{
-      0%, 100% {{ transform: translateY(0) scale(1); opacity: 0.9; }}
-      50% {{ transform: translateY(-0.8px) scale(1.05); opacity: 1.0; }}
-    }}
-    @keyframes wings-angel {{
-      0%, 100% {{ transform: scaleY(1); }}
-      50% {{ transform: scaleY(0.7); }}
-    }}
-    .angel-body {{
-      animation: float-angel 1.4s ease-in-out infinite;
-    }}
-    .halo {{
-      transform-origin: 16px 4px;
-      animation: float-angel 1.4s ease-in-out infinite, halo-shimmer 2s ease-in-out infinite;
-    }}
-    .wings {{
-      transform-origin: 16px 11px;
-      animation: float-angel 1.4s ease-in-out infinite, wings-angel 0.8s ease-in-out infinite;
+    .steam-particle {{
+      transform-origin: 13px 7px;
+      animation: steam-rise 1.5s linear infinite;
     }}
   </style>
-  <!-- Feather Wings -->
-  <g class="wings">
-    <path d="M12,9 h-4 v-2 h-2 v4 h1 v2 h3 v1 h2 z" fill="#ffffff" opacity="0.95"/>
-    <path d="M20,9 h 4 v-2 h 2 v4 h-1 v2 h-3 v1 h-2 z" fill="#ffffff" opacity="0.95"/>
+  <g>
+    <!-- Tall Chef Hat (white) -->
+    <rect x="5" y="0" width="6" height="4" fill="#ffffff"/>
+    <rect x="6" y="3" width="4" height="1" fill="#cbd5e1"/>
+    <!-- Head/Skin (white) -->
+    <rect x="5" y="4" width="6" height="4" fill="#ffffff"/>
+    <!-- Eyes (cutout) -->
+    <rect x="6" y="5" width="1" height="1" fill="#121214"/>
+    <rect x="9" y="5" width="1" height="1" fill="#121214"/>
+    <!-- Apron & Body (gray/white) -->
+    <rect x="6" y="8" width="4" height="1" fill="#ffffff"/>
+    <rect x="5" y="9" width="6" height="6" fill="#cbd5e1"/>
+    <rect x="6" y="9" width="4" height="5" fill="#ffffff"/>
+    <!-- Legs & Feet -->
+    <rect x="6" y="15" width="1" height="1" fill="#ffffff"/>
+    <rect x="9" y="15" width="1" height="1" fill="#ffffff"/>
+    <!-- Spatula/Pan (white) -->
+    <rect x="12" y="10" width="3" height="2" fill="#ffffff"/>
+    <rect x="11" y="11" width="1" height="1" fill="#ffffff"/>
+    <!-- Steam particle (accent) -->
+    <rect class="steam-particle" x="13" y="7" width="1" height="2" fill="{accent}"/>
   </g>
-  <!-- Floating Halo -->
-  <path class="halo" d="M13,3 h6 v1 h-6 z M12,4 h1 v1 h-1 z M19,4 h1 v1 h-1 z" fill="#fde047"/>
-  <g class="angel-body">
-    <!-- Humanoid body / dress -->
-    <rect x="14" y="6" width="4" height="4" fill="{body_color}"/>
-    <rect x="13" y="10" width="6" height="5" fill="{clothes_color}"/>
-    <!-- Hair -->
-    <path d="M13,5 h6 v2 h-1 v3 h-4 v-3 h-1 z" fill="{hair_color}"/>
-    <!-- Eyes -->
-    <rect x="14" y="7" width="1" height="1" fill="{eye_color}"/>
-    <rect x="17" y="7" width="1" height="1" fill="{eye_color}"/>
+</svg>"""
+
+    elif archetype == "artist":
+        return f"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="100%" height="100%" shape-rendering="crispEdges">
+  <style>
+    @keyframes brush-sway {{
+      0%, 100% {{ transform: rotate(0deg); }}
+      50% {{ transform: rotate(-12deg); }}
+    }}
+    .brush-sway {{
+      transform-origin: 13px 12px;
+      animation: brush-sway 1.3s ease-in-out infinite;
+    }}
+  </style>
+  <g>
+    <!-- Beret Hat (white/gray) -->
+    <rect x="7" y="1" width="2" height="1" fill="#ffffff"/>
+    <rect x="4" y="2" width="8" height="1" fill="#ffffff"/>
+    <rect x="5" y="3" width="6" height="1" fill="#cbd5e1"/>
+    <!-- Head/Skin (white) -->
+    <rect x="5" y="4" width="6" height="4" fill="#ffffff"/>
+    <!-- Eyes (cutout) -->
+    <rect x="6" y="5" width="1" height="1" fill="#121214"/>
+    <rect x="9" y="5" width="1" height="1" fill="#121214"/>
+    <!-- Clothes/Smock (gray) -->
+    <rect x="6" y="8" width="4" height="1" fill="#ffffff"/>
+    <rect x="5" y="9" width="6" height="6" fill="#cbd5e1"/>
+    <!-- Palette (white/accent) -->
+    <rect x="1" y="11" width="3" height="2" fill="#ffffff"/>
+    <rect x="2" y="12" width="1" height="1" fill="{accent}"/>
+    <!-- Paintbrush (white/accent) -->
+    <g class="brush-sway">
+      <rect x="13" y="9" width="1" height="3" fill="#ffffff"/>
+      <rect x="13" y="8" width="1" height="1" fill="{accent}"/>
+    </g>
+    <!-- Legs & Feet -->
+    <rect x="6" y="15" width="1" height="1" fill="#ffffff"/>
+    <rect x="9" y="15" width="1" height="1" fill="#ffffff"/>
   </g>
 </svg>"""
 
     elif archetype == "fairy":
-        return f"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="5 3 22 15" width="100%" height="100%" shape-rendering="crispEdges">
+        return f"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="100%" height="100%" shape-rendering="crispEdges">
   <style>
     @keyframes float-fairy {{
       0%, 100% {{ transform: translateY(0); }}
-      50% {{ transform: translateY(-1.5px); }}
+      50% {{ transform: translateY(-1.2px); }}
     }}
-    @keyframes wings-fairy {{
+    @keyframes wings-l {{
       0%, 100% {{ transform: scaleX(1); }}
-      50% {{ transform: scaleX(0.4); }}
+      50% {{ transform: scaleX(0.3); }}
     }}
-    .body {{
-      animation: float-fairy 1.2s ease-in-out infinite;
+    @keyframes wings-r {{
+      0%, 100% {{ transform: scaleX(1); }}
+      50% {{ transform: scaleX(0.3); }}
+    }}
+    .fairy-char {{
+      animation: float-fairy 1.4s ease-in-out infinite;
     }}
     .wing-l {{
-      transform-origin: 14px 10px;
-      animation: float-fairy 1.2s ease-in-out infinite, wings-fairy 0.4s ease-in-out infinite;
+      transform-origin: 5px 7px;
+      animation: wings-l 0.3s ease-in-out infinite;
     }}
     .wing-r {{
-      transform-origin: 18px 10px;
-      animation: float-fairy 1.2s ease-in-out infinite, wings-fairy 0.4s ease-in-out infinite;
-      animation-delay: 0.2s;
+      transform-origin: 11px 7px;
+      animation: wings-r 0.3s ease-in-out infinite;
     }}
   </style>
-  <g class="wing-l">
-    <path d="M13,9 h-3 v1 h-2 v2 h-1 v3 h1 v2 h2 v1 h3 v-1 h1 v-2 h1 v-3 h-1 v-2 h-1 z" fill="{wing_color}" opacity="0.8"/>
-  </g>
-  <g class="wing-r">
-    <path d="M19,9 h3 v1 h2 v2 h1 v3 h-1 v2 h-2 v1 h-3 v-1 h-1 v-2 h-1 v-3 h-1 v-2 h-1 z" fill="{wing_color}" opacity="0.8"/>
-  </g>
-  <g class="body">
-    <rect x="14" y="5" width="4" height="4" fill="{body_color}"/>
-    <!-- Clothes -->
-    <rect x="14" y="9" width="4" height="6" fill="{clothes_color}"/>
-    <!-- Hair -->
-    <path d="M13,4 h6 v2 h-1 v3 h-4 v-3 h-1 z" fill="{hair_color}"/>
-    <!-- Eyes -->
-    <rect x="15" y="6" width="1" height="1" fill="{eye_color}"/>
-    <rect x="17" y="6" width="1" height="1" fill="{eye_color}"/>
+  <g>
+    <!-- Shimmering Wings (accent, under the body) -->
+    <rect class="wing-l" x="1" y="5" width="4" height="4" fill="{accent}" opacity="0.8"/>
+    <rect class="wing-r" x="11" y="5" width="4" height="4" fill="{accent}" opacity="0.8"/>
+    <g class="fairy-char">
+      <!-- Head/Skin (white) -->
+      <rect x="6" y="2" width="4" height="1" fill="#ffffff"/>
+      <rect x="5" y="3" width="6" height="5" fill="#ffffff"/>
+      <!-- Hair overlay (gray) -->
+      <rect x="5" y="3" width="6" height="1" fill="#cbd5e1"/>
+      <!-- Eyes (cutout) -->
+      <rect x="6" y="5" width="1" height="1" fill="#121214"/>
+      <rect x="9" y="5" width="1" height="1" fill="#121214"/>
+      <!-- Dress (white/gray) -->
+      <rect x="6" y="8" width="4" height="1" fill="#ffffff"/>
+      <rect x="5" y="9" width="6" height="6" fill="#cbd5e1"/>
+      <!-- Legs & Feet -->
+      <rect x="6" y="15" width="1" height="1" fill="#ffffff"/>
+      <rect x="9" y="15" width="1" height="1" fill="#ffffff"/>
+    </g>
   </g>
 </svg>"""
 
-    elif archetype == "dragon":
-        return f"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="5 3 22 15" width="100%" height="100%" shape-rendering="crispEdges">
+    elif archetype == "demon":
+        return f"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="100%" height="100%" shape-rendering="crispEdges">
   <style>
-    @keyframes float-drag {{
+    @keyframes float-demon {{
       0%, 100% {{ transform: translateY(0); }}
-      50% {{ transform: translateY(-1.5px); }}
+      50% {{ transform: translateY(-1.0px); }}
     }}
-    @keyframes wings-drag {{
+    @keyframes wing-flap {{
       0%, 100% {{ transform: scaleY(1); }}
-      50% {{ transform: scaleY(0.4); }}
-    }}
-    .dragon {{
-      animation: float-drag 1s ease-in-out infinite;
-    }}
-    .wings {{
-      transform-origin: 16px 14px;
-      animation: float-drag 1s ease-in-out infinite, wings-drag 0.6s ease-in-out infinite;
-    }}
-  </style>
-  <g class="wings">
-    <path d="M12,10 h-4 v-2 h-2 v2 h1 v2 h2 v1 h3 z" fill="{wing_color}"/>
-    <path d="M20,10 h 4 v-2 h 2 v2 h-1 v2 h-2 v-1 h-3 z" fill="{wing_color}"/>
-  </g>
-  <g class="dragon">
-    <rect x="14" y="11" width="4" height="6" fill="{body_color}"/>
-    <path d="M18,16 h2 v-1 h1 v-1 h1 v1 h-1 v1 h-2 v1 h-1 z" fill="{wing_color}"/>
-    <rect x="12" y="6" width="8" height="6" fill="{body_color}"/>
-    <!-- Horns -->
-    <rect x="12" y="4" width="2" height="2" fill="{wing_color}"/>
-    <rect x="18" y="4" width="2" height="2" fill="{wing_color}"/>
-    <!-- Eyes -->
-    <rect x="13" y="8" width="2" height="1" fill="{eye_color}"/>
-    <rect x="17" y="8" width="2" height="1" fill="{eye_color}"/>
-  </g>
-</svg>"""
-
-    elif archetype == "beast":
-        return f"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="5 3 22 15" width="100%" height="100%" shape-rendering="crispEdges">
-  <style>
-    @keyframes float-beast {{
-      0%, 100% {{ transform: translateY(0); }}
-      50% {{ transform: translateY(-1px); }}
+      50% {{ transform: scaleY(0.5); }}
     }}
     @keyframes tail-wag {{
       0%, 100% {{ transform: rotate(0deg); }}
-      50% {{ transform: rotate(15deg) translateY(-0.5px); }}
+      50% {{ transform: rotate(10deg); }}
     }}
-    .beast {{
-      animation: float-beast 1.2s ease-in-out infinite;
+    .demon-char {{
+      animation: float-demon 1.6s ease-in-out infinite;
     }}
-    .tail {{
-      transform-origin: 13px 13px;
+    .wing-l {{
+      transform-origin: 4px 7px;
+      animation: wing-flap 0.5s ease-in-out infinite;
+    }}
+    .wing-r {{
+      transform-origin: 12px 7px;
+      animation: wing-flap 0.5s ease-in-out infinite;
+    }}
+    .demon-tail {{
+      transform-origin: 4px 13px;
       animation: tail-wag 0.8s ease-in-out infinite;
     }}
   </style>
-  <g class="beast">
-    <!-- Tail -->
-    <path class="tail" d="M12,12 h-3 v-2 h-1 v-1 h1 v2 h3 z" fill="{wing_color}"/>
-    <!-- Body -->
-    <rect x="12" y="10" width="8" height="5" fill="{body_color}"/>
-    <!-- Head -->
-    <rect x="15" y="6" width="6" height="5" fill="{body_color}"/>
-    <!-- Pointy ears -->
-    <rect x="15" y="4" width="2" height="2" fill="{wing_color}"/>
-    <rect x="19" y="4" width="2" height="2" fill="{wing_color}"/>
-    <!-- Legs -->
-    <rect x="13" y="15" width="1" height="2" fill="{body_color}"/>
-    <rect x="15" y="15" width="1" height="2" fill="{body_color}"/>
-    <rect x="17" y="15" width="1" height="2" fill="{body_color}"/>
-    <rect x="19" y="15" width="1" height="2" fill="{body_color}"/>
-    <!-- Glowing eyes -->
-    <rect x="18" y="7" width="1" height="1" fill="{eye_color}"/>
-    <rect x="20" y="7" width="1" height="1" fill="{eye_color}"/>
+  <g>
+    <!-- Bat wings (accent, under the body) -->
+    <rect class="wing-l" x="1" y="6" width="3" height="3" fill="{accent}"/>
+    <rect class="wing-r" x="12" y="6" width="3" height="3" fill="{accent}"/>
+    <g class="demon-char">
+      <!-- Horns (white) -->
+      <rect x="5" y="1" width="1" height="2" fill="#ffffff"/>
+      <rect x="10" y="1" width="1" height="2" fill="#ffffff"/>
+      <!-- Head/Skin (white) -->
+      <rect x="5" y="3" width="6" height="5" fill="#ffffff"/>
+      <!-- Hair overlay (gray) -->
+      <rect x="5" y="3" width="6" height="1" fill="#cbd5e1"/>
+      <!-- Eyes (cutout) -->
+      <rect x="6" y="5" width="1" height="1" fill="#121214"/>
+      <rect x="9" y="5" width="1" height="1" fill="#121214"/>
+      <!-- Clothes (gray) -->
+      <rect x="6" y="8" width="4" height="1" fill="#ffffff"/>
+      <rect x="5" y="9" width="6" height="6" fill="#cbd5e1"/>
+      <!-- Tail (white) -->
+      <g class="demon-tail">
+        <path d="M4,11 h-2 v3 h3 v-1 h-2 v-1 z" fill="#ffffff"/>
+      </g>
+      <!-- Legs & Feet -->
+      <rect x="6" y="15" width="1" height="1" fill="#ffffff"/>
+      <rect x="9" y="15" width="1" height="1" fill="#ffffff"/>
+    </g>
   </g>
 </svg>"""
 
-    else: # Humanoid base (No wings)
-        return f"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="6 3 20 17" width="100%" height="100%" shape-rendering="crispEdges">
+    elif archetype == "athlete":
+        return f"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="100%" height="100%" shape-rendering="crispEdges">
+  <style>
+    @keyframes athlete-breathe {{
+      0%, 100% {{ transform: translateY(0); }}
+      50% {{ transform: translateY(-0.8px); }}
+    }}
+    @keyframes lift-dumbbell {{
+      0%, 100% {{ transform: translateY(0); }}
+      50% {{ transform: translateY(-2px); }}
+    }}
+    .athlete-char {{
+      animation: athlete-breathe 1.5s ease-in-out infinite;
+    }}
+    .dumbbell-l {{
+      animation: lift-dumbbell 1s ease-in-out infinite;
+    }}
+    .dumbbell-r {{
+      animation: lift-dumbbell 1s ease-in-out infinite;
+      animation-delay: 0.5s;
+    }}
+  </style>
+  <g class="athlete-char">
+    <!-- Head/Skin (white) -->
+    <rect x="6" y="2" width="4" height="1" fill="#ffffff"/>
+    <rect x="5" y="3" width="6" height="5" fill="#ffffff"/>
+    <!-- Sweatband (accent) -->
+    <rect x="5" y="3" width="6" height="1" fill="{accent}"/>
+    <!-- Eyes (cutout) -->
+    <rect x="6" y="5" width="1" height="1" fill="#121214"/>
+    <rect x="9" y="5" width="1" height="1" fill="#121214"/>
+    <!-- Gym Tank Top (gray/white) -->
+    <rect x="6" y="8" width="4" height="1" fill="#ffffff"/>
+    <rect x="5" y="9" width="6" height="6" fill="#cbd5e1"/>
+    <rect x="6" y="9" width="4" height="6" fill="#ffffff"/>
+    <!-- Dumbbells (white) -->
+    <g class="dumbbell-l">
+      <rect x="2" y="11" width="1" height="3" fill="#ffffff"/>
+      <rect x="1" y="12" width="3" height="1" fill="#ffffff"/>
+    </g>
+    <g class="dumbbell-r">
+      <rect x="13" y="11" width="1" height="3" fill="#ffffff"/>
+      <rect x="12" y="12" width="3" height="1" fill="#ffffff"/>
+    </g>
+    <!-- Legs & Feet -->
+    <rect x="6" y="15" width="1" height="1" fill="#ffffff"/>
+    <rect x="9" y="15" width="1" height="1" fill="#ffffff"/>
+  </g>
+</svg>"""
+
+    elif archetype == "cat":
+        return f"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="100%" height="100%" shape-rendering="crispEdges">
+  <style>
+    @keyframes cat-breathe {{
+      0%, 100% {{ transform: translateY(0); }}
+      50% {{ transform: translateY(-0.8px); }}
+    }}
+    @keyframes tail-wag-cat {{
+      0%, 100% {{ transform: rotate(0deg); }}
+      50% {{ transform: rotate(-8deg); }}
+    }}
+    .cat-char {{
+      animation: cat-breathe 1.6s ease-in-out infinite;
+    }}
+    .cat-tail {{
+      transform-origin: 5px 12px;
+      animation: tail-wag-cat 0.6s ease-in-out infinite;
+    }}
+  </style>
+  <g class="cat-char">
+    <!-- Pointy Cat Ears (white) -->
+    <rect x="5" y="1" width="1" height="2" fill="#ffffff"/>
+    <rect x="6" y="2" width="1" height="1" fill="#ffffff"/>
+    <rect x="10" y="1" width="1" height="2" fill="#ffffff"/>
+    <rect x="9" y="2" width="1" height="1" fill="#ffffff"/>
+    <!-- Head/Skin (white) -->
+    <rect x="5" y="3" width="6" height="5" fill="#ffffff"/>
+    <rect x="6" y="2" width="4" height="1" fill="#ffffff"/>
+    <!-- Hair/Fur details (gray) -->
+    <rect x="5" y="3" width="6" height="1" fill="#cbd5e1"/>
+    <!-- Eyes (cutout) -->
+    <rect x="6" y="5" width="1" height="1" fill="#121214"/>
+    <rect x="9" y="5" width="1" height="1" fill="#121214"/>
+    <!-- Collar & Bell (accent) -->
+    <rect x="6" y="8" width="4" height="1" fill="{accent}"/>
+    <rect x="7" y="9" width="2" height="1" fill="{accent}"/>
+    <!-- Body/Clothes (gray) -->
+    <rect x="5" y="9" width="6" height="6" fill="#cbd5e1"/>
+    <!-- Cat Tail (white) -->
+    <g class="cat-tail">
+      <rect x="2" y="10" width="3" height="4" fill="#ffffff"/>
+      <rect x="1" y="9" width="2" height="1" fill="#ffffff"/>
+    </g>
+    <!-- Legs & Feet -->
+    <rect x="6" y="15" width="1" height="1" fill="#ffffff"/>
+    <rect x="9" y="15" width="1" height="1" fill="#ffffff"/>
+  </g>
+</svg>"""
+
+    else:
+        # Default cute 1-bit humanoid chibi character
+        return f"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="100%" height="100%" shape-rendering="crispEdges">
   <style>
     @keyframes breathe {{
       0%, 100% {{ transform: translateY(0); }}
       50% {{ transform: translateY(-0.8px); }}
     }}
+    .humanoid-char {{
+      animation: breathe 1.6s ease-in-out infinite;
+    }}
   </style>
-  <g style="animation: breathe 1.5s ease-in-out infinite;">
-    <!-- Head/Skin -->
-    <rect x="14" y="5" width="4" height="4" fill="#fed7aa"/>
-    <!-- Dynamic hair overlay (framed around head) -->
-    <path d="M13,4 h6 v2 h-1 v3 h-4 v-3 h-1 z" fill="{hair_color}"/>
-    <!-- Eyes -->
-    <rect x="14" y="6" width="1" height="1" fill="{eye_color}"/>
-    <rect x="17" y="6" width="1" height="1" fill="{eye_color}"/>
-    <!-- Body/Shirt/Dress -->
-    <rect x="14" y="9" width="4" height="6" fill="{clothes_color}"/>
-    <!-- Shoulder straps / sleeves details -->
-    <rect x="13" y="9" width="1" height="3" fill="{hair_color}"/>
-    <rect x="18" y="9" width="1" height="3" fill="{hair_color}"/>
-    <!-- Legs -->
-    <rect x="14" y="15" width="1" height="3" fill="#fed7aa"/>
-    <rect x="17" y="15" width="1" height="3" fill="#fed7aa"/>
-    <!-- Shoes -->
-    <rect x="14" y="18" width="1" height="1" fill="{hair_color}"/>
-    <rect x="17" y="18" width="1" height="1" fill="{hair_color}"/>
+  <g class="humanoid-char">
+    <!-- Head/Skin (white) -->
+    <rect x="5" y="3" width="6" height="4" fill="#ffffff"/>
+    <rect x="6" y="2" width="4" height="1" fill="#ffffff"/>
+    <rect x="6" y="7" width="4" height="1" fill="#ffffff"/>
+    <!-- Hair overlay (gray) -->
+    <rect x="5" y="3" width="6" height="1" fill="#cbd5e1"/>
+    <!-- Eyes (cutout) -->
+    <rect x="6" y="5" width="1" height="1" fill="#121214"/>
+    <rect x="9" y="5" width="1" height="1" fill="#121214"/>
+    <!-- Neck Scarf (accent) -->
+    <rect x="6" y="8" width="4" height="1" fill="{accent}"/>
+    <rect x="9" y="9" width="1" height="2" fill="{accent}"/>
+    <!-- Clothes (gray) -->
+    <rect x="5" y="9" width="6" height="6" fill="#cbd5e1"/>
+    <!-- Legs & Feet -->
+    <rect x="6" y="15" width="1" height="1" fill="#ffffff"/>
+    <rect x="9" y="15" width="1" height="1" fill="#ffffff"/>
   </g>
 </svg>"""
+
+def regenerate_program_sprite(program_id):
+    from variables import PROGRAMS_DIR
+    import json
+    program_path = os.path.normpath(os.path.join(PROGRAMS_DIR, program_id))
+    json_path = os.path.join(program_path, f"{program_id}.json")
+    old_json_path = os.path.join(program_path, "character_profile.json")
+    
+    profile_data = None
+    for p in [json_path, old_json_path]:
+        if os.path.exists(p):
+            try:
+                with open(p, "r", encoding="utf-8") as f:
+                    profile_data = json.load(f)
+                break
+            except Exception:
+                pass
+                
+    if not profile_data:
+        return False
+        
+    name = profile_data.get("name", program_id.title())
+    operation = profile_data.get("operation", {})
+    desc_text = operation.get("description", "")
+    personality_text = operation.get("personality", "")
+    
+    # Also grab hair/eye details from the description subkeys
+    phys_desc = profile_data.get("description", {})
+    combined_desc = f"{desc_text} {phys_desc.get('hair color', '')} hair {phys_desc.get('eyes', '')} eyes {phys_desc.get('skin', '')} skin"
+    
+    colors_data = determine_character_colors(name, combined_desc, personality_text)
+    
+    # Check if physical description subkeys explicitly define colors, we can override colors_data values!
+    hair_color_name = phys_desc.get("hair color", "").lower().strip()
+    color_map = {
+        "red": "#ef4444", "crimson": "#dc2626", "pink": "#ec4899", "rose": "#f43f5e",
+        "blue": "#3b82f6", "sky blue": "#0ea5e9", "cyan": "#06b6d4",
+        "green": "#22c55e", "emerald": "#10b981", "mint": "#34d399",
+        "purple": "#a855f7", "violet": "#8b5cf6", "magenta": "#d946ef",
+        "yellow": "#eab308", "gold": "#fbbf24", "amber": "#f59e0b", "orange": "#f97316",
+        "silver": "#cbd5e1", "white": "#f8fafc", "grey": "#94a3b8", "gray": "#94a3b8",
+        "black": "#1e293b", "brown": "#78350f"
+    }
+    
+    if hair_color_name in color_map:
+        colors_data["accent_color"] = color_map[hair_color_name]
+        
+    eye_color_name = phys_desc.get("eyes", "").lower().strip()
+    if eye_color_name in color_map:
+        colors_data["eye_color"] = color_map[eye_color_name]
+        
+    skin_color_name = phys_desc.get("skin", "").lower().strip()
+    skin_map = {
+        "pale": "#ffedd5", "fair": "#fed7aa", "tanned": "#fdba74", "tan": "#f59e0b",
+        "dark": "#b45309", "olive": "#d97706", "brown": "#78350f", "white": "#f8fafc",
+        "black": "#1e293b"
+    }
+    body_color = colors_data["body_color"]
+    if skin_color_name in skin_map:
+        body_color = skin_map[skin_color_name]
+        
+    primary_color = colors_data["primary_accent"]
+    body_color_val = body_color
+    accent_color_val = colors_data["accent_color"]
+    eye_color_val = colors_data["eye_color"]
+    
+    custom_color = get_custom_program_color(program_id)
+    if custom_color:
+        primary_color = custom_color
+        
+    try:
+        theme_data = generate_character_theme(primary_color)
+        with open(os.path.join(program_path, 'theme.json'), "w", encoding="utf-8") as tf:
+            json.dump(theme_data, tf, indent=2)
+        return True
+    except Exception as e:
+        print(f"Error generating theme for {program_id}: {e}")
+        return False
 
 def determine_character_colors(name, description, personality):
     primary_color = "#38bdf8"
     body_color = "#38bdf8"
-    wing_color = "#94a3b8"
+    accent_color = "#94a3b8"
     eye_color = "#38bdf8"
     
     # Check if Gemini API key is configured
@@ -2286,12 +3471,12 @@ def determine_character_colors(name, description, personality):
                 f"Provide exactly these 4 hexadecimal colors (e.g. #38bdf8):\n"
                 f"1. PRIMARY_ACCENT: The main UI theme color (e.g., matching the character's primary magic/element/outfit tone)\n"
                 f"2. BODY_COLOR: The sprite's body color (e.g., matching character's hair, skin, fur, scale, or suit tone)\n"
-                f"3. WING_COLOR: A complementary color for the wings\n"
+                f"3. ACCENT_COLOR: A complementary accent color for details / highlights\n"
                 f"4. EYE_COLOR: A contrasting glowing color for eyes/visor\n\n"
                 f"Format your output exactly as:\n"
                 f"PRIMARY_ACCENT: #XXXXXX\n"
                 f"BODY_COLOR: #XXXXXX\n"
-                f"WING_COLOR: #XXXXXX\n"
+                f"ACCENT_COLOR: #XXXXXX\n"
                 f"EYE_COLOR: #XXXXXX"
             )
             
@@ -2307,30 +3492,30 @@ def determine_character_colors(name, description, personality):
             
             accent_m = re.search(r'PRIMARY_ACCENT:\s*(#[0-9a-fA-F]{6})', response_text)
             body_m = re.search(r'BODY_COLOR:\s*(#[0-9a-fA-F]{6})', response_text)
-            wing_m = re.search(r'WING_COLOR:\s*(#[0-9a-fA-F]{6})', response_text)
+            accent_color_m = re.search(r'ACCENT_COLOR:\s*(#[0-9a-fA-F]{6})', response_text)
             eye_m = re.search(r'EYE_COLOR:\s*(#[0-9a-fA-F]{6})', response_text)
             
             if accent_m: primary_color = accent_m.group(1)
             if body_m: body_color = body_m.group(1)
-            if wing_m: wing_color = wing_m.group(1)
+            if accent_color_m: accent_color = accent_color_m.group(1)
             if eye_m: eye_color = eye_m.group(1)
             
         except Exception as e:
             print(f"Error procedural color generation via LLM: {e}")
             
     # Heuristic matching if LLM was skipped or failed to extract
-    if primary_color == "#38bdf8" and body_color == "#38bdf8" and wing_color == "#94a3b8" and eye_color == "#38bdf8":
+    if primary_color == "#38bdf8" and body_color == "#38bdf8" and accent_color == "#94a3b8" and eye_color == "#38bdf8":
         text = (name + " " + description + " " + personality).lower()
         if "fire" in text or "red" in text or "crimson" in text or "flame" in text:
-            primary_color, body_color, wing_color, eye_color = "#ef4444", "#dc2626", "#450a0a", "#facc15"
+            primary_color, body_color, accent_color, eye_color = "#ef4444", "#dc2626", "#450a0a", "#facc15"
         elif "water" in text or "blue" in text or "aqua" in text or "ocean" in text:
-            primary_color, body_color, wing_color, eye_color = "#0ea5e9", "#0284c7", "#0c4a6e", "#38bdf8"
+            primary_color, body_color, accent_color, eye_color = "#0ea5e9", "#0284c7", "#0c4a6e", "#38bdf8"
         elif "nature" in text or "green" in text or "forest" in text or "earth" in text:
-            primary_color, body_color, wing_color, eye_color = "#10b981", "#059669", "#064e3b", "#a7f3d0"
+            primary_color, body_color, accent_color, eye_color = "#10b981", "#059669", "#064e3b", "#a7f3d0"
         elif "dark" in text or "shadow" in text or "black" in text or "void" in text:
-            primary_color, body_color, wing_color, eye_color = "#a855f7", "#3b0764", "#0f172a", "#f43f5e"
+            primary_color, body_color, accent_color, eye_color = "#a855f7", "#3b0764", "#0f172a", "#f43f5e"
         elif "light" in text or "gold" in text or "yellow" in text or "sun" in text:
-            primary_color, body_color, wing_color, eye_color = "#eab308", "#d97706", "#fef08a", "#ffffff"
+            primary_color, body_color, accent_color, eye_color = "#eab308", "#d97706", "#fef08a", "#ffffff"
         else:
             presets = [
                 ("#38bdf8", "#0284c7", "#94a3b8", "#facc15"),
@@ -2340,41 +3525,69 @@ def determine_character_colors(name, description, personality):
                 ("#f97316", "#ea580c", "#7c2d12", "#fdba74"),
             ]
             import random
-            primary_color, body_color, wing_color, eye_color = random.choice(presets)
+            primary_color, body_color, accent_color, eye_color = random.choice(presets)
             
     return {
         "primary_accent": primary_color,
         "body_color": body_color,
-        "wing_color": wing_color,
+        "accent_color": accent_color,
         "eye_color": eye_color
     }
 
 def determine_archetype_string(name, description, personality):
     text = f"{name} {description} {personality}".lower()
-    scores = {"slime": 0, "robot": 0, "angel": 0, "fairy": 0, "dragon": 0, "beast": 0, "ghost": 0}
+    scores = {
+        "elf": 0,
+        "mage": 0,
+        "knight": 0,
+        "rogue": 0,
+        "coder": 0,
+        "doctor": 0,
+        "chef": 0,
+        "artist": 0,
+        "fairy": 0,
+        "demon": 0,
+        "athlete": 0,
+        "cat": 0
+    }
     
-    slime_keywords = ["slime", "blob", "goo", "jelly", "puddle", "melt", "liquid", "fluid", "soft", "bubbly"]
-    robot_keywords = ["robot", "android", "cyborg", "machine", "synth", "mech", "metal", "steel", "program", "code", "ai", "artificial", "bot", "screen", "visor", "pc", "gamer", "computer", "meme", "terminally online"]
-    angel_keywords = ["angel", "seraph", "cherub", "divine", "holy", "halo", "feather", "sky", "heaven", "pure", "white wings"]
-    fairy_keywords = ["fairy", "pixie", "sprite", "flutter", "tiny", "wing", "pollen", "forest", "nature", "glow"]
-    dragon_keywords = ["dragon", "drake", "wyvern", "lizard", "fierce", "angry", "proud", "strong", "fire", "flame", "warrior", "confident", "brave", "hot"]
-    beast_keywords = ["cat", "neko", "fox", "kitsune", "wolf", "dog", "beast", "animal", "energetic", "wild", "fast", "active", "hunt", "athletic", "gym"]
-    ghost_keywords = ["ghost", "phantom", "spirit", "specter", "shadow", "stoic", "mysterious", "silent", "sad", "melancholy", "spooky", "dark", "dead", "hollow"]
+    elf_keywords = ["elf", "elven", "nature", "pointy ears", "ears", "forest", "ranger", "bow", "arrow", "woodland", "archery", "druid"]
+    mage_keywords = ["mage", "wizard", "witch", "warlock", "sorcerer", "sorceress", "magic", "spell", "staff", "cleric", "priest", "monk", "healer", "prophet", "runes", "spellcaster"]
+    knight_keywords = ["knight", "warrior", "paladin", "fighter", "armor", "helmet", "shield", "sword", "soldier", "hero", "blade", "guard", "defense", "champion", "samurai"]
+    rogue_keywords = ["rogue", "thief", "assassin", "shadow", "stealth", "ninja", "dagger", "cloak", "hood", "spy", "cunning", "quiet", "silent", "ghost", "phantom", "specter"]
+    coder_keywords = ["coder", "programmer", "hacker", "developer", "software", "tech", "computer", "laptop", "code", "ai", "geek", "gamer", "terminal", "data", "robot", "cyborg", "android", "synth"]
+    doctor_keywords = ["doctor", "scientist", "nurse", "medic", "flask", "lab", "researcher", "chemist", "biology", "surgeon", "clinic", "hospital", "professor"]
+    chef_keywords = ["chef", "baker", "cook", "food", "restaurant", "kitchen", "pan", "spatula", "cake", "pastry", "recipe", "baking"]
+    artist_keywords = ["artist", "painter", "designer", "sculptor", "brush", "palette", "canvas", "illustrator", "drawing", "artistic", "draw", "creative"]
+    fairy_keywords = ["fairy", "pixie", "sprite", "fay", "wings", "luminous", "sparkle", "glitter", "flutter"]
+    demon_keywords = ["demon", "demonic", "devil", "devilish", "horn", "horns", "imp", "succubus", "incubus", "underworld", "hell"]
+    athlete_keywords = ["athlete", "fitness", "gym", "workout", "runner", "exercise", "strong", "fit", "muscle", "muscular", "active", "sport", "sports", "athletic", "lift", "lifting"]
+    cat_keywords = ["cat", "neko", "kitsune", "feline", "whiskers", "tail", "beast", "panther", "tiger", "lion", "leopard", "cheetah", "catgirl", "catboy", "nyan"]
     
-    for kw in slime_keywords:
-        if kw in text: scores["slime"] += 1
-    for kw in robot_keywords:
-        if kw in text: scores["robot"] += 1.2
-    for kw in angel_keywords:
-        if kw in text: scores["angel"] += 1
+    for kw in elf_keywords:
+        if kw in text: scores["elf"] += 1
+    for kw in mage_keywords:
+        if kw in text: scores["mage"] += 1
+    for kw in knight_keywords:
+        if kw in text: scores["knight"] += 1
+    for kw in rogue_keywords:
+        if kw in text: scores["rogue"] += 1
+    for kw in coder_keywords:
+        if kw in text: scores["coder"] += 1
+    for kw in doctor_keywords:
+        if kw in text: scores["doctor"] += 1
+    for kw in chef_keywords:
+        if kw in text: scores["chef"] += 1
+    for kw in artist_keywords:
+        if kw in text: scores["artist"] += 1
     for kw in fairy_keywords:
         if kw in text: scores["fairy"] += 1
-    for kw in dragon_keywords:
-        if kw in text: scores["dragon"] += 1
-    for kw in beast_keywords:
-        if kw in text: scores["beast"] += 1
-    for kw in ghost_keywords:
-        if kw in text: scores["ghost"] += 1
+    for kw in demon_keywords:
+        if kw in text: scores["demon"] += 1.2
+    for kw in athlete_keywords:
+        if kw in text: scores["athlete"] += 1
+    for kw in cat_keywords:
+        if kw in text: scores["cat"] += 1
         
     max_score = max(scores.values())
     if max_score > 0:
@@ -2420,6 +3633,92 @@ def clean_and_normalize_profile(name, description, personality, text):
     cleaned_text = "\n".join(final_lines).strip()
         
     return cleaned_text
+
+def extract_appearance_fields(description_text):
+    desc_fields = {
+        "voice": "casual",
+        "hair style": "",
+        "hair color": "",
+        "ethnicity": "",
+        "breasts": "",
+        "butt": "",
+        "eyes": "",
+        "skin": "",
+        "body": ""
+    }
+    if not description_text:
+        return desc_fields
+        
+    desc_lower = description_text.lower()
+    
+    # Hair style
+    for style in ["long", "short", "medium", "curly", "straight", "wavy", "bob", "pixie", "ponytail", "pigtails", "braids"]:
+        if style in desc_lower:
+            desc_fields["hair style"] = style
+            break
+            
+    # Hair color
+    for color in ["black", "blonde", "brown", "white", "silver", "red", "blue", "green", "purple", "pink", "grey", "gray", "auburn"]:
+        if f"{color} hair" in desc_lower or (color in desc_lower and "hair" in desc_lower):
+            desc_fields["hair color"] = color
+            break
+            
+    # Eye color
+    for color in ["blue", "green", "brown", "hazel", "amber", "grey", "gray", "purple", "red", "black", "violet"]:
+        if f"{color} eyes" in desc_lower or (color in desc_lower and "eyes" in desc_lower):
+            desc_fields["eyes"] = color
+            break
+            
+    # Skin
+    for skin in ["pale", "fair", "tanned", "tan", "dark", "olive", "brown", "white", "black", "glowing"]:
+        if f"{skin} skin" in desc_lower or f"{skin} complexion" in desc_lower:
+            desc_fields["skin"] = skin
+            break
+            
+    # Body
+    for body in ["slim", "slender", "petite", "athletic", "muscular", "curvy", "plump", "chubby", "average", "tall", "short"]:
+        if body in desc_lower:
+            desc_fields["body"] = body
+            break
+            
+    return desc_fields
+
+def parse_markdown_to_json_layout(program_id, name, md_text, first_message="", raw_desc="", appearance_tags=""):
+    sections = {}
+    current_section = None
+    lines = md_text.split('\n')
+    
+    for line in lines:
+        if line.startswith('## '):
+            current_section = line[3:].strip().lower()
+            sections[current_section] = []
+        elif current_section:
+            sections[current_section].append(line)
+            
+    desc = "\n".join(sections.get("description", [])).strip()
+    scenario = "\n".join(sections.get("scenario", [])).strip()
+    pers = "\n".join(sections.get("personality", [])).strip()
+    
+    desc_fields = extract_appearance_fields(raw_desc or desc)
+    
+    profile = {
+        "program_id": program_id,
+        "name": name,
+        "operation": {
+            "description": desc or f"{name} is a new companion.",
+            "response_directive": "Speak naturally (use contractions like I'm, That's) and directly. Listen and respond warmly. Keep responses concise.",
+            "ontology": "",
+            "example_message": first_message or "",
+            "personality": pers or "Friendly & Supportive",
+            "scenario": scenario or "A comfortable room for chatting."
+        },
+        "description": desc_fields,
+        "image details": {
+            "image details": appearance_tags or (desc or "realistic, photorealistic, 8k"),
+            "negative details": "blurry, low quality, distorted, extra limbs, bad anatomy"
+        }
+    }
+    return profile
 
 @app.route('/api/programs/import/tavern', methods=['POST'])
 @requires_auth
@@ -2606,7 +3905,7 @@ def import_tavern_program():
                 "sad": f"{name} is now a highly empathetic, introspective, and gentle companion offering deep emotional support."
             }
             
-        with open(os.path.join(program_path, 'inversion_directives.json'), 'w', encoding='utf-8') as f:
+        with open(os.path.join(program_path, 'inversion.json'), 'w', encoding='utf-8') as f:
             json.dump(inversion_data, f, indent=2)
             
         # Clean any inversion headers from markdown text
@@ -2615,70 +3914,58 @@ def import_tavern_program():
         instructions_md = instructions_md.strip()
 
         instructions_md = clean_and_normalize_profile(name, description, personality, instructions_md)
-        instruction_file_path = os.path.join(program_path, f"{name.upper()}.md")
-        with open(instruction_file_path, "w", encoding="utf-8") as f:
-            f.write(instructions_md)
             
         # Delete temp file without saving any PNG artwork in the program's folder
         os.remove(temp_path)
         
-        # Setup portraits folder and default workflow
+        # Setup portraits folder
         portraits_dir = os.path.join(program_path, 'portraits')
         os.makedirs(portraits_dir, exist_ok=True)
         
-        default_workflow_path = os.path.join(base_dir, 'templates', 'default_ImageWorkflow.json')
-        target_workflow_path = os.path.join(portraits_dir, 'ImageWorkflow.json')
-        if os.path.exists(default_workflow_path):
-            with open(default_workflow_path, "r", encoding="utf-8") as tf:
-                workflow = json.load(tf)
+        appearance_tags = ""
+        # Extract visual tag keywords to build a clean comma-separated tag list instead of sentences/prose
+        tags = [f"character named {name}", "1girl" if "she" in description.lower() or "her" in description.lower() or "girl" in description.lower() else "1man"]
+        
+        # Scan for common visual colors or features
+        for color in ["black", "blonde", "brown", "white", "silver", "red", "blue", "green", "purple", "pink"]:
+            if f"{color} hair" in description.lower():
+                tags.append(f"{color} hair")
+            if f"{color} eyes" in description.lower():
+                tags.append(f"{color} eyes")
                 
-            if "6" in workflow and "inputs" in workflow["6"]:
-                # Extract visual tag keywords to build a clean comma-separated tag list instead of sentences/prose
-                tags = [f"character named {name}", "1girl" if "she" in description.lower() or "her" in description.lower() or "girl" in description.lower() else "1man"]
+        for feature in ["glasses", "sunglasses", "freckles", "tattoos", "horns", "wings", "tail", "pointy ears"]:
+            if feature in description.lower():
+                tags.append(feature)
                 
-                # Scan for common visual colors or features
-                for color in ["black", "blonde", "brown", "white", "silver", "red", "blue", "green", "purple", "pink"]:
-                    if f"{color} hair" in description.lower():
-                        tags.append(f"{color} hair")
-                    if f"{color} eyes" in description.lower():
-                        tags.append(f"{color} eyes")
-                        
-                for feature in ["glasses", "sunglasses", "freckles", "tattoos", "horns", "wings", "tail", "pointy ears"]:
-                    if feature in description.lower():
-                        tags.append(feature)
-                        
-                for attire in ["shorts", "shirt", "dress", "skirt", "pants", "suit", "jacket", "hoodie", "bikini", "lingerie"]:
-                    if attire in description.lower():
-                        tags.append(attire)
-                        
-                # Fallback to a truncated visual slice if no specific tags were extracted
-                if len(tags) <= 2:
-                    clean_desc = re.sub(r'[^\w\s,]', '', description) # strip sentences punctuation
-                    tags.extend([t.strip() for t in clean_desc.split()[:12] if len(t.strip()) > 3])
-                    
-                appearance_tags = ", ".join(tags)
-                workflow["6"]["inputs"]["text"] = f"%prompt%, {appearance_tags}, realistic, photorealistic, 8k, volumetric lighting, detailed background"
+        for attire in ["shorts", "shirt", "dress", "skirt", "pants", "suit", "jacket", "hoodie", "bikini", "lingerie"]:
+            if attire in description.lower():
+                tags.append(attire)
                 
-            with open(target_workflow_path, "w", encoding="utf-8") as tf:
-                json.dump(workflow, tf, indent=2)
-        else:
-            arthur_workflow = os.path.join(base_dir, 'core', 'programs', 'arthur', 'portraits', 'ImageWorkflow.json')
-            if os.path.exists(arthur_workflow):
-                shutil.copy(arthur_workflow, target_workflow_path)
+        # Fallback to a truncated visual slice if no specific tags were extracted
+        if len(tags) <= 2:
+            clean_desc = re.sub(r'[^\w\s,]', '', description) # strip sentences punctuation
+            tags.extend([t.strip() for t in clean_desc.split()[:12] if len(t.strip()) > 3])
+            
+        appearance_tags = ", ".join(tags)
                 
         colors_data = determine_character_colors(name, description, personality)
         primary_color = colors_data["primary_accent"]
         body_color = colors_data["body_color"]
-        wing_color = colors_data["wing_color"]
+        accent_color = colors_data["accent_color"]
         eye_color = colors_data["eye_color"]
         
+        custom_color = get_custom_program_color(program_id)
+        if custom_color:
+            primary_color = custom_color
+            
         theme_data = generate_character_theme(primary_color)
         with open(os.path.join(program_path, 'theme.json'), "w", encoding="utf-8") as tf:
             json.dump(theme_data, tf, indent=2)
             
-        svg_content = get_animated_svg_template(body_color, wing_color, eye_color, name=name, description=description, personality=personality)
-        with open(os.path.join(program_path, 'profile.svg'), "w", encoding="utf-8") as sf:
-            sf.write(svg_content)
+        # Generate and save the simplified json profile
+        json_profile = parse_markdown_to_json_layout(program_id, name, instructions_md, first_mes, description, appearance_tags)
+        with open(os.path.join(program_path, f"{program_id}.json"), "w", encoding="utf-8") as f:
+            json.dump(json_profile, f, indent=2, ensure_ascii=False)
             
         return jsonify({'status': 'success', 'program_id': program_id, 'name': name})
     except Exception as e:
@@ -2705,7 +3992,7 @@ def import_describe_program():
         # Initialize default colors
         primary_color = "#38bdf8"
         body_color = "#38bdf8"
-        wing_color = "#94a3b8"
+        accent_color = "#94a3b8"
         eye_color = "#38bdf8"
         
         identity_prompt = (
@@ -2721,7 +4008,7 @@ def import_describe_program():
             "Include custom color codes and personality inversion behaviors at the very end formatted as:\n"
             "PRIMARY_ACCENT: #XXXXXX\n"
             "BODY_COLOR: #XXXXXX\n"
-            "WING_COLOR: #XXXXXX\n"
+            "ACCENT_COLOR: #XXXXXX\n"
             "EYE_COLOR: #XXXXXX\n"
             "INVERSION_INTIMATE: [affectionate behavior]\n"
             "INVERSION_EXCITED: [excited/playful behavior]\n"
@@ -2773,12 +4060,12 @@ def import_describe_program():
         # Parse colors, inversion directives and clean generated_md
         accent_match = re.search(r'PRIMARY_ACCENT:\s*(#[0-9a-fA-F]{6})', response_text)
         body_match = re.search(r'BODY_COLOR:\s*(#[0-9a-fA-F]{6})', response_text)
-        wing_match = re.search(r'WING_COLOR:\s*(#[0-9a-fA-F]{6})', response_text)
+        accent_color_match = re.search(r'ACCENT_COLOR:\s*(#[0-9a-fA-F]{6})', response_text)
         eye_match = re.search(r'EYE_COLOR:\s*(#[0-9a-fA-F]{6})', response_text)
         
         if accent_match: primary_color = accent_match.group(1)
         if body_match: body_color = body_match.group(1)
-        if wing_match: wing_color = wing_match.group(1)
+        if accent_color_match: accent_color = accent_color_match.group(1)
         if eye_match: eye_color = eye_match.group(1)
         
         intimate_match = re.search(r'INVERSION_INTIMATE:\s*(.*)', response_text)
@@ -2802,7 +4089,7 @@ def import_describe_program():
             
         generated_md = response_text
         for pattern in [
-            r'PRIMARY_ACCENT:\s*#[0-9a-fA-F]{6}', r'BODY_COLOR:\s*#[0-9a-fA-F]{6}', r'WING_COLOR:\s*#[0-9a-fA-F]{6}', r'EYE_COLOR:\s*#[0-9a-fA-F]{6}', r'COLOR:\s*#[0-9a-fA-F]{6}',
+            r'PRIMARY_ACCENT:\s*#[0-9a-fA-F]{6}', r'BODY_COLOR:\s*#[0-9a-fA-F]{6}', r'ACCENT_COLOR:\s*#[0-9a-fA-F]{6}', r'EYE_COLOR:\s*#[0-9a-fA-F]{6}', r'COLOR:\s*#[0-9a-fA-F]{6}',
             r'INVERSION_INTIMATE:.*', r'INVERSION_EXCITED:.*', r'INVERSION_INTENSE:.*', r'INVERSION_SAD:.*'
         ]:
             generated_md = re.sub(pattern, '', generated_md)
@@ -2819,22 +4106,23 @@ def import_describe_program():
         os.makedirs(program_path, exist_ok=True)
         
         # Write inversion directives
-        with open(os.path.join(program_path, 'inversion_directives.json'), "w", encoding="utf-8") as f:
+        with open(os.path.join(program_path, 'inversion.json'), "w", encoding="utf-8") as f:
             json.dump(inversion_data, f, indent=2)
         
         generated_md = clean_and_normalize_profile(name, description, "", generated_md)
-        instruction_file_path = os.path.join(program_path, f"{name.upper()}.md")
-        with open(instruction_file_path, "w", encoding="utf-8") as f:
-            f.write(generated_md)
             
         # Fallback to heuristics if colors were not successfully set by LLM
-        if primary_color == "#38bdf8" and body_color == "#38bdf8" and wing_color == "#94a3b8" and eye_color == "#38bdf8":
+        if primary_color == "#38bdf8" and body_color == "#38bdf8" and accent_color == "#94a3b8" and eye_color == "#38bdf8":
             colors_data = determine_character_colors(name, description, "")
             primary_color = colors_data["primary_accent"]
             body_color = colors_data["body_color"]
-            wing_color = colors_data["wing_color"]
+            accent_color = colors_data["accent_color"]
             eye_color = colors_data["eye_color"]
 
+        custom_color = get_custom_program_color(program_id)
+        if custom_color:
+            primary_color = custom_color
+            
         theme_data = generate_character_theme(primary_color)
         with open(os.path.join(program_path, 'theme.json'), "w", encoding="utf-8") as tf:
             json.dump(theme_data, tf, indent=2)
@@ -2842,46 +4130,36 @@ def import_describe_program():
         portraits_dir = os.path.join(program_path, 'portraits')
         os.makedirs(portraits_dir, exist_ok=True)
         
-        default_workflow_path = os.path.join(base_dir, 'templates', 'default_ImageWorkflow.json')
-        target_workflow_path = os.path.join(portraits_dir, 'ImageWorkflow.json')
-        if os.path.exists(default_workflow_path):
-            with open(default_workflow_path, "r", encoding="utf-8") as tf:
-                workflow = json.load(tf)
-                # Extract visual tag keywords to build a clean comma-separated tag list instead of sentences/prose
-                tags = [f"character named {name}", "1girl" if "she" in description.lower() or "her" in description.lower() or "girl" in description.lower() else "1man"]
+        appearance_tags = ""
+        # Extract visual tag keywords to build a clean comma-separated tag list instead of sentences/prose
+        tags = [f"character named {name}", "1girl" if "she" in description.lower() or "her" in description.lower() or "girl" in description.lower() else "1man"]
+        
+        # Scan for common visual colors or features
+        for color in ["black", "blonde", "brown", "white", "silver", "red", "blue", "green", "purple", "pink"]:
+            if f"{color} hair" in description.lower():
+                tags.append(f"{color} hair")
+            if f"{color} eyes" in description.lower():
+                tags.append(f"{color} eyes")
                 
-                # Scan for common visual colors or features
-                for color in ["black", "blonde", "brown", "white", "silver", "red", "blue", "green", "purple", "pink"]:
-                    if f"{color} hair" in description.lower():
-                        tags.append(f"{color} hair")
-                    if f"{color} eyes" in description.lower():
-                        tags.append(f"{color} eyes")
-                        
-                for feature in ["glasses", "sunglasses", "freckles", "tattoos", "horns", "wings", "tail", "pointy ears"]:
-                    if feature in description.lower():
-                        tags.append(feature)
-                        
-                for attire in ["shorts", "shirt", "dress", "skirt", "pants", "suit", "jacket", "hoodie", "bikini", "lingerie"]:
-                    if attire in description.lower():
-                        tags.append(attire)
-                        
-                # Fallback to a truncated visual slice if no specific tags were extracted
-                if len(tags) <= 2:
-                    clean_desc = re.sub(r'[^\w\s,]', '', description) # strip sentences punctuation
-                    tags.extend([t.strip() for t in clean_desc.split()[:12] if len(t.strip()) > 3])
-                    
-                appearance_tags = ", ".join(tags)
-                workflow["6"]["inputs"]["text"] = f"%prompt%, {appearance_tags}, realistic, photorealistic, 8k, volumetric lighting, detailed background"
-            with open(target_workflow_path, "w", encoding="utf-8") as tf:
-                json.dump(workflow, tf, indent=2)
-        else:
-            arthur_workflow = os.path.join(base_dir, 'core', 'programs', 'arthur', 'portraits', 'ImageWorkflow.json')
-            if os.path.exists(arthur_workflow):
-                shutil.copy(arthur_workflow, target_workflow_path)
+        for feature in ["glasses", "sunglasses", "freckles", "tattoos", "horns", "wings", "tail", "pointy ears"]:
+            if feature in description.lower():
+                tags.append(feature)
                 
-        svg_content = get_animated_svg_template(body_color, wing_color, eye_color, name=name, description=description, personality="")
-        with open(os.path.join(program_path, 'profile.svg'), "w", encoding="utf-8") as sf:
-            sf.write(svg_content)
+        for attire in ["shorts", "shirt", "dress", "skirt", "pants", "suit", "jacket", "hoodie", "bikini", "lingerie"]:
+            if attire in description.lower():
+                tags.append(attire)
+                
+        # Fallback to a truncated visual slice if no specific tags were extracted
+        if len(tags) <= 2:
+            clean_desc = re.sub(r'[^\w\s,]', '', description) # strip sentences punctuation
+            tags.extend([t.strip() for t in clean_desc.split()[:12] if len(t.strip()) > 3])
+            
+        appearance_tags = ", ".join(tags)
+                
+        # Generate and save the simplified json profile
+        json_profile = parse_markdown_to_json_layout(program_id, name, generated_md, "", description, appearance_tags)
+        with open(os.path.join(program_path, f"{program_id}.json"), "w", encoding="utf-8") as f:
+            json.dump(json_profile, f, indent=2, ensure_ascii=False)
             
         return jsonify({'status': 'success', 'program_id': program_id, 'name': name})
     except Exception as e:
@@ -3035,6 +4313,12 @@ def comfy_resolve_workflow():
             image_path = os.path.normpath(os.path.join(
                 PROGRAMS_DIR, active_program, "portraits", "ImageWorkflow.json"
             ))
+            if not os.path.exists(image_path):
+                base_dir = os.path.dirname(os.path.abspath(__file__))
+                image_path = os.path.normpath(os.path.join(
+                    base_dir, "core", "skills", "portrait_generation", "ImageWorkflow.json"
+                ))
+                
             if os.path.exists(image_path):
                 with open(image_path, "r", encoding="utf-8") as f:
                     try:
@@ -3138,10 +4422,29 @@ def comfy_checkpoint_download_status():
 if __name__ == '__main__':
     host = os.getenv('HOST', '0.0.0.0')
     port = int(os.getenv('PORT', '5000'))
+    
+    ssl_context = None
+    use_https = os.getenv('USE_HTTPS', 'false').lower() == 'true'
+    ssl_cert = os.getenv('SSL_CERT')
+    ssl_key = os.getenv('SSL_KEY')
+    
+    if ssl_cert and ssl_key and os.path.exists(ssl_cert) and os.path.exists(ssl_key):
+        ssl_context = (ssl_cert, ssl_key)
+        print(f"[*] Starting server with SSL certificate: {ssl_cert}")
+    elif use_https:
+        try:
+            import OpenSSL
+            ssl_context = 'adhoc'
+            print("[*] Starting server with ad-hoc SSL certificate")
+        except ImportError:
+            print("[!] pyOpenSSL is not installed. To run with ad-hoc SSL, please run: pip install pyopenssl")
+            print("[!] Falling back to HTTP...")
+            
     app.run(
         host=host,
         port=port,
         debug=True,
+        ssl_context=ssl_context,
         use_reloader=True,
         reloader_type='stat',  # Use stable stat reloader to avoid false-alarm watchdog access events on Windows
         exclude_patterns=[

@@ -3,8 +3,9 @@
 __pycache__/
 *.pyc
 
-# Local Config (contains credentials)
+# Local Config (contains credentials and settings)
 .env
+variables/project_settings.json
 
 # Temporary files
 backups/
@@ -20,20 +21,23 @@ variables/*
 variables/user_profiles/*
 !variables/user_profiles/builder.md
 
-# Ignore all companion profiles under core/programs except the default Arthur program template
+# Ignore all companion profiles under core/programs except the default Sebile program template
 core/programs/*
-!core/programs/arthur/
 !core/programs/sebile/
 !core/programs/sparkle.mp3
 
-# Ignore user-generated dynamic program sessions, databases, and custom generated portraits
+# Ignore user-generated dynamic program sessions, databases, custom generated portraits, and memories
 core/programs/*/sessions/
 core/programs/*/portraits/
 core/programs/*/media/
 core/programs/*/uploads/
 core/programs/*/databank.db
+core/programs/*/databank.json
+core/programs/*/journals.json
+core/programs/*/memories.json
 core/embeddings.pkl
 temp_uploads/
+**/ImageWorkflow.json
 
 # TTS Speech Model weights and synthesized audio cache
 core/skills/speech_generation/speech_model/*.onnx
@@ -42,3 +46,4 @@ core/skills/speech_generation/speech_cache/
 
 # Runtime logs
 *.log
+comfy_server.log

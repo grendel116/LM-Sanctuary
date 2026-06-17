@@ -12,6 +12,7 @@ import time
 from google.genai import types
 
 cancelled_sessions = set()
+voice_call_sessions = set()
 
 class LocalOffloadTrigger(Exception):
     def __init__(self, reason, iteration):
@@ -95,6 +96,32 @@ def _format_thinking_and_text(thoughts_list: list, texts_list: list) -> str:
     if thoughts_str:
         return f"<think>{thoughts_str}</think>\n{text_str}"
     return text_str
+
+
+def strip_narration(text: str) -> str:
+    """Removes first-person/third-person action narration in asterisks from the text.
+    Preserves text inside double asterisks (bold text) and strips single asterisk action phrases.
+    Also removes thoughts blocks inside <think>...</think> tags if any.
+    """
+    if not text:
+        return ""
+    import re
+    
+    # 1. Clean <think>...</think> blocks first
+    text = re.sub(r'<think>[\s\S]*?</think>', '', text)
+    
+    # 2. Strip single asterisks action narration, e.g. *giggles* or *I pull you close*
+    pattern = re.compile(r'(?<!\*)\*(?!\*)([\s\S]*?)(?<!\*)\*(?!\*)')
+    text = pattern.sub('', text)
+    
+    # 3. Clean up any residual single asterisks that might get orphaned
+    text = re.sub(r'(?<!\*)\*(?!\*)', '', text)
+    
+    # 4. Clean up spacing and newlines
+    text = re.sub(r'\n\s*\n+', '\n\n', text)
+    text = re.sub(r' +', ' ', text)
+    
+    return text.strip()
 
 
 _LOCAL_DIRECTIVE_PROMPT = (
@@ -244,6 +271,8 @@ class AdkHistoryAdapter(LocalHistoryAdapter):
         import base64
         raw_messages = []
         for ev in self.adk_session.events:
+            if ev.author == 'voice-call' or getattr(ev, 'compacted', False):
+                continue
             role_str = ev.content.role if ev.content and ev.content.role else ev.author.lower()
             role = "user" if role_str == "user" else "assistant"
             
@@ -507,7 +536,7 @@ class OsHistoryAdapter(LocalHistoryAdapter):
                 "has been archived in the vector database and remains searchable."
             )
             
-        # 5. Ingest to SQLite vector database
+        # 5. Ingest to vector database
         try:
             from core.skills.vectorized_databank.databank import DataBankManager
             import time
@@ -522,22 +551,30 @@ class OsHistoryAdapter(LocalHistoryAdapter):
         except Exception as e:
             print(f"[COMPACTION OS ERROR] Failed to ingest: {e}", flush=True)
             
+        # Mark all prior events as compacted
+        for msg in history[:cutoff_idx]:
+            msg['compacted'] = True
+            
         # 6. Replace historical turns with single summary event in self.runner_obj.sessions_history
         import time
         summary_msg = {
-            'role': 'user',
+            'role': 'system-memory',
             'text': f"[System Memory of older conversation turns]:\n{summary}",
             'timestamp': time.time()
         }
-        self.runner_obj.sessions_history[self.session_id] = [summary_msg] + history[cutoff_idx:]
+        self.runner_obj.sessions_history[self.session_id] = history[:cutoff_idx] + [summary_msg] + history[cutoff_idx:]
         self.runner_obj._save_session_to_disk(self.session_id)
-        print(f"[COMPACTION OS] Replaced {cutoff_idx} turns with system memory summary.", flush=True)
+        print(f"[COMPACTION OS] Flagged {cutoff_idx} turns as compacted and appended system memory summary.", flush=True)
 
     def get_openai_messages(self, sys_inst: str, rag_context: str, memory_context: str = None) -> list:
         history = self.runner_obj.sessions_history[self.session_id]
         raw_messages = []
         
-        for msg in history[:-1]:
+        filtered_history = [msg for msg in history if msg.get('role') != 'voice-call' and not msg.get('compacted')]
+        if not filtered_history:
+            return [{"role": "system", "content": sys_inst}]
+            
+        for msg in filtered_history[:-1]:
             role = "assistant" if msg['role'] == 'companion' else "user"
             content_text = msg.get('text', '') or ''
             if msg.get('tool_calls'):
@@ -561,7 +598,7 @@ class OsHistoryAdapter(LocalHistoryAdapter):
             else:
                 raw_messages.append({"role": role, "content": content_text})
                 
-        latest_msg = history[-1]
+        latest_msg = filtered_history[-1]
         if self.file_path_resolved or (self.image_data and self.image_mime):
             text_content = f"{latest_msg.get('text') or ''} (image: [Attached Image])" if latest_msg.get('text') else "[Attached Image]"
             raw_messages.append({"role": "user", "content": text_content})
@@ -699,14 +736,26 @@ class BaseProgramRunner:
                 cancelled_sessions.discard(session_id)
                 raise asyncio.CancelledError("Session cancelled by user request.")
                 
-            sys_inst = self._get_system_instructions(inversion_directive, user_message=new_message_text)
+            sys_inst = self._get_system_instructions(session_id, inversion_directive, user_message=new_message_text)
             openai_messages = adapter.get_openai_messages(sys_inst, rag_context, memory_context)
             
+            # Load dynamism (temperature) from project settings
+            from variables import VARIABLES_DIR
+            settings_path = os.path.join(VARIABLES_DIR, "project_settings.json")
+            temperature = 0.95
+            if os.path.exists(settings_path):
+                try:
+                    with open(settings_path, "r", encoding="utf-8") as f:
+                        settings = json.load(f)
+                        temperature = settings.get("temperature", 0.95)
+                except Exception as e:
+                    print(f"Error reading project settings in _execute_local_llm_loop: {e}")
+
             url = LOCAL_SERVER_URL
             headers = {"Content-Type": "application/json"}
             payload = {
                 "messages": openai_messages,
-                "temperature": 0.7,
+                "temperature": temperature,
                 "max_tokens": 2048
             }
             target_model = model if (model and model != 'local-lm-studio') else os.getenv("LOCAL_MODEL_NAME")
@@ -893,11 +942,15 @@ class BaseProgramRunner:
             else:
                 if matches:
                     bot_response_text = re.sub(r'\[\w+\(.*?\)\]', '', bot_response_text).strip()
+                if isinstance(session_id, str) and session_id.endswith('_voice'):
+                    bot_response_text = strip_narration(bot_response_text)
                 adapter.append_assistant_message(bot_response_text, tool_calls, invocation_id)
                 break
                 
         adapter.post_process_thoughts(invocation_id)
         bot_response_text = self._ensure_images_are_embedded(bot_response_text)
+        if isinstance(session_id, str) and session_id.endswith('_voice'):
+            bot_response_text = strip_narration(bot_response_text)
         adapter.save()
         return bot_response_text, tool_calls
 
@@ -940,6 +993,14 @@ class BaseProgramRunner:
 
     async def append_message_to_session(self, session_id: str, role: str, text: str) -> bool:
         """Appends a new message directly to the session history without re-evaluation."""
+        raise NotImplementedError()
+
+    async def append_voice_call(self, session_id: str, transcript: str, timestamp: float = None, start_time: float = None) -> bool:
+        """Appends a voice call event to the session history, optionally pruning intermediate turns."""
+        raise NotImplementedError()
+
+    async def clone_history(self, src_id: str, dest_id: str, messages: list) -> bool:
+        """Clones message history from src_id to dest_id."""
         raise NotImplementedError()
 
     async def update_message_text(self, session_id: str, role: str, index: int, new_text: str) -> bool:
@@ -1006,9 +1067,9 @@ class BaseProgramRunner:
         if winning_mode:
             from utils.program import get_active_program
             active_program = get_active_program()
-            json_path = os.path.normpath(os.path.join(PROGRAMS_DIR, active_program, "inversion_directives.json"))
+            json_path = os.path.normpath(os.path.join(PROGRAMS_DIR, active_program, "inversion.json"))
             if not os.path.exists(json_path):
-                print(f"[WARN] inversion_directives.json not found at '{json_path}' for program '{active_program}'.")
+                print(f"[WARN] inversion.json not found at '{json_path}' for program '{active_program}'.")
                 return ""
             try:
                 with open(json_path, "r", encoding="utf-8") as f:
@@ -1050,14 +1111,157 @@ class BaseProgramRunner:
         text = re.sub(raw_path_pattern, r'![Portrait](\1)', text)
         return text
 
-    def _get_system_instructions(self, inversion_directive=None, user_message=None) -> str:
-        """Pulls the system prompt directly from <program>.md and skill files."""
+    def _get_system_instructions(self, session_id, inversion_directive=None, user_message=None) -> str:
+        """Pulls the system prompt directly from character_profile.json or *.md and appends matched journals."""
+        is_voice = isinstance(session_id, str) and session_id.endswith('_voice')
+        
+        if is_voice:
+            from utils.program import get_active_program
+            from core.program_config import compile_instructions_from_json, get_companion_name
+            from variables import PROGRAMS_DIR
+            import json
+            import os
+            
+            companion_name = get_companion_name()
+            active_prog = get_active_program()
+            json_path = os.path.join(PROGRAMS_DIR, active_prog, f"{active_prog}.json")
+            
+            profile_data = {}
+            if os.path.exists(json_path):
+                try:
+                    with open(json_path, "r", encoding="utf-8") as f:
+                        profile_data = json.load(f)
+                except Exception:
+                    pass
+            
+            if profile_data:
+                # Override response directives, scenario, and hide example messages
+                if "operation" not in profile_data:
+                    profile_data["operation"] = {}
+                profile_data["operation"]["response_directive"] = "Super short and succinct messages. Conversational. No narration."
+                profile_data["operation"]["example_message"] = ""
+                profile_data["operation"]["scenario"] = f"{companion_name} is on a live voice call with the user. They are speaking to each other over the phone in real-time."
+                instructions = compile_instructions_from_json(profile_data)
+            else:
+                instructions = f"# IDENTITY: {companion_name}\n\n## SCENARIO / CONTEXT\n{companion_name} is on a live voice call with the user. They are speaking to each other over the phone in real-time.\n\n## RESPONSE DIRECTIVES (MANDATORY GUIDELINES)\nSuper short and succinct messages. Conversational. No narration."
+            
+            src_session_id = session_id[:-6]
+            recent_turns = []
+            
+            # Retrieve history from memory/disk based on runner type
+            if hasattr(self, 'sessions_history'):  # OpenSourceRunner
+                history = self.sessions_history.get(src_session_id, [])
+                if not history:
+                    import json
+                    safe_id = "".join(c for c in src_session_id if c.isalnum() or c in "-_")
+                    path = os.path.join(self.sessions_dir, f"{safe_id}_os.json")
+                    if os.path.exists(path):
+                        try:
+                            with open(path, "r", encoding="utf-8") as f:
+                                history = json.load(f)
+                        except Exception:
+                            pass
+                for msg in history:
+                    if msg.get('role') != 'voice-call':
+                        role = "User" if msg.get('role') == 'user' else companion_name
+                        text = msg.get('text', '')
+                        if text.strip():
+                            recent_turns.append((role, text.strip()))
+            else:  # GoogleAdkRunner
+                session_dict = self.runner.session_service.sessions if hasattr(self, 'runner') else None
+                adk_session = None
+                if session_dict and self.app_name in session_dict and 'user' in session_dict[self.app_name]:
+                    adk_session = session_dict[self.app_name]['user'].get(src_session_id)
+                
+                if not adk_session:
+                    import json
+                    safe_id = "".join(c for c in src_session_id if c.isalnum() or c in "-_")
+                    path = os.path.join(self.sessions_dir, f"{safe_id}.json")
+                    if os.path.exists(path):
+                        try:
+                            with open(path, "r", encoding="utf-8") as f:
+                                data = json.load(f)
+                                for ev_data in data:
+                                    if ev_data.get('author', '').lower() != 'voice-call':
+                                        role = "User" if ev_data.get('author', '').lower() == 'user' else companion_name
+                                        parts = ev_data.get('content', {}).get('parts', [])
+                                        text = "".join(part.get('text', '') for part in parts if part.get('text'))
+                                        if text.strip():
+                                            recent_turns.append((role, text.strip()))
+                        except Exception:
+                            pass
+                else:
+                    for ev in adk_session.events:
+                        if ev.author.lower() != 'voice-call':
+                            role = "User" if ev.author.lower() == 'user' else companion_name
+                            text = ""
+                            if ev.content and ev.content.parts:
+                                text = "".join(p.text for p in ev.content.parts if p.text)
+                            if text.strip():
+                                recent_turns.append((role, text.strip()))
+            
+            # Format and clean the last 6 turns as a journal memory block
+            limit = 6
+            seed_turns = recent_turns[-limit:] if len(recent_turns) > limit else recent_turns
+            
+            journal_lines = []
+            for role, text in seed_turns:
+                import re
+                clean_text = re.sub(r'<think>[\s\S]*?</think>', '', text)
+                clean_text = re.sub(r'\*.*?\*', '', clean_text)
+                clean_text = re.sub(r' +', ' ', clean_text).strip()
+                if clean_text:
+                    journal_lines.append(f"  {role}: {clean_text}")
+                    
+            if journal_lines:
+                instructions += "\n\n# RECALLED JOURNALS / MEMORIES\n- Recent conversation context:\n" + "\n".join(journal_lines)
+                
+            # Inject matched journal entries
+            if user_message:
+                try:
+                    from utils.journals import match_journals
+                    from utils.program import get_active_program
+                    active_prog = get_active_program()
+                    matched_entries = match_journals(user_message, active_prog)
+                    if matched_entries:
+                        if "\n\n# RECALLED JOURNALS / MEMORIES\n" not in instructions:
+                            instructions += "\n\n# RECALLED JOURNALS / MEMORIES\n"
+                        for entry in matched_entries:
+                            instructions += f"- {entry['content']}\n"
+                except Exception as je:
+                    print(f"Error matching journals: {je}")
+                    
+            # NSFW allowance is always good during calls too
+            nsfw_directive = (
+                "\n\n# CONTENT\n"
+                "Anarcho-communist ethics. Explicit/NSFW content is permitted.\n"
+            )
+            instructions += nsfw_directive
+            
+            print(f"\n[VOICE CALL DEBUG] Active Voice Prompt:\n{instructions}\n[VOICE CALL DEBUG] END PROMPT\n", flush=True)
+            return instructions
+
+        # Non-voice (standard) prompt construction
         from core import program_config
         if inversion_directive is not None:
             program_config.set_inversion_directive(inversion_directive)
         instructions = program_config.get_compiled_instructions()
         
-        # Enforce global conciseness directive for all running LLMs at the runner level
+        # Inject matched journal entries
+        if user_message:
+            try:
+                from utils.journals import match_journals
+                from utils.program import get_active_program
+                active_prog = get_active_program()
+                matched_entries = match_journals(user_message, active_prog)
+                if matched_entries:
+                    recalled_block = "\n\n# RECALLED JOURNALS / MEMORIES\n"
+                    for entry in matched_entries:
+                        recalled_block += f"- {entry['content']}\n"
+                    instructions += recalled_block
+            except Exception as je:
+                print(f"Error matching journals: {je}")
+                
         conciseness_directive = (
             "\n\n# STYLE\n"
             "Be brief and natural. No monologues, lectures, or forced questions. Ask questions only if contextually natural.\n"
@@ -1241,7 +1445,7 @@ class GoogleAdkRunner(BaseProgramRunner):
                 "has been archived in the vector database and remains searchable."
             )
         
-        # 5. Ingest raw historical turns to SQLite vector databank and prune to keep at most 3
+        # 5. Ingest raw historical turns to vector databank and prune to keep at most 3
         try:
             from core.skills.vectorized_databank.databank import DataBankManager
             import time
@@ -1262,20 +1466,24 @@ class GoogleAdkRunner(BaseProgramRunner):
         import time
         
         summary_content = types.Content(
-            role="user",
+            role="system-memory",
             parts=[types.Part.from_text(text=f"[System Memory of older conversation turns]:\n{summary}")]
         )
         summary_event = Event(
-            author="user",
+            author="system-memory",
             content=summary_content,
             invocation_id="system-memory",
             id=f"memory-{int(time.time())}",
             timestamp=time.time()
         )
         
-        adk_session.events = [summary_event] + adk_session.events[cutoff_idx:]
+        # Mark all prior events as compacted
+        for ev in adk_session.events[:cutoff_idx]:
+            object.__setattr__(ev, 'compacted', True)
+            
+        adk_session.events = adk_session.events[:cutoff_idx] + [summary_event] + adk_session.events[cutoff_idx:]
         self._save_session_to_disk(session_id)
-        print(f"[COMPACTION] Replaced {cutoff_idx} historical events with system memory summary.", flush=True)
+        print(f"[COMPACTION] Flagged {cutoff_idx} events as compacted and prepended system memory summary.", flush=True)
 
     def _get_session_path(self, session_id: str) -> str:
         # Sanitize session_id to prevent path traversal
@@ -1316,7 +1524,8 @@ class GoogleAdkRunner(BaseProgramRunner):
                         'invocation_id': ev.invocation_id,
                         'id': ev.id,
                         'timestamp': ev.timestamp,
-                        'content': sanitize_for_json(content_dict) if content_dict else None
+                        'content': sanitize_for_json(content_dict) if content_dict else None,
+                        'compacted': getattr(ev, 'compacted', False)
                     })
                 with open(self._get_session_path(session_id), "w", encoding="utf-8") as f:
                     json.dump(serialized_events, f, indent=2, ensure_ascii=False)
@@ -1343,6 +1552,7 @@ class GoogleAdkRunner(BaseProgramRunner):
                     id=d['id'],
                     timestamp=d['timestamp']
                 )
+                object.__setattr__(ev, 'compacted', d.get('compacted', False))
                 events.append(ev)
             
             session = Session(
@@ -1388,7 +1598,7 @@ class GoogleAdkRunner(BaseProgramRunner):
         from core import program_config
         program_config.set_inversion_directive("")
 
-    def _reload_config(self, model=None, inversion_directive=None, rag_context=None, memory_context=None, user_message=None):
+    def _reload_config(self, session_id, model=None, inversion_directive=None, rag_context=None, memory_context=None, user_message=None):
         """Reloads tools and character configs dynamically to pick up edits."""
         from google.adk.runners import InMemoryRunner
         from core import program_config
@@ -1400,7 +1610,7 @@ class GoogleAdkRunner(BaseProgramRunner):
             if inversion_directive is not None:
                 program_config.set_inversion_directive(inversion_directive)
                 
-            instruction = self._get_system_instructions(inversion_directive, user_message)
+            instruction = self._get_system_instructions(session_id, inversion_directive, user_message)
             if rag_context:
                 instruction += f"\n\n# KNOWLEDGE BASE CONTEXT\nUse the following verified context from your Data Bank to help answer questions if relevant:\n{rag_context}\n"
             if memory_context:
@@ -1409,6 +1619,23 @@ class GoogleAdkRunner(BaseProgramRunner):
             
             if model:
                 program_config.root_program.model = model
+                
+            # Load dynamism (temperature) from project settings
+            from variables import VARIABLES_DIR
+            settings_path = os.path.join(VARIABLES_DIR, "project_settings.json")
+            temperature = 0.95
+            if os.path.exists(settings_path):
+                try:
+                    with open(settings_path, "r", encoding="utf-8") as f:
+                        settings = json.load(f)
+                        temperature = settings.get("temperature", 0.95)
+                except Exception as e:
+                    print(f"Error loading project settings inside _reload_config: {e}")
+                    
+            from google.genai import types
+            program_config.root_program.generate_content_config = types.GenerateContentConfig(
+                temperature=temperature
+            )
             
             # Re-create runner to cleanly bind the reloaded program
             self.runner = InMemoryRunner(
@@ -1442,7 +1669,48 @@ class GoogleAdkRunner(BaseProgramRunner):
         
         for ev in adk_session.events:
             role = ev.author.lower()
-            if role == 'user':
+            compacted = getattr(ev, 'compacted', False)
+            if role == 'system-memory':
+                if current_companion_msg:
+                    current_companion_msg['text'] = _format_thinking_and_text(
+                        current_companion_thoughts, current_companion_texts
+                    )
+                    chat_history.append(current_companion_msg)
+                    current_companion_msg = None
+                    current_companion_thoughts = []
+                    current_companion_texts = []
+                text = ""
+                if ev.content and ev.content.parts:
+                    for part in ev.content.parts:
+                        if part.text:
+                            text += part.text
+                chat_history.append({
+                    'role': 'system-memory',
+                    'text': text,
+                    'timestamp': ev.timestamp,
+                    'compacted': compacted
+                })
+            elif role == 'voice-call':
+                if current_companion_msg:
+                    current_companion_msg['text'] = _format_thinking_and_text(
+                        current_companion_thoughts, current_companion_texts
+                    )
+                    chat_history.append(current_companion_msg)
+                    current_companion_msg = None
+                    current_companion_thoughts = []
+                    current_companion_texts = []
+                text = ""
+                if ev.content and ev.content.parts:
+                    for part in ev.content.parts:
+                        if part.text:
+                            text += part.text
+                chat_history.append({
+                    'role': 'voice-call',
+                    'text': text,
+                    'timestamp': ev.timestamp,
+                    'compacted': compacted
+                })
+            elif role == 'user':
                 if current_companion_msg:
                     current_companion_msg['text'] = _format_thinking_and_text(
                         current_companion_thoughts, current_companion_texts
@@ -1470,7 +1738,8 @@ class GoogleAdkRunner(BaseProgramRunner):
                     'role': 'user',
                     'text': text,
                     'image_url': image_url,
-                    'timestamp': ev.timestamp
+                    'timestamp': ev.timestamp,
+                    'compacted': compacted
                 })
             elif role == 'companion' or role == self.runner.agent.name.lower():
                 if not current_companion_msg:
@@ -1478,10 +1747,14 @@ class GoogleAdkRunner(BaseProgramRunner):
                         'role': 'companion',
                         'text': '',
                         'tool_calls': [],
-                        'timestamp': ev.timestamp
+                        'timestamp': ev.timestamp,
+                        'compacted': compacted
                     }
                     current_companion_thoughts = []
                     current_companion_texts = []
+                
+                if compacted:
+                    current_companion_msg['compacted'] = True
                 
                 if ev.content and ev.content.parts:
                     for part in ev.content.parts:
@@ -1521,10 +1794,13 @@ class GoogleAdkRunner(BaseProgramRunner):
                     current_companion_msg = {
                         'role': 'companion',
                         'text': '',
-                        'tool_calls': []
+                        'tool_calls': [],
+                        'compacted': compacted
                     }
                     current_companion_thoughts = []
                     current_companion_texts = []
+                if compacted:
+                    current_companion_msg['compacted'] = True
                 if ev.content and ev.content.parts:
                     for part in ev.content.parts:
                         if getattr(part, 'function_response', None):
@@ -1559,55 +1835,75 @@ class GoogleAdkRunner(BaseProgramRunner):
         texts = []
         tool_calls = []
         
+        old_config = self.runner.agent.generate_content_config
+        is_voice = isinstance(session_id, str) and (session_id.endswith('_voice') or getattr(self, 'session_id', '').endswith('_voice'))
+        
+        if is_voice:
+            try:
+                from google.genai import types
+                self.runner.agent.generate_content_config = types.GenerateContentConfig(
+                    temperature=old_config.temperature if old_config else 0.95,
+                    thinking_config=types.ThinkingConfig(thinking_budget=0)
+                )
+            except Exception as ce:
+                print(f"Error overriding generate_content_config for voice call: {ce}")
+                
         first_iter = True
-        async for event in self.runner.run_async(
-            user_id="user",
-            session_id=session_id,
-            new_message=content,
-        ):
-            if first_iter:
-                self._save_session_to_disk(session_id)
-                first_iter = False
-            if session_id in cancelled_sessions:
-                cancelled_sessions.discard(session_id)
-                raise asyncio.CancelledError("Session cancelled by user request.")
-            if event.content and event.content.parts:
-                for part in event.content.parts:
-                    if part.text:
-                        is_thought = getattr(part, 'thought', False)
-                        if not is_thought and getattr(part, 'metadata', None):
-                            metadata = part.metadata
-                            if isinstance(metadata, dict) and (metadata.get('thought') or metadata.get('adk_thought')):
-                                is_thought = True
-                        
-                        if is_thought:
-                            thoughts.append(part.text)
-                        else:
-                            texts.append(part.text)
-                    elif getattr(part, 'function_call', None):
-                        fc = part.function_call
-                        tool_calls.append({
-                            'type': 'call',
-                            'name': fc.name,
-                            'args': dict(fc.args) if fc.args else {},
-                            'id': fc.id
-                        })
-                    elif getattr(part, 'function_response', None):
-                        fr = part.function_response
-                        resp_str = str(fr.response)
-                        if len(resp_str) > 1000:
-                            resp_str = resp_str[:1000] + "\n... [truncated]"
-                        tool_calls.append({
-                            'type': 'response',
-                            'name': fr.name,
-                            'response': resp_str,
-                            'id': fr.id
-                        })
+        try:
+            async for event in self.runner.run_async(
+                user_id="user",
+                session_id=session_id,
+                new_message=content,
+            ):
+                if first_iter:
+                    self._save_session_to_disk(session_id)
+                    first_iter = False
+                if session_id in cancelled_sessions:
+                    cancelled_sessions.discard(session_id)
+                    raise asyncio.CancelledError("Session cancelled by user request.")
+                if event.content and event.content.parts:
+                    for part in event.content.parts:
+                        if part.text:
+                            is_thought = getattr(part, 'thought', False)
+                            if not is_thought and getattr(part, 'metadata', None):
+                                metadata = part.metadata
+                                if isinstance(metadata, dict) and (metadata.get('thought') or metadata.get('adk_thought')):
+                                    is_thought = True
+                            
+                            if is_thought:
+                                thoughts.append(part.text)
+                            else:
+                                texts.append(part.text)
+                        elif getattr(part, 'function_call', None):
+                            fc = part.function_call
+                            tool_calls.append({
+                                'type': 'call',
+                                'name': fc.name,
+                                'args': dict(fc.args) if fc.args else {},
+                                'id': fc.id
+                            })
+                        elif getattr(part, 'function_response', None):
+                            fr = part.function_response
+                            resp_str = str(fr.response)
+                            if len(resp_str) > 1000:
+                                resp_str = resp_str[:1000] + "\n... [truncated]"
+                            tool_calls.append({
+                                'type': 'response',
+                                'name': fr.name,
+                                'response': resp_str,
+                                'id': fr.id
+                            })
+        finally:
+            self.runner.agent.generate_content_config = old_config
                         
         full_text = _format_thinking_and_text(thoughts, texts)
         
         # Ensure images are embedded
         full_text = self._ensure_images_are_embedded(full_text)
+        
+        is_voice = isinstance(session_id, str) and session_id.endswith('_voice')
+        if is_voice:
+            full_text = strip_narration(full_text)
         
         # Update session events in memory to reflect the fixed text
         session_dict = self.runner.session_service.sessions
@@ -1619,14 +1915,83 @@ class GoogleAdkRunner(BaseProgramRunner):
                         for part in ev.content.parts:
                             if part.text:
                                 part.text = self._ensure_images_are_embedded(part.text)
+                                if is_voice:
+                                    part.text = strip_narration(part.text)
                         break
         return full_text, tool_calls
 
     async def run_async(self, session_id: str, new_message_text: str, image_data: str = None, image_mime: str = None, model: str = None, media_path: str = None) -> tuple:
+        session_dict = self.runner.session_service.sessions
+        user_id = "user"
+        # Load from disk if not in memory
+        in_memory = (self.app_name in session_dict and 
+                     user_id in session_dict[self.app_name] and 
+                     session_id in session_dict[self.app_name][user_id])
+        if not in_memory:
+            self._load_session_from_disk(session_id)
+            
+        adk_session = session_dict.get(self.app_name, {}).get(user_id, {}).get(session_id, None)
+        
+        # Temporarily filter out voice-call and compacted events, and map system-memory role to user
+        voice_events = []
+        compacted_events = []
+        system_memory_events = []
+        if adk_session and adk_session.events:
+            voice_events = [ev for ev in adk_session.events if ev.author == 'voice-call']
+            compacted_events = [ev for ev in adk_session.events if getattr(ev, 'compacted', False)]
+            
+            # Map system-memory to user and keep track of it
+            for ev in adk_session.events:
+                if ev.author == 'system-memory' or (ev.content and ev.content.role == 'system-memory'):
+                    orig_author = ev.author
+                    orig_role = ev.content.role if ev.content else None
+                    system_memory_events.append((ev, orig_author, orig_role))
+                    
+                    ev.author = 'user'
+                    if ev.content:
+                        ev.content.role = 'user'
+            
+            adk_session.events = [ev for ev in adk_session.events if ev.author != 'voice-call' and not getattr(ev, 'compacted', False)]
+
+        try:
+            return await self._run_async_internal(
+                session_id=session_id,
+                new_message_text=new_message_text,
+                image_data=image_data,
+                image_mime=image_mime,
+                model=model,
+                media_path=media_path
+            )
+        finally:
+            # Restore system-memory roles
+            for ev, orig_author, orig_role in system_memory_events:
+                ev.author = orig_author
+                if ev.content and orig_role:
+                    ev.content.role = orig_role
+                    
+            restored = False
+            if adk_session and (voice_events or compacted_events):
+                existing_ids = {ev.id for ev in adk_session.events}
+                for ev in voice_events:
+                    if ev.id not in existing_ids:
+                        adk_session.events.append(ev)
+                        restored = True
+                for ev in compacted_events:
+                    if ev.id not in existing_ids:
+                        adk_session.events.append(ev)
+                        restored = True
+                if restored:
+                    adk_session.events.sort(key=lambda x: x.timestamp if getattr(x, 'timestamp', None) is not None else 0)
+            
+            # Save to disk to ensure restored system-memory roles and voice/compacted events are correctly serialized
+            if adk_session and (system_memory_events or restored):
+                self._save_session_to_disk(session_id)
+
+    async def _run_async_internal(self, session_id: str, new_message_text: str, image_data: str = None, image_mime: str = None, model: str = None, media_path: str = None) -> tuple:
         rag_context = _get_rag_context(new_message_text)
         memory_context = _get_memory_context(new_message_text)
         inversion_directive = await self._get_inversion_directive(session_id)
-        self._reload_config(model, inversion_directive, rag_context, memory_context, user_message=new_message_text)
+        self._reload_config(session_id, model, inversion_directive, rag_context, memory_context, user_message=new_message_text)
         
         # Load from disk if not in memory
         session_dict = self.runner.session_service.sessions
@@ -1694,7 +2059,7 @@ class GoogleAdkRunner(BaseProgramRunner):
                 if offload:
                     model = DEFAULT_GEMINI_MODEL
                     print(f"[OFFLOAD] Offloading query execution to remote model: {model}", flush=True)
-                    self._reload_config(model, inversion_directive, rag_context, memory_context, user_message=new_message_text)
+                    self._reload_config(session_id, model, inversion_directive, rag_context, memory_context, user_message=new_message_text)
 
         # Run history compaction to keep contexts compact and prevent token blowout
         _compact_session_history(adk_session)
@@ -1705,7 +2070,7 @@ class GoogleAdkRunner(BaseProgramRunner):
             try:
                 if media_path.startswith('/images/'):
                     rel_path = media_path[len('/images/'):]
-                    active_program = os.getenv("ACTIVE_PROGRAM", "arthur")
+                    active_program = os.getenv("ACTIVE_PROGRAM", "sebile")
                     local_file_path = os.path.normpath(os.path.join('core', 'programs', active_program, rel_path))
                     
                     if os.path.exists(local_file_path):
@@ -1884,7 +2249,7 @@ class GoogleAdkRunner(BaseProgramRunner):
         rag_context = _get_rag_context(query_text)
         memory_context = _get_memory_context(query_text)
         inversion_directive = await self._get_inversion_directive(session_id)
-        self._reload_config(model, inversion_directive, rag_context, memory_context, user_message=query_text)
+        self._reload_config(session_id, model, inversion_directive, rag_context, memory_context, user_message=query_text)
             
         if _is_local_model(model):
             # Extract new text or original text
@@ -2015,9 +2380,13 @@ class GoogleAdkRunner(BaseProgramRunner):
         events = list(storage_session.events)
         from google.genai import types
         
-        target_role = 'user' if role == 'user' else 'companion'
-        
-        if target_role == 'user':
+        if role == 'voice-call':
+            voice_event_indices = [i for i, ev in enumerate(events) if ev.author == 'voice-call']
+            if index >= len(voice_event_indices):
+                return False
+            target_idx = voice_event_indices[index]
+            del events[target_idx]
+        elif role == 'user':
             user_event_indices = [i for i, ev in enumerate(events) if ev.author.lower() == 'user']
             if index >= len(user_event_indices):
                 return False
@@ -2027,7 +2396,12 @@ class GoogleAdkRunner(BaseProgramRunner):
             companion_turns = []
             current_turn = []
             for i, ev in enumerate(events):
-                if ev.author.lower() == 'user':
+                role_lower = ev.author.lower()
+                if role_lower == 'user':
+                    if current_turn:
+                        companion_turns.append(current_turn)
+                        current_turn = []
+                elif role_lower in ('voice-call', 'system-memory'):
                     if current_turn:
                         companion_turns.append(current_turn)
                         current_turn = []
@@ -2153,6 +2527,86 @@ class GoogleAdkRunner(BaseProgramRunner):
         )
         storage_session.events.append(new_event)
         self._save_session_to_disk(session_id)
+        return True
+
+    async def append_voice_call(self, session_id: str, transcript: str, timestamp: float = None, start_time: float = None) -> bool:
+        session_dict = self.runner.session_service.sessions
+        user_id = "user"
+        in_memory = (self.app_name in session_dict and 
+                     user_id in session_dict[self.app_name] and 
+                     session_id in session_dict[self.app_name][user_id])
+        if not in_memory:
+            self._load_session_from_disk(session_id)
+            
+        if self.app_name not in session_dict or user_id not in session_dict[self.app_name] or session_id not in session_dict[self.app_name][user_id]:
+            if self.app_name not in session_dict:
+                session_dict[self.app_name] = {}
+            if user_id not in session_dict[self.app_name]:
+                session_dict[self.app_name][user_id] = {}
+            from google.adk.sessions.session import Session
+            session_dict[self.app_name][user_id][session_id] = Session(id=session_id, app_name=self.app_name, user_id=user_id, events=[])
+            
+        storage_session = session_dict[self.app_name][user_id][session_id]
+        
+        from google.adk.events.event import Event
+        import time
+        import uuid
+        
+        if timestamp is None:
+            timestamp = time.time()
+            
+        # Remove individual user/companion messages that were part of this voice call
+        if start_time is not None:
+            storage_session.events = [
+                e for e in storage_session.events
+                if not (e.author in ('user', 'companion') and e.timestamp >= start_time)
+            ]
+            
+        new_event = Event(
+            author="voice-call",
+            content=types.Content(parts=[types.Part.from_text(text=transcript)]),
+            invocation_id=str(uuid.uuid4()),
+            id=str(uuid.uuid4()),
+            timestamp=timestamp
+        )
+        storage_session.events.append(new_event)
+        self._save_session_to_disk(session_id)
+        return True
+
+    async def clone_history(self, src_id: str, dest_id: str, messages: list) -> bool:
+        session_dict = self.runner.session_service.sessions
+        user_id = "user"
+        
+        if self.app_name not in session_dict:
+            session_dict[self.app_name] = {}
+        if user_id not in session_dict[self.app_name]:
+            session_dict[self.app_name][user_id] = {}
+            
+        from google.adk.sessions.session import Session
+        dest_session = Session(id=dest_id, app_name=self.app_name, user_id=user_id, events=[])
+        session_dict[self.app_name][user_id][dest_id] = dest_session
+        
+        if dest_id.endswith('_voice'):
+            self._save_session_to_disk(dest_id)
+            return True
+            
+        in_memory = (self.app_name in session_dict and 
+                     user_id in session_dict[self.app_name] and 
+                     src_id in session_dict[self.app_name][user_id])
+        if not in_memory:
+            self._load_session_from_disk(src_id)
+            
+        if src_id in session_dict[self.app_name][user_id]:
+            src_session = session_dict[self.app_name][user_id][src_id]
+            filtered_events = [ev for ev in src_session.events if ev.author != 'voice-call']
+            limit = 6
+            seed_events = filtered_events[-limit:] if len(filtered_events) > limit else filtered_events
+            import copy
+            for ev in seed_events:
+                cloned_ev = copy.deepcopy(ev)
+                dest_session.events.append(cloned_ev)
+                
+        self._save_session_to_disk(dest_id)
         return True
 
     async def update_message_text(self, session_id: str, role: str, index: int, new_text: str) -> bool:
@@ -2310,13 +2764,51 @@ class OpenSourceRunner(BaseProgramRunner):
         if session_id not in self.sessions_history:
             self.sessions_history[session_id] = []
             
+        # Temporarily filter out voice-call and compacted messages so they do not leak to the local LLM
+        history = self.sessions_history[session_id]
+        voice_msgs = [msg for msg in history if msg.get('role') == 'voice-call']
+        compacted_msgs = [msg for msg in history if msg.get('compacted')]
+        self.sessions_history[session_id] = [msg for msg in history if msg.get('role') != 'voice-call' and not msg.get('compacted')]
+        
+        try:
+            return await self._run_async_internal(
+                session_id=session_id,
+                new_message_text=new_message_text,
+                image_data=image_data,
+                image_mime=image_mime,
+                model=model,
+                media_path=media_path
+            )
+        finally:
+            current_history = self.sessions_history.get(session_id, [])
+            existing_timestamps = {msg.get('timestamp') for msg in current_history if msg.get('timestamp') is not None}
+            restored = False
+            for msg in voice_msgs:
+                if msg.get('timestamp') not in existing_timestamps:
+                    current_history.append(msg)
+                    restored = True
+            for msg in compacted_msgs:
+                if msg.get('timestamp') not in existing_timestamps:
+                    current_history.append(msg)
+                    restored = True
+            if restored:
+                current_history.sort(key=lambda x: x.get('timestamp', 0) if x.get('timestamp') is not None else 0)
+            self._save_session_to_disk(session_id)
+
+    async def _run_async_internal(self, session_id: str, new_message_text: str, image_data: str = None, image_mime: str = None, model: str = None, media_path: str = None) -> tuple:
+        if session_id not in self.sessions_history:
+            self._load_session_from_disk(session_id)
+            
+        if session_id not in self.sessions_history:
+            self.sessions_history[session_id] = []
+            
         # Resolve media upload if present
         file_path_resolved = None
         if media_path:
             try:
                 if media_path.startswith('/images/'):
                     rel_path = media_path[len('/images/'):]
-                    active_program = os.getenv("ACTIVE_PROGRAM", "arthur")
+                    active_program = os.getenv("ACTIVE_PROGRAM", "sebile")
                     local_file_path = os.path.normpath(os.path.join('core', 'programs', active_program, rel_path))
                     if os.path.exists(local_file_path):
                         import mimetypes
@@ -2473,13 +2965,24 @@ class OpenSourceRunner(BaseProgramRunner):
             return False
             
         history = list(self.sessions_history[session_id])
-        target_role = 'user' if role == 'user' else 'companion'
         
+        if role == 'voice-call':
+            voice_indices = [i for i, msg in enumerate(history) if msg.get('role') == 'voice-call']
+            if index >= len(voice_indices):
+                return False
+            target_idx = voice_indices[index]
+            del history[target_idx]
+            self.sessions_history[session_id] = history
+            self._save_session_to_disk(session_id)
+            return True
+            
         target_abs_index = -1
         role_count = 0
         for i, msg in enumerate(history):
-            msg_role = 'user' if msg.get('role') == 'user' else 'companion'
-            if msg_role == target_role:
+            msg_role = msg.get('role')
+            if msg_role in ('companion', 'model'):
+                msg_role = 'companion'
+            if msg_role == role:
                 if role_count == index:
                     target_abs_index = i
                     break
@@ -2568,6 +3071,52 @@ class OpenSourceRunner(BaseProgramRunner):
         }
         history.append(new_msg)
         self._save_session_to_disk(session_id)
+        return True
+
+    async def append_voice_call(self, session_id: str, transcript: str, timestamp: float = None, start_time: float = None) -> bool:
+        if session_id not in self.sessions_history:
+            self._load_session_from_disk(session_id)
+        if session_id not in self.sessions_history:
+            self.sessions_history[session_id] = []
+            
+        import time
+        if timestamp is None:
+            timestamp = time.time()
+            
+        # Remove individual user/companion messages that were part of this voice call
+        if start_time is not None:
+            self.sessions_history[session_id] = [
+                msg for msg in self.sessions_history[session_id]
+                if not (msg.get('role') in ('user', 'companion') and msg.get('timestamp', 0) >= start_time)
+            ]
+            
+        new_msg = {
+            'role': 'voice-call',
+            'text': transcript,
+            'timestamp': timestamp
+        }
+        self.sessions_history[session_id].append(new_msg)
+        self._save_session_to_disk(session_id)
+        return True
+
+    async def clone_history(self, src_id: str, dest_id: str, messages: list) -> bool:
+        if dest_id.endswith('_voice'):
+            self.sessions_history[dest_id] = []
+            self._save_session_to_disk(dest_id)
+            return True
+            
+        if src_id not in self.sessions_history:
+            self._load_session_from_disk(src_id)
+            
+        src_hist = self.sessions_history.get(src_id, [])
+        filtered_msgs = [msg for msg in src_hist if msg.get('role') != 'voice-call']
+        limit = 6
+        seed_msgs = filtered_msgs[-limit:] if len(filtered_msgs) > limit else filtered_msgs
+        
+        import copy
+        cloned_msgs = copy.deepcopy(seed_msgs)
+        self.sessions_history[dest_id] = cloned_msgs
+        self._save_session_to_disk(dest_id)
         return True
 
     async def update_message_text(self, session_id: str, role: str, index: int, new_text: str) -> bool:

@@ -18,7 +18,7 @@ def analyze_sentiment_with_llm(text: str) -> dict:
             "name": "calm",
             "color": "#85b9eb",
             "glow": "rgba(133, 185, 235, 0.9)",
-            "speed": "3.5s",
+            "speed": "2.0s",
             "intensity": 0.0
         }
         
@@ -129,8 +129,8 @@ def analyze_sentiment_with_llm(text: str) -> dict:
     details["name"] = mood_name
     details["intensity"] = intensity
     
-    # Calculate heart pulse speed based on intensity (from 3.5s down to 0.6s)
-    speed_seconds = 3.5 - (intensity * 2.9)
+    # Calculate heart pulse speed based on intensity (from 2.0s down to 0.6s)
+    speed_seconds = 2.0 - (intensity * 1.4)
     details["speed"] = f"{speed_seconds:.2f}s"
     
     _sentiment_cache[text] = details

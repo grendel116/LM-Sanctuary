@@ -1,5 +1,4 @@
 import os
-import sqlite3
 import json
 import time
 import requests
@@ -30,34 +29,41 @@ class DataBankManager:
             db_dir = os.path.join(base_core, "programs", active_program)
         
         os.makedirs(db_dir, exist_ok=True)
-        self.db_path = os.path.join(db_dir, "databank.db")
+        self.db_path = os.path.join(db_dir, "databank.json")
+        self.memories_path = os.path.join(db_dir, "memories.json")
+        
+        # Migration from legacy journal.json to memories.json
+        legacy_journal_path = os.path.join(db_dir, "journal.json")
+        if os.path.exists(legacy_journal_path) and not os.path.exists(self.memories_path):
+            try:
+                os.rename(legacy_journal_path, self.memories_path)
+                print(f"[DATABANK MIGRATION] Renamed legacy {legacy_journal_path} to {self.memories_path}", flush=True)
+            except Exception as e:
+                print(f"[DATABANK MIGRATION ERROR] Failed to rename legacy journal: {e}", flush=True)
+                
         self._init_db()
 
     def _init_db(self):
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            # Documents table
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS documents (
-                    id TEXT PRIMARY KEY,
-                    name TEXT NOT NULL,
-                    source_type TEXT NOT NULL,
-                    size INTEGER NOT NULL,
-                    timestamp REAL NOT NULL
-                )
-            """)
-            # Chunks table
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS chunks (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    doc_id TEXT NOT NULL,
-                    chunk_index INTEGER NOT NULL,
-                    text TEXT NOT NULL,
-                    vector TEXT NOT NULL,
-                    FOREIGN KEY (doc_id) REFERENCES documents (id) ON DELETE CASCADE
-                )
-            """)
-            conn.commit()
+        if not os.path.exists(self.db_path):
+            self._save_data(self.db_path, {"documents": [], "chunks": []})
+        if not os.path.exists(self.memories_path):
+            self._save_data(self.memories_path, {"documents": [], "chunks": []})
+
+    def _load_data(self, path):
+        try:
+            if os.path.exists(path):
+                with open(path, "r", encoding="utf-8") as f:
+                    return json.load(f)
+        except Exception as e:
+            print(f"Error loading JSON file at {path}: {e}")
+        return {"documents": [], "chunks": []}
+
+    def _save_data(self, path, data):
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+        except Exception as e:
+            print(f"Error saving JSON file to {path}: {e}")
 
     def clean_html(self, html_content: str) -> str:
         """Parses HTML and extracts clean readable text, removing boilerplate markup."""
@@ -160,7 +166,7 @@ class DataBankManager:
         return [c.strip() for c in chunks if c.strip()]
 
     def ingest_text(self, text: str, name: str, source_type: str, doc_id: str = None) -> str:
-        """Chunks, embeds, and saves a text document to the local database."""
+        """Chunks, embeds, and saves a text document to the local JSON files."""
         if not doc_id:
             import uuid
             doc_id = str(uuid.uuid4())
@@ -173,23 +179,32 @@ class DataBankManager:
         model = get_embedding_model()
         vectors = model.encode(chunks)
         
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            # Insert document reference
-            cursor.execute(
-                "INSERT INTO documents (id, name, source_type, size, timestamp) VALUES (?, ?, ?, ?, ?)",
-                (doc_id, name, source_type, len(text), time.time())
-            )
-            # Insert chunk vectors
-            for idx, (chunk_text, vector) in enumerate(zip(chunks, vectors)):
-                vector_json = json.dumps(vector.tolist())
-                cursor.execute(
-                    "INSERT INTO chunks (doc_id, chunk_index, text, vector) VALUES (?, ?, ?, ?)",
-                    (doc_id, idx, chunk_text, vector_json)
-                )
-            conn.commit()
+        # Decide which database file to use
+        is_chat_history = (source_type == 'chat_history')
+        path = self.memories_path if is_chat_history else self.db_path
+        
+        data = self._load_data(path)
+        
+        # Insert document reference
+        data["documents"].append({
+            "id": doc_id,
+            "name": name,
+            "source_type": source_type,
+            "size": len(text),
+            "timestamp": time.time()
+        })
+        
+        # Insert chunk vectors
+        for idx, (chunk_text, vector) in enumerate(zip(chunks, vectors)):
+            data["chunks"].append({
+                "doc_id": doc_id,
+                "chunk_index": idx,
+                "text": chunk_text,
+                "vector": vector.tolist()
+            })
             
-        print(f"[Data Bank] Ingested document '{name}' ({len(chunks)} chunks).")
+        self._save_data(path, data)
+        print(f"[Data Bank] Ingested document '{name}' ({len(chunks)} chunks) into {'journal' if is_chat_history else 'databank'}.")
         return doc_id
 
     def ingest_file(self, file_path: str, original_filename: str) -> str:
@@ -224,119 +239,133 @@ class DataBankManager:
         return self.ingest_text(clean_text, name, "url")
 
     def list_documents(self) -> list:
-        """Lists all documents registered in the database (excluding chat history memory)."""
-        with sqlite3.connect(self.db_path) as conn:
-            conn.row_factory = sqlite3.Row
-            cursor = conn.cursor()
-            cursor.execute("""
-                SELECT d.id, d.name, d.source_type, d.size, d.timestamp, COUNT(c.id) as chunk_count
-                FROM documents d
-                LEFT JOIN chunks c ON d.id = c.doc_id
-                WHERE d.source_type != 'chat_history'
-                GROUP BY d.id
-                ORDER BY d.timestamp DESC
-            """)
-            return [dict(row) for row in cursor.fetchall()]
+        """Lists all documents registered in databank.json (excluding chat history memory)."""
+        data = self._load_data(self.db_path)
+        
+        chunk_counts = {}
+        for chunk in data["chunks"]:
+            doc_id = chunk["doc_id"]
+            chunk_counts[doc_id] = chunk_counts.get(doc_id, 0) + 1
+            
+        results = []
+        for doc in data["documents"]:
+            if doc["source_type"] != 'chat_history':
+                doc_copy = doc.copy()
+                doc_copy["chunk_count"] = chunk_counts.get(doc["id"], 0)
+                results.append(doc_copy)
+                
+        results.sort(key=lambda x: x["timestamp"], reverse=True)
+        return results
 
     def delete_document(self, doc_id: str) -> bool:
-        """Removes a document and all its chunks from the database index."""
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            cursor.execute("DELETE FROM documents WHERE id = ?", (doc_id,))
-            cursor.execute("DELETE FROM chunks WHERE doc_id = ?", (doc_id,))
-            conn.commit()
-            deleted = cursor.rowcount > 0
-        return deleted
+        """Removes a document and all its chunks from the databank.json file."""
+        data = self._load_data(self.db_path)
+        
+        original_doc_count = len(data["documents"])
+        
+        data["documents"] = [d for d in data["documents"] if d["id"] != doc_id]
+        data["chunks"] = [c for c in data["chunks"] if c["doc_id"] != doc_id]
+        
+        self._save_data(self.db_path, data)
+        return len(data["documents"]) < original_doc_count
 
     def delete_chat_history(self, session_id: str):
-        """Deletes all chat history archives associated with the session."""
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            # Find document IDs to delete
-            cursor.execute("SELECT id FROM documents WHERE source_type = 'chat_history' AND name LIKE ?", (f"chat_history_archive_{session_id}_%",))
-            doc_ids = [row[0] for row in cursor.fetchall()]
-            if doc_ids:
-                placeholders = ",".join("?" for _ in doc_ids)
-                cursor.execute(f"DELETE FROM chunks WHERE doc_id IN ({placeholders})", doc_ids)
-                cursor.execute(f"DELETE FROM documents WHERE id IN ({placeholders})", doc_ids)
-                conn.commit()
-            print(f"[Data Bank] Deleted {len(doc_ids)} chat history archives for session '{session_id}'.")
+        """Deletes all chat history archives associated with the session from memories.json."""
+        data = self._load_data(self.memories_path)
+        
+        prefix = f"chat_history_archive_{session_id}_"
+        doc_ids_to_delete = [
+            d["id"] for d in data["documents"] 
+            if d["source_type"] == 'chat_history' and d["name"].startswith(prefix)
+        ]
+        
+        if doc_ids_to_delete:
+            doc_ids_set = set(doc_ids_to_delete)
+            data["documents"] = [d for d in data["documents"] if d["id"] not in doc_ids_set]
+            data["chunks"] = [c for c in data["chunks"] if c["doc_id"] not in doc_ids_set]
+            self._save_data(self.memories_path, data)
+            
+        print(f"[Data Bank] Deleted {len(doc_ids_to_delete)} chat history archives for session '{session_id}' in memories.")
 
     def get_prior_chat_histories(self, session_id: str, limit: int = 2) -> list:
-        """Retrieves the text contents of the prior N chat history archives for the session."""
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            cursor.execute("""
-                SELECT d.id, d.name
-                FROM documents d
-                WHERE d.source_type = 'chat_history' AND d.name LIKE ?
-                ORDER BY d.timestamp DESC
-                LIMIT ?
-            """, (f"chat_history_archive_{session_id}_%", limit))
-            rows = cursor.fetchall()
+        """Retrieves prior chat histories from memories.json."""
+        data = self._load_data(self.memories_path)
+        
+        prefix = f"chat_history_archive_{session_id}_"
+        chat_docs = [
+            d for d in data["documents"]
+            if d["source_type"] == 'chat_history' and d["name"].startswith(prefix)
+        ]
+        
+        chat_docs.sort(key=lambda x: x["timestamp"], reverse=True)
+        target_docs = chat_docs[:limit]
+        
+        archives = []
+        for doc in target_docs:
+            doc_id = doc["id"]
+            doc_chunks = [c for c in data["chunks"] if c["doc_id"] == doc_id]
+            doc_chunks.sort(key=lambda x: x["chunk_index"])
             
-            archives = []
-            for doc_id, name in rows:
-                cursor.execute("SELECT text FROM chunks WHERE doc_id = ? ORDER BY chunk_index ASC", (doc_id,))
-                chunks = [r[0] for r in cursor.fetchall()]
-                archives.append({
-                    "name": name,
-                    "text": "\n".join(chunks)
-                })
-            return archives
+            archives.append({
+                "name": doc["name"],
+                "text": "\n".join(c["text"] for c in doc_chunks)
+            })
+            
+        return archives
 
     def prune_chat_histories(self, session_id: str, keep_limit: int = 3):
-        """Prunes older chat history archives to keep at most keep_limit archives for the session."""
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            cursor.execute("""
-                SELECT id FROM documents 
-                WHERE source_type = 'chat_history' AND name LIKE ?
-                ORDER BY timestamp DESC
-            """, (f"chat_history_archive_{session_id}_%",))
-            rows = cursor.fetchall()
-            if len(rows) > keep_limit:
-                to_delete = [r[0] for r in rows[keep_limit:]]
-                placeholders = ",".join("?" for _ in to_delete)
-                cursor.execute(f"DELETE FROM chunks WHERE doc_id IN ({placeholders})", to_delete)
-                cursor.execute(f"DELETE FROM documents WHERE id IN ({placeholders})", to_delete)
-                conn.commit()
-                print(f"[Data Bank] Pruned {len(to_delete)} older chat history archives for session '{session_id}'.")
+        """Prunes older chat history archives from memories.json."""
+        data = self._load_data(self.memories_path)
+        
+        prefix = f"chat_history_archive_{session_id}_"
+        chat_docs = [
+            d for d in data["documents"]
+            if d["source_type"] == 'chat_history' and d["name"].startswith(prefix)
+        ]
+        
+        chat_docs.sort(key=lambda x: x["timestamp"], reverse=True)
+        
+        if len(chat_docs) > keep_limit:
+            to_delete_docs = chat_docs[keep_limit:]
+            to_delete_ids = set(d["id"] for d in to_delete_docs)
+            
+            data["documents"] = [d for d in data["documents"] if d["id"] not in to_delete_ids]
+            data["chunks"] = [c for c in data["chunks"] if c["doc_id"] not in to_delete_ids]
+            
+            self._save_data(self.memories_path, data)
+            print(f"[Data Bank] Pruned {len(to_delete_ids)} older chat history archives for session '{session_id}' in memories.")
 
     def purge_all(self):
-        """Purges the database, removing all files and chunks."""
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            cursor.execute("DELETE FROM documents")
-            cursor.execute("DELETE FROM chunks")
-            conn.commit()
-        print("[Data Bank] Purged all documents and vectors.")
+        """Purges both databank.json and memories.json."""
+        self._save_data(self.db_path, {"documents": [], "chunks": []})
+        self._save_data(self.memories_path, {"documents": [], "chunks": []})
+        print("[Data Bank] Purged all documents and vectors from databank and memories.")
 
     def query(self, query_text: str, top_k: int = 5, score_threshold: float = 0.25, exclude_source_type: str = None, include_source_type: str = None) -> str:
-        """Queries the vector index and returns clean contextual matching chunks."""
-        query_sql = "SELECT d.name, c.text, c.vector FROM chunks c JOIN documents d ON c.doc_id = d.id"
-        params = []
-        conditions = []
-        if exclude_source_type:
-            conditions.append("d.source_type != ?")
-            params.append(exclude_source_type)
-        if include_source_type:
-            conditions.append("d.source_type = ?")
-            params.append(include_source_type)
+        """Queries the respective JSON vector index and returns clean contextual matching chunks."""
+        # Query memories.json for chat history, otherwise query databank.json
+        is_chat_history = (include_source_type == 'chat_history')
+        path = self.memories_path if is_chat_history else self.db_path
+        
+        data = self._load_data(path)
+        
+        if not data["chunks"]:
+            return ""
             
-        if conditions:
-            query_sql += " WHERE " + " AND ".join(conditions)
-
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT COUNT(*) FROM chunks")
-            if cursor.fetchone()[0] == 0:
-                return ""
-                
-            cursor.execute(query_sql, params)
-            rows = cursor.fetchall()
+        docs_map = {d["id"]: d for d in data["documents"]}
+        
+        filtered_chunks = []
+        for chunk in data["chunks"]:
+            doc = docs_map.get(chunk["doc_id"])
+            if not doc:
+                continue
+            if exclude_source_type and doc["source_type"] == exclude_source_type:
+                continue
+            if include_source_type and doc["source_type"] != include_source_type:
+                continue
+            filtered_chunks.append((doc["name"], chunk["text"], chunk["vector"]))
             
-        if not rows:
+        if not filtered_chunks:
             return ""
             
         # Get query embedding
@@ -349,8 +378,8 @@ class DataBankManager:
             return ""
             
         results = []
-        for doc_name, chunk_text, vector_json in rows:
-            chunk_vector = np.array(json.loads(vector_json))
+        for doc_name, chunk_text, vector in filtered_chunks:
+            chunk_vector = np.array(vector)
             chunk_norm = np.linalg.norm(chunk_vector)
             if chunk_norm == 0:
                 continue
@@ -361,16 +390,14 @@ class DataBankManager:
             if similarity >= score_threshold:
                 results.append((similarity, doc_name, chunk_text))
                 
-        # Sort by similarity score descending and pick top_k
         results.sort(key=lambda x: x[0], reverse=True)
         top_results = results[:top_k]
         
         if not top_results:
             return ""
             
-        # Format the retrieved chunks for prompt injection
         formatted_context = []
-        if include_source_type == 'chat_history':
+        if is_chat_history:
             for score, doc_name, text in top_results:
                 formatted_context.append(text.strip())
             return "\n\n---\n\n".join(formatted_context)

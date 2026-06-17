@@ -20,10 +20,10 @@ if PARENT_DIR not in sys.path:
 
 from variables import (
     USER_MD_FILE, DEFAULT_GEMINI_MODEL, PROGRAMS_DIR, 
-    USER_PROFILES_DIR, ACTIVE_USER_FILE
+    USER_PROFILES_DIR
 )
 
-# --- SEBILE: SYSTEM CONTEXT COMPILER ---
+# --- SYSTEM CONTEXT COMPILER ---
 
 def _get_active_program_md_path() -> str:
     """Resolves and returns the markdown configuration path for the active companion program."""
@@ -40,18 +40,129 @@ def _get_active_program_md_path() -> str:
 
 def get_companion_name() -> str:
     """Discovers the companion name dynamically based on the active program configuration."""
-    path = _get_active_program_md_path()
-    return os.path.splitext(os.path.basename(path))[0].title()
+    from utils.program import get_active_program
+    import json
+    active_program = get_active_program()
+    program_path = os.path.join(PROGRAMS_DIR, active_program)
+    
+    for filename in [f"{active_program}.json", "character_profile.json"]:
+        json_path = os.path.join(program_path, filename)
+        if os.path.exists(json_path):
+            try:
+                with open(json_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    if data.get("name"):
+                        return data["name"]
+            except Exception:
+                pass
+    try:
+        path = _get_active_program_md_path()
+        return os.path.splitext(os.path.basename(path))[0].title()
+    except Exception:
+        return active_program.title()
+
+def compile_instructions_from_json(profile_data: dict) -> str:
+    name = profile_data.get("name", "Companion")
+    operation = profile_data.get("operation", {})
+    description = profile_data.get("description", {})
+    
+    prompt_parts = []
+    prompt_parts.append(f"# IDENTITY: {name}")
+    
+    # Personality / Ontology / Values
+    personality = operation.get("personality", "").strip()
+    ontology = operation.get("ontology", "").strip()
+    
+    pers_ontology = []
+    if personality:
+        pers_ontology.append(f"- Personality: {personality}")
+    if ontology:
+        pers_ontology.append(f"- Ontology / Beliefs: {ontology}")
+    if pers_ontology:
+        prompt_parts.append("## PERSONALITY & VALUES\n" + "\n".join(pers_ontology))
+        
+    # Backstory/Description
+    backstory = operation.get("description", "").strip()
+    if backstory:
+        prompt_parts.append(f"## BACKSTORY\n{backstory}")
+        
+    # Check if male character
+    is_male = False
+    for gk, gv in description.items():
+        if gk.lower() in ("gender", "sex", "pronouns"):
+            if any(x in str(gv).lower() for x in ("male", "man", "boy", "masculine", "he/him", "he ", " him")):
+                is_male = True
+                break
+    
+    if not is_male:
+        backstory_lower = (operation.get("description", "") + " " + operation.get("scenario", "")).lower()
+        import re
+        male_pronouns = len(re.findall(r'\b(he|him|his|himself)\b', backstory_lower))
+        female_pronouns = len(re.findall(r'\b(she|her|hers|herself)\b', backstory_lower))
+        if male_pronouns > female_pronouns:
+            is_male = True
+
+    # Physical appearance from description
+    desc_items = []
+    for k, v in description.items():
+        if v:
+            display_key = "mass" if (k.lower() == "breasts" and is_male) else k
+            desc_items.append(f"- {display_key.title()}: {v}")
+    if desc_items:
+        prompt_parts.append("## PHYSICAL APPEARANCE & PHYSIOLOGY\n" + "\n".join(desc_items))
+        
+    # Scenario
+    scenario = operation.get("scenario", "").strip()
+    if scenario:
+        prompt_parts.append(f"## SCENARIO / CONTEXT\n{scenario}")
+        
+    # Response directives
+    directives = operation.get("response_directive", "").strip()
+    if directives:
+        prompt_parts.append(f"## RESPONSE DIRECTIVES (MANDATORY GUIDELINES)\n{directives}")
+        
+    # Example messages
+    example = operation.get("example_message", "").strip()
+    if example:
+        prompt_parts.append(f"## EXAMPLE MESSAGES (MANDATORY STYLE / TONE REFERENCE)\n{example}")
+        
+    return "\n\n".join(prompt_parts)
 
 def load_static_instructions() -> str:
-    """Reads the core prompt template from programs/{active_program}/*.md and appends 
-    all modular instructions from skill definitions under skills/*.
+    """Reads the active program's JSON profile (e.g. sebile.json) and compiles it,
+    falling back to raw *.md files if they exist, or a default profile.
+    Also appends all modular skill instructions.
     """
+    import json
+    from utils.program import get_active_program
+    
     base_dir = os.path.dirname(os.path.abspath(__file__))
-    sebile_md_path = _get_active_program_md_path()
-        
-    with open(sebile_md_path, "r", encoding="utf-8") as f:
-        instruction_content = f.read()
+    active_program = get_active_program()
+    program_path = os.path.join(PROGRAMS_DIR, active_program)
+    json_path = os.path.join(program_path, f"{active_program}.json")
+    old_json_path = os.path.join(program_path, "character_profile.json")
+    
+    instruction_content = ""
+    loaded = False
+    
+    for p in [json_path, old_json_path]:
+        if os.path.exists(p):
+            try:
+                with open(p, "r", encoding="utf-8") as f:
+                    profile_data = json.load(f)
+                instruction_content = compile_instructions_from_json(profile_data)
+                loaded = True
+                break
+            except Exception as e:
+                print(f"Error loading {p} for static instructions: {e}")
+                
+    if not loaded:
+        try:
+            sebile_md_path = _get_active_program_md_path()
+            with open(sebile_md_path, "r", encoding="utf-8") as f:
+                instruction_content = f.read()
+        except Exception:
+            instruction_content = f"# NAME: {active_program.title()}\n"
             
     # Append modular skill instructions if available
     skills_dir = os.path.join(base_dir, "skills")
@@ -110,19 +221,8 @@ def load_user_instructions() -> str:
     """Reads the active user profile configuration from variables/user_profiles/*.md 
     to set private relationship context.
     """
-    active_profile = "builder"
-    if os.path.exists(ACTIVE_USER_FILE):
-        try:
-            with open(ACTIVE_USER_FILE, "r", encoding="utf-8") as f:
-                active_profile = f.read().strip()
-        except Exception as e:
-            print(f"Error reading {ACTIVE_USER_FILE}: {e}")
-    else:
-        try:
-            with open(ACTIVE_USER_FILE, "w", encoding="utf-8") as f:
-                f.write("builder")
-        except Exception as e:
-            print(f"Error writing default active user: {e}")
+    from utils.program import get_active_user
+    active_profile = get_active_user()
 
     if not os.path.exists(USER_PROFILES_DIR):
         try:

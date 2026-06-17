@@ -82,22 +82,40 @@ def track_tool_activity(func):
                         active_running_tools.pop(func.__name__, None)
     return wrapper
 
-def resolve_workspace_path(path: str) -> str:
-    normalized = os.path.normpath(path)
-    if os.path.isabs(normalized):
-        return normalized
-        
-    folders = [os.getcwd()]
+def get_project_folders() -> list:
+    try:
+        from utils.program import get_active_program
+        active_prog = get_active_program()
+    except Exception:
+        active_prog = os.environ.get("ACTIVE_PROGRAM", "sebile")
+    default_folder = os.path.normpath(os.path.join(os.getcwd(), 'core', 'programs', active_prog))
+    
+    folders = [default_folder]
     try:
         import json
         settings_path = os.path.join(VARIABLES_DIR, "project_settings.json")
         if os.path.exists(settings_path):
             with open(settings_path, "r", encoding="utf-8") as f:
                 settings = json.load(f)
-            folders = settings.get("folders", [os.getcwd()])
+            loaded_folders = settings.get("folders", [])
+            if loaded_folders:
+                # Update first folder dynamically if it's the old workspace root or a program folder
+                first_folder = os.path.normpath(loaded_folders[0])
+                cwd = os.path.normpath(os.getcwd())
+                is_old_program_dir = ("core" in first_folder and "programs" in first_folder) or first_folder == cwd
+                if is_old_program_dir and first_folder != default_folder:
+                    loaded_folders[0] = default_folder
+                folders = loaded_folders
     except Exception:
         pass
+    return folders
+
+def resolve_workspace_path(path: str) -> str:
+    normalized = os.path.normpath(path)
+    if os.path.isabs(normalized):
+        return normalized
         
+    folders = get_project_folders()
     for folder in folders:
         candidate = os.path.normpath(os.path.join(folder, path))
         if os.path.exists(candidate):
@@ -775,16 +793,7 @@ def get_workspace_structure() -> str:
     """
     exclude_dirs = {".venv", "__pycache__", ".git", "node_modules", "dist"}
     
-    folders = [os.getcwd()]
-    try:
-        import json
-        settings_path = os.path.join(VARIABLES_DIR, "project_settings.json")
-        if os.path.exists(settings_path):
-            with open(settings_path, "r", encoding="utf-8") as f:
-                settings = json.load(f)
-            folders = settings.get("folders", [os.getcwd()])
-    except Exception:
-        pass
+    folders = get_project_folders()
         
     lines = []
     max_lines = 300
@@ -855,16 +864,7 @@ def search_codebase(keyword: str) -> str:
     max_files = 25
     truncated = False
     
-    folders = [os.getcwd()]
-    try:
-        import json
-        settings_path = os.path.join(VARIABLES_DIR, "project_settings.json")
-        if os.path.exists(settings_path):
-            with open(settings_path, "r", encoding="utf-8") as f:
-                settings = json.load(f)
-            folders = settings.get("folders", [os.getcwd()])
-    except Exception:
-        pass
+    folders = get_project_folders()
         
     keyword_lower = keyword.lower()
     
@@ -1116,9 +1116,9 @@ def generate_local_image(prompt: str) -> str:
         )
 
     base_dir = os.path.dirname(os.path.abspath(__file__))
-    active_program = os.getenv("ACTIVE_PROGRAM", "arthur")
+    active_program = os.getenv("ACTIVE_PROGRAM", "sebile")
     workflow_path = os.path.normpath(os.path.join(
-        base_dir, "core", "programs", active_program, "portraits", "ImageWorkflow.json"
+        base_dir, "core", "skills", "portrait_generation", "ImageWorkflow.json"
     ))
     
     if not os.path.exists(workflow_path):
@@ -1139,31 +1139,54 @@ def generate_local_image(prompt: str) -> str:
         if available_vaes and selected_vae not in available_vaes:
             raise Exception(f"Missing VAE: The required VAE file `{selected_vae}` was not found.")
 
-        # Load appearance from the active program's markdown context (## IDENTITY & FORM)
+        # Load appearance, image details, and negative details from the active program's JSON profile
         appearance_val = ""
-        program_md_path = os.path.normpath(os.path.join(
-            base_dir, "core", "programs", active_program, f"{active_program.upper()}.md"
+        img_details_val = ""
+        neg_details_val = ""
+        
+        import json
+        program_json_path = os.path.normpath(os.path.join(
+            base_dir, "core", "programs", active_program, f"{active_program}.json"
         ))
-        if os.path.exists(program_md_path):
+        if os.path.exists(program_json_path):
             try:
-                with open(program_md_path, "r", encoding="utf-8") as f:
-                    content = f.read()
-                import re
-                match = re.search(r'## IDENTITY & FORM\s*\n+([^\n#]+)', content)
-                if match:
-                    appearance_val = match.group(1).strip()
+                with open(program_json_path, "r", encoding="utf-8") as f:
+                    prof_data = json.load(f)
+                
+                # Appearance from details
+                desc = prof_data.get("description", {})
+                desc_parts = []
+                for k, v in desc.items():
+                    if v:
+                        desc_parts.append(f"{v} {k}")
+                if desc_parts:
+                    appearance_val = ", ".join(desc_parts)
+                    
+                # Image details section
+                img_sec = prof_data.get("image details", {})
+                img_details_val = img_sec.get("image details", "")
+                neg_details_val = img_sec.get("negative details", "")
             except Exception as e:
-                print(f"[DEBUG] Error reading identity for appearance: {e}", flush=True)
+                print(f"[DEBUG] Error reading active program JSON for image generation: {e}", flush=True)
 
         if not appearance_val:
             appearance_val = f"character named {active_program}"
 
+        # Combine prompt and image details
+        final_prompt = prompt
+        if img_details_val:
+            if final_prompt and not final_prompt.endswith(","):
+                final_prompt += ", "
+            final_prompt += img_details_val
+            
+        final_negative = neg_details_val if neg_details_val else "worst quality, low quality, deformed, mutated, extra limbs"
+
         # Define dynamic replacement parameters
         seed_val = random.randint(1, 1125899906842624)
         replacements = {
-            "%prompt%": f"{prompt}",
+            "%prompt%": final_prompt,
             "%appearance%": appearance_val,
-            "%negative_prompt%": "worst quality, low quality, deformed, mutated, extra limbs",
+            "%negative_prompt%": final_negative,
             "%seed%": seed_val,
             "%steps%": 25,
             "%scale%": 7.0,
@@ -1246,7 +1269,7 @@ def generate_imagen(prompt: str, aspect_ratio: str = '1:1') -> str:
         if not hasattr(img_obj.image, 'image_bytes'):
             return "Error: Generated image object does not contain image bytes."
 
-        active_program = os.getenv("ACTIVE_PROGRAM", "arthur")
+        active_program = os.getenv("ACTIVE_PROGRAM", "sebile")
         media_dir = os.path.normpath(os.path.join(base_dir, "core", "programs", active_program, "media"))
         os.makedirs(media_dir, exist_ok=True)
 
