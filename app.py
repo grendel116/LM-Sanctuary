@@ -2,6 +2,7 @@ import os
 import time
 import shutil
 import warnings
+import json
 
 # Suppress Google GenAI warnings about thought_signature deprecation and non-text system instruction parts
 warnings.filterwarnings("ignore", message=".*thought_signature.*")
@@ -1957,7 +1958,118 @@ def databank_purge():
         return jsonify({"status": "success"})
     except Exception as e:
         print(f"Error purging databank: {e}")
+
+@app.route('/api/programs/memories/delete', methods=['POST'])
+@requires_auth
+def delete_memory():
+    data = request.json or {}
+    session_id = data.get("session_id", "default")
+    timestamp = data.get("timestamp")
+    if timestamp is None:
+        return jsonify({"error": "Missing timestamp"}), 400
+    try:
+        timestamp = float(timestamp)
+    except ValueError:
+        return jsonify({"error": "Invalid timestamp"}), 400
+    try:
+        success = asyncio.run(runner.delete_system_memory(session_id, timestamp))
+        return jsonify({"status": "success", "deleted": success})
+    except Exception as e:
+        print(f"Error deleting memory for session {session_id} at {timestamp}: {e}")
         return jsonify({"error": str(e)}), 500
+
+@app.route('/api/quests', methods=['GET'])
+@requires_auth
+def list_quests():
+    try:
+        from variables import VARIABLES_DIR
+        quests_path = os.path.join(VARIABLES_DIR, 'quest_log.json')
+        if not os.path.exists(quests_path):
+            return jsonify([])
+        with open(quests_path, 'r', encoding='utf-8') as f:
+            quests = json.load(f)
+        return jsonify(quests)
+    except Exception as e:
+        print(f"Error loading quests: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/quests/<quest_id>/delete', methods=['POST'])
+@requires_auth
+def delete_quest(quest_id):
+    try:
+        from variables import VARIABLES_DIR
+        quests_path = os.path.join(VARIABLES_DIR, 'quest_log.json')
+        if os.path.exists(quests_path):
+            with open(quests_path, 'r', encoding='utf-8') as f:
+                quests = json.load(f)
+            quests = [q for q in quests if q['id'] != quest_id]
+            with open(quests_path, 'w', encoding='utf-8') as f:
+                json.dump(quests, f, indent=2, ensure_ascii=False)
+        return jsonify({"status": "success"})
+    except Exception as e:
+        print(f"Error deleting quest {quest_id}: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/quests/<quest_id>/download', methods=['GET'])
+@requires_auth
+def download_quest(quest_id):
+    try:
+        from variables import VARIABLES_DIR
+        quests_path = os.path.join(VARIABLES_DIR, 'quest_log.json')
+        if not os.path.exists(quests_path):
+            return jsonify({"error": "No quests found"}), 404
+        with open(quests_path, 'r', encoding='utf-8') as f:
+            quests = json.load(f)
+        quest = next((q for q in quests if q['id'] == quest_id), None)
+        if not quest:
+            return jsonify({"error": "Quest not found"}), 404
+
+        title = quest.get('title', 'Quest')
+        location = quest.get('location', '')
+        objectives = quest.get('objectives', [])
+        notes = "\n".join(objectives)
+        due_str = quest.get('due', '')
+
+        # Parse start time
+        try:
+            from datetime import datetime, timedelta, timezone
+            dt_start = datetime.fromisoformat(due_str.replace("Z", "+00:00"))
+        except Exception:
+            dt_start = datetime.now(timezone.utc)
+            
+        dt_end = dt_start + timedelta(hours=1)
+        
+        stamp_str = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        start_str = dt_start.strftime("%Y%m%dT%H%M%SZ")
+        end_str = dt_end.strftime("%Y%m%dT%H%M%SZ")
+        
+        clean_desc = notes.replace("\n", "\\n")
+        
+        ics_content = f"""BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//The Sanctuary//Quest Giver//EN
+CALSCALE:GREGORIAN
+METHOD:PUBLISH
+BEGIN:VEVENT
+UID:{quest_id}@thesanctuary
+DTSTAMP:{stamp_str}
+DTSTART:{start_str}
+DTEND:{end_str}
+SUMMARY:{title}
+DESCRIPTION:{clean_desc}
+LOCATION:{location}
+END:VEVENT
+END:VCALENDAR"""
+
+        return Response(
+            ics_content.strip(),
+            mimetype="text/calendar",
+            headers={"Content-Disposition": f"attachment; filename=\"{quest_id}.ics\""}
+        )
+    except Exception as e:
+        print(f"Error downloading quest {quest_id}: {e}")
+        return jsonify({"error": str(e)}), 500
+
 @app.route('/api/programs', methods=['GET'])
 @requires_auth
 def list_programs():

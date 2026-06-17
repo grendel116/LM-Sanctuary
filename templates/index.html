@@ -1362,6 +1362,28 @@
             color: #fbbf24;
             border-color: rgba(245, 158, 11, 0.3);
         }
+        /* Quest Log Button */
+        .quest-btn {
+            background: rgba(255, 255, 255, 0.05);
+            color: var(--text-muted);
+            border: 1px solid var(--border-color);
+            width: 32px;
+            height: 32px;
+            border-radius: 50%;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            box-sizing: border-box;
+            flex-shrink: 0;
+        }
+        .quest-btn:hover {
+            background: rgba(249, 115, 22, 0.15); /* orange tint */
+            color: #ff9d4d;
+            border-color: rgba(249, 115, 22, 0.4);
+            box-shadow: 0 0 10px rgba(249, 115, 22, 0.35);
+        }
         /* Pokeball Button */
         .pokeball-btn {
             background: rgba(255, 255, 255, 0.05);
@@ -2555,10 +2577,10 @@
             cursor: pointer;
         }
         .message.thought-bubble {
-            background: color-mix(in srgb, var(--primary-accent) 8%, #18181c) !important;
-            border: 1.5px dashed color-mix(in srgb, var(--primary-accent) 30%, transparent) !important;
+            background: color-mix(in srgb, var(--primary-accent) 4%, rgba(16, 16, 18, 0.6)) !important;
+            border: 1.5px dashed color-mix(in srgb, var(--primary-accent) 20%, transparent) !important;
             box-shadow: 0 4px 15px rgba(0, 0, 0, 0.15);
-            max-width: 80%;
+            max-width: 70%;
             position: relative;
             backdrop-filter: blur(8px);
             -webkit-backdrop-filter: blur(8px);
@@ -2638,10 +2660,9 @@
                         <span id="header-status-text"></span>
                     </div>
                 </div>
-            </div>
-            <div class="header-actions">
+            </div>            <div class="header-actions">
 
-                <button class="databank-btn" onclick="openDataBank()" title="Knowledge Base / Data Bank">
+                <button class="quest-btn" onclick="openQuestLog()" title="Quest Log">
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
                         <path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"></path>
                     </svg>
@@ -2667,6 +2688,13 @@
                     </svg>
                 </button>
 
+                <button class="databank-btn" onclick="openDataBank()" title="Knowledge Base / Data Bank">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                        <polygon points="12 2 2 7 12 12 22 7 12 2"></polygon>
+                        <polyline points="2 17 12 22 22 17"></polyline>
+                        <polyline points="2 12 12 17 22 12"></polyline>
+                    </svg>
+                </button>
 
                 <button class="trash-btn" onclick="resetSession()" title="Delete Chat / Reset Session">
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
@@ -2819,6 +2847,7 @@
             <div style="display: flex; gap: 10px; margin-bottom: 15px;">
                 <button onclick="switchDataBankTab('upload')" id="tab-btn-upload" class="edit-btn" style="background: var(--primary-accent); color: white; border: none;">Add Document</button>
                 <button onclick="switchDataBankTab('settings')" id="tab-btn-settings" class="edit-btn edit-cancel-btn">Project Settings</button>
+                <button onclick="switchDataBankTab('memories')" id="tab-btn-memories" class="edit-btn edit-cancel-btn">Journals & Memories</button>
             </div>
             
             <!-- Upload & Scrape Tab -->
@@ -2920,6 +2949,42 @@
                     </div>
                 </div>
             </div>
+
+            <!-- Memories Tab -->
+            <div id="databank-tab-memories" style="display: none; flex-direction: column; gap: 15px; max-height: 480px; margin-bottom: 20px;">
+                <!-- Add new journal (Persistent Section) -->
+                <div style="background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.05); border-radius: 8px; padding: 12px;">
+                    <h4 style="margin: 0 0 10px 0; font-size: 0.85rem; font-weight: 600; color: var(--text-main);">Add Memory Journal</h4>
+                    <div style="display: flex; flex-direction: column; gap: 8px;">
+                        <input type="text" id="journal-keyphrases-input" class="onboarding-input" style="width: 100%; font-size: 0.8rem;" placeholder="Keywords (comma-separated, e.g. cat, whiskers, job hunt)">
+                        <textarea id="journal-content-input" class="onboarding-input" style="width: 100%; height: 50px; resize: vertical; font-size: 0.8rem;" placeholder="Memory content (concise, max 300 characters)"></textarea>
+                        <button onclick="addManualJournalEntry()" class="onboarding-btn" style="align-self: flex-end; padding: 5px 12px; font-size: 0.75rem; min-width: auto; height: auto;">Add Entry</button>
+                    </div>
+                </div>
+
+                <!-- Scrollable Lists Section -->
+                <div style="flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 15px; padding-right: 5px; max-height: 250px;">
+                    <!-- Journals List -->
+                    <div>
+                        <div style="font-size: 0.8rem; font-weight: 600; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 1px solid rgba(255,255,255,0.05); padding-bottom: 4px; margin-bottom: 8px;">
+                            Memory Journals (Trigger-Based)
+                        </div>
+                        <div id="companion-journals-list" style="display: flex; flex-direction: column; gap: 8px;">
+                            <!-- Journals rendered dynamically -->
+                        </div>
+                    </div>
+
+                    <!-- Memories List -->
+                    <div>
+                        <div style="font-size: 0.8rem; font-weight: 600; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 1px solid rgba(255,255,255,0.05); padding-bottom: 4px; margin-bottom: 8px; margin-top: 10px;">
+                            Consolidated Memories (Chat Compactions)
+                        </div>
+                        <div id="companion-memories-list" style="display: flex; flex-direction: column; gap: 8px;">
+                            <!-- Memories rendered dynamically -->
+                        </div>
+                    </div>
+                </div>
+            </div>
             
             <!-- Ingestion Status / Loader -->
             <div id="databank-loader" style="display: none; align-items: center; justify-content: center; gap: 10px; background: color-mix(in srgb, var(--primary-accent) 10%, transparent); border: 1px solid color-mix(in srgb, var(--primary-accent) 20%, transparent); padding: 12px; border-radius: 10px; margin-bottom: 20px; font-size: 0.85rem; color: var(--text-main);">
@@ -2928,7 +2993,7 @@
             </div>
 
             <!-- Ingested documents list -->
-            <div style="flex: 1; display: flex; flex-direction: column; min-height: 200px;">
+            <div id="databank-documents-container" style="flex: 1; display: flex; flex-direction: column; min-height: 200px;">
                 <div style="font-size: 0.85rem; font-weight: 600; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 1px solid rgba(255,255,255,0.05); padding-bottom: 6px; margin-bottom: 10px; display: flex; justify-content: space-between; align-items: center;">
                     <span>Ingested Documents</span>
                     <button onclick="purgeDataBank()" class="edit-btn edit-cancel-btn" style="padding: 2px 8px; font-size: 0.75rem; border-color: rgba(239, 68, 68, 0.3); color: #fca5a5;">Purge All</button>
@@ -2937,6 +3002,24 @@
                 <div id="databank-files-container" style="flex: 1; max-height: 220px; overflow-y: auto; border: 1px solid rgba(255,255,255,0.05); border-radius: 10px; background: rgba(0, 0, 0, 0.25);">
                     <!-- Files populated dynamically -->
                 </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Quest Log Modal -->
+    <div id="quest-modal" class="modal" onclick="closeQuestLog()">
+        <div class="modal-card" style="max-width: 580px; width: 95%; text-align: left; align-items: stretch;" onclick="event.stopPropagation()">
+            <span class="close-modal-btn" onclick="closeQuestLog()">&times;</span>
+            <h3 style="margin-bottom: 12px; display: flex; align-items: center; gap: 8px; font-size: 1.15rem; border-bottom: 1px solid rgba(255,255,255,0.08); padding-bottom: 10px;">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--primary-accent)" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 4px;">
+                    <path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"></path>
+                </svg>
+                <span>Quest Log</span>
+            </h3>
+            
+            <div id="quests-container" style="display: flex; flex-direction: column; gap: 15px; max-height: 400px; overflow-y: auto; padding-right: 5px;">
+                <!-- Quests loaded dynamically -->
+                <p style="color: var(--text-muted); font-size: 0.85rem; text-align: center; margin: 20px 0;">No active quests. Ask your companion to assign you one!</p>
             </div>
         </div>
     </div>
@@ -3290,9 +3373,7 @@
                 <button onclick="switchCompanionProfileTab('phys')" id="comp-tab-btn-phys" class="edit-btn" style="background: rgba(255,255,255,0.05); color: var(--text-muted); border: 1px solid rgba(255,255,255,0.1); padding: 6px 12px; font-size: 0.8rem; border-radius: 6px; cursor: pointer;">
                     Appearance
                 </button>
-                <button onclick="switchCompanionProfileTab('journals')" id="comp-tab-btn-journals" class="edit-btn" style="background: rgba(255,255,255,0.05); color: var(--text-muted); border: 1px solid rgba(255,255,255,0.1); padding: 6px 12px; font-size: 0.8rem; border-radius: 6px; cursor: pointer;">
-                    Journals & Memories
-                </button>
+                
             </div>
 
             <!-- Tab 1 Content: Personality -->
@@ -3403,34 +3484,7 @@
                 </div>
             </div>
 
-            <!-- Tab 3 Content: Journals & Memories -->
-            <div id="comp-tab-content-journals" style="display: none; max-height: 400px; overflow-y: auto; padding-right: 15px;">
-                <!-- Add new journal -->
-                <div style="background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.05); border-radius: 8px; padding: 12px; margin-bottom: 15px;">
-                    <h4 style="margin: 0 0 10px 0; font-size: 0.85rem; font-weight: 600; color: var(--text-main);">Add Memory Journal</h4>
-                    <div style="display: flex; flex-direction: column; gap: 8px;">
-                        <input type="text" id="journal-keyphrases-input" class="onboarding-input" style="width: 100%; font-size: 0.8rem;" placeholder="Keywords (comma-separated, e.g. cat, whiskers, job hunt)">
-                        <textarea id="journal-content-input" class="onboarding-input" style="width: 100%; height: 50px; resize: vertical; font-size: 0.8rem;" placeholder="Memory content (concise, max 300 characters)"></textarea>
-                        <button onclick="addManualJournalEntry()" class="onboarding-btn" style="align-self: flex-end; padding: 5px 12px; font-size: 0.75rem; min-width: auto; height: auto;">Add Entry</button>
-                    </div>
-                </div>
 
-                <!-- Journals List -->
-                <div style="font-size: 0.8rem; font-weight: 600; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 1px solid rgba(255,255,255,0.05); padding-bottom: 4px; margin-bottom: 8px;">
-                    Memory Journals (Trigger-Based)
-                </div>
-                <div id="companion-journals-list" style="display: flex; flex-direction: column; gap: 8px;">
-                    <!-- Journals rendered dynamically -->
-                </div>
-
-                <!-- Memories List -->
-                <div style="font-size: 0.8rem; font-weight: 600; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 1px solid rgba(255,255,255,0.05); padding-bottom: 4px; margin-bottom: 8px; margin-top: 20px;">
-                    Consolidated Memories (Chat Compactions)
-                </div>
-                <div id="companion-memories-list" style="display: flex; flex-direction: column; gap: 8px;">
-                    <!-- Memories rendered dynamically -->
-                </div>
-            </div>
 
             <div style="display: flex; justify-content: flex-end; gap: 10px; margin-top: 15px; border-top: 1px solid rgba(255,255,255,0.08); padding-top: 12px;">
                 <button onclick="closeCompanionProfileModal()" class="onboarding-btn" style="background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1); color: var(--text-muted); padding: 8px 16px; border-radius: 8px; font-size: 0.8rem; cursor: pointer;">
@@ -6244,35 +6298,19 @@ function renderProgramsList(assistants, activeId) {
 
                 if (assistant.id !== 'sebile') {
                     const deleteBtn = document.createElement('button');
-                    deleteBtn.innerHTML = '&times;';
-                    deleteBtn.title = 'Delete Companion';
-                    deleteBtn.style.cssText = `
-                        background: rgba(239, 68, 68, 0.1);
-                        border: 1px solid rgba(239, 68, 68, 0.3);
-                        color: #fca5a5;
-                        width: 24px;
-                        height: 24px;
-                        border-radius: 50%;
-                        display: flex;
-                        align-items: center;
-                        justify-content: center;
-                        cursor: pointer;
-                        font-size: 0.9rem;
-                        font-weight: bold;
-                        transition: all 0.2s;
-                        padding: 0;
-                        margin-left: 10px;
-                        line-height: 1;
-                        flex-shrink: 0;
+                    deleteBtn.className = 'action-icon-btn';
+                    deleteBtn.innerHTML = `
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                            <polyline points="3 6 5 6 21 6"></polyline>
+                            <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+                        </svg>
                     `;
-                    deleteBtn.onmouseover = () => {
-                        deleteBtn.style.background = 'rgba(239, 68, 68, 0.3)';
-                        deleteBtn.style.color = '#ffffff';
-                    };
-                    deleteBtn.onmouseout = () => {
-                        deleteBtn.style.background = 'rgba(239, 68, 68, 0.1)';
-                        deleteBtn.style.color = '#fca5a5';
-                    };
+                    deleteBtn.title = 'Delete Companion';
+                    deleteBtn.style.width = '26px';
+                    deleteBtn.style.height = '26px';
+                    deleteBtn.style.borderRadius = '6px';
+                    deleteBtn.style.marginLeft = '10px';
+                    deleteBtn.style.flexShrink = '0';
                     deleteBtn.onclick = (e) => {
                         e.stopPropagation();
                         deleteAssistant(assistant.id, assistant.name);
@@ -6661,7 +6699,7 @@ async function deleteAssistant(assistantId, name) {
         }
 
         function switchCompanionProfileTab(tab) {
-            const tabs = ['core', 'phys', 'journals'];
+            const tabs = ['core', 'phys'];
             tabs.forEach(t => {
                 const content = document.getElementById(`comp-tab-content-${t}`);
                 const btn = document.getElementById(`comp-tab-btn-${t}`);
@@ -6780,7 +6818,7 @@ async function deleteAssistant(assistantId, name) {
                             `;
                             
                             const header = document.createElement('div');
-                            header.style.cssText = 'display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid rgba(255,255,255,0.04); padding-bottom: 4px;';
+                            header.style.cssText = 'display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid rgba(255,255,255,0.04); padding-bottom: 4px; gap: 12px;';
                             
                             const kps = document.createElement('span');
                             kps.style.cssText = 'color: var(--primary-accent); font-weight: 600; font-size: 0.72rem;';
@@ -6788,17 +6826,18 @@ async function deleteAssistant(assistantId, name) {
                             header.appendChild(kps);
                             
                             const deleteBtn = document.createElement('button');
-                            deleteBtn.innerHTML = '&times;';
-                            deleteBtn.title = 'Delete Journal Entry';
-                            deleteBtn.style.cssText = `
-                                background: transparent;
-                                border: none;
-                                color: #fca5a5;
-                                cursor: pointer;
-                                font-size: 1.1rem;
-                                line-height: 1;
-                                padding: 0;
+                            deleteBtn.className = 'action-icon-btn';
+                            deleteBtn.innerHTML = `
+                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                                    <polyline points="3 6 5 6 21 6"></polyline>
+                                    <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+                                </svg>
                             `;
+                            deleteBtn.title = 'Delete Journal Entry';
+                            deleteBtn.style.width = '26px';
+                            deleteBtn.style.height = '26px';
+                            deleteBtn.style.borderRadius = '6px';
+                            deleteBtn.style.flexShrink = '0';
                             deleteBtn.onclick = () => deleteCompanionJournalEntry(e.id);
                             header.appendChild(deleteBtn);
                             
@@ -6822,8 +6861,9 @@ async function deleteAssistant(assistantId, name) {
                     
                     const historyList = historyData.history || [];
                     const memoryEvents = historyList.filter(msg => 
-                        msg.role === 'system-memory' || 
-                        (msg.text && msg.text.startsWith('[System Memory of older conversation turns]:'))
+                        (msg.role === 'system-memory' || 
+                         (msg.text && msg.text.startsWith('[System Memory of older conversation turns]:'))) &&
+                        !msg.compacted
                     );
                     
                     if (memoryEvents.length === 0) {
@@ -6850,22 +6890,42 @@ async function deleteAssistant(assistantId, name) {
                             `;
                             
                             const header = document.createElement('div');
-                            header.style.cssText = 'display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid rgba(255,255,255,0.04); padding-bottom: 4px;';
+                            header.style.cssText = 'display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid rgba(255,255,255,0.04); padding-bottom: 4px; gap: 12px;';
                             
                             const kps = document.createElement('span');
                             kps.style.cssText = 'color: #10b981; font-weight: 600; font-size: 0.72rem;';
                             kps.textContent = 'Auto-Compacted';
                             header.appendChild(kps);
                             
-                            // Timestamp formatted
+                            // Right side container for timestamp and delete button
+                            const rightContainer = document.createElement('div');
+                            rightContainer.style.cssText = 'display: flex; align-items: center; gap: 8px;';
+                            
                             if (msg.timestamp) {
                                 const tsSpan = document.createElement('span');
                                 tsSpan.style.cssText = 'color: var(--text-muted); font-size: 0.7rem;';
                                 const d = new Date(msg.timestamp * 1000);
                                 tsSpan.textContent = d.toLocaleString(undefined, {month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'});
-                                header.appendChild(tsSpan);
+                                rightContainer.appendChild(tsSpan);
                             }
                             
+                            const deleteBtn = document.createElement('button');
+                            deleteBtn.className = 'action-icon-btn';
+                            deleteBtn.innerHTML = `
+                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                                    <polyline points="3 6 5 6 21 6"></polyline>
+                                    <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+                                </svg>
+                            `;
+                            deleteBtn.title = 'Delete Compacted Memory';
+                            deleteBtn.style.width = '26px';
+                            deleteBtn.style.height = '26px';
+                            deleteBtn.style.borderRadius = '6px';
+                            deleteBtn.style.flexShrink = '0';
+                            deleteBtn.onclick = () => deleteConsolidatedMemory(msg.timestamp);
+                            rightContainer.appendChild(deleteBtn);
+                            
+                            header.appendChild(rightContainer);
                             row.appendChild(header);
                             
                             const text = document.createElement('div');
@@ -6943,6 +7003,30 @@ async function deleteAssistant(assistantId, name) {
                         await loadCompanionJournals();
                     } catch (e) {
                         showCustomAlert("Error", "Could not delete memory entry: " + e.message);
+                    }
+                }
+            );
+        }
+
+        async function deleteConsolidatedMemory(timestamp) {
+            showCustomConfirm(
+                "Delete Consolidated Memory",
+                "Are you sure you want to permanently delete this compacted chat history block? Your companion will lose this memory immediately.",
+                async () => {
+                    try {
+                        const res = await fetch('/api/programs/memories/delete', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                                session_id: sessionId,
+                                timestamp: timestamp
+                            })
+                        });
+                        const data = await res.json();
+                        if (data.error) throw new Error(data.error);
+                        await loadCompanionJournals();
+                    } catch (e) {
+                        showCustomAlert("Error", "Could not delete memory: " + e.message);
                     }
                 }
             );
@@ -8334,6 +8418,7 @@ function triggerFileInput() {
 
         // --- sendMessage ---
         async function sendMessage() {
+            hideThoughtBubbleOverlay();
             const text = userInput.value.trim();
             if (!text && !attachedBase64 && !attachedMediaPath) {
                 const messageRows = chatContainer.querySelectorAll('.message-row:not(#welcome-message):not(#onboarding-container)');
@@ -8451,6 +8536,7 @@ function triggerFileInput() {
 
         async function continueMessage() {
             if (isGenerating) return;
+            hideThoughtBubbleOverlay();
             
             const messageRows = chatContainer.querySelectorAll('.message-row:not(#welcome-message):not(#onboarding-container)');
             if (messageRows.length === 0) {
@@ -9903,8 +9989,13 @@ function showToolConfirmModal(callId, toolName, details) {
         // --- openDataBank ---
         function openDataBank() {
             document.getElementById('databank-modal').style.display = 'flex';
+            if (activeCompanionName) {
+                currentEditingCompanionId = activeCompanionName.toLowerCase();
+            }
+            switchDataBankTab('upload');
             loadDataBankFiles();
             loadProjectSettings();
+            loadCompanionJournals();
         }
 
         // --- closeDataBank ---
@@ -9912,15 +10003,113 @@ function showToolConfirmModal(callId, toolName, details) {
             document.getElementById('databank-modal').style.display = 'none';
         }
 
+        // --- openQuestLog ---
+        async function openQuestLog() {
+            document.getElementById('quest-modal').style.display = 'flex';
+            await loadQuests();
+        }
+
+        // --- closeQuestLog ---
+        function closeQuestLog() {
+            document.getElementById('quest-modal').style.display = 'none';
+        }
+
+        // --- loadQuests ---
+        async function loadQuests() {
+            const container = document.getElementById('quests-container');
+            if (!container) return;
+            
+            try {
+                const response = await fetch('/api/quests');
+                const quests = await response.json();
+                
+                if (quests.error) {
+                    container.innerHTML = `<p style="color: #fca5a5; font-size: 0.85rem; text-align: center; margin: 20px 0;">Error loading quests: ${quests.error}</p>`;
+                    return;
+                }
+                
+                if (!quests || quests.length === 0) {
+                    container.innerHTML = `<p style="color: var(--text-muted); font-size: 0.85rem; text-align: center; margin: 20px 0;">No active quests. Ask your companion to assign you one!</p>`;
+                    return;
+                }
+                
+                container.innerHTML = quests.map(quest => {
+                    const dueTime = quest.due ? new Date(quest.due).toLocaleString() : 'No Target Time';
+                    const objectivesHtml = (quest.objectives || []).map(obj => 
+                        `<li style="margin-bottom: 5px; color: var(--text-main); font-size: 0.82rem;">${obj}</li>`
+                    ).join('');
+                    
+                    return `
+                        <div style="background: rgba(255, 255, 255, 0.03); border: 1px solid rgba(255,255,255,0.06); border-radius: 10px; padding: 15px; display: flex; flex-direction: column; gap: 8px;">
+                            <div style="display: flex; justify-content: space-between; align-items: flex-start; gap: 10px;">
+                                <h4 style="margin: 0; color: #fbbf24; font-size: 0.95rem; font-weight: 600;">${quest.title}</h4>
+                                <div style="display: flex; gap: 6px;">
+                                    <!-- Download ICS -->
+                                    <button class="edit-btn" onclick="downloadQuest('${quest.id}')" title="Download Calendar invite" style="padding: 4px 8px; font-size: 0.75rem; display: flex; align-items: center; gap: 4px; border-color: rgba(255,255,255,0.1);">
+                                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                                            <polyline points="7 10 12 15 17 10"></polyline>
+                                            <line x1="12" y1="15" x2="12" y2="3"></line>
+                                        </svg>
+                                    </button>
+                                    <!-- Complete/Delete -->
+                                    <button class="edit-btn" onclick="deleteQuest('${quest.id}')" title="Complete Quest" style="padding: 4px 8px; font-size: 0.75rem; background: rgba(16, 185, 129, 0.1); border-color: rgba(16, 185, 129, 0.2); color: #34d399;">
+                                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                                            <polyline points="20 6 9 17 4 12"></polyline>
+                                        </svg>
+                                    </button>
+                                </div>
+                            </div>
+                            ${quest.location ? `<div style="font-size: 0.75rem; color: var(--text-muted); display: flex; align-items: center; gap: 4px;"><strong>Location:</strong> ${quest.location}</div>` : ''}
+                            <div style="font-size: 0.75rem; color: var(--text-muted);"><strong>Target:</strong> ${dueTime}</div>
+                            <div style="margin-top: 5px;">
+                                <strong style="font-size: 0.78rem; color: var(--text-muted);">Objectives:</strong>
+                                <ul style="margin: 4px 0 0 15px; padding: 0; list-style-type: square;">
+                                    ${objectivesHtml}
+                                </ul>
+                            </div>
+                        </div>
+                    `;
+                }).join('');
+            } catch (e) {
+                console.error("Error loading quests:", e);
+                container.innerHTML = `<p style="color: #fca5a5; font-size: 0.85rem; text-align: center; margin: 20px 0;">Failed to load quests.</p>`;
+            }
+        }
+
+        // --- downloadQuest ---
+        function downloadQuest(questId) {
+            window.open(`/api/quests/${questId}/download`, '_blank');
+        }
+
+        // --- deleteQuest ---
+        async function deleteQuest(questId) {
+            try {
+                const response = await fetch(`/api/quests/${questId}/delete`, { method: 'POST' });
+                const data = await response.json();
+                if (data.status === 'success') {
+                    await loadQuests();
+                } else {
+                    alert("Failed to complete quest: " + (data.error || 'unknown error'));
+                }
+            } catch (e) {
+                console.error("Error deleting quest:", e);
+                alert("Error completing quest.");
+            }
+        }
+
         // --- switchDataBankTab ---
         function switchDataBankTab(tab) {
             const uploadTab = document.getElementById('databank-tab-upload');
             const settingsTab = document.getElementById('databank-tab-settings');
+            const memoriesTab = document.getElementById('databank-tab-memories');
+            const docsContainer = document.getElementById('databank-documents-container');
             const uploadBtn = document.getElementById('tab-btn-upload');
             const settingsBtn = document.getElementById('tab-btn-settings');
+            const memoriesBtn = document.getElementById('tab-btn-memories');
             
             // Reset active buttons
-            [uploadBtn, settingsBtn].forEach(btn => {
+            [uploadBtn, settingsBtn, memoriesBtn].forEach(btn => {
                 if (btn) {
                     btn.style.background = 'transparent';
                     btn.style.color = 'var(--text-muted)';
@@ -9929,9 +10118,13 @@ function showToolConfirmModal(callId, toolName, details) {
             });
             
             // Hide all tabs
-            [uploadTab, settingsTab].forEach(t => {
+            [uploadTab, settingsTab, memoriesTab].forEach(t => {
                 if (t) t.style.display = 'none';
             });
+            
+            if (docsContainer) {
+                docsContainer.style.display = (tab === 'upload') ? 'flex' : 'none';
+            }
             
             if (tab === 'upload') {
                 if (uploadTab) uploadTab.style.display = 'flex';
@@ -9946,6 +10139,13 @@ function showToolConfirmModal(callId, toolName, details) {
                     settingsBtn.style.background = 'var(--primary-accent)';
                     settingsBtn.style.color = 'white';
                     settingsBtn.classList.remove('edit-cancel-btn');
+                }
+            } else if (tab === 'memories') {
+                if (memoriesTab) memoriesTab.style.display = 'flex';
+                if (memoriesBtn) {
+                    memoriesBtn.style.background = 'var(--primary-accent)';
+                    memoriesBtn.style.color = 'white';
+                    memoriesBtn.classList.remove('edit-cancel-btn');
                 }
             }
         }
@@ -10658,9 +10858,9 @@ let galleryImages = [];
         }
 
         window.addEventListener('mousemove', resetIdleTimer);
-        window.addEventListener('click', () => { resetIdleTimer(); hideThoughtBubbleOverlay(); });
-        window.addEventListener('keypress', () => { resetIdleTimer(); hideThoughtBubbleOverlay(); });
-        window.addEventListener('touchstart', () => { resetIdleTimer(); hideThoughtBubbleOverlay(); });
+        window.addEventListener('click', resetIdleTimer);
+        window.addEventListener('keypress', resetIdleTimer);
+        window.addEventListener('touchstart', resetIdleTimer);
 
         async function triggerProactiveAction() {
             try {
