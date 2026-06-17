@@ -60,10 +60,14 @@ class LocalSpeechProvider(BaseSpeechProvider):
         self._lazy_init()
         import soundfile as sf
         try:
+            # Dynamically read TTS voice from project settings
+            from utils.program import get_tts_voice
+            active_voice = get_tts_voice()
+            
             # Generate speech samples
             samples, sample_rate = self.kokoro.create(
                 text, 
-                voice=self.voice_name,
+                voice=active_voice,
                 speed=1.0, 
                 lang="en-us"
             )

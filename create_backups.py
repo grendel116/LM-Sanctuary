@@ -20,7 +20,7 @@ active_program = get_active_program()
 user_zip_path = os.path.join(backups_dir, "backup_user.zip")
 user_files = [
     "variables/user.md",
-    "variables/active_program.txt",
+    "variables/project_settings.json",
     "variables/banned_words.json",
     ".env"
 ]
@@ -50,7 +50,7 @@ with zipfile.ZipFile(programs_zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
 # Everything in workspace, excluding virtual environment, git, backups, user-specific configs, and program folders
 app_zip_path = os.path.join(backups_dir, "backup_app.zip")
 exclude_dirs = {".venv", ".git", "backups", "__pycache__", "programs"}
-exclude_files = {".env", "user.md", "active_program.txt", "banned_words.json"}
+exclude_files = {".env", "user.md", "project_settings.json", "banned_words.json"}
 print("Creating backup_app.zip (clean codebase)...")
 with zipfile.ZipFile(app_zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
     for root, dirs, files in os.walk(workspace_dir):
@@ -64,7 +64,7 @@ with zipfile.ZipFile(app_zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
                 if rel_path.replace('\\', '/') in {
                     ".env",
                     "variables/user.md",
-                    "variables/active_program.txt",
+                    "variables/project_settings.json",
                     "variables/banned_words.json"
                 }:
                     continue

@@ -1,6 +1,6 @@
-const CACHE_NAME = 'program-sanctuary-v3';
+const CACHE_NAME = 'program-sanctuary-v4';
 const ASSETS = [
-  '/profile.svg',
+  '/profile.png',
   '/app_icon.png',
   'https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap',
   'https://cdn.jsdelivr.net/npm/marked/marked.min.js',
@@ -46,7 +46,7 @@ self.addEventListener('fetch', (event) => {
       url.pathname.startsWith('/api/') ||
       url.pathname.startsWith('/programs/') ||
       url.pathname.startsWith('/images/') ||
-      url.pathname === '/profile.svg' ||
+      url.pathname === '/profile.png' ||
       url.pathname === '/app_icon.png') {
     return;
   }

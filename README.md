@@ -58,6 +58,17 @@ These are the things your companion can do on your computer. By default, before 
 * **Comfy Workflow** (`apply_comfy_workflow`): Run custom workflows against a local ComfyUI API.
 ---
 
+## 🌟 FEATURES
+
+* **Interactive Voice Calls / Chat**: Speak with companions in real-time. Powering Kokoro ONNX voice generation, companion-specific voices, and call transcript saving.
+* **Temperature Control**: A dynamic slider in settings to control chat creativity.
+* **Procedural Journals & Memories**: Companions build dynamic memory structures (`memories.json`) and journal logs (`journals.json`), preserving context and relationships across sessions.
+* **Companion Editing & Imports**: Profile updating, and support for importing custom Tavern cards.
+* **Character Accent Palette**: Colors saved in `project_settings.json` that dynamically generates and update themed CSS variables, buttons, active card highlights, and glow keyframes.
+* **Idle Thoughts**: Inline monologue bubbles (`.thought-row`) showing a companion's thoughts during inactivity, resolving the active user profile name dynamically.
+
+---
+
 ## 🚀 HOW TO RUN
 
 ### Easy Way (Windows):
