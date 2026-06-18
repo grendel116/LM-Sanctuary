@@ -3037,6 +3037,17 @@
     <div id="image-modal" class="modal" onclick="closeModal()">
         <span class="close-modal" onclick="closeModal()">&times;</span>
         
+        <!-- Active Queue Container -->
+        <div id="gallery-queue-container" style="display: none; position: absolute; top: 20px; left: 20px; width: 300px; max-height: 250px; background: rgba(20, 20, 25, 0.85); backdrop-filter: blur(16px); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 12px; padding: 15px; overflow-y: auto; z-index: 10005; font-size: 0.85rem; pointer-events: auto;" onclick="event.stopPropagation()">
+            <h4 style="margin: 0 0 10px 0; font-size: 0.9rem; font-weight: 600; display: flex; justify-content: space-between; align-items: center;">
+                <span>Active Queue</span>
+                <span id="queue-count-badge" style="background: var(--primary-accent); color: var(--primary-btn-text); border-radius: 10px; padding: 2px 8px; font-size: 0.75rem;">0</span>
+            </h4>
+            <div id="queue-list-items" style="display: flex; flex-direction: column; gap: 8px;">
+                <!-- Queued items will be rendered here dynamically -->
+            </div>
+        </div>
+        
         <!-- Left Arrow -->
         <button class="gallery-nav-btn prev-btn" onclick="prevGalleryImage(event)" title="Previous image">
             <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
@@ -9465,6 +9476,9 @@ async function loadServerImages() {
                 if (data.images) {
                     serverImages = data.images;
                 }
+                if (typeof pollQueueStatus === 'function') {
+                    pollQueueStatus();
+                }
             } catch (e) {
                 console.error("Error loading server images:", e);
             }
@@ -10099,6 +10113,225 @@ async function regenerateImage(buttonElement, oldImageUrl, prompt) {
         }
 
 
+        let activeQueueTasks = {};
+        let queuePollInterval = null;
+
+        function startQueuePolling() {
+            if (queuePollInterval) return;
+            pollQueueStatus();
+            queuePollInterval = setInterval(pollQueueStatus, 15000);
+        }
+
+        function stopQueuePolling() {
+            if (queuePollInterval) {
+                clearInterval(queuePollInterval);
+                queuePollInterval = null;
+            }
+        }
+
+        function findChatImageByUrl(url) {
+            const relUrl = getRelativePath(url);
+            const imgs = document.querySelectorAll('.message-image-container img');
+            for (let img of imgs) {
+                if (getRelativePath(img.src) === relUrl) {
+                    return img;
+                }
+            }
+            return null;
+        }
+
+        function showImageLoadingOverlay(container, status) {
+            let overlay = container.querySelector('.image-loading-overlay');
+            if (!overlay) {
+                overlay = document.createElement('div');
+                overlay.className = 'image-loading-overlay';
+                container.appendChild(overlay);
+            }
+            const label = status === 'queued' ? 'Queued...' : 'Generating Video...';
+            overlay.innerHTML = `
+                <div style="display: flex; flex-direction: column; align-items: center; gap: 8px; color: var(--primary-accent);">
+                    <div class="typing-indicator" style="gap: 6px;">
+                        <div class="typing-dot" style="background-color: var(--primary-accent);"></div>
+                        <div class="typing-dot" style="background-color: var(--primary-accent); animation-delay: -0.16s;"></div>
+                        <div class="typing-dot" style="background-color: var(--primary-accent); animation-delay: -0.32s;"></div>
+                    </div>
+                    <span style="font-size: 0.75rem; font-weight: 500; text-shadow: 0 2px 4px rgba(0,0,0,0.8);">${label}</span>
+                </div>
+            `;
+            
+            // Disable action buttons in the overlay
+            const overlayBtns = container.querySelectorAll('.image-action-btn');
+            overlayBtns.forEach(btn => {
+                btn.style.pointerEvents = 'none';
+                btn.style.opacity = '0.5';
+            });
+        }
+
+        function updateImageLoadingText(container, status) {
+            const span = container.querySelector('.image-loading-overlay span');
+            if (span) {
+                span.textContent = status === 'queued' ? 'Queued...' : 'Generating Video...';
+            }
+        }
+
+        function showImageErrorOverlay(container, error) {
+            const overlay = container.querySelector('.image-loading-overlay');
+            if (overlay) {
+                overlay.innerHTML = `
+                    <div style="display: flex; flex-direction: column; align-items: center; gap: 8px; color: #ef4444; padding: 10px; text-align: center;">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                            <circle cx="12" cy="12" r="10"></circle>
+                            <line x1="12" y1="8" x2="12" y2="12"></line>
+                            <line x1="12" y1="16" x2="12.01" y2="16"></line>
+                        </svg>
+                        <span style="font-size: 0.75rem; font-weight: 600; text-shadow: 0 2px 4px rgba(0,0,0,0.8);">Generation Failed</span>
+                        <button class="icon-btn" onclick="this.closest('.image-loading-overlay').remove();" style="font-size: 0.7rem; padding: 2px 8px; background: rgba(255,255,255,0.1); border-radius: 4px; margin-top: 4px; color: #ffffff; cursor: pointer; pointer-events: auto;">Dismiss</button>
+                    </div>
+                `;
+            }
+            
+            // Re-enable action buttons
+            const overlayBtns = container.querySelectorAll('.image-action-btn');
+            overlayBtns.forEach(btn => {
+                btn.style.pointerEvents = 'auto';
+                btn.style.opacity = '';
+            });
+        }
+
+        function swapImageWithVideo(container, videoUrl) {
+            const bubble = container.closest('.message.companion');
+            if (bubble) {
+                container.remove();
+                
+                const videoContainer = document.createElement('div');
+                videoContainer.className = 'message-video-container';
+                videoContainer.style.marginTop = '8px';
+                
+                const video = document.createElement('video');
+                video.src = videoUrl;
+                video.controls = true;
+                video.autoplay = true;
+                video.loop = true;
+                video.muted = true;
+                video.style.maxWidth = '100%';
+                video.style.maxHeight = '300px';
+                video.style.borderRadius = '12px';
+                
+                videoContainer.appendChild(video);
+                
+                const textDiv = bubble.querySelector('.message-text');
+                if (textDiv) {
+                    bubble.insertBefore(videoContainer, textDiv);
+                } else {
+                    bubble.appendChild(videoContainer);
+                }
+            }
+        }
+
+        function updateQueueModalUI(generations) {
+            const queueContainer = document.getElementById('gallery-queue-container');
+            const queueListItems = document.getElementById('queue-list-items');
+            const badge = document.getElementById('queue-count-badge');
+            
+            if (!queueContainer || !queueListItems) return;
+            
+            const activeTasks = generations.filter(g => g.status === 'queued' || g.status === 'generating');
+            
+            if (activeTasks.length === 0) {
+                queueContainer.style.display = 'none';
+                return;
+            }
+            
+            queueContainer.style.display = 'block';
+            if (badge) badge.textContent = activeTasks.length;
+            
+            queueListItems.innerHTML = '';
+            activeTasks.forEach(task => {
+                const item = document.createElement('div');
+                item.style.display = 'flex';
+                item.style.alignItems = 'center';
+                item.style.gap = '10px';
+                item.style.padding = '8px';
+                item.style.background = 'rgba(255, 255, 255, 0.04)';
+                item.style.borderRadius = '8px';
+                item.style.border = '1px solid rgba(255, 255, 255, 0.05)';
+                
+                const statusLabel = task.status === 'queued' ? 'Queued' : 'Rendering';
+                
+                item.innerHTML = `
+                    <img src="${task.source_image}" style="width: 36px; height: 36px; border-radius: 6px; object-fit: cover; border: 1px solid rgba(255,255,255,0.1);">
+                    <div style="flex-grow: 1; min-width: 0;">
+                        <div style="font-weight: 600; font-size: 0.8rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${task.prompt}</div>
+                        <div style="font-size: 0.7rem; color: #94a3b8; display: flex; align-items: center; gap: 6px;">
+                            <span class="typing-dot" style="background: var(--primary-accent); width: 6px; height: 6px; border-radius: 50%; display: inline-block;"></span>
+                            <span>${statusLabel}</span>
+                        </div>
+                    </div>
+                `;
+                queueListItems.appendChild(item);
+            });
+        }
+
+        async function pollQueueStatus() {
+            try {
+                const response = await fetch(`/api/generations?t=${Date.now()}`);
+                if (!response.ok) return;
+                
+                const data = await response.json();
+                if (!data.generations) return;
+                
+                updateQueueModalUI(data.generations);
+                
+                let activeTaskIds = Object.keys(activeQueueTasks);
+                if (activeTaskIds.length === 0) {
+                    data.generations.forEach(gen => {
+                        if (gen.status === 'queued' || gen.status === 'generating') {
+                            const img = findChatImageByUrl(gen.source_image);
+                            if (img) {
+                                const container = img.closest('.message-image-container');
+                                if (container) {
+                                    container.setAttribute('data-task-id', gen.task_id);
+                                    showImageLoadingOverlay(container, gen.status);
+                                    activeQueueTasks[gen.task_id] = {
+                                        task_id: gen.task_id,
+                                        source_image: gen.source_image,
+                                        container: container
+                                    };
+                                }
+                            }
+                        }
+                    });
+                    activeTaskIds = Object.keys(activeQueueTasks);
+                    if (activeTaskIds.length === 0) {
+                        stopQueuePolling();
+                        return;
+                    }
+                }
+                
+                data.generations.forEach(gen => {
+                    const task = activeQueueTasks[gen.task_id];
+                    if (task) {
+                        if (gen.status === 'completed') {
+                            swapImageWithVideo(task.container, gen.result_url);
+                            delete activeQueueTasks[gen.task_id];
+                        } else if (gen.status === 'failed') {
+                            showImageErrorOverlay(task.container, gen.error);
+                            delete activeQueueTasks[gen.task_id];
+                        } else {
+                            updateImageLoadingText(task.container, gen.status);
+                        }
+                    }
+                });
+                
+                if (Object.keys(activeQueueTasks).length === 0) {
+                    stopQueuePolling();
+                    loadServerImages();
+                }
+            } catch (e) {
+                console.error("Error polling queue status:", e);
+            }
+        }
+
         // --- animateImage ---
         async function animateImage(buttonElement, oldImageUrl, motionPrompt) {
             try {
@@ -10113,24 +10346,9 @@ async function regenerateImage(buttonElement, oldImageUrl, prompt) {
                     return;
                 }
                 
-                // Create loading overlay
-                let overlay = container.querySelector('.image-loading-overlay');
-                if (!overlay) {
-                    overlay = document.createElement('div');
-                    overlay.className = 'image-loading-overlay';
-                    overlay.innerHTML = `
-                        <div class="typing-indicator" style="gap: 6px;">
-                            <div class="typing-dot" style="background-color: var(--primary-accent);"></div>
-                            <div class="typing-dot" style="background-color: var(--primary-accent); animation-delay: -0.16s;"></div>
-                            <div class="typing-dot" style="background-color: var(--primary-accent); animation-delay: -0.32s;"></div>
-                        </div>
-                    `;
-                    container.appendChild(overlay);
-                }
+                showImageLoadingOverlay(container, 'queued');
                 buttonElement.style.pointerEvents = 'none';
                 buttonElement.style.opacity = '0.5';
-
-                startToolPolling();
                 
                 const response = await fetch('/api/animate_image', {
                     method: 'POST',
@@ -10143,39 +10361,14 @@ async function regenerateImage(buttonElement, oldImageUrl, prompt) {
                 });
                 
                 const data = await response.json();
-                if (response.ok && data.status === 'success') {
-                    // Replace the image container with a video container in the DOM dynamically!
-                    const bubble = container.closest('.message.companion');
-                    if (bubble) {
-                        // Remove the image container
-                        container.remove();
-                        
-                        // Add the video container
-                        const videoContainer = document.createElement('div');
-                        videoContainer.className = 'message-video-container';
-                        videoContainer.style.marginTop = '8px';
-                        
-                        const video = document.createElement('video');
-                        video.src = data.new_video_url;
-                        video.controls = true;
-                        video.autoplay = true;
-                        video.loop = true;
-                        video.muted = true;
-                        video.style.maxWidth = '100%';
-                        video.style.maxHeight = '300px';
-                        video.style.borderRadius = '12px';
-                        
-                        videoContainer.appendChild(video);
-                        
-                        // Insert video right before message text or logs if possible
-                        const textDiv = bubble.querySelector('.message-text');
-                        if (textDiv) {
-                            bubble.insertBefore(videoContainer, textDiv);
-                        } else {
-                            bubble.appendChild(videoContainer);
-                        }
-                    }
-                    await loadServerImages();
+                if (response.ok && data.status === 'queued') {
+                    container.setAttribute('data-task-id', data.task_id);
+                    activeQueueTasks[data.task_id] = {
+                        task_id: data.task_id,
+                        source_image: oldImageUrl,
+                        container: container
+                    };
+                    startQueuePolling();
                 } else {
                     let errorMsg = data.error || 'Unknown error';
                     if (typeof marked !== 'undefined' && marked.parse) {
@@ -10185,20 +10378,17 @@ async function regenerateImage(buttonElement, oldImageUrl, prompt) {
                             console.error("Marked parsing error in error alert:", me);
                         }
                     }
-                    showCustomAlert("Animation Failed", errorMsg);
+                    showImageErrorOverlay(container, errorMsg);
                 }
             } catch (error) {
                 console.error("Error animating image:", error);
-                showCustomAlert("Connection Error", "Failed to connect to the server for image animation: " + error.message);
-            } finally {
                 const container = buttonElement.closest('.message-image-container');
                 if (container) {
-                    const overlay = container.querySelector('.image-loading-overlay');
-                    if (overlay) overlay.remove();
+                    showImageErrorOverlay(container, "Failed to connect to the server: " + error.message);
                 }
+            } finally {
                 buttonElement.style.pointerEvents = 'auto';
                 buttonElement.style.opacity = '';
-                stopToolPolling();
             }
         }
 
