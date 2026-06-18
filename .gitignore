@@ -39,6 +39,8 @@ core/programs/*/memories.json
 core/embeddings.pkl
 temp_uploads/
 **/ImageWorkflow.json
+**/VideoWorkflow.json
+
 
 # TTS Speech Model weights and synthesized audio cache
 core/skills/speech_generation/speech_model/*.onnx

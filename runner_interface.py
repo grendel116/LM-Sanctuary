@@ -972,6 +972,11 @@ class BaseProgramRunner:
         """Replaces all references to old_image_url with new_image_url in the session history and deletes the old image file from disk."""
         raise NotImplementedError()
 
+    async def replace_image_with_video_in_session(self, session_id: str, old_image_url: str, new_video_url: str) -> bool:
+        """Replaces all references to old_image_url with new_video_url in the session history, but does NOT delete the old image file from disk."""
+        raise NotImplementedError()
+
+
     async def append_message_to_session(self, session_id: str, role: str, text: str) -> bool:
         """Appends a new message directly to the session history without re-evaluation."""
         raise NotImplementedError()
@@ -2530,6 +2535,35 @@ class GoogleAdkRunner(BaseProgramRunner):
             return True
         return False
 
+    async def replace_image_with_video_in_session(self, session_id: str, old_image_url: str, new_video_url: str) -> bool:
+        session_dict = self.runner.session_service.sessions
+        user_id = "user"
+        in_memory = (self.app_name in session_dict and 
+                     user_id in session_dict[self.app_name] and 
+                     session_id in session_dict[self.app_name][user_id])
+        if not in_memory:
+            self._load_session_from_disk(session_id)
+            
+        if self.app_name not in session_dict or user_id not in session_dict[self.app_name] or session_id not in session_dict[self.app_name][user_id]:
+            return False
+            
+        storage_session = session_dict[self.app_name][user_id][session_id]
+        modified = False
+        
+        for ev in storage_session.events:
+            if ev.content and ev.content.parts:
+                for part in ev.content.parts:
+                    if part.text:
+                        if old_image_url in part.text:
+                            part.text = part.text.replace(old_image_url, new_video_url)
+                            modified = True
+                            
+        if modified:
+            self._save_session_to_disk(session_id)
+            return True
+        return False
+
+
     async def append_message_to_session(self, session_id: str, role: str, text: str) -> bool:
         session_dict = self.runner.session_service.sessions
         user_id = "user"
@@ -3112,6 +3146,9 @@ class OpenSourceRunner(BaseProgramRunner):
                 pattern = r'!\[[^\]]*\]\(' + re.escape(image_url) + r'\)'
                 msg['text'] = re.sub(pattern, '[Portrait Deleted]', msg['text'])
                 modified = True
+            if msg.get('image_url') == image_url:
+                msg['image_url'] = None
+                modified = True
             if msg.get('tool_calls'):
                 for tc in msg['tool_calls']:
                     if tc.get('type') == 'response' and tc.get('response') and image_url in tc['response']:
@@ -3141,6 +3178,9 @@ class OpenSourceRunner(BaseProgramRunner):
             if msg.get('text') and old_image_url in msg['text']:
                 msg['text'] = msg['text'].replace(old_image_url, new_image_url)
                 modified = True
+            if msg.get('image_url') == old_image_url:
+                msg['image_url'] = new_image_url
+                modified = True
             if msg.get('tool_calls'):
                 for tc in msg['tool_calls']:
                     if tc.get('type') == 'response' and tc.get('response') and old_image_url in tc['response']:
@@ -3154,6 +3194,34 @@ class OpenSourceRunner(BaseProgramRunner):
             self._save_session_to_disk(session_id)
             return True
         return False
+
+    async def replace_image_with_video_in_session(self, session_id: str, old_image_url: str, new_video_url: str) -> bool:
+        if session_id not in self.sessions_history:
+            self._load_session_from_disk(session_id)
+        if session_id not in self.sessions_history:
+            return False
+            
+        history = self.sessions_history[session_id]
+        modified = False
+        
+        for msg in history:
+            if msg.get('text') and old_image_url in msg['text']:
+                msg['text'] = msg['text'].replace(old_image_url, new_video_url)
+                modified = True
+            if msg.get('image_url') == old_image_url:
+                msg['image_url'] = new_video_url
+                modified = True
+            if msg.get('tool_calls'):
+                for tc in msg['tool_calls']:
+                    if tc.get('type') == 'response' and tc.get('response') and old_image_url in tc['response']:
+                        tc['response'] = tc['response'].replace(old_image_url, new_video_url)
+                        modified = True
+                        
+        if modified:
+            self._save_session_to_disk(session_id)
+            return True
+        return False
+
 
     async def append_message_to_session(self, session_id: str, role: str, text: str) -> bool:
         if session_id not in self.sessions_history:

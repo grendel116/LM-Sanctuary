@@ -1358,7 +1358,38 @@ def regenerate_image():
 @app.route('/api/animate_image', methods=['POST'])
 @requires_auth
 def animate_image():
-    return jsonify({'error': 'Portrait animation (video generation) is not supported in this version.'}), 501
+    session_id = request.json.get('session_id', 'default')
+    image_url = request.json.get('image_url')
+    prompt = request.json.get('prompt', 'gentle head turn, smiling, blinking, looking at camera')
+    
+    if not image_url:
+        return jsonify({'error': 'Missing image_url'}), 400
+        
+    try:
+        import tools
+        from runner_interface import _get_safe_local_path
+        
+        # Resolve to safe local path
+        local_path = _get_safe_local_path(image_url)
+        if not local_path or not os.path.exists(local_path):
+            return jsonify({'error': f'Image file not found: {image_url}'}), 404
+            
+        # Call video generation
+        new_video_url = tools.generate_video_from_image(local_path, prompt)
+        
+        # Replace the image in session history
+        success = asyncio.run(runner.replace_image_with_video_in_session(session_id, image_url, new_video_url))
+        
+        return jsonify({
+            'status': 'success',
+            'new_video_url': new_video_url,
+            'history_updated': success
+        })
+            
+    except Exception as e:
+        print(f"Error animating image {image_url}: {e}")
+        return jsonify({'error': str(e)}), 500
+
 
 @app.route('/list_images', methods=['GET'])
 @requires_auth
@@ -1369,7 +1400,7 @@ def list_images():
         if not os.path.exists(portraits_dir):
             return jsonify({'images': []})
         files = os.listdir(portraits_dir)
-        image_files = [f for f in files if f.lower().endswith(('.png', '.jpg', '.jpeg', '.gif')) and f.lower() != 'profile.png']
+        image_files = [f for f in files if f.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.mp4', '.webm')) and f.lower() != 'profile.png']
         image_files.sort(key=lambda x: os.path.getmtime(os.path.join(portraits_dir, x)), reverse=True)
         image_urls = [f"/images/portraits/{f}" for f in image_files]
         return jsonify({'images': image_urls})
@@ -2540,7 +2571,7 @@ def save_program_profile():
         with open(json_path, "w", encoding="utf-8") as f:
             json.dump(final_data, f, indent=2, ensure_ascii=False)
             
-        regenerate_program_sprite(program_id)
+        # No sprite regeneration needed
             
         old_json_path = os.path.join(program_path, "character_profile.json")
         if os.path.exists(old_json_path):
@@ -2900,129 +2931,7 @@ def generate_character_theme(main_color, accent_color_a=None, accent_color_b=Non
         "primary_btn_text": btn_text
     }
 
-def regenerate_program_sprite(program_id):
-    from variables import PROGRAMS_DIR
-    import json
-    program_path = os.path.normpath(os.path.join(PROGRAMS_DIR, program_id))
-    json_path = os.path.join(program_path, f"{program_id}.json")
-    old_json_path = os.path.join(program_path, "character_profile.json")
-    
-    profile_data = None
-    for p in [json_path, old_json_path]:
-        if os.path.exists(p):
-            try:
-                with open(p, "r", encoding="utf-8") as f:
-                    profile_data = json.load(f)
-                break
-            except Exception:
-                pass
-                
-    if not profile_data:
-        return False
-        
-    name = profile_data.get("name", program_id.title())
-    operation = profile_data.get("operation", {})
-    desc_text = operation.get("description", "")
-    personality_text = operation.get("personality", "")
-    
-    phys_desc = profile_data.get("description", {})
-    combined_desc = f"{desc_text} {phys_desc.get('hair color', '')} hair {phys_desc.get('eyes', '')} eyes {phys_desc.get('skin', '')} skin"
-    
-    colors_data = determine_character_colors(name, combined_desc, personality_text)
-    main_color = colors_data["main_color"]
-    accent_a = colors_data["accent_color_a"]
-    accent_b = colors_data["accent_color_b"]
-    
-
-        
-    try:
-        theme_data = generate_character_theme(main_color, accent_a, accent_b)
-        with open(os.path.join(program_path, 'theme.json'), "w", encoding="utf-8") as tf:
-            json.dump(theme_data, tf, indent=2)
-        return True
-    except Exception as e:
-        print(f"Error generating theme for {program_id}: {e}")
-        return False
-
-def determine_character_colors(name, description, personality):
-    main_color = "#38bdf8"
-    accent_a = "#cbd5e1"
-    accent_b = "#94a3b8"
-    
-    gemini_key = os.getenv("GEMINI_API_KEY")
-    is_gemini_configured = bool(
-        gemini_key and gemini_key.strip() and gemini_key != "your_gemini_api_key_here"
-    )
-    
-    if is_gemini_configured:
-        try:
-            from google.genai import Client
-            from variables import DEFAULT_GEMINI_MODEL
-            import re
-            
-            color_prompt = (
-                f"You are a visual design assistant choosing colors for a custom companion. "
-                f"Based on the character name '{name}', description '{description[:400]}', and personality '{personality[:400]}', "
-                f"generate a harmonious 3-color palette that fits their vibe, elements, or color scheme described.\n"
-                f"Provide exactly these 3 hexadecimal colors (e.g. #38bdf8):\n"
-                f"1. MAIN_COLOR: The main UI theme color (e.g., matching the character's primary magic/element/outfit tone)\n"
-                f"2. ACCENT_COLOR_A: The first companion UI accent color\n"
-                f"3. ACCENT_COLOR_B: The second complementary accent/highlight color\n\n"
-                f"Format your output exactly as:\n"
-                f"MAIN_COLOR: #XXXXXX\n"
-                f"ACCENT_COLOR_A: #XXXXXX\n"
-                f"ACCENT_COLOR_B: #XXXXXX"
-            )
-            
-            client = Client(api_key=gemini_key)
-            response = client.models.generate_content(
-                model=DEFAULT_GEMINI_MODEL,
-                contents=color_prompt,
-                config={
-                    "system_instruction": "You select visual colors based on character design prompts."
-                }
-            )
-            response_text = response.text
-            
-            main_m = re.search(r'MAIN_COLOR:\s*(#[0-9a-fA-F]{6})', response_text)
-            accent_a_m = re.search(r'ACCENT_COLOR_A:\s*(#[0-9a-fA-F]{6})', response_text)
-            accent_b_m = re.search(r'ACCENT_COLOR_B:\s*(#[0-9a-fA-F]{6})', response_text)
-            
-            if main_m: main_color = main_m.group(1)
-            if accent_a_m: accent_a = accent_a_m.group(1)
-            if accent_b_m: accent_b = accent_b_m.group(1)
-            
-        except Exception as e:
-            print(f"Error procedural color generation via LLM: {e}")
-            
-    if main_color == "#38bdf8" and accent_a == "#cbd5e1" and accent_b == "#94a3b8":
-        text = (name + " " + description + " " + personality).lower()
-        if "fire" in text or "red" in text or "crimson" in text or "flame" in text:
-            main_color, accent_a, accent_b = "#ef4444", "#450a0a", "#facc15"
-        elif "water" in text or "blue" in text or "aqua" in text or "ocean" in text:
-            main_color, accent_a, accent_b = "#0ea5e9", "#0c4a6e", "#38bdf8"
-        elif "nature" in text or "green" in text or "forest" in text or "earth" in text:
-            main_color, accent_a, accent_b = "#10b981", "#064e3b", "#a7f3d0"
-        elif "dark" in text or "shadow" in text or "black" in text or "void" in text:
-            main_color, accent_a, accent_b = "#a855f7", "#0f172a", "#f43f5e"
-        elif "light" in text or "gold" in text or "yellow" in text or "sun" in text:
-            main_color, accent_a, accent_b = "#eab308", "#fef08a", "#ffffff"
-        else:
-            presets = [
-                ("#38bdf8", "#94a3b8", "#facc15"),
-                ("#a855f7", "#4a044e", "#c084fc"),
-                ("#f43f5e", "#881337", "#fbcfe8"),
-                ("#10b981", "#064e3b", "#6ee7b7"),
-                ("#f97316", "#7c2d12", "#fdba74"),
-            ]
-            import random
-            main_color, accent_a, accent_b = random.choice(presets)
-            
-    return {
-        "main_color": main_color,
-        "accent_color_a": accent_a,
-        "accent_color_b": accent_b
-    }
+# Obsolete sprite and theme color generation functions removed
 
 def clean_and_normalize_profile(name, description, personality, text):
     """Cleans codeblock backticks and stray preambles from the LLM output, 
