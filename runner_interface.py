@@ -817,7 +817,7 @@ class BaseProgramRunner:
         """Runs the program with a new turn and returns (response_text, tool_calls_list)."""
         raise NotImplementedError()
 
-    async def edit_turn(self, session_id: str, user_message_index: int, new_text: str = None, model: str = None) -> tuple:
+    async def edit_turn(self, session_id: str, user_message_index: int, new_text: str = None, model: str = None, force_offload: bool = False) -> tuple:
         """Edits an existing user message, truncates downstream history, and re-evaluates."""
         raise NotImplementedError()
 
@@ -1406,7 +1406,7 @@ class OpenSourceRunner(BaseProgramRunner):
                 media_path=media_path
             )
  
-    async def edit_turn(self, session_id: str, user_message_index: int, new_text: str = None, model: str = None) -> tuple:
+    async def edit_turn(self, session_id: str, user_message_index: int, new_text: str = None, model: str = None, force_offload: bool = False) -> tuple:
         if session_id not in self.sessions_history:
             self._load_session_from_disk(session_id)
             
@@ -1415,7 +1415,7 @@ class OpenSourceRunner(BaseProgramRunner):
         
         history = self.sessions_history[session_id]
         
-        print(f"[DEBUG OS edit_turn] session_id={session_id}, user_message_index={user_message_index}, history_count={len(history)}")
+        print(f"[DEBUG OS edit_turn] session_id={session_id}, user_message_index={user_message_index}, history_count={len(history)}, force_offload={force_offload}")
         # Find corresponding N-th user event
         user_idx = -1
         user_count = 0
@@ -1449,6 +1449,12 @@ class OpenSourceRunner(BaseProgramRunner):
         self.sessions_history[session_id] = history
         self._save_session_to_disk(session_id)
         
+        # If forcing offload, override model with remote model
+        if force_offload:
+            remote_model = os.getenv("REMOTE_MODEL", "gemini-3.1-flash-lite")
+            print(f"[OFFLOAD] Forcing offload to remote model: {remote_model}", flush=True)
+            model = remote_model
+
         # Re-run turn
         new_input = new_text if new_text is not None else orig_msg.get('text', '')
         res = await self.run_async(session_id, new_input, image_data=img_data, image_mime=img_mime, model=model)

@@ -742,6 +742,7 @@ def edit():
     user_message_index = request.json.get('user_message_index') # 0-based index of user messages
     new_text = request.json.get('new_text') # None means reroll (use original text)
     selected_model = request.json.get('model')
+    force_offload = request.json.get('force_offload', new_text is None)
 
     import tools
     tools.current_session_id.set(session_id)
@@ -758,7 +759,8 @@ def edit():
                 session_id=session_id,
                 user_message_index=user_message_index,
                 new_text=new_text,
-                model=selected_model
+                model=selected_model,
+                force_offload=force_offload
             )
         )
         duration = round(time.time() - start_time, 1)
