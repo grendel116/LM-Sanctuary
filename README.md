@@ -2,9 +2,7 @@
 
 > [!IMPORTANT]
 > **Environment Configuration Updates**:
-> * All previous `GEMINI_API_KEY`, `CLOUD_API_KEY`, and `CLOUD_SERVER_URL` environment variables have been migrated and unified into provider-agnostic `REMOTE_API_KEY` and `REMOTE_SERVER_URL` keys.
->
-> Please ensure you rename these fields in your local `.env` file to match the updated [.env.example](file:///c:/LLM/LM%20Sanctuary/.env.example) structure.
+> * All previous `GEMINI_API_KEY`, `CLOUD_API_KEY`, and `CLOUD_SERVER_URL` environment variables have been migrated and unified into provider-agnostic `REMOTE_API_KEY` and `REMOTE_SERVER_URL` keys. Please ensure you rename these fields in your local `.env` file to match the updated [.env.example](file:///c:/LLM/LM%20Sanctuary/.env.example) structure.
 
 Welcome to the **Sanctuary**. 
 This is your private computer workspace. 
