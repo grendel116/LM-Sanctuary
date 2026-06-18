@@ -1355,6 +1355,47 @@ def regenerate_image():
         print(f"Error regenerating image in session {session_id}: {e}")
         return jsonify({'error': str(e)}), 500
 
+import threading
+import uuid
+
+active_generations = {}
+active_generations_lock = threading.Lock()
+
+def run_background_video_gen(task_id, session_id, image_url, local_path, prompt):
+    import tools
+    import asyncio
+    
+    with active_generations_lock:
+        if task_id in active_generations:
+            active_generations[task_id]['status'] = 'generating'
+            active_generations[task_id]['progress'] = 20
+            
+    try:
+        # Call video generation
+        new_video_url = tools.generate_video_from_image(local_path, prompt)
+        
+        # Replace the image in session history
+        success = asyncio.run(runner.replace_image_with_video_in_session(session_id, image_url, new_video_url))
+        
+        with active_generations_lock:
+            if task_id in active_generations:
+                active_generations[task_id].update({
+                    'status': 'completed',
+                    'progress': 100,
+                    'result_url': new_video_url,
+                    'history_updated': success
+                })
+                
+    except Exception as e:
+        print(f"Error in background generation task {task_id}: {e}")
+        with active_generations_lock:
+            if task_id in active_generations:
+                active_generations[task_id].update({
+                    'status': 'failed',
+                    'progress': 100,
+                    'error': str(e)
+                })
+
 @app.route('/api/animate_image', methods=['POST'])
 @requires_auth
 def animate_image():
@@ -1366,7 +1407,6 @@ def animate_image():
         return jsonify({'error': 'Missing image_url'}), 400
         
     try:
-        import tools
         from runner_interface import _get_safe_local_path
         
         # Resolve to safe local path
@@ -1374,21 +1414,49 @@ def animate_image():
         if not local_path or not os.path.exists(local_path):
             return jsonify({'error': f'Image file not found: {image_url}'}), 404
             
-        # Call video generation
-        new_video_url = tools.generate_video_from_image(local_path, prompt)
+        # Create a unique task ID
+        task_id = f"gen_{int(time.time())}_{uuid.uuid4().hex[:4]}"
         
-        # Replace the image in session history
-        success = asyncio.run(runner.replace_image_with_video_in_session(session_id, image_url, new_video_url))
+        # Initialize task in queue
+        with active_generations_lock:
+            active_generations[task_id] = {
+                'task_id': task_id,
+                'status': 'queued',
+                'progress': 0,
+                'prompt': prompt,
+                'source_image': image_url,
+                'session_id': session_id,
+                'timestamp': time.time(),
+                'result_url': None,
+                'error': None
+            }
+            
+        # Spawn background thread
+        t = threading.Thread(
+            target=run_background_video_gen,
+            args=(task_id, session_id, image_url, local_path, prompt),
+            daemon=True
+        )
+        t.start()
         
         return jsonify({
-            'status': 'success',
-            'new_video_url': new_video_url,
-            'history_updated': success
+            'status': 'queued',
+            'task_id': task_id
         })
             
     except Exception as e:
-        print(f"Error animating image {image_url}: {e}")
+        print(f"Error starting animation queue for {image_url}: {e}")
         return jsonify({'error': str(e)}), 500
+
+@app.route('/api/generations', methods=['GET'])
+@requires_auth
+def list_generations():
+    with active_generations_lock:
+        tasks = list(active_generations.values())
+        tasks.sort(key=lambda x: x['timestamp'], reverse=True)
+        return jsonify({
+            'generations': tasks
+        })
 
 
 @app.route('/list_images', methods=['GET'])
