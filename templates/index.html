@@ -4107,18 +4107,18 @@
                     let extraMsg = "";
                     if (inversionActive) {
                         const stateQualities = {
-                            intimate: "tender",
-                            excited: "playful",
-                            calm: "serene",
-                            intense: "determined",
-                            sad: "attuned"
+                            intimate: "intimate",
+                            excited: "excited",
+                            calm: "calm",
+                            intense: "intense",
+                            sad: "sad"
                         };
-                        const quality = stateQualities[inversionActive] || "attuned";
-                        extraMsg = `<br><br><span style="color: var(--text-muted); font-size: 0.9rem;">The companion has experienced a dialectical inversion. They are ${quality}.</span>`;
+                        const quality = stateQualities[inversionActive] || "sad";
+                        extraMsg = `<br><br><span style="color: var(--text-muted); font-size: 0.9rem;">${activeCompanionName || 'The companion'} has experienced a dialectical inversion. They are ${quality}.</span>`;
                     }
                     
                     showCustomAlert("Heart Status",
-                          `Companion's Mood: <strong>${statusName}</strong><br>` +
+                          `${activeCompanionName || 'Companion'}'s Mood: <strong>${statusName}</strong><br>` +
                           `Emotional Intensity: <strong>${intensityPercent}%</strong>` + extraMsg);
                 });
                 heartElement.addEventListener('dblclick', () => {
@@ -5328,24 +5328,25 @@ function updateHeartState(state, activeInversion) {
             heartElement.style.setProperty('--heart-speed-active', activeSpeed);
             
             // Add a dynamic description to title tooltips for depth
+            const name = activeCompanionName || "Companion";
             const stateTitles = {
-                intimate: "Companion's heart glows warmly with deep intimacy",
-                excited: "Companion's heart is beating rapidly with playful excitement",
-                calm: "Companion's heart is beating in calm, thoughtful serenity",
-                intense: "Companion's heart pulses with intense determination",
-                sad: "Companion's heart glows dimly with concern and sadness"
+                intimate: `${name}'s heart glows warmly with deep intimacy`,
+                excited: `${name}'s heart is beating rapidly with playful excitement`,
+                calm: `${name}'s heart is beating in calm, thoughtful serenity`,
+                intense: `${name}'s heart pulses with intense determination`,
+                sad: `${name}'s heart glows dimly with concern and sadness`
             };
             
-            let title = stateTitles[state.name] || "Companion's Encoded Heart";
+            let title = stateTitles[state.name] || `${name}'s Encoded Heart`;
             if (resolvedInversion) {
                 const stateQualities = {
-                    intimate: "tender",
-                    excited: "playful",
-                    calm: "serene",
-                    intense: "determined",
-                    sad: "attuned"
+                    intimate: "intimate",
+                    excited: "excited",
+                    calm: "calm",
+                    intense: "intense",
+                    sad: "sad"
                 };
-                const quality = stateQualities[resolvedInversion] || "attuned";
+                const quality = stateQualities[resolvedInversion] || "sad";
                 title += ` (Dialectical Inversion: ${quality})`;
             }
             heartElement.title = title;
@@ -8105,7 +8106,7 @@ function toggleThinkingBlock(headerElement) {
             if (role === 'user') {
                 const reuseBtn = document.createElement('button');
                 reuseBtn.className = 'action-icon-btn';
-                reuseBtn.title = 'Resend prompt and regenerate';
+                reuseBtn.title = 'Resend prompt (local)';
                 reuseBtn.innerHTML = `
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
                         <polyline points="9 17 4 12 9 7"></polyline>
@@ -8158,7 +8159,7 @@ function toggleThinkingBlock(headerElement) {
                 } else {
                     const rerollBtn = document.createElement('button');
                     rerollBtn.className = 'action-icon-btn';
-                    rerollBtn.title = 'Reroll response';
+                    rerollBtn.title = 'Reroll response (cloud)';
                     rerollBtn.innerHTML = `
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                             <path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"></path>
@@ -11552,8 +11553,8 @@ let galleryImages = [];
         // Periodically check for inactivity (every 5 seconds)
         setInterval(async () => {
             const idleTime = Date.now() - lastInteractionTime;
-            // 45 seconds of idle time triggers proactive check
-            if (idleTime > 45000 && !hasTriggeredProactive) {
+            // 3 minutes (180 seconds) of idle time triggers proactive check
+            if (idleTime > 180000 && !hasTriggeredProactive) {
                 hasTriggeredProactive = true;
                 const userInput = document.getElementById('user-input');
                 if (userInput && !userInput.disabled) {
