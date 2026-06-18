@@ -1971,7 +1971,8 @@ class GoogleAdkRunner(BaseProgramRunner):
                         'timestamp': ev.timestamp,
                         'compacted': compacted,
                         'inversion_active': getattr(ev, 'inversion_active', ''),
-                        'mood': getattr(ev, 'mood', None)
+                        'mood': getattr(ev, 'mood', None),
+                        'is_proactive': getattr(ev, 'is_proactive', False)
                     }
                     current_companion_thoughts = []
                     current_companion_texts = []
@@ -2027,7 +2028,8 @@ class GoogleAdkRunner(BaseProgramRunner):
                         'tool_calls': [],
                         'compacted': compacted,
                         'inversion_active': getattr(ev, 'inversion_active', ''),
-                        'mood': getattr(ev, 'mood', None)
+                        'mood': getattr(ev, 'mood', None),
+                        'is_proactive': getattr(ev, 'is_proactive', False)
                     }
                     current_companion_thoughts = []
                     current_companion_texts = []

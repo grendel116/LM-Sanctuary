@@ -370,12 +370,14 @@ def append_companion_message_to_session(runner, session_id: str, content: str):
         from google.adk.events.event import Event
         from google.genai import types
         adk_session = runner.runner.session_service.get_session(runner.app_name, "user", session_id)
-        adk_session.events.append(Event(
+        ev = Event(
             author="companion",
             content=types.Content(role="model", parts=[types.Part.from_text(text=content)]),
             id=f"companion-{int(time.time())}",
             timestamp=time.time()
-        ))
+        )
+        setattr(ev, 'is_proactive', True)
+        adk_session.events.append(ev)
         runner._save_session_to_disk(session_id)
     else:
         # Open Source Runner
@@ -384,7 +386,8 @@ def append_companion_message_to_session(runner, session_id: str, content: str):
         runner.sessions_history[session_id].append({
             "role": "companion",
             "text": content,
-            "timestamp": time.time()
+            "timestamp": time.time(),
+            "is_proactive": True
         })
         runner._save_session_to_disk(session_id)
 
@@ -430,6 +433,18 @@ def proactive_action():
 
         # Load session history
         chat_history = asyncio.run(runner.get_history(session_id))
+        
+        # Limit proactive messages to one: do not send another if one was already sent during this idle period
+        for msg in reversed(chat_history):
+            if msg.get('role') == 'user':
+                break
+            if msg.get('role') == 'companion' and msg.get('is_proactive'):
+                print(f"[PROACTIVE] A proactive message was already sent since the last user message. Skipping.")
+                return jsonify({
+                    'status': 'success',
+                    'type': 'skipped',
+                    'reason': 'A proactive message was already sent since the last user message.'
+                })
         
         # Generate history context string
         history_context = ""
