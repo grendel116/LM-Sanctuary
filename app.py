@@ -108,18 +108,18 @@ def prewarm_caches():
         print(f"Error prewarming local models: {e}")
         
     try:
-        # Prewarm daemon status
-        from utils.lms_manager import check_daemon_status, check_lms_cli
-        check_daemon_status(force_refresh=True)
+        # Prewarm server status
+        from utils.lms_manager import check_lms_status, check_lms_cli
+        check_lms_status(force_refresh=True)
         check_lms_cli()
     except Exception as e:
-        print(f"Error prewarming lms daemon status: {e}")
+        print(f"Error prewarming lms server status: {e}")
 
     try:
         # Start ComfyUI automatically
-        from utils.comfy_manager import start_comfy_daemon
+        from utils.comfy_manager import start_comfy_server
         print(">>> Starting ComfyUI server in background...")
-        started, msg = start_comfy_daemon()
+        started, msg = start_comfy_server()
         print(f">>> ComfyUI startup: {msg}")
     except Exception as e:
         print(f"Error starting ComfyUI automatically: {e}")
@@ -1490,8 +1490,8 @@ def get_models():
         remote_cloud_url and remote_cloud_url.strip() and remote_cloud_url != "your_remote_cloud_url_here"
     )
     
-    from utils.lms_manager import check_daemon_status, list_local_models, check_lms_cli
-    is_lm_studio_online = check_daemon_status()
+    from utils.lms_manager import check_lms_status, list_local_models, check_lms_cli
+    is_lm_studio_online = check_lms_status()
     
     # 1. Fetch dynamic local models (only actively loaded models in LM Studio)
     models = fetch_local_models()
@@ -3145,7 +3145,7 @@ from utils import lms_manager
 @requires_auth
 def lms_status():
     installed = lms_manager.check_lms_cli()
-    online = lms_manager.check_daemon_status()
+    online = lms_manager.check_lms_status()
     loaded_models = []
     downloaded_models = []
     if online:
@@ -3224,13 +3224,13 @@ def lms_delete():
 @app.route('/api/lms/start', methods=['POST'])
 @requires_auth
 def lms_start():
-    success, message = lms_manager.start_lms_daemon()
+    success, message = lms_manager.start_lms_server()
     return jsonify({"success": success, "message": message})
 
 @app.route('/api/lms/stop', methods=['POST'])
 @requires_auth
 def lms_stop():
-    success, message = lms_manager.stop_lms_daemon()
+    success, message = lms_manager.stop_lms_server()
     return jsonify({"success": success, "message": message})
 
 
@@ -3257,13 +3257,13 @@ def comfy_install():
 @app.route('/api/comfy/start', methods=['POST'])
 @requires_auth
 def comfy_start():
-    success, message = comfy_manager.start_comfy_daemon()
+    success, message = comfy_manager.start_comfy_server()
     return jsonify({"success": success, "message": message})
 
 @app.route('/api/comfy/stop', methods=['POST'])
 @requires_auth
 def comfy_stop():
-    success, message = comfy_manager.stop_comfy_daemon()
+    success, message = comfy_manager.stop_comfy_server()
     return jsonify({"success": success, "message": message})
 
 @app.route('/api/comfy/resolve_workflow', methods=['POST'])
