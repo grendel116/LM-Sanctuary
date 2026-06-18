@@ -822,42 +822,28 @@ class BaseProgramRunner:
                     print(f"[OFFLOAD] Local model exceeded tool loop iteration threshold ({iteration}). Offloading to cloud.", flush=True)
                     raise LocalOffloadTrigger(f"Iteration threshold exceeded ({iteration})", iteration)
 
-            legacy_portrait = False
-            if not matches:
-                match_legacy = re.search(r'<portrait>(.*?)</portrait>', bot_response_text)
-                if match_legacy:
-                    legacy_portrait = True
-                    matches = [match_legacy]
-                    
             executed_calls_count = len([tc for tc in tool_calls if tc.get('type') == 'call'])
             if matches and executed_calls_count < 10:
                 # Check for image generation tool
                 has_image_gen = False
                 for m in matches:
-                    if legacy_portrait:
+                    tool_name = m.group(1)
+                    if tool_name == "generate_companion_portrait":
                         tool_name = "generate_local_image"
-                    else:
-                        tool_name = m.group(1)
-                        if tool_name == "generate_companion_portrait":
-                            tool_name = "generate_local_image"
-                        elif tool_name == "generate_general_image":
-                            tool_name = "generate_imagen"
+                    elif tool_name == "generate_general_image":
+                        tool_name = "generate_imagen"
                     if tool_name in ("generate_local_image", "generate_imagen", "generate_companion_portrait", "generate_general_image"):
                         has_image_gen = True
                         break
                         
                 if has_image_gen:
                     m = matches[0]
-                    if legacy_portrait:
+                    tool_name = m.group(1)
+                    if tool_name == "generate_companion_portrait":
                         tool_name = "generate_local_image"
-                        args_str = f"prompt={m.group(1)}"
-                    else:
-                        tool_name = m.group(1)
-                        if tool_name == "generate_companion_portrait":
-                            tool_name = "generate_local_image"
-                        elif tool_name == "generate_general_image":
-                            tool_name = "generate_imagen"
-                        args_str = m.group(2)
+                    elif tool_name == "generate_general_image":
+                        tool_name = "generate_imagen"
+                    args_str = m.group(2)
                         
                     parsed_args = _parse_emulated_tool_call(tool_name, args_str)
                     import tools
@@ -1015,9 +1001,10 @@ class BaseProgramRunner:
         """Deletes a specific message inside the session history, merging surrounding messages of the same role if needed."""
         raise NotImplementedError()
 
-    async def _get_inversion_mode(self, session_id: str) -> str:
+    async def _get_inversion_mode(self, session_id: str, history: list = None) -> str:
         try:
-            history = await self.get_history(session_id)
+            if history is None:
+                history = await self.get_history(session_id)
             if not history:
                 return ""
                 

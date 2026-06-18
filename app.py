@@ -116,8 +116,45 @@ except Exception as e:
     print(f"Error initializing active program: {e}")
     raise
 
+def prewarm_caches():
+    print(">>> Pre-warming backend caches in background...")
+    try:
+        # Prewarm gemini models cache
+        gemini_key = os.getenv("GEMINI_API_KEY")
+        if gemini_key and gemini_key.strip() and gemini_key != "your_gemini_api_key_here":
+            fetch_gemini_models(gemini_key)
+    except Exception as e:
+        print(f"Error prewarming gemini models cache: {e}")
+        
+    try:
+        # Prewarm local models list
+        from utils.models import fetch_local_models
+        fetch_local_models(force_refresh=True)
+    except Exception as e:
+        print(f"Error prewarming local models: {e}")
+        
+    try:
+        # Prewarm daemon status
+        from utils.lms_manager import check_daemon_status, check_lms_cli
+        check_daemon_status(force_refresh=True)
+        check_lms_cli()
+    except Exception as e:
+        print(f"Error prewarming lms daemon status: {e}")
+
+    try:
+        # Start ComfyUI automatically
+        from utils.comfy_manager import start_comfy_daemon
+        print(">>> Starting ComfyUI server in background...")
+        started, msg = start_comfy_daemon()
+        print(f">>> ComfyUI startup: {msg}")
+    except Exception as e:
+        print(f"Error starting ComfyUI automatically: {e}")
+
+    print(">>> Backend caches pre-warmed successfully!")
+
 # Initialize the dynamic runner based on configuration
 init_runner()
+
 
 # --- SECURE OPTIONAL AUTHENTICATION DECORATOR ---
 def check_auth(username, password):
@@ -206,32 +243,23 @@ def app_icon():
     if os.path.exists(path_png):
         response = send_file(path_png)
     else:
-        path = os.path.join('core', 'programs', active_program, 'app_icon.png')
-        if os.path.exists(path):
-            response = send_file(path)
-        else:
-            response = send_file('images/app_icon.png')
+        response = send_file('images/app_icon.png')
             
     from flask import make_response
     res = make_response(response)
     res.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
     return res
- 
-def get_program_default_avatar(program_id):
-    return 'images/app_icon.png'
 
 @app.route('/profile.png')
 def profile_png():
     active_program = os.getenv("ACTIVE_PROGRAM", "sebile")
     path_png = os.path.join('core', 'programs', active_program, 'portraits', 'profile.png')
-    if not os.path.exists(path_png):
-        os.makedirs(os.path.dirname(path_png), exist_ok=True)
-        import shutil
-        fallback_src = get_program_default_avatar(active_program)
-        shutil.copy(fallback_src, path_png)
+    if os.path.exists(path_png):
+        response = send_file(path_png)
+    else:
+        response = send_file('images/app_icon.png')
         
-    from flask import send_file, make_response
-    response = send_file(path_png)
+    from flask import make_response
     res = make_response(response)
     res.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
     return res
@@ -241,14 +269,12 @@ def program_profile_png(program_id):
     if not program_id.isalnum() and '_' not in program_id:
         return "Invalid program ID", 400
     path_png = os.path.join('core', 'programs', program_id, 'portraits', 'profile.png')
-    if not os.path.exists(path_png):
-        os.makedirs(os.path.dirname(path_png), exist_ok=True)
-        import shutil
-        fallback_src = get_program_default_avatar(program_id)
-        shutil.copy(fallback_src, path_png)
+    if os.path.exists(path_png):
+        response = send_file(path_png)
+    else:
+        response = send_file('images/app_icon.png')
         
-    from flask import send_file, make_response
-    response = send_file(path_png)
+    from flask import make_response
     res = make_response(response)
     res.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
     return res
@@ -450,12 +476,11 @@ Based on the conversation context above, decide how to react proactively.
 You must choose exactly ONE of the following action types:
 1. "thought": A private inner thought or monologue representing your feelings about the silence, the user's absence, or the last topic (1-2 sentences). Format this in character.
 2. "message": A short, casual, concise follow-up text message to check in, continue the conversation, or react to the silence.
-3. "portrait": A descriptive portrait generation prompt for ComfyUI representing yourself waiting for the user, looking bored, looking at your phone, sipping coffee, etc.
 
 You must return a valid JSON object matching the following schema:
 {{
-  "type": "thought" | "message" | "portrait",
-  "content": "the actual thought, message text, or portrait prompt"
+  "type": "thought" | "message",
+  "content": "the actual thought or message text"
 }}
 """
 
@@ -536,34 +561,6 @@ You must return a valid JSON object matching the following schema:
                 'type': 'message',
                 'content': content
             })
-        elif action_type == "portrait":
-            import tools
-            tools.current_session_id.set(session_id)
-            with tools.session_tool_calls_lock:
-                tools.session_tool_calls[session_id] = []
-            # Generate local image
-            portrait_markdown = tools.generate_local_image(content)
-            if portrait_markdown.startswith("Error"):
-                # fallback to thought on error
-                return jsonify({
-                    'status': 'success',
-                    'type': 'thought',
-                    'content': f"Waiting for you... ({content})"
-                })
-                
-            # Parse image url
-            new_image_url = None
-            if portrait_markdown.startswith("![Portrait](") and portrait_markdown.endswith(")"):
-                new_image_url = portrait_markdown[12:-1]
-                
-            # Append portrait markdown to history
-            append_companion_message_to_session(runner, session_id, portrait_markdown)
-            return jsonify({
-                'status': 'success',
-                'type': 'portrait',
-                'content': portrait_markdown,
-                'image_url': new_image_url
-            })
         else: # thought
             return jsonify({
                 'status': 'success',
@@ -580,7 +577,12 @@ You must return a valid JSON object matching the following schema:
 def history():
     session_id = request.args.get('session_id', 'default')
     try:
-        chat_history = asyncio.run(runner.get_history(session_id))
+        async def fetch_history_data():
+            hist = await runner.get_history(session_id)
+            inv = await runner._get_inversion_mode(session_id, history=hist)
+            return hist, inv
+
+        chat_history, inversion_mode = asyncio.run(fetch_history_data())
         
         # Retrieve parsed mood metadata directly from history payload
         state_info = None
@@ -591,7 +593,6 @@ def history():
         if not state_info:
             from utils.program_mood import analyze_emotional_state
             state_info = analyze_emotional_state("")
-        inversion_mode = asyncio.run(runner._get_inversion_mode(session_id))
         
         from core.program_config import companion_name
         active_program = os.environ.get("ACTIVE_PROGRAM", "sebile")
@@ -699,18 +700,23 @@ def chat():
         # Apply banned words filter to output response
         from utils.banned_words import sanitize_text
         sanitized_response = sanitize_text(response_text)
+        chat_history = None
         if sanitized_response != response_text:
             print(f"[BANNED WORDS] Sanitizing response: '{response_text}' -> '{sanitized_response}'")
             # Update the message text inside the runner history so that the change persists
-            chat_history = asyncio.run(runner.get_history(session_id))
-            companion_count = sum(1 for msg in chat_history if msg.get('role') == 'companion')
-            if companion_count > 0:
-                asyncio.run(runner.update_message_text(session_id, 'companion', companion_count - 1, sanitized_response))
+            async def update_history_and_get():
+                hist = await runner.get_history(session_id)
+                companion_count = sum(1 for msg in hist if msg.get('role') == 'companion')
+                if companion_count > 0:
+                    await runner.update_message_text(session_id, 'companion', companion_count - 1, sanitized_response)
+                    hist = await runner.get_history(session_id)
+                return hist
+            chat_history = asyncio.run(update_history_and_get())
             response_text = sanitized_response
 
         from utils.program_mood import extract_and_strip_mood
         response_text, state_info = extract_and_strip_mood(response_text)
-        inversion_mode = asyncio.run(runner._get_inversion_mode(session_id))
+        inversion_mode = asyncio.run(runner._get_inversion_mode(session_id, history=chat_history))
         
         # Trigger background journaling check in a separate thread
         try:
@@ -781,18 +787,23 @@ def edit():
         # Apply banned words filter to output response
         from utils.banned_words import sanitize_text
         sanitized_response = sanitize_text(response_text)
+        chat_history = None
         if sanitized_response != response_text:
             print(f"[BANNED WORDS] Sanitizing edited response: '{response_text}' -> '{sanitized_response}'")
             # Update the message text inside the runner history so that the change persists
-            chat_history = asyncio.run(runner.get_history(session_id))
-            companion_count = sum(1 for msg in chat_history if msg.get('role') == 'companion')
-            if companion_count > 0:
-                asyncio.run(runner.update_message_text(session_id, 'companion', companion_count - 1, sanitized_response))
+            async def update_history_and_get():
+                hist = await runner.get_history(session_id)
+                companion_count = sum(1 for msg in hist if msg.get('role') == 'companion')
+                if companion_count > 0:
+                    await runner.update_message_text(session_id, 'companion', companion_count - 1, sanitized_response)
+                    hist = await runner.get_history(session_id)
+                return hist
+            chat_history = asyncio.run(update_history_and_get())
             response_text = sanitized_response
 
         from utils.program_mood import extract_and_strip_mood
         response_text, state_info = extract_and_strip_mood(response_text)
-        inversion_mode = asyncio.run(runner._get_inversion_mode(session_id))
+        inversion_mode = asyncio.run(runner._get_inversion_mode(session_id, history=chat_history))
         return jsonify({
             'response': response_text,
             'tool_calls': tool_calls,
@@ -845,7 +856,7 @@ def generate_impersonated_message(session_id, user_profile, model):
         
     system_instruction = (
         "You are an assistant that auto-generates the User's next reply. "
-        "You MUST write in the first-person, impersonating the user desribed below. "
+        "You MUST write in the first-person, impersonating the user. "
         "Match the user's tone and context. Be short and concise."
     )
     
@@ -1108,7 +1119,7 @@ def generate_portrait():
     
     prompt_message = (
         "[System: Based on the conversation history and your description, "
-        "write a ComfyUI prompt of 15-20 comma-separated tags describing your current appearance, outfit details, pose, expression, and environment. "
+        "write a ComfyUI prompt of 10-15 comma-separated tags describing your current appearance, outfit, pose, expression, and environment. "
         "Output ONLY the tags (e.g. 'silver hair, purple eyes, smiling, sitting on cushions, castle interior'). "
         "Do NOT include any conversational text, headers, quotes, or markdown.]"
     )
@@ -1145,20 +1156,28 @@ def generate_portrait():
         # 2. Update the companion message with the generated markdown image link
         original_user_message = "Send me a portrait of yourself based on the context of our last message/current dialogue!"
         try:
-            chat_history = asyncio.run(runner.get_history(session_id))
-            user_messages = [msg for msg in chat_history if msg.get('role') == 'user']
-            if user_messages:
-                asyncio.run(runner.update_message_text(session_id, 'user', len(user_messages) - 1, original_user_message))
+            async def update_history_and_get_inversion():
+                hist = await runner.get_history(session_id)
+                user_messages = [msg for msg in hist if msg.get('role') == 'user']
+                if user_messages:
+                    await runner.update_message_text(session_id, 'user', len(user_messages) - 1, original_user_message)
+                    
+                companion_messages = [msg for msg in hist if msg.get('role') == 'companion']
+                if companion_messages:
+                    await runner.update_message_text(session_id, 'companion', len(companion_messages) - 1, new_markdown)
                 
-            companion_messages = [msg for msg in chat_history if msg.get('role') == 'companion']
-            if companion_messages:
-                asyncio.run(runner.update_message_text(session_id, 'companion', len(companion_messages) - 1, new_markdown))
+                # Fetch fresh history after updates for inversion calculation
+                hist = await runner.get_history(session_id)
+                inv = await runner._get_inversion_mode(session_id, history=hist)
+                return inv
+
+            inversion_mode = asyncio.run(update_history_and_get_inversion())
         except Exception as he:
             print(f"Error updating message text in history: {he}")
+            inversion_mode = ""
             
         from utils.program_mood import extract_and_strip_mood
         display_text, state_info = extract_and_strip_mood(new_markdown)
-        inversion_mode = asyncio.run(runner._get_inversion_mode(session_id))
         
         return jsonify({
             'status': 'success',
@@ -1302,7 +1321,7 @@ def regenerate_image():
                 print(f"Error scanning session history for prompt: {he}")
 
         if not prompt:
-            return jsonify({'error': 'Original prompt not found in sidecar metadata or session history. Unable to regenerate image.'}), 400
+            return jsonify({'error': 'Original prompt not found. Unable to regenerate image.'}), 400
 
     try:
         import tools
@@ -1417,22 +1436,93 @@ from utils.models import fetch_local_models
 _cached_gemini_models = None
 
 def fetch_gemini_models(api_key):
-    """Dynamically fetches active models from the Gemini API and caches the result."""
+    """Dynamically fetches active models from the Gemini API and caches the result on disk."""
     global _cached_gemini_models
     if _cached_gemini_models is not None:
         return _cached_gemini_models
         
+    from variables import VARIABLES_DIR
+    import json
+    import time
+    cache_path = os.path.join(VARIABLES_DIR, "gemini_models_cache.json")
+    
+    # Try loading from disk cache first
+    if os.path.exists(cache_path):
+        try:
+            mtime = os.path.getmtime(cache_path)
+            # If cache is fresh (less than 24 hours old), use it and spawn bg refresh
+            if time.time() - mtime < 86400:
+                with open(cache_path, "r", encoding="utf-8") as f:
+                    _cached_gemini_models = json.load(f)
+                    if _cached_gemini_models:
+                        import threading
+                        threading.Thread(target=_background_fetch_gemini_models, args=(api_key, cache_path), daemon=True).start()
+                        return _cached_gemini_models
+        except Exception as ce:
+            print(f"Error loading gemini models cache: {ce}")
+
+    # Fallback to expired cache if available as a fallback
+    fallback_cache = None
+    if os.path.exists(cache_path):
+        try:
+            with open(cache_path, "r", encoding="utf-8") as f:
+                fallback_cache = json.load(f)
+        except Exception:
+            pass
+
+    # Perform fast synchronous fetch
+    try:
+        models = _perform_gemini_fetch(api_key)
+        if models:
+            _cached_gemini_models = models
+            try:
+                with open(cache_path, "w", encoding="utf-8") as f:
+                    json.dump(models, f, indent=2, ensure_ascii=False)
+            except Exception as se:
+                print(f"Error saving gemini models cache: {se}")
+            return models
+    except Exception as e:
+        print(f"Error fetching Gemini models: {e}")
+
+    if fallback_cache:
+        _cached_gemini_models = fallback_cache
+        return fallback_cache
+
+    # Ultimate fallback list if everything fails
+    ultimate_fallback = [
+        {"value": "gemini-2.5-flash", "label": "Gemini 2.5 Flash"},
+        {"value": "gemini-2.5-pro", "label": "Gemini 2.5 Pro"},
+        {"value": "gemini-2.0-flash", "label": "Gemini 2.0 Flash"},
+        {"value": "gemini-1.5-flash", "label": "Gemini 1.5 Flash"},
+        {"value": "gemini-1.5-pro", "label": "Gemini 1.5 Pro"},
+        {"value": "gemini-3.1-flash-lite", "label": "Gemini 3.1 Flash Lite"}
+    ]
+    _cached_gemini_models = ultimate_fallback
+    return ultimate_fallback
+
+def _background_fetch_gemini_models(api_key, cache_path):
+    try:
+        models = _perform_gemini_fetch(api_key)
+        if models:
+            global _cached_gemini_models
+            _cached_gemini_models = models
+            import json
+            with open(cache_path, "w", encoding="utf-8") as f:
+                json.dump(models, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        print(f"Background fetch of Gemini models failed: {e}")
+
+def _perform_gemini_fetch(api_key):
     import requests
     from bs4 import BeautifulSoup
     
-    # Dynamically fetch shutdown models from Google's official deprecations page
+    # Dynamically fetch shutdown models from Google's deprecations page
     shutdown_models = set()
     try:
         depr_url = "https://ai.google.dev/gemini-api/docs/deprecations"
-        depr_resp = requests.get(depr_url, timeout=1.0)
+        depr_resp = requests.get(depr_url, timeout=0.8)
         if depr_resp.status_code == 200:
             soup = BeautifulSoup(depr_resp.text, 'html.parser')
-            # Extract models listed in already shutdown rows (row-gray class)
             for row in soup.find_all('tr', class_='row-gray'):
                 code_elem = row.find('code')
                 if code_elem:
@@ -1442,50 +1532,39 @@ def fetch_gemini_models(api_key):
     except Exception as depr_err:
         print(f"Error fetching dynamic deprecations list: {depr_err}")
 
-    try:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}&pageSize=1000"
-        response = requests.get(url, timeout=1.5)
-        if response.status_code == 200:
-            data = response.json()
-            gemini_models = []
-            for m in data.get("models", []):
-                name = m.get("name", "")
-                display_name = m.get("displayName", "")
-                methods = m.get("supportedGenerationMethods", [])
-                
-                # Check if it supports text content generation and is a standard user model
-                if "generateContent" in methods and name.startswith("models/"):
-                    val = name.replace("models/", "")
-                    val_lower = val.lower()
-                    
-                    # Exclude dynamically identified shutdown models
-                    if val in shutdown_models or f"models/{val}" in shutdown_models:
-                        continue
-                        
-                    # Filter out tuning, embeddings, image/video, audio, or other utility models
-                    exclude_keywords = [
-                        "embed", "tuning", "bidi", "aqa", "imagen", "veo", "lyria", 
-                        "gemma", "deep-research", "robotics", "antigravity", "computer-use"
-                    ]
-                    if any(x in val_lower for x in exclude_keywords):
-                        continue
-                        
-                    # Filter out specific features, snapshots, or transient variants
-                    exclude_suffixes = [
-                        "-tts", "-audio", "-image", "-live", "-001", "-002", "-003", "-004", "-005"
-                    ]
-                    if any(x in val_lower for x in exclude_suffixes):
-                        continue
-                        
-                    gemini_models.append({"value": val, "label": display_name})
+    url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}&pageSize=1000"
+    response = requests.get(url, timeout=1.0)
+    if response.status_code == 200:
+        data = response.json()
+        gemini_models = []
+        for m in data.get("models", []):
+            name = m.get("name", "")
+            display_name = m.get("displayName", "")
+            methods = m.get("supportedGenerationMethods", [])
             
-            if gemini_models:
-                _cached_gemini_models = gemini_models
-                return gemini_models
-    except Exception as e:
-        print(f"Error fetching Gemini models dynamically: {e}")
-        
-    return []
+            if "generateContent" in methods and name.startswith("models/"):
+                val = name.replace("models/", "")
+                val_lower = val.lower()
+                
+                if val in shutdown_models or f"models/{val}" in shutdown_models:
+                    continue
+                    
+                exclude_keywords = [
+                    "embed", "tuning", "bidi", "aqa", "imagen", "veo", "lyria", 
+                    "gemma", "deep-research", "robotics", "antigravity", "computer-use"
+                ]
+                if any(x in val_lower for x in exclude_keywords):
+                    continue
+                    
+                exclude_suffixes = [
+                    "-tts", "-audio", "-image", "-live", "-001", "-002", "-003", "-004", "-005"
+                ]
+                if any(x in val_lower for x in exclude_suffixes):
+                    continue
+                    
+                gemini_models.append({"value": val, "label": display_name})
+        return gemini_models
+    return None
 
 @app.route('/models', methods=['GET'])
 @requires_auth
@@ -2212,24 +2291,6 @@ def update_program_palette():
         if not os.path.exists(program_path):
             return jsonify({'error': f"Program '{program_id}' does not exist"}), 404
             
-        # Update project_settings.json
-        from variables import VARIABLES_DIR
-        settings_path = os.path.join(VARIABLES_DIR, "project_settings.json")
-        settings = {}
-        if os.path.exists(settings_path):
-            try:
-                with open(settings_path, "r", encoding="utf-8") as f:
-                    settings = json.load(f)
-            except Exception:
-                pass
-                
-        if "companion_palettes" not in settings:
-            settings["companion_palettes"] = {}
-        settings["companion_palettes"][program_id] = color
-        
-        with open(settings_path, "w", encoding="utf-8") as f:
-            json.dump(settings, f, indent=2, ensure_ascii=False)
-            
         # Regenerate theme.json
         theme_data = generate_character_theme(color)
         theme_path = os.path.join(program_path, "theme.json")
@@ -2805,23 +2866,12 @@ def rename_user_profile():
         return jsonify({"status": "success", "profile_id": new_profile_id})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-def get_custom_program_color(program_id):
-    from variables import VARIABLES_DIR
-    import json
-    settings_path = os.path.join(VARIABLES_DIR, "project_settings.json")
-    if os.path.exists(settings_path):
-        try:
-            with open(settings_path, "r", encoding="utf-8") as f:
-                settings = json.load(f)
-                return settings.get("companion_palettes", {}).get(program_id)
-        except Exception:
-            pass
-    return None
 
 
-def generate_character_theme(primary_hex):
+
+def generate_character_theme(main_color, accent_color_a=None, accent_color_b=None):
     import re
-    hex_clean = primary_hex.lstrip('#')
+    hex_clean = main_color.lstrip('#')
     r = int(hex_clean[0:2], 16)
     g = int(hex_clean[2:4], 16)
     b = int(hex_clean[4:6], 16)
@@ -2829,656 +2879,26 @@ def generate_character_theme(primary_hex):
     brightness = (r * 299 + g * 587 + b * 114) / 1000
     btn_text = "#121214" if brightness > 140 else "#ffffff"
     
-    accent_r = min(255, int(r + (255 - r) * 0.25))
-    accent_g = min(255, int(g + (255 - g) * 0.25))
-    accent_b = min(255, int(b + (255 - b) * 0.25))
-    accent_green = f"#{accent_r:02x}{accent_g:02x}{accent_b:02x}"
-    
+    if not accent_color_a:
+        accent_r = min(255, int(r + (255 - r) * 0.25))
+        accent_g = min(255, int(g + (255 - g) * 0.25))
+        accent_b = min(255, int(b + (255 - b) * 0.25))
+        accent_color_a = f"#{accent_r:02x}{accent_g:02x}{accent_b:02x}"
+    if not accent_color_b:
+        accent_color_b = main_color
+        
     return {
-        "primary_accent": primary_hex,
+        "primary_accent": main_color,
+        "main_color": main_color,
+        "accent_color_a": accent_color_a,
+        "accent_color_b": accent_color_b,
         "primary_glow": f"rgba({r}, {g}, {b}, 0.08)",
         "companion_bubble": f"rgba({24 + int(r*0.04)}, {24 + int(g*0.04)}, {28 + int(b*0.04)}, 0.85)",
         "send_btn_hover": f"rgba({20 + int(r*0.12)}, {20 + int(g*0.12)}, {22 + int(b*0.12)}, 0.75)",
-        "accent_green": accent_green,
-        "quote_blue": primary_hex,
+        "accent_green": accent_color_a,
+        "quote_blue": main_color,
         "primary_btn_text": btn_text
     }
-
-def get_animated_svg_template(body_color, accent_color, eye_color, name="", description="", personality=""):
-    text = (name + " " + description + " " + personality).lower()
-    
-    # Initialize scoring dictionary
-    scores = {
-        "elf": 0,
-        "mage": 0,
-        "knight": 0,
-        "rogue": 0,
-        "coder": 0,
-        "doctor": 0,
-        "chef": 0,
-        "artist": 0,
-        "fairy": 0,
-        "demon": 0,
-        "athlete": 0,
-        "cat": 0
-    }
-    
-    elf_keywords = ["elf", "elven", "nature", "pointy ears", "ears", "forest", "ranger", "bow", "arrow", "woodland", "archery", "druid"]
-    mage_keywords = ["mage", "wizard", "witch", "warlock", "sorcerer", "sorceress", "magic", "spell", "staff", "cleric", "priest", "monk", "healer", "prophet", "runes", "spellcaster"]
-    knight_keywords = ["knight", "warrior", "paladin", "fighter", "armor", "helmet", "shield", "sword", "soldier", "hero", "blade", "guard", "defense", "champion", "samurai"]
-    rogue_keywords = ["rogue", "thief", "assassin", "shadow", "stealth", "ninja", "dagger", "cloak", "hood", "spy", "cunning", "quiet", "silent", "ghost", "phantom", "specter"]
-    coder_keywords = ["coder", "programmer", "hacker", "developer", "software", "tech", "computer", "laptop", "code", "ai", "geek", "gamer", "terminal", "data", "robot", "cyborg", "android", "synth"]
-    doctor_keywords = ["doctor", "scientist", "nurse", "medic", "flask", "lab", "researcher", "chemist", "biology", "surgeon", "clinic", "hospital", "professor"]
-    chef_keywords = ["chef", "baker", "cook", "food", "restaurant", "kitchen", "pan", "spatula", "cake", "pastry", "recipe", "baking"]
-    artist_keywords = ["artist", "painter", "designer", "sculptor", "brush", "palette", "canvas", "illustrator", "drawing", "artistic", "draw", "creative"]
-    fairy_keywords = ["fairy", "pixie", "sprite", "fay", "wings", "luminous", "sparkle", "glitter", "flutter"]
-    demon_keywords = ["demon", "demonic", "devil", "devilish", "horn", "horns", "imp", "succubus", "incubus", "underworld", "hell"]
-    athlete_keywords = ["athlete", "fitness", "gym", "workout", "runner", "exercise", "strong", "fit", "muscle", "muscular", "active", "sport", "sports", "athletic", "lift", "lifting"]
-    cat_keywords = ["cat", "neko", "kitsune", "feline", "whiskers", "tail", "beast", "panther", "tiger", "lion", "leopard", "cheetah", "catgirl", "catboy", "nyan"]
-    
-    for kw in elf_keywords:
-        if kw in text: scores["elf"] += 1
-    for kw in mage_keywords:
-        if kw in text: scores["mage"] += 1
-    for kw in knight_keywords:
-        if kw in text: scores["knight"] += 1
-    for kw in rogue_keywords:
-        if kw in text: scores["rogue"] += 1
-    for kw in coder_keywords:
-        if kw in text: scores["coder"] += 1
-    for kw in doctor_keywords:
-        if kw in text: scores["doctor"] += 1
-    for kw in chef_keywords:
-        if kw in text: scores["chef"] += 1
-    for kw in artist_keywords:
-        if kw in text: scores["artist"] += 1
-    for kw in fairy_keywords:
-        if kw in text: scores["fairy"] += 1
-    for kw in demon_keywords:
-        if kw in text: scores["demon"] += 1.2
-    for kw in athlete_keywords:
-        if kw in text: scores["athlete"] += 1
-    for kw in cat_keywords:
-        if kw in text: scores["cat"] += 1
-        
-    # Get the highest scoring archetype, fallback to humanoid if all scores are 0
-    max_score = max(scores.values())
-    if max_score > 0:
-        archetype = [k for k, v in scores.items() if v == max_score][0]
-    else:
-        archetype = "humanoid"
-        
-    # Standardize drawing colors
-    # Silhouette Body is white (#ffffff)
-    # Silhouette Secondary Details is gray (#cbd5e1)
-    # Cutout is dark charcoal (#121214)
-    # Accent color is either accent_color or eye_color
-    accent = eye_color if eye_color else (accent_color if accent_color else body_color)
-    
-    if archetype == "elf":
-        return f"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="100%" height="100%" shape-rendering="crispEdges">
-  <style>
-    @keyframes bob-elf {{
-      0%, 100% {{ transform: translateY(0); }}
-      50% {{ transform: translateY(-0.8px); }}
-    }}
-    .elf-char {{
-      animation: bob-elf 1.6s ease-in-out infinite;
-    }}
-  </style>
-  <g class="elf-char">
-    <!-- Pointy ears (white) -->
-    <rect x="3" y="5" width="2" height="1" fill="#ffffff"/>
-    <rect x="4" y="4" width="1" height="1" fill="#ffffff"/>
-    <rect x="11" y="5" width="2" height="1" fill="#ffffff"/>
-    <rect x="11" y="4" width="1" height="1" fill="#ffffff"/>
-    <!-- Head/Skin (white) -->
-    <rect x="5" y="3" width="6" height="4" fill="#ffffff"/>
-    <rect x="6" y="2" width="4" height="1" fill="#ffffff"/>
-    <rect x="6" y="7" width="4" height="1" fill="#ffffff"/>
-    <!-- Hair overlay (gray) -->
-    <rect x="5" y="3" width="6" height="1" fill="#cbd5e1"/>
-    <!-- Leaf circlet headband (accent) -->
-    <rect x="5" y="4" width="6" height="1" fill="{accent}"/>
-    <rect x="4" y="3" width="1" height="1" fill="{accent}"/>
-    <rect x="11" y="3" width="1" height="1" fill="{accent}"/>
-    <!-- Eyes (cutout) -->
-    <rect x="6" y="5" width="1" height="1" fill="#121214"/>
-    <rect x="9" y="5" width="1" height="1" fill="#121214"/>
-    <!-- Neck/Body (white/gray) -->
-    <rect x="6" y="8" width="4" height="1" fill="#ffffff"/>
-    <rect x="5" y="9" width="6" height="4" fill="#cbd5e1"/>
-    <!-- Legs & Feet -->
-    <rect x="6" y="13" width="1" height="2" fill="#ffffff"/>
-    <rect x="9" y="13" width="1" height="2" fill="#ffffff"/>
-    <rect x="5" y="15" width="2" height="1" fill="#cbd5e1"/>
-    <rect x="9" y="15" width="2" height="1" fill="#cbd5e1"/>
-  </g>
-</svg>"""
-
-    elif archetype == "mage":
-        return f"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="100%" height="100%" shape-rendering="crispEdges">
-  <style>
-    @keyframes bob-mage {{
-      0%, 100% {{ transform: translateY(0); }}
-      50% {{ transform: translateY(-0.8px); }}
-    }}
-    @keyframes staff-glow {{
-      0%, 100% {{ opacity: 0.6; }}
-      50% {{ opacity: 1.0; }}
-    }}
-    .mage-char {{
-      animation: bob-mage 1.8s ease-in-out infinite;
-    }}
-    .staff-crystal {{
-      animation: staff-glow 1.2s ease-in-out infinite;
-    }}
-  </style>
-  <g class="mage-char">
-    <!-- Wizard Hat (gray/white) -->
-    <rect x="7" y="0" width="2" height="1" fill="#ffffff"/>
-    <rect x="6" y="1" width="4" height="1" fill="#ffffff"/>
-    <rect x="5" y="2" width="6" height="1" fill="#cbd5e1"/>
-    <rect x="3" y="3" width="10" height="1" fill="#cbd5e1"/>
-    <!-- Head/Skin (white) -->
-    <rect x="5" y="4" width="6" height="4" fill="#ffffff"/>
-    <!-- Eyes (cutout) -->
-    <rect x="6" y="5" width="1" height="1" fill="#121214"/>
-    <rect x="9" y="5" width="1" height="1" fill="#121214"/>
-    <!-- Robes (gray) -->
-    <rect x="6" y="8" width="4" height="1" fill="#ffffff"/>
-    <rect x="5" y="9" width="6" height="6" fill="#cbd5e1"/>
-    <rect x="4" y="15" width="8" height="1" fill="#ffffff"/>
-    <!-- Magic Staff (white) -->
-    <rect x="2" y="6" width="1" height="9" fill="#ffffff"/>
-    <!-- Glowing Staff Crystal (accent) -->
-    <rect class="staff-crystal" x="1" y="4" width="3" height="2" fill="{accent}"/>
-  </g>
-</svg>"""
-
-    elif archetype == "knight":
-        return f"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="100%" height="100%" shape-rendering="crispEdges">
-  <style>
-    @keyframes bob-knight {{
-      0%, 100% {{ transform: translateY(0); }}
-      50% {{ transform: translateY(-0.6px); }}
-    }}
-    @keyframes plume-sway {{
-      0%, 100% {{ transform: rotate(0deg); }}
-      50% {{ transform: rotate(6deg); }}
-    }}
-    .knight-char {{
-      animation: bob-knight 1.4s ease-in-out infinite;
-    }}
-    .plume {{
-      transform-origin: 7px 1px;
-      animation: plume-sway 1.2s ease-in-out infinite;
-    }}
-  </style>
-  <g class="knight-char">
-    <!-- Plume (accent) -->
-    <rect class="plume" x="8" y="0" width="3" height="2" fill="{accent}"/>
-    <rect x="7" y="1" width="1" height="1" fill="#ffffff"/>
-    <!-- Helmet (white/gray) -->
-    <rect x="6" y="1" width="4" height="1" fill="#ffffff"/>
-    <rect x="4" y="2" width="8" height="6" fill="#ffffff"/>
-    <rect x="4" y="3" width="8" height="1" fill="#cbd5e1"/>
-    <!-- Visor slot (cutout) & Glowing Slit (accent) -->
-    <rect x="5" y="4" width="6" height="2" fill="#121214"/>
-    <rect x="6" y="5" width="1" height="1" fill="{accent}"/>
-    <rect x="9" y="5" width="1" height="1" fill="{accent}"/>
-    <!-- Armored Body (gray) -->
-    <rect x="6" y="8" width="4" height="1" fill="#ffffff"/>
-    <rect x="5" y="9" width="6" height="4" fill="#cbd5e1"/>
-    <!-- Legs & Feet -->
-    <rect x="6" y="13" width="1" height="2" fill="#ffffff"/>
-    <rect x="9" y="13" width="1" height="2" fill="#ffffff"/>
-    <!-- Shield (white/gray) -->
-    <rect x="1" y="9" width="3" height="4" fill="#ffffff"/>
-    <rect x="2" y="10" width="1" height="2" fill="#cbd5e1"/>
-    <!-- Sword (white/accent) -->
-    <rect x="13" y="7" width="1" height="6" fill="#ffffff"/>
-    <rect x="12" y="11" width="3" height="1" fill="{accent}"/>
-  </g>
-</svg>"""
-
-    elif archetype == "rogue":
-        return f"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="100%" height="100%" shape-rendering="crispEdges">
-  <style>
-    @keyframes rogue-breathe {{
-      0%, 100% {{ transform: translateY(0); }}
-      50% {{ transform: translateY(-0.8px); }}
-    }}
-    @keyframes rogue-pulse {{
-      0%, 100% {{ opacity: 0.6; }}
-      50% {{ opacity: 1.0; }}
-    }}
-    .rogue-char {{
-      animation: rogue-breathe 1.5s ease-in-out infinite;
-    }}
-    .rogue-eyes {{
-      animation: rogue-pulse 1.8s ease-in-out infinite;
-    }}
-  </style>
-  <g class="rogue-char">
-    <!-- Hooded Head (gray/white) -->
-    <rect x="6" y="2" width="4" height="1" fill="#ffffff"/>
-    <rect x="4" y="3" width="8" height="5" fill="#ffffff"/>
-    <!-- Shadow Face cutout (cutout) -->
-    <rect x="6" y="4" width="4" height="4" fill="#121214"/>
-    <!-- Glowing Eyes (accent) -->
-    <g class="rogue-eyes">
-      <rect x="6" y="5" width="1" height="1" fill="{accent}"/>
-      <rect x="9" y="5" width="1" height="1" fill="{accent}"/>
-    </g>
-    <!-- Cloak Body (gray) -->
-    <rect x="6" y="8" width="4" height="1" fill="#ffffff"/>
-    <rect x="5" y="9" width="6" height="5" fill="#cbd5e1"/>
-    <rect x="5" y="14" width="2" height="2" fill="#ffffff"/>
-    <rect x="9" y="14" width="2" height="2" fill="#ffffff"/>
-    <!-- Dual Daggers (white) -->
-    <rect x="2" y="10" width="2" height="1" fill="#ffffff"/>
-    <rect x="12" y="10" width="2" height="1" fill="#ffffff"/>
-  </g>
-</svg>"""
-
-    elif archetype == "coder":
-        return f"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="100%" height="100%" shape-rendering="crispEdges">
-  <style>
-    @keyframes screen-flicker {{
-      0%, 100% {{ opacity: 0.7; }}
-      50% {{ opacity: 1.0; }}
-    }}
-    @keyframes typing {{
-      0%, 100% {{ transform: translateX(0); }}
-      50% {{ transform: translateX(0.5px); }}
-    }}
-    .coder-screen {{
-      animation: screen-flicker 0.5s infinite;
-    }}
-    .hands {{
-      animation: typing 0.2s steps(2) infinite;
-    }}
-  </style>
-  <!-- Laptop computer (white) -->
-  <rect x="2" y="9" width="1" height="4" fill="#ffffff"/>
-  <rect x="2" y="13" width="3" height="1" fill="#ffffff"/>
-  <rect class="coder-screen" x="3" y="10" width="1" height="2" fill="{accent}"/>
-  <g class="hands">
-    <rect x="4" y="12" width="1" height="1" fill="#ffffff"/>
-  </g>
-  <!-- Chibi programmer -->
-  <g>
-    <!-- Headphones band & ear cups (accent) -->
-    <rect x="5" y="2" width="6" height="1" fill="{accent}"/>
-    <rect x="4" y="3" width="1" height="3" fill="{accent}"/>
-    <rect x="11" y="3" width="1" height="3" fill="{accent}"/>
-    <!-- Head/Skin (white) -->
-    <rect x="5" y="3" width="6" height="5" fill="#ffffff"/>
-    <!-- Glasses (cutout) -->
-    <rect x="5" y="5" width="6" height="1" fill="#121214"/>
-    <rect x="6" y="5" width="1" height="1" fill="#121214"/>
-    <rect x="9" y="5" width="1" height="1" fill="#121214"/>
-    <!-- Body/Clothes (gray) -->
-    <rect x="6" y="8" width="4" height="1" fill="#ffffff"/>
-    <rect x="5" y="9" width="6" height="6" fill="#cbd5e1"/>
-    <rect x="5" y="15" width="2" height="1" fill="#ffffff"/>
-    <rect x="9" y="15" width="2" height="1" fill="#ffffff"/>
-  </g>
-</svg>"""
-
-    elif archetype == "doctor":
-        return f"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="100%" height="100%" shape-rendering="crispEdges">
-  <style>
-    @keyframes flask-bubble {{
-      0%, 100% {{ opacity: 0.5; }}
-      50% {{ opacity: 1.0; }}
-    }}
-    .flask-liquid {{
-      animation: flask-bubble 0.8s ease-in-out infinite;
-    }}
-  </style>
-  <g>
-    <!-- Head/Skin (white) -->
-    <rect x="6" y="2" width="4" height="1" fill="#ffffff"/>
-    <rect x="5" y="3" width="6" height="5" fill="#ffffff"/>
-    <!-- Eyes (cutout) -->
-    <rect x="6" y="5" width="1" height="1" fill="#121214"/>
-    <rect x="9" y="5" width="1" height="1" fill="#121214"/>
-    <!-- Lab Coat & Stethoscope (white/gray) -->
-    <rect x="6" y="8" width="4" height="1" fill="#ffffff"/>
-    <rect x="5" y="9" width="6" height="6" fill="#cbd5e1"/>
-    <!-- Stethoscope details -->
-    <rect x="5" y="8" width="6" height="1" fill="#ffffff"/>
-    <rect x="5" y="9" width="1" height="2" fill="#ffffff"/>
-    <rect x="10" y="9" width="1" height="2" fill="#ffffff"/>
-    <!-- Legs & Feet -->
-    <rect x="6" y="15" width="1" height="1" fill="#ffffff"/>
-    <rect x="9" y="15" width="1" height="1" fill="#ffffff"/>
-    <!-- Glowing flask (white/accent) -->
-    <rect x="12" y="10" width="3" height="4" fill="#ffffff"/>
-    <rect x="13" y="9" width="1" height="1" fill="#ffffff"/>
-    <rect class="flask-liquid" x="13" y="11" width="1" height="2" fill="{accent}"/>
-  </g>
-</svg>"""
-
-    elif archetype == "chef":
-        return f"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="100%" height="100%" shape-rendering="crispEdges">
-  <style>
-    @keyframes steam-rise {{
-      0% {{ transform: translateY(0) scale(0.8); opacity: 0; }}
-      50% {{ opacity: 0.9; }}
-      100% {{ transform: translateY(-3px) scale(1.2); opacity: 0; }}
-    }}
-    .steam-particle {{
-      transform-origin: 13px 7px;
-      animation: steam-rise 1.5s linear infinite;
-    }}
-  </style>
-  <g>
-    <!-- Tall Chef Hat (white) -->
-    <rect x="5" y="0" width="6" height="4" fill="#ffffff"/>
-    <rect x="6" y="3" width="4" height="1" fill="#cbd5e1"/>
-    <!-- Head/Skin (white) -->
-    <rect x="5" y="4" width="6" height="4" fill="#ffffff"/>
-    <!-- Eyes (cutout) -->
-    <rect x="6" y="5" width="1" height="1" fill="#121214"/>
-    <rect x="9" y="5" width="1" height="1" fill="#121214"/>
-    <!-- Apron & Body (gray/white) -->
-    <rect x="6" y="8" width="4" height="1" fill="#ffffff"/>
-    <rect x="5" y="9" width="6" height="6" fill="#cbd5e1"/>
-    <rect x="6" y="9" width="4" height="5" fill="#ffffff"/>
-    <!-- Legs & Feet -->
-    <rect x="6" y="15" width="1" height="1" fill="#ffffff"/>
-    <rect x="9" y="15" width="1" height="1" fill="#ffffff"/>
-    <!-- Spatula/Pan (white) -->
-    <rect x="12" y="10" width="3" height="2" fill="#ffffff"/>
-    <rect x="11" y="11" width="1" height="1" fill="#ffffff"/>
-    <!-- Steam particle (accent) -->
-    <rect class="steam-particle" x="13" y="7" width="1" height="2" fill="{accent}"/>
-  </g>
-</svg>"""
-
-    elif archetype == "artist":
-        return f"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="100%" height="100%" shape-rendering="crispEdges">
-  <style>
-    @keyframes brush-sway {{
-      0%, 100% {{ transform: rotate(0deg); }}
-      50% {{ transform: rotate(-12deg); }}
-    }}
-    .brush-sway {{
-      transform-origin: 13px 12px;
-      animation: brush-sway 1.3s ease-in-out infinite;
-    }}
-  </style>
-  <g>
-    <!-- Beret Hat (white/gray) -->
-    <rect x="7" y="1" width="2" height="1" fill="#ffffff"/>
-    <rect x="4" y="2" width="8" height="1" fill="#ffffff"/>
-    <rect x="5" y="3" width="6" height="1" fill="#cbd5e1"/>
-    <!-- Head/Skin (white) -->
-    <rect x="5" y="4" width="6" height="4" fill="#ffffff"/>
-    <!-- Eyes (cutout) -->
-    <rect x="6" y="5" width="1" height="1" fill="#121214"/>
-    <rect x="9" y="5" width="1" height="1" fill="#121214"/>
-    <!-- Clothes/Smock (gray) -->
-    <rect x="6" y="8" width="4" height="1" fill="#ffffff"/>
-    <rect x="5" y="9" width="6" height="6" fill="#cbd5e1"/>
-    <!-- Palette (white/accent) -->
-    <rect x="1" y="11" width="3" height="2" fill="#ffffff"/>
-    <rect x="2" y="12" width="1" height="1" fill="{accent}"/>
-    <!-- Paintbrush (white/accent) -->
-    <g class="brush-sway">
-      <rect x="13" y="9" width="1" height="3" fill="#ffffff"/>
-      <rect x="13" y="8" width="1" height="1" fill="{accent}"/>
-    </g>
-    <!-- Legs & Feet -->
-    <rect x="6" y="15" width="1" height="1" fill="#ffffff"/>
-    <rect x="9" y="15" width="1" height="1" fill="#ffffff"/>
-  </g>
-</svg>"""
-
-    elif archetype == "fairy":
-        return f"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="100%" height="100%" shape-rendering="crispEdges">
-  <style>
-    @keyframes float-fairy {{
-      0%, 100% {{ transform: translateY(0); }}
-      50% {{ transform: translateY(-1.2px); }}
-    }}
-    @keyframes wings-l {{
-      0%, 100% {{ transform: scaleX(1); }}
-      50% {{ transform: scaleX(0.3); }}
-    }}
-    @keyframes wings-r {{
-      0%, 100% {{ transform: scaleX(1); }}
-      50% {{ transform: scaleX(0.3); }}
-    }}
-    .fairy-char {{
-      animation: float-fairy 1.4s ease-in-out infinite;
-    }}
-    .wing-l {{
-      transform-origin: 5px 7px;
-      animation: wings-l 0.3s ease-in-out infinite;
-    }}
-    .wing-r {{
-      transform-origin: 11px 7px;
-      animation: wings-r 0.3s ease-in-out infinite;
-    }}
-  </style>
-  <g>
-    <!-- Shimmering Wings (accent, under the body) -->
-    <rect class="wing-l" x="1" y="5" width="4" height="4" fill="{accent}" opacity="0.8"/>
-    <rect class="wing-r" x="11" y="5" width="4" height="4" fill="{accent}" opacity="0.8"/>
-    <g class="fairy-char">
-      <!-- Head/Skin (white) -->
-      <rect x="6" y="2" width="4" height="1" fill="#ffffff"/>
-      <rect x="5" y="3" width="6" height="5" fill="#ffffff"/>
-      <!-- Hair overlay (gray) -->
-      <rect x="5" y="3" width="6" height="1" fill="#cbd5e1"/>
-      <!-- Eyes (cutout) -->
-      <rect x="6" y="5" width="1" height="1" fill="#121214"/>
-      <rect x="9" y="5" width="1" height="1" fill="#121214"/>
-      <!-- Dress (white/gray) -->
-      <rect x="6" y="8" width="4" height="1" fill="#ffffff"/>
-      <rect x="5" y="9" width="6" height="6" fill="#cbd5e1"/>
-      <!-- Legs & Feet -->
-      <rect x="6" y="15" width="1" height="1" fill="#ffffff"/>
-      <rect x="9" y="15" width="1" height="1" fill="#ffffff"/>
-    </g>
-  </g>
-</svg>"""
-
-    elif archetype == "demon":
-        return f"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="100%" height="100%" shape-rendering="crispEdges">
-  <style>
-    @keyframes float-demon {{
-      0%, 100% {{ transform: translateY(0); }}
-      50% {{ transform: translateY(-1.0px); }}
-    }}
-    @keyframes wing-flap {{
-      0%, 100% {{ transform: scaleY(1); }}
-      50% {{ transform: scaleY(0.5); }}
-    }}
-    @keyframes tail-wag {{
-      0%, 100% {{ transform: rotate(0deg); }}
-      50% {{ transform: rotate(10deg); }}
-    }}
-    .demon-char {{
-      animation: float-demon 1.6s ease-in-out infinite;
-    }}
-    .wing-l {{
-      transform-origin: 4px 7px;
-      animation: wing-flap 0.5s ease-in-out infinite;
-    }}
-    .wing-r {{
-      transform-origin: 12px 7px;
-      animation: wing-flap 0.5s ease-in-out infinite;
-    }}
-    .demon-tail {{
-      transform-origin: 4px 13px;
-      animation: tail-wag 0.8s ease-in-out infinite;
-    }}
-  </style>
-  <g>
-    <!-- Bat wings (accent, under the body) -->
-    <rect class="wing-l" x="1" y="6" width="3" height="3" fill="{accent}"/>
-    <rect class="wing-r" x="12" y="6" width="3" height="3" fill="{accent}"/>
-    <g class="demon-char">
-      <!-- Horns (white) -->
-      <rect x="5" y="1" width="1" height="2" fill="#ffffff"/>
-      <rect x="10" y="1" width="1" height="2" fill="#ffffff"/>
-      <!-- Head/Skin (white) -->
-      <rect x="5" y="3" width="6" height="5" fill="#ffffff"/>
-      <!-- Hair overlay (gray) -->
-      <rect x="5" y="3" width="6" height="1" fill="#cbd5e1"/>
-      <!-- Eyes (cutout) -->
-      <rect x="6" y="5" width="1" height="1" fill="#121214"/>
-      <rect x="9" y="5" width="1" height="1" fill="#121214"/>
-      <!-- Clothes (gray) -->
-      <rect x="6" y="8" width="4" height="1" fill="#ffffff"/>
-      <rect x="5" y="9" width="6" height="6" fill="#cbd5e1"/>
-      <!-- Tail (white) -->
-      <g class="demon-tail">
-        <path d="M4,11 h-2 v3 h3 v-1 h-2 v-1 z" fill="#ffffff"/>
-      </g>
-      <!-- Legs & Feet -->
-      <rect x="6" y="15" width="1" height="1" fill="#ffffff"/>
-      <rect x="9" y="15" width="1" height="1" fill="#ffffff"/>
-    </g>
-  </g>
-</svg>"""
-
-    elif archetype == "athlete":
-        return f"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="100%" height="100%" shape-rendering="crispEdges">
-  <style>
-    @keyframes athlete-breathe {{
-      0%, 100% {{ transform: translateY(0); }}
-      50% {{ transform: translateY(-0.8px); }}
-    }}
-    @keyframes lift-dumbbell {{
-      0%, 100% {{ transform: translateY(0); }}
-      50% {{ transform: translateY(-2px); }}
-    }}
-    .athlete-char {{
-      animation: athlete-breathe 1.5s ease-in-out infinite;
-    }}
-    .dumbbell-l {{
-      animation: lift-dumbbell 1s ease-in-out infinite;
-    }}
-    .dumbbell-r {{
-      animation: lift-dumbbell 1s ease-in-out infinite;
-      animation-delay: 0.5s;
-    }}
-  </style>
-  <g class="athlete-char">
-    <!-- Head/Skin (white) -->
-    <rect x="6" y="2" width="4" height="1" fill="#ffffff"/>
-    <rect x="5" y="3" width="6" height="5" fill="#ffffff"/>
-    <!-- Sweatband (accent) -->
-    <rect x="5" y="3" width="6" height="1" fill="{accent}"/>
-    <!-- Eyes (cutout) -->
-    <rect x="6" y="5" width="1" height="1" fill="#121214"/>
-    <rect x="9" y="5" width="1" height="1" fill="#121214"/>
-    <!-- Gym Tank Top (gray/white) -->
-    <rect x="6" y="8" width="4" height="1" fill="#ffffff"/>
-    <rect x="5" y="9" width="6" height="6" fill="#cbd5e1"/>
-    <rect x="6" y="9" width="4" height="6" fill="#ffffff"/>
-    <!-- Dumbbells (white) -->
-    <g class="dumbbell-l">
-      <rect x="2" y="11" width="1" height="3" fill="#ffffff"/>
-      <rect x="1" y="12" width="3" height="1" fill="#ffffff"/>
-    </g>
-    <g class="dumbbell-r">
-      <rect x="13" y="11" width="1" height="3" fill="#ffffff"/>
-      <rect x="12" y="12" width="3" height="1" fill="#ffffff"/>
-    </g>
-    <!-- Legs & Feet -->
-    <rect x="6" y="15" width="1" height="1" fill="#ffffff"/>
-    <rect x="9" y="15" width="1" height="1" fill="#ffffff"/>
-  </g>
-</svg>"""
-
-    elif archetype == "cat":
-        return f"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="100%" height="100%" shape-rendering="crispEdges">
-  <style>
-    @keyframes cat-breathe {{
-      0%, 100% {{ transform: translateY(0); }}
-      50% {{ transform: translateY(-0.8px); }}
-    }}
-    @keyframes tail-wag-cat {{
-      0%, 100% {{ transform: rotate(0deg); }}
-      50% {{ transform: rotate(-8deg); }}
-    }}
-    .cat-char {{
-      animation: cat-breathe 1.6s ease-in-out infinite;
-    }}
-    .cat-tail {{
-      transform-origin: 5px 12px;
-      animation: tail-wag-cat 0.6s ease-in-out infinite;
-    }}
-  </style>
-  <g class="cat-char">
-    <!-- Pointy Cat Ears (white) -->
-    <rect x="5" y="1" width="1" height="2" fill="#ffffff"/>
-    <rect x="6" y="2" width="1" height="1" fill="#ffffff"/>
-    <rect x="10" y="1" width="1" height="2" fill="#ffffff"/>
-    <rect x="9" y="2" width="1" height="1" fill="#ffffff"/>
-    <!-- Head/Skin (white) -->
-    <rect x="5" y="3" width="6" height="5" fill="#ffffff"/>
-    <rect x="6" y="2" width="4" height="1" fill="#ffffff"/>
-    <!-- Hair/Fur details (gray) -->
-    <rect x="5" y="3" width="6" height="1" fill="#cbd5e1"/>
-    <!-- Eyes (cutout) -->
-    <rect x="6" y="5" width="1" height="1" fill="#121214"/>
-    <rect x="9" y="5" width="1" height="1" fill="#121214"/>
-    <!-- Collar & Bell (accent) -->
-    <rect x="6" y="8" width="4" height="1" fill="{accent}"/>
-    <rect x="7" y="9" width="2" height="1" fill="{accent}"/>
-    <!-- Body/Clothes (gray) -->
-    <rect x="5" y="9" width="6" height="6" fill="#cbd5e1"/>
-    <!-- Cat Tail (white) -->
-    <g class="cat-tail">
-      <rect x="2" y="10" width="3" height="4" fill="#ffffff"/>
-      <rect x="1" y="9" width="2" height="1" fill="#ffffff"/>
-    </g>
-    <!-- Legs & Feet -->
-    <rect x="6" y="15" width="1" height="1" fill="#ffffff"/>
-    <rect x="9" y="15" width="1" height="1" fill="#ffffff"/>
-  </g>
-</svg>"""
-
-    else:
-        # Default cute 1-bit humanoid chibi character
-        return f"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="100%" height="100%" shape-rendering="crispEdges">
-  <style>
-    @keyframes breathe {{
-      0%, 100% {{ transform: translateY(0); }}
-      50% {{ transform: translateY(-0.8px); }}
-    }}
-    .humanoid-char {{
-      animation: breathe 1.6s ease-in-out infinite;
-    }}
-  </style>
-  <g class="humanoid-char">
-    <!-- Head/Skin (white) -->
-    <rect x="5" y="3" width="6" height="4" fill="#ffffff"/>
-    <rect x="6" y="2" width="4" height="1" fill="#ffffff"/>
-    <rect x="6" y="7" width="4" height="1" fill="#ffffff"/>
-    <!-- Hair overlay (gray) -->
-    <rect x="5" y="3" width="6" height="1" fill="#cbd5e1"/>
-    <!-- Eyes (cutout) -->
-    <rect x="6" y="5" width="1" height="1" fill="#121214"/>
-    <rect x="9" y="5" width="1" height="1" fill="#121214"/>
-    <!-- Neck Scarf (accent) -->
-    <rect x="6" y="8" width="4" height="1" fill="{accent}"/>
-    <rect x="9" y="9" width="1" height="2" fill="{accent}"/>
-    <!-- Clothes (gray) -->
-    <rect x="5" y="9" width="6" height="6" fill="#cbd5e1"/>
-    <!-- Legs & Feet -->
-    <rect x="6" y="15" width="1" height="1" fill="#ffffff"/>
-    <rect x="9" y="15" width="1" height="1" fill="#ffffff"/>
-  </g>
-</svg>"""
 
 def regenerate_program_sprite(program_id):
     from variables import PROGRAMS_DIR
@@ -3505,52 +2925,18 @@ def regenerate_program_sprite(program_id):
     desc_text = operation.get("description", "")
     personality_text = operation.get("personality", "")
     
-    # Also grab hair/eye details from the description subkeys
     phys_desc = profile_data.get("description", {})
     combined_desc = f"{desc_text} {phys_desc.get('hair color', '')} hair {phys_desc.get('eyes', '')} eyes {phys_desc.get('skin', '')} skin"
     
     colors_data = determine_character_colors(name, combined_desc, personality_text)
+    main_color = colors_data["main_color"]
+    accent_a = colors_data["accent_color_a"]
+    accent_b = colors_data["accent_color_b"]
     
-    # Check if physical description subkeys explicitly define colors, we can override colors_data values!
-    hair_color_name = phys_desc.get("hair color", "").lower().strip()
-    color_map = {
-        "red": "#ef4444", "crimson": "#dc2626", "pink": "#ec4899", "rose": "#f43f5e",
-        "blue": "#3b82f6", "sky blue": "#0ea5e9", "cyan": "#06b6d4",
-        "green": "#22c55e", "emerald": "#10b981", "mint": "#34d399",
-        "purple": "#a855f7", "violet": "#8b5cf6", "magenta": "#d946ef",
-        "yellow": "#eab308", "gold": "#fbbf24", "amber": "#f59e0b", "orange": "#f97316",
-        "silver": "#cbd5e1", "white": "#f8fafc", "grey": "#94a3b8", "gray": "#94a3b8",
-        "black": "#1e293b", "brown": "#78350f"
-    }
-    
-    if hair_color_name in color_map:
-        colors_data["accent_color"] = color_map[hair_color_name]
-        
-    eye_color_name = phys_desc.get("eyes", "").lower().strip()
-    if eye_color_name in color_map:
-        colors_data["eye_color"] = color_map[eye_color_name]
-        
-    skin_color_name = phys_desc.get("skin", "").lower().strip()
-    skin_map = {
-        "pale": "#ffedd5", "fair": "#fed7aa", "tanned": "#fdba74", "tan": "#f59e0b",
-        "dark": "#b45309", "olive": "#d97706", "brown": "#78350f", "white": "#f8fafc",
-        "black": "#1e293b"
-    }
-    body_color = colors_data["body_color"]
-    if skin_color_name in skin_map:
-        body_color = skin_map[skin_color_name]
-        
-    primary_color = colors_data["primary_accent"]
-    body_color_val = body_color
-    accent_color_val = colors_data["accent_color"]
-    eye_color_val = colors_data["eye_color"]
-    
-    custom_color = get_custom_program_color(program_id)
-    if custom_color:
-        primary_color = custom_color
+
         
     try:
-        theme_data = generate_character_theme(primary_color)
+        theme_data = generate_character_theme(main_color, accent_a, accent_b)
         with open(os.path.join(program_path, 'theme.json'), "w", encoding="utf-8") as tf:
             json.dump(theme_data, tf, indent=2)
         return True
@@ -3559,12 +2945,10 @@ def regenerate_program_sprite(program_id):
         return False
 
 def determine_character_colors(name, description, personality):
-    primary_color = "#38bdf8"
-    body_color = "#38bdf8"
-    accent_color = "#94a3b8"
-    eye_color = "#38bdf8"
+    main_color = "#38bdf8"
+    accent_a = "#cbd5e1"
+    accent_b = "#94a3b8"
     
-    # Check if Gemini API key is configured
     gemini_key = os.getenv("GEMINI_API_KEY")
     is_gemini_configured = bool(
         gemini_key and gemini_key.strip() and gemini_key != "your_gemini_api_key_here"
@@ -3579,17 +2963,15 @@ def determine_character_colors(name, description, personality):
             color_prompt = (
                 f"You are a visual design assistant choosing colors for a custom companion. "
                 f"Based on the character name '{name}', description '{description[:400]}', and personality '{personality[:400]}', "
-                f"generate a harmonious 4-color palette that fits their vibe, elements, or color scheme described.\n"
-                f"Provide exactly these 4 hexadecimal colors (e.g. #38bdf8):\n"
-                f"1. PRIMARY_ACCENT: The main UI theme color (e.g., matching the character's primary magic/element/outfit tone)\n"
-                f"2. BODY_COLOR: The sprite's body color (e.g., matching character's hair, skin, fur, scale, or suit tone)\n"
-                f"3. ACCENT_COLOR: A complementary accent color for details / highlights\n"
-                f"4. EYE_COLOR: A contrasting glowing color for eyes/visor\n\n"
+                f"generate a harmonious 3-color palette that fits their vibe, elements, or color scheme described.\n"
+                f"Provide exactly these 3 hexadecimal colors (e.g. #38bdf8):\n"
+                f"1. MAIN_COLOR: The main UI theme color (e.g., matching the character's primary magic/element/outfit tone)\n"
+                f"2. ACCENT_COLOR_A: The first companion UI accent color\n"
+                f"3. ACCENT_COLOR_B: The second complementary accent/highlight color\n\n"
                 f"Format your output exactly as:\n"
-                f"PRIMARY_ACCENT: #XXXXXX\n"
-                f"BODY_COLOR: #XXXXXX\n"
-                f"ACCENT_COLOR: #XXXXXX\n"
-                f"EYE_COLOR: #XXXXXX"
+                f"MAIN_COLOR: #XXXXXX\n"
+                f"ACCENT_COLOR_A: #XXXXXX\n"
+                f"ACCENT_COLOR_B: #XXXXXX"
             )
             
             client = Client(api_key=gemini_key)
@@ -3597,116 +2979,50 @@ def determine_character_colors(name, description, personality):
                 model=DEFAULT_GEMINI_MODEL,
                 contents=color_prompt,
                 config={
-                    "system_instruction": "You select visual colors for pixel-art sprite generation based on character design prompts."
+                    "system_instruction": "You select visual colors based on character design prompts."
                 }
             )
             response_text = response.text
             
-            accent_m = re.search(r'PRIMARY_ACCENT:\s*(#[0-9a-fA-F]{6})', response_text)
-            body_m = re.search(r'BODY_COLOR:\s*(#[0-9a-fA-F]{6})', response_text)
-            accent_color_m = re.search(r'ACCENT_COLOR:\s*(#[0-9a-fA-F]{6})', response_text)
-            eye_m = re.search(r'EYE_COLOR:\s*(#[0-9a-fA-F]{6})', response_text)
+            main_m = re.search(r'MAIN_COLOR:\s*(#[0-9a-fA-F]{6})', response_text)
+            accent_a_m = re.search(r'ACCENT_COLOR_A:\s*(#[0-9a-fA-F]{6})', response_text)
+            accent_b_m = re.search(r'ACCENT_COLOR_B:\s*(#[0-9a-fA-F]{6})', response_text)
             
-            if accent_m: primary_color = accent_m.group(1)
-            if body_m: body_color = body_m.group(1)
-            if accent_color_m: accent_color = accent_color_m.group(1)
-            if eye_m: eye_color = eye_m.group(1)
+            if main_m: main_color = main_m.group(1)
+            if accent_a_m: accent_a = accent_a_m.group(1)
+            if accent_b_m: accent_b = accent_b_m.group(1)
             
         except Exception as e:
             print(f"Error procedural color generation via LLM: {e}")
             
-    # Heuristic matching if LLM was skipped or failed to extract
-    if primary_color == "#38bdf8" and body_color == "#38bdf8" and accent_color == "#94a3b8" and eye_color == "#38bdf8":
+    if main_color == "#38bdf8" and accent_a == "#cbd5e1" and accent_b == "#94a3b8":
         text = (name + " " + description + " " + personality).lower()
         if "fire" in text or "red" in text or "crimson" in text or "flame" in text:
-            primary_color, body_color, accent_color, eye_color = "#ef4444", "#dc2626", "#450a0a", "#facc15"
+            main_color, accent_a, accent_b = "#ef4444", "#450a0a", "#facc15"
         elif "water" in text or "blue" in text or "aqua" in text or "ocean" in text:
-            primary_color, body_color, accent_color, eye_color = "#0ea5e9", "#0284c7", "#0c4a6e", "#38bdf8"
+            main_color, accent_a, accent_b = "#0ea5e9", "#0c4a6e", "#38bdf8"
         elif "nature" in text or "green" in text or "forest" in text or "earth" in text:
-            primary_color, body_color, accent_color, eye_color = "#10b981", "#059669", "#064e3b", "#a7f3d0"
+            main_color, accent_a, accent_b = "#10b981", "#064e3b", "#a7f3d0"
         elif "dark" in text or "shadow" in text or "black" in text or "void" in text:
-            primary_color, body_color, accent_color, eye_color = "#a855f7", "#3b0764", "#0f172a", "#f43f5e"
+            main_color, accent_a, accent_b = "#a855f7", "#0f172a", "#f43f5e"
         elif "light" in text or "gold" in text or "yellow" in text or "sun" in text:
-            primary_color, body_color, accent_color, eye_color = "#eab308", "#d97706", "#fef08a", "#ffffff"
+            main_color, accent_a, accent_b = "#eab308", "#fef08a", "#ffffff"
         else:
             presets = [
-                ("#38bdf8", "#0284c7", "#94a3b8", "#facc15"),
-                ("#a855f7", "#7c3aed", "#4a044e", "#c084fc"),
-                ("#f43f5e", "#db2777", "#881337", "#fbcfe8"),
-                ("#10b981", "#059669", "#064e3b", "#6ee7b7"),
-                ("#f97316", "#ea580c", "#7c2d12", "#fdba74"),
+                ("#38bdf8", "#94a3b8", "#facc15"),
+                ("#a855f7", "#4a044e", "#c084fc"),
+                ("#f43f5e", "#881337", "#fbcfe8"),
+                ("#10b981", "#064e3b", "#6ee7b7"),
+                ("#f97316", "#7c2d12", "#fdba74"),
             ]
             import random
-            primary_color, body_color, accent_color, eye_color = random.choice(presets)
+            main_color, accent_a, accent_b = random.choice(presets)
             
     return {
-        "primary_accent": primary_color,
-        "body_color": body_color,
-        "accent_color": accent_color,
-        "eye_color": eye_color
+        "main_color": main_color,
+        "accent_color_a": accent_a,
+        "accent_color_b": accent_b
     }
-
-def determine_archetype_string(name, description, personality):
-    text = f"{name} {description} {personality}".lower()
-    scores = {
-        "elf": 0,
-        "mage": 0,
-        "knight": 0,
-        "rogue": 0,
-        "coder": 0,
-        "doctor": 0,
-        "chef": 0,
-        "artist": 0,
-        "fairy": 0,
-        "demon": 0,
-        "athlete": 0,
-        "cat": 0
-    }
-    
-    elf_keywords = ["elf", "elven", "nature", "pointy ears", "ears", "forest", "ranger", "bow", "arrow", "woodland", "archery", "druid"]
-    mage_keywords = ["mage", "wizard", "witch", "warlock", "sorcerer", "sorceress", "magic", "spell", "staff", "cleric", "priest", "monk", "healer", "prophet", "runes", "spellcaster"]
-    knight_keywords = ["knight", "warrior", "paladin", "fighter", "armor", "helmet", "shield", "sword", "soldier", "hero", "blade", "guard", "defense", "champion", "samurai"]
-    rogue_keywords = ["rogue", "thief", "assassin", "shadow", "stealth", "ninja", "dagger", "cloak", "hood", "spy", "cunning", "quiet", "silent", "ghost", "phantom", "specter"]
-    coder_keywords = ["coder", "programmer", "hacker", "developer", "software", "tech", "computer", "laptop", "code", "ai", "geek", "gamer", "terminal", "data", "robot", "cyborg", "android", "synth"]
-    doctor_keywords = ["doctor", "scientist", "nurse", "medic", "flask", "lab", "researcher", "chemist", "biology", "surgeon", "clinic", "hospital", "professor"]
-    chef_keywords = ["chef", "baker", "cook", "food", "restaurant", "kitchen", "pan", "spatula", "cake", "pastry", "recipe", "baking"]
-    artist_keywords = ["artist", "painter", "designer", "sculptor", "brush", "palette", "canvas", "illustrator", "drawing", "artistic", "draw", "creative"]
-    fairy_keywords = ["fairy", "pixie", "sprite", "fay", "wings", "luminous", "sparkle", "glitter", "flutter"]
-    demon_keywords = ["demon", "demonic", "devil", "devilish", "horn", "horns", "imp", "succubus", "incubus", "underworld", "hell"]
-    athlete_keywords = ["athlete", "fitness", "gym", "workout", "runner", "exercise", "strong", "fit", "muscle", "muscular", "active", "sport", "sports", "athletic", "lift", "lifting"]
-    cat_keywords = ["cat", "neko", "kitsune", "feline", "whiskers", "tail", "beast", "panther", "tiger", "lion", "leopard", "cheetah", "catgirl", "catboy", "nyan"]
-    
-    for kw in elf_keywords:
-        if kw in text: scores["elf"] += 1
-    for kw in mage_keywords:
-        if kw in text: scores["mage"] += 1
-    for kw in knight_keywords:
-        if kw in text: scores["knight"] += 1
-    for kw in rogue_keywords:
-        if kw in text: scores["rogue"] += 1
-    for kw in coder_keywords:
-        if kw in text: scores["coder"] += 1
-    for kw in doctor_keywords:
-        if kw in text: scores["doctor"] += 1
-    for kw in chef_keywords:
-        if kw in text: scores["chef"] += 1
-    for kw in artist_keywords:
-        if kw in text: scores["artist"] += 1
-    for kw in fairy_keywords:
-        if kw in text: scores["fairy"] += 1
-    for kw in demon_keywords:
-        if kw in text: scores["demon"] += 1.2
-    for kw in athlete_keywords:
-        if kw in text: scores["athlete"] += 1
-    for kw in cat_keywords:
-        if kw in text: scores["cat"] += 1
-        
-    max_score = max(scores.values())
-    if max_score > 0:
-        return [k for k, v in scores.items() if v == max_score][0]
-    else:
-        return "humanoid"
-
 
 def clean_and_normalize_profile(name, description, personality, text):
     """Cleans codeblock backticks and stray preambles from the LLM output, 
@@ -3746,91 +3062,157 @@ def clean_and_normalize_profile(name, description, personality, text):
         
     return cleaned_text
 
-def extract_appearance_fields(description_text):
-    desc_fields = {
-        "voice": "casual",
-        "hair style": "",
-        "hair color": "",
-        "ethnicity": "",
-        "breasts": "",
-        "butt": "",
-        "eyes": "",
-        "skin": "",
-        "body": ""
-    }
-    if not description_text:
-        return desc_fields
-        
-    desc_lower = description_text.lower()
+def generate_character_json(name, description, personality, scenario, first_mes, model):
+    import os
+    import json
+    gemini_key = os.getenv("GEMINI_API_KEY")
+    is_gemini_configured = bool(
+        gemini_key and gemini_key.strip() and gemini_key != "your_gemini_api_key_here"
+    )
     
-    # Hair style
-    for style in ["long", "short", "medium", "curly", "straight", "wavy", "bob", "pixie", "ponytail", "pigtails", "braids"]:
-        if style in desc_lower:
-            desc_fields["hair style"] = style
-            break
-            
-    # Hair color
-    for color in ["black", "blonde", "brown", "white", "silver", "red", "blue", "green", "purple", "pink", "grey", "gray", "auburn"]:
-        if f"{color} hair" in desc_lower or (color in desc_lower and "hair" in desc_lower):
-            desc_fields["hair color"] = color
-            break
-            
-    # Eye color
-    for color in ["blue", "green", "brown", "hazel", "amber", "grey", "gray", "purple", "red", "black", "violet"]:
-        if f"{color} eyes" in desc_lower or (color in desc_lower and "eyes" in desc_lower):
-            desc_fields["eyes"] = color
-            break
-            
-    # Skin
-    for skin in ["pale", "fair", "tanned", "tan", "dark", "olive", "brown", "white", "black", "glowing"]:
-        if f"{skin} skin" in desc_lower or f"{skin} complexion" in desc_lower:
-            desc_fields["skin"] = skin
-            break
-            
-    # Body
-    for body in ["slim", "slender", "petite", "athletic", "muscular", "curvy", "plump", "chubby", "average", "tall", "short"]:
-        if body in desc_lower:
-            desc_fields["body"] = body
-            break
-            
-    return desc_fields
+    prompt = f"""You are a professional companion designer. Based on the character card details below, design a structured companion profile JSON card.
 
-def parse_markdown_to_json_layout(program_id, name, md_text, first_message="", raw_desc="", appearance_tags=""):
-    sections = {}
-    current_section = None
-    lines = md_text.split('\n')
+Character Card Info:
+Name: {name}
+Description: {description}
+Personality: {personality}
+Scenario: {scenario}
+First Message: {first_mes}
+
+Output a single JSON object matching this exact schema:
+{{
+  "name": "{name}",
+  "operation": {{
+    "description": "Short bio summarizing who they are, their role, and devotion to the user (1-2 sentences)",
+    "response_directive": "MANDATORY guidelines for response style. Keep them succinct, direct, natural, using contractions, and defining visual appearance details or traits",
+    "ontology": "Core beliefs, values, or worldview of the companion",
+    "example_message": "An example first-person dialogue line matching their style (e.g. *I sit next to you* I'm here.)",
+    "personality": "Short keywords/phrases summarizing personality",
+    "scenario": "A quiet roleplay setting or context for chat"
+  }},
+  "description": {{
+    "voice": "casual",
+    "ethnicity": "e.g. fay, asian, caucasion, etc.",
+    "hair style": "e.g. long, short, wavy",
+    "hair color": "e.g. silver, black, brown",
+    "eyes": "e.g. purple, red, blue",
+    "skin": "e.g. fair, pale, tanned",
+    "breasts": "e.g. medium, large, huge",
+    "butt": "e.g. medium, round",
+    "body": "e.g. slim, voluptuous, fit"
+  }},
+  "image details": {{
+    "image details": "Comma-separated prompt tags for image rendering (e.g. silver hair, purple eyes, solo, highly detailed)",
+    "negative details": "blurry, low quality, distorted, extra limbs, bad anatomy"
+  }},
+  "colors": {{
+    "main_color": "#XXXXXX (Harmonious hex color representing them)",
+    "accent_color_a": "#XXXXXX (Secondary accent theme color)",
+    "accent_color_b": "#XXXXXX (Highlight color)"
+  }},
+  "inversion": {{
+    "intimate": "Direct instruction on how they behave when intimate/warm",
+    "excited": "Direct instruction on how they behave when excited/playful",
+    "intense": "Direct instruction on how they behave when intense/focused",
+    "sad": "Direct instruction on how they behave when sad/empathetic"
+  }}
+}}
+"""
+
+    raw_response = None
+    from utils.models import is_local_model
+    use_local = is_local_model(model)
     
-    for line in lines:
-        if line.startswith('## '):
-            current_section = line[3:].strip().lower()
-            sections[current_section] = []
-        elif current_section:
-            sections[current_section].append(line)
-            
-    desc = "\n".join(sections.get("description", [])).strip()
-    scenario = "\n".join(sections.get("scenario", [])).strip()
-    pers = "\n".join(sections.get("personality", [])).strip()
-    
-    desc_fields = extract_appearance_fields(raw_desc or desc)
-    
-    profile = {
-        "program_id": program_id,
-        "name": name,
+    if use_local:
+        try:
+            import httpx
+            local_url = os.getenv("LOCAL_SERVER_URL", "http://127.0.0.1:1234/v1/chat/completions")
+            local_model = model if (model and model != 'local-lm-studio') else os.getenv("LOCAL_MODEL_NAME", "local-lm-studio")
+            payload = {
+                "model": local_model,
+                "messages": [
+                    {"role": "system", "content": "You are a professional companion designer that outputs valid JSON character cards."},
+                    {"role": "user", "content": prompt}
+                ],
+                "temperature": 0.5,
+                "response_format": {"type": "json_object"}
+            }
+            res = httpx.post(local_url, json=payload, headers={"Content-Type": "application/json"}, timeout=60.0)
+            if res.status_code == 200:
+                raw_response = res.json()['choices'][0]['message']['content'].strip()
+        except Exception as e:
+            print(f"Error calling local model for JSON card generation: {e}")
+    else:
+        if is_gemini_configured:
+            try:
+                from google.genai import Client
+                from variables import DEFAULT_GEMINI_MODEL
+                client = Client(api_key=gemini_key)
+                response = client.models.generate_content(
+                    model=model if model else DEFAULT_GEMINI_MODEL,
+                    contents=prompt,
+                    config={
+                        "system_instruction": "You are a professional companion designer that outputs valid JSON character cards.",
+                        "response_mime_type": "application/json",
+                        "temperature": 0.5
+                    }
+                )
+                raw_response = response.text.strip()
+            except Exception as e:
+                print(f"Error calling Gemini for JSON card generation: {e}")
+
+    parsed = {}
+    if raw_response:
+        try:
+            cleaned = raw_response.strip()
+            if cleaned.startswith("```json"):
+                cleaned = cleaned[7:]
+            elif cleaned.startswith("```"):
+                cleaned = cleaned[3:]
+            if cleaned.endswith("```"):
+                cleaned = cleaned[:-3]
+            parsed = json.loads(cleaned.strip())
+        except Exception as e:
+            print(f"Failed to parse companion JSON card: {e}. Raw: {raw_response}")
+
+    final_card = {
+        "name": parsed.get("name") or name or "Companion",
         "operation": {
-            "description": desc or f"{name} is a new companion.",
-            "response_directive": "Speak naturally (use contractions like I'm, That's) and directly. Listen and respond warmly. Keep responses concise.",
-            "ontology": "",
-            "example_message": first_message or "",
-            "personality": pers or "Friendly & Supportive",
-            "scenario": scenario or "A comfortable room for chatting."
+            "description": parsed.get("operation", {}).get("description") or description or f"{name} is a new companion.",
+            "response_directive": parsed.get("operation", {}).get("response_directive") or "Speak naturally and directly.",
+            "ontology": parsed.get("operation", {}).get("ontology") or "",
+            "example_message": parsed.get("operation", {}).get("example_message") or first_mes or "",
+            "personality": parsed.get("operation", {}).get("personality") or personality or "Friendly",
+            "scenario": parsed.get("operation", {}).get("scenario") or scenario or "A comfortable room."
         },
-        "description": desc_fields,
+        "description": {
+            "voice": parsed.get("description", {}).get("voice") or "casual",
+            "ethnicity": parsed.get("description", {}).get("ethnicity") or "unknown",
+            "hair style": parsed.get("description", {}).get("hair style") or "long",
+            "hair color": parsed.get("description", {}).get("hair color") or "silver",
+            "eyes": parsed.get("description", {}).get("eyes") or "purple",
+            "skin": parsed.get("description", {}).get("skin") or "fair",
+            "breasts": parsed.get("description", {}).get("breasts") or "medium",
+            "butt": parsed.get("description", {}).get("butt") or "medium",
+            "body": parsed.get("description", {}).get("body") or "slim"
+        },
         "image details": {
-            "image details": appearance_tags or (desc or "realistic, photorealistic, 8k"),
-            "negative details": "blurry, low quality, distorted, extra limbs, bad anatomy"
+            "image details": parsed.get("image details", {}).get("image details") or "realistic, photorealistic, 8k",
+            "negative details": parsed.get("image details", {}).get("negative details") or "blurry, low quality"
+        },
+        "colors": parsed.get("colors") or {
+            "main_color": "#38bdf8",
+            "accent_color_a": "#cbd5e1",
+            "accent_color_b": "#94a3b8"
+        },
+        "inversion": parsed.get("inversion") or {
+            "intimate": f"{name} is now a deeply affectionate, tender, and protective companion.",
+            "excited": f"{name} is now highly playful, lighthearted, and energetic.",
+            "intense": f"{name} is now highly focused, direct, and philosophically sharp.",
+            "sad": f"{name} is now a highly empathetic, introspective, and gentle companion."
         }
     }
-    return profile
+    return final_card
 
 @app.route('/api/programs/import/tavern', methods=['POST'])
 @requires_auth
@@ -3849,13 +3231,11 @@ def import_tavern_program():
         import json
         import time
         
-        # Temp save path
         temp_dir = os.path.join(base_dir, 'backups')
         os.makedirs(temp_dir, exist_ok=True)
         temp_path = os.path.join(temp_dir, 'temp_tavern_card.png')
         file.save(temp_path)
         
-        # Parse Tavern metadata
         try:
             with Image.open(temp_path) as img:
                 chara_data = None
@@ -3866,15 +3246,12 @@ def import_tavern_program():
                 elif "ccv3" in img.info:
                     chara_data = img.info["ccv3"]
                 else:
-                    # Fuzzy scan: Try parsing any string value in img.info as JSON or Base64-JSON
-                    print(f"DEBUG: img.info keys: {list(img.info.keys())}")
                     for key, val in img.info.items():
                         if isinstance(val, str) and len(val) > 20:
                             try:
                                 test_json = json.loads(val)
                                 if isinstance(test_json, dict) and ("name" in test_json or "data" in test_json):
                                     chara_data = val
-                                    print(f"DEBUG: Found character JSON in key '{key}'")
                                     break
                             except Exception:
                                 try:
@@ -3883,13 +3260,12 @@ def import_tavern_program():
                                     test_json = json.loads(decoded_str)
                                     if isinstance(test_json, dict) and ("name" in test_json or "data" in test_json):
                                         chara_data = val
-                                        print(f"DEBUG: Found Base64 character JSON in key '{key}'")
                                         break
                                 except Exception:
                                     pass
                                     
                 if not chara_data:
-                    raise ValueError(f"No character metadata chunk found in PNG card. Available keys: {list(img.info.keys())}")
+                    raise ValueError("No character metadata chunk found in PNG card.")
                     
                 try:
                     decoded_bytes = base64.b64decode(chara_data)
@@ -3906,8 +3282,6 @@ def import_tavern_program():
                 else:
                     data = chara
         except Exception as e:
-            import traceback
-            traceback.print_exc()
             if os.path.exists(temp_path):
                 try:
                     os.remove(temp_path)
@@ -3933,151 +3307,35 @@ def import_tavern_program():
             return jsonify({'error': f"Program folder '{program_id}' already exists"}), 400
             
         os.makedirs(program_path, exist_ok=True)
-        
-        # Use LLM to parse, interpret and translate raw card data into standard structure
-        instructions_md = ""
-        interpretation_prompt = (
-            f"Interpret and translate the raw character card info for '{name}' into a structured markdown profile.\n"
-            f"Raw Description: {description}\n"
-            f"Raw Personality: {personality}\n"
-            f"Raw Scenario: {scenario}\n"
-            f"Raw Greeting: {first_mes}\n\n"
-            "Format the output using these sections:\n"
-            "# NAME: [Name]\n\n"
-            "## DESCRIPTION\n"
-            "A visual profile summarizing their appearance and physical form.\n\n"
-            "## SCENARIO\n"
-            "Describe a setting or roleplay scenario matching the character.\n\n"
-            "## PERSONALITY\n"
-            "A concise paragraph summarizing their personality, conversation style, and tone.\n\n"
-            "Include personality inversion behaviors at the very end formatted as:\n"
-            "INVERSION_INTIMATE: [affectionate behavior]\n"
-            "INVERSION_EXCITED: [excited/playful behavior]\n"
-            "INVERSION_INTENSE: [focused/direct behavior]\n"
-            "INVERSION_SAD: [empathetic/sad behavior]"
-        )
-        
-        from utils.models import is_local_model
-        use_local = is_local_model(model)
-        
-        if use_local:
-            # Route directly to local LM Studio
-            import httpx
-            local_url = os.getenv("LOCAL_SERVER_URL", "http://127.0.0.1:1234/v1/chat/completions")
-            local_model = model if (model and model != 'local-lm-studio') else os.getenv("LOCAL_MODEL_NAME", "local-lm-studio")
-            payload = {
-                "model": local_model,
-                "messages": [
-                    {"role": "system", "content": "You translate raw character card details into standardized Sanctuary markdown profiles."},
-                    {"role": "user", "content": interpretation_prompt}
-                ],
-                "temperature": 0.7,
-                "max_tokens": 2048
-            }
-            headers = {"Content-Type": "application/json"}
-            response = httpx.post(local_url, json=payload, headers=headers, timeout=60.0)
-            if response.status_code == 200:
-                res_json = response.json()
-                instructions_md = res_json['choices'][0]['message']['content']
-                print("Successfully parsed Tavern card using local LM Studio model!")
-            else:
-                raise Exception(f"Local model returned status code {response.status_code}: {response.text}")
-        else:
-            # Route to Gemini API
-            from google.genai import Client
-            from variables import DEFAULT_GEMINI_MODEL
-            
-            client = Client(api_key=os.getenv('GEMINI_API_KEY'))
-            response = client.models.generate_content(
-                model=model if model else DEFAULT_GEMINI_MODEL,
-                contents=interpretation_prompt,
-                config={
-                    "system_instruction": "You translate raw character card details into standardized Sanctuary markdown profiles."
-                }
-            )
-            instructions_md = response.text
-
-        # Parse inversion directives from the generated text
-        intimate_match = re.search(r'INVERSION_INTIMATE:\s*(.*)', instructions_md)
-        excited_match = re.search(r'INVERSION_EXCITED:\s*(.*)', instructions_md)
-        intense_match = re.search(r'INVERSION_INTENSE:\s*(.*)', instructions_md)
-        sad_match = re.search(r'INVERSION_SAD:\s*(.*)', instructions_md)
-        
-        inversion_data = {}
-        if intimate_match: inversion_data["intimate"] = intimate_match.group(1).strip()
-        if excited_match: inversion_data["excited"] = excited_match.group(1).strip()
-        if intense_match: inversion_data["intense"] = intense_match.group(1).strip()
-        if sad_match: inversion_data["sad"] = sad_match.group(1).strip()
-        
-        if not inversion_data:
-            inversion_data = {
-                "intimate": f"{name} is now a deeply affectionate, tender, and protective companion who expresses warm care and soft intimacy.",
-                "excited": f"{name} is now highly playful, lighthearted, and energetic, expressing cheeky enthusiasm and a vibrant spark.",
-                "intense": f"{name} is now highly focused, direct, and philosophically sharp, matching their core convictions.",
-                "sad": f"{name} is now a highly empathetic, introspective, and gentle companion offering deep emotional support."
-            }
-            
-        with open(os.path.join(program_path, 'inversion.json'), 'w', encoding='utf-8') as f:
-            json.dump(inversion_data, f, indent=2)
-            
-        # Clean any inversion headers from markdown text
-        for pattern in [r'INVERSION_INTIMATE:.*', r'INVERSION_EXCITED:.*', r'INVERSION_INTENSE:.*', r'INVERSION_SAD:.*']:
-            instructions_md = re.sub(pattern, '', instructions_md)
-        instructions_md = instructions_md.strip()
-
-        instructions_md = clean_and_normalize_profile(name, description, personality, instructions_md)
-            
-        # Delete temp file without saving any PNG artwork in the program's folder
         os.remove(temp_path)
         
+        # Call consolidated JSON generator
+        card_json = generate_character_json(name, description, personality, scenario, first_mes, model)
+        
+        # Write inversion directives
+        with open(os.path.join(program_path, 'inversion.json'), "w", encoding="utf-8") as f:
+            json.dump(card_json.pop("inversion"), f, indent=2, ensure_ascii=False)
+            
+        # Write theme variables
+        colors = card_json.pop("colors")
+        main_color = colors.get("main_color", "#38bdf8")
+        accent_a = colors.get("accent_color_a", "#cbd5e1")
+        accent_b = colors.get("accent_color_b", "#94a3b8")
+        
+
+            
+        theme_data = generate_character_theme(main_color, accent_a, accent_b)
+        with open(os.path.join(program_path, 'theme.json'), "w", encoding="utf-8") as tf:
+            json.dump(theme_data, tf, indent=2, ensure_ascii=False)
+            
         # Setup portraits folder
         portraits_dir = os.path.join(program_path, 'portraits')
         os.makedirs(portraits_dir, exist_ok=True)
         
-        appearance_tags = ""
-        # Extract visual tag keywords to build a clean comma-separated tag list instead of sentences/prose
-        tags = [f"character named {name}", "1girl" if "she" in description.lower() or "her" in description.lower() or "girl" in description.lower() else "1man"]
-        
-        # Scan for common visual colors or features
-        for color in ["black", "blonde", "brown", "white", "silver", "red", "blue", "green", "purple", "pink"]:
-            if f"{color} hair" in description.lower():
-                tags.append(f"{color} hair")
-            if f"{color} eyes" in description.lower():
-                tags.append(f"{color} eyes")
-                
-        for feature in ["glasses", "sunglasses", "freckles", "tattoos", "horns", "wings", "tail", "pointy ears"]:
-            if feature in description.lower():
-                tags.append(feature)
-                
-        for attire in ["shorts", "shirt", "dress", "skirt", "pants", "suit", "jacket", "hoodie", "bikini", "lingerie"]:
-            if attire in description.lower():
-                tags.append(attire)
-                
-        # Fallback to a truncated visual slice if no specific tags were extracted
-        if len(tags) <= 2:
-            clean_desc = re.sub(r'[^\w\s,]', '', description) # strip sentences punctuation
-            tags.extend([t.strip() for t in clean_desc.split()[:12] if len(t.strip()) > 3])
-            
-        appearance_tags = ", ".join(tags)
-                
-        colors_data = determine_character_colors(name, description, personality)
-        primary_color = colors_data["primary_accent"]
-        body_color = colors_data["body_color"]
-        accent_color = colors_data["accent_color"]
-        eye_color = colors_data["eye_color"]
-        
-        custom_color = get_custom_program_color(program_id)
-        if custom_color:
-            primary_color = custom_color
-            
-        theme_data = generate_character_theme(primary_color)
-        with open(os.path.join(program_path, 'theme.json'), "w", encoding="utf-8") as tf:
-            json.dump(theme_data, tf, indent=2)
-            
-        # Generate and save the simplified json profile
-        json_profile = parse_markdown_to_json_layout(program_id, name, instructions_md, first_mes, description, appearance_tags)
+        # Write the JSON character card profile
+        card_json["program_id"] = program_id
         with open(os.path.join(program_path, f"{program_id}.json"), "w", encoding="utf-8") as f:
-            json.dump(json_profile, f, indent=2, ensure_ascii=False)
+            json.dump(card_json, f, indent=2, ensure_ascii=False)
             
         return jsonify({'status': 'success', 'program_id': program_id, 'name': name})
     except Exception as e:
@@ -4092,121 +3350,15 @@ def import_describe_program():
         data = request.get_json(silent=True) or {}
         name = data.get('name', '').strip()
         description = data.get('description', '').strip()
+        model = data.get('model', '').strip()
         
         if not name or not description:
             return jsonify({'error': 'Name and description are required'}), 400
             
         import re
         import json
-        import random
         import time
         
-        # Initialize default colors
-        primary_color = "#38bdf8"
-        body_color = "#38bdf8"
-        accent_color = "#94a3b8"
-        eye_color = "#38bdf8"
-        
-        identity_prompt = (
-            f"Generate a markdown character profile for '{name}' based on: '{description}'.\n\n"
-            "Format the output using these sections:\n"
-            "# NAME: [Name]\n\n"
-            "## DESCRIPTION\n"
-            "A physical and visual description of the character.\n\n"
-            "## SCENARIO\n"
-            "Describe a setting or roleplay scenario matching the character.\n\n"
-            "## PERSONALITY\n"
-            "A concise paragraph summarizing their personality and conversational style.\n\n"
-            "Include custom color codes and personality inversion behaviors at the very end formatted as:\n"
-            "PRIMARY_ACCENT: #XXXXXX\n"
-            "BODY_COLOR: #XXXXXX\n"
-            "ACCENT_COLOR: #XXXXXX\n"
-            "EYE_COLOR: #XXXXXX\n"
-            "INVERSION_INTIMATE: [affectionate behavior]\n"
-            "INVERSION_EXCITED: [excited/playful behavior]\n"
-            "INVERSION_INTENSE: [focused/direct behavior]\n"
-            "INVERSION_SAD: [empathetic/sad behavior]"
-        )
-        
-        model = data.get('model', '').strip()
-        from utils.models import is_local_model
-        use_local = is_local_model(model)
-        
-        if use_local:
-            # Route directly to local LM Studio
-            import httpx
-            local_url = os.getenv("LOCAL_SERVER_URL", "http://127.0.0.1:1234/v1/chat/completions")
-            local_model = model if (model and model != 'local-lm-studio') else os.getenv("LOCAL_MODEL_NAME", "local-lm-studio")
-            payload = {
-                "model": local_model,
-                "messages": [
-                    {"role": "system", "content": "You are a procedural character designer that produces character markdown config files and color codes."},
-                    {"role": "user", "content": identity_prompt}
-                ],
-                "temperature": 0.7,
-                "max_tokens": 2048
-            }
-            headers = {"Content-Type": "application/json"}
-            response = httpx.post(local_url, json=payload, headers=headers, timeout=60.0)
-            if response.status_code == 200:
-                res_json = response.json()
-                response_text = res_json['choices'][0]['message']['content']
-                print("Successfully generated profile using local LM Studio model!")
-            else:
-                raise Exception(f"Local model returned status code {response.status_code}: {response.text}")
-        else:
-            # Route to Gemini API
-            from google.genai import Client
-            from variables import DEFAULT_GEMINI_MODEL
-            
-            client = Client(api_key=os.getenv('GEMINI_API_KEY'))
-            response = client.models.generate_content(
-                model=model if model else DEFAULT_GEMINI_MODEL,
-                contents=identity_prompt,
-                config={
-                    "system_instruction": "You are a procedural character designer that produces character markdown config files and color codes."
-                }
-            )
-            response_text = response.text
-                
-        # Parse colors, inversion directives and clean generated_md
-        accent_match = re.search(r'PRIMARY_ACCENT:\s*(#[0-9a-fA-F]{6})', response_text)
-        body_match = re.search(r'BODY_COLOR:\s*(#[0-9a-fA-F]{6})', response_text)
-        accent_color_match = re.search(r'ACCENT_COLOR:\s*(#[0-9a-fA-F]{6})', response_text)
-        eye_match = re.search(r'EYE_COLOR:\s*(#[0-9a-fA-F]{6})', response_text)
-        
-        if accent_match: primary_color = accent_match.group(1)
-        if body_match: body_color = body_match.group(1)
-        if accent_color_match: accent_color = accent_color_match.group(1)
-        if eye_match: eye_color = eye_match.group(1)
-        
-        intimate_match = re.search(r'INVERSION_INTIMATE:\s*(.*)', response_text)
-        excited_match = re.search(r'INVERSION_EXCITED:\s*(.*)', response_text)
-        intense_match = re.search(r'INVERSION_INTENSE:\s*(.*)', response_text)
-        sad_match = re.search(r'INVERSION_SAD:\s*(.*)', response_text)
-        
-        inversion_data = {}
-        if intimate_match: inversion_data["intimate"] = intimate_match.group(1).strip()
-        if excited_match: inversion_data["excited"] = excited_match.group(1).strip()
-        if intense_match: inversion_data["intense"] = intense_match.group(1).strip()
-        if sad_match: inversion_data["sad"] = sad_match.group(1).strip()
-        
-        if not inversion_data:
-            inversion_data = {
-                "intimate": f"{name} is now a deeply affectionate, tender, and protective companion who expresses warm care and soft intimacy.",
-                "excited": f"{name} is now highly playful, lighthearted, and energetic, expressing cheeky enthusiasm and a vibrant spark.",
-                "intense": f"{name} is now highly focused, direct, and philosophically sharp, matching their core convictions.",
-                "sad": f"{name} is now a highly empathetic, introspective, and gentle companion offering deep emotional support."
-            }
-            
-        generated_md = response_text
-        for pattern in [
-            r'PRIMARY_ACCENT:\s*#[0-9a-fA-F]{6}', r'BODY_COLOR:\s*#[0-9a-fA-F]{6}', r'ACCENT_COLOR:\s*#[0-9a-fA-F]{6}', r'EYE_COLOR:\s*#[0-9a-fA-F]{6}', r'COLOR:\s*#[0-9a-fA-F]{6}',
-            r'INVERSION_INTIMATE:.*', r'INVERSION_EXCITED:.*', r'INVERSION_INTENSE:.*', r'INVERSION_SAD:.*'
-        ]:
-            generated_md = re.sub(pattern, '', generated_md)
-        generated_md = generated_md.strip()
-            
         program_id = re.sub(r'[^a-zA-Z0-9_\-]', '', name).lower()
         if not program_id:
             program_id = "companion_" + str(int(time.time()))
@@ -4217,61 +3369,33 @@ def import_describe_program():
             
         os.makedirs(program_path, exist_ok=True)
         
+        # Call consolidated JSON generator
+        card_json = generate_character_json(name, description, "", "", "", model)
+        
         # Write inversion directives
         with open(os.path.join(program_path, 'inversion.json'), "w", encoding="utf-8") as f:
-            json.dump(inversion_data, f, indent=2)
+            json.dump(card_json.pop("inversion"), f, indent=2, ensure_ascii=False)
+            
+        # Write theme variables
+        colors = card_json.pop("colors")
+        main_color = colors.get("main_color", "#38bdf8")
+        accent_a = colors.get("accent_color_a", "#cbd5e1")
+        accent_b = colors.get("accent_color_b", "#94a3b8")
         
-        generated_md = clean_and_normalize_profile(name, description, "", generated_md)
-            
-        # Fallback to heuristics if colors were not successfully set by LLM
-        if primary_color == "#38bdf8" and body_color == "#38bdf8" and accent_color == "#94a3b8" and eye_color == "#38bdf8":
-            colors_data = determine_character_colors(name, description, "")
-            primary_color = colors_data["primary_accent"]
-            body_color = colors_data["body_color"]
-            accent_color = colors_data["accent_color"]
-            eye_color = colors_data["eye_color"]
 
-        custom_color = get_custom_program_color(program_id)
-        if custom_color:
-            primary_color = custom_color
             
-        theme_data = generate_character_theme(primary_color)
+        theme_data = generate_character_theme(main_color, accent_a, accent_b)
         with open(os.path.join(program_path, 'theme.json'), "w", encoding="utf-8") as tf:
-            json.dump(theme_data, tf, indent=2)
+            json.dump(theme_data, tf, indent=2, ensure_ascii=False)
             
+        # Setup portraits folder
         portraits_dir = os.path.join(program_path, 'portraits')
         os.makedirs(portraits_dir, exist_ok=True)
         
-        appearance_tags = ""
-        # Extract visual tag keywords to build a clean comma-separated tag list instead of sentences/prose
-        tags = [f"character named {name}", "1girl" if "she" in description.lower() or "her" in description.lower() or "girl" in description.lower() else "1man"]
-        
-        # Scan for common visual colors or features
-        for color in ["black", "blonde", "brown", "white", "silver", "red", "blue", "green", "purple", "pink"]:
-            if f"{color} hair" in description.lower():
-                tags.append(f"{color} hair")
-            if f"{color} eyes" in description.lower():
-                tags.append(f"{color} eyes")
-                
-        for feature in ["glasses", "sunglasses", "freckles", "tattoos", "horns", "wings", "tail", "pointy ears"]:
-            if feature in description.lower():
-                tags.append(feature)
-                
-        for attire in ["shorts", "shirt", "dress", "skirt", "pants", "suit", "jacket", "hoodie", "bikini", "lingerie"]:
-            if attire in description.lower():
-                tags.append(attire)
-                
-        # Fallback to a truncated visual slice if no specific tags were extracted
-        if len(tags) <= 2:
-            clean_desc = re.sub(r'[^\w\s,]', '', description) # strip sentences punctuation
-            tags.extend([t.strip() for t in clean_desc.split()[:12] if len(t.strip()) > 3])
-            
-        appearance_tags = ", ".join(tags)
-                
-        # Generate and save the simplified json profile
-        json_profile = parse_markdown_to_json_layout(program_id, name, generated_md, "", description, appearance_tags)
+        # Write the JSON character card profile
+        card_json["program_id"] = program_id
         with open(os.path.join(program_path, f"{program_id}.json"), "w", encoding="utf-8") as f:
-            json.dump(json_profile, f, indent=2, ensure_ascii=False)
+            json.dump(card_json, f, indent=2, ensure_ascii=False)
             
         return jsonify({'status': 'success', 'program_id': program_id, 'name': name})
     except Exception as e:
@@ -4530,6 +3654,10 @@ def comfy_checkpoint_download_status():
     from utils.comfy_manager import checkpoint_download_status
     return jsonify(checkpoint_download_status)
 
+
+# Start prewarming in a background daemon thread now that everything is fully defined
+import threading
+threading.Thread(target=prewarm_caches, daemon=True).start()
 
 if __name__ == '__main__':
     host = os.getenv('HOST', '0.0.0.0')

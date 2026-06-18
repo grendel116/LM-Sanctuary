@@ -42,6 +42,9 @@
         /* Dynamic CSS variables injected from core/programs/{active_program}/theme.json */
         {% if theme %}
         :root {
+            {% if theme.main_color %}--main-color: {{ theme.main_color }};{% endif %}
+            {% if theme.accent_color_a %}--accent-color-a: {{ theme.accent_color_a }};{% endif %}
+            {% if theme.accent_color_b %}--accent-color-b: {{ theme.accent_color_b }};{% endif %}
             {% if theme.primary_accent %}--primary-accent: {{ theme.primary_accent }};{% endif %}
             {% if theme.primary_glow %}--primary-glow: {{ theme.primary_glow }};{% endif %}
             {% if theme.companion_bubble %}--companion-bubble: {{ theme.companion_bubble }};{% endif %}
@@ -69,6 +72,7 @@
         }
 
         #app-container {
+            position: relative;
             width: 100%;
             max-width: 900px;
             height: 100vh;
@@ -1935,8 +1939,15 @@
             .header-actions {
                 gap: 6px;
             }
+            .model-select-wrapper {
+                padding: 0 10px 0 6px;
+                height: 26px;
+                border-radius: 12px;
+            }
             #model-select {
-                max-width: 95px;
+                max-width: 75px;
+                min-width: 60px;
+                font-size: 0.7rem;
             }
             #chat-container {
                 padding: 15px;
@@ -2281,6 +2292,110 @@
         @keyframes spin {
             0% { transform: rotate(0deg); }
             100% { transform: rotate(360deg); }
+        }
+
+        /* App Loading Overlay */
+        #chat-loading-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(10, 10, 12, 0.7);
+            backdrop-filter: blur(20px);
+            -webkit-backdrop-filter: blur(20px);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            z-index: 10000;
+            transition: opacity 0.4s cubic-bezier(0.25, 1, 0.5, 1), visibility 0.4s;
+            opacity: 1;
+            visibility: visible;
+        }
+
+        #chat-loading-overlay.fade-out {
+            opacity: 0;
+            visibility: hidden;
+            pointer-events: none;
+        }
+
+        .loading-content {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 20px;
+            text-align: center;
+            transform: scale(0.95);
+            animation: pulse-scale 2s infinite ease-in-out;
+        }
+
+        .loading-logo {
+            width: 80px;
+            height: 80px;
+            border-radius: 20px;
+            background: linear-gradient(135deg, var(--primary-accent), var(--secondary-accent, #3b82f6));
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            box-shadow: 0 8px 32px rgba(99, 102, 241, 0.3);
+            margin-bottom: 8px;
+        }
+
+        .loading-logo svg {
+            width: 40px;
+            height: 40px;
+            color: #ffffff;
+            animation: pulse-heart 1.5s infinite ease-in-out;
+        }
+
+        .loading-spinner-bar {
+            width: 140px;
+            height: 4px;
+            background: rgba(255, 255, 255, 0.08);
+            border-radius: 2px;
+            overflow: hidden;
+            position: relative;
+        }
+
+        .loading-spinner-bar::after {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 60%;
+            height: 100%;
+            background: linear-gradient(90deg, transparent, var(--primary-accent), transparent);
+            animation: loading-slide 1.5s infinite ease-in-out;
+        }
+
+        .loading-text {
+            color: var(--text-main);
+            font-size: 0.95rem;
+            font-weight: 500;
+            letter-spacing: 0.05em;
+            text-shadow: 0 2px 4px rgba(0, 0, 0, 0.4);
+        }
+
+        .loading-subtext {
+            color: var(--text-muted);
+            font-size: 0.75rem;
+            margin-top: -12px;
+            opacity: 0.7;
+        }
+
+        @keyframes loading-slide {
+            0% { transform: translateX(-100%); }
+            100% { transform: translateX(200%); }
+        }
+
+        @keyframes pulse-heart {
+            0%, 100% { transform: scale(1); filter: drop-shadow(0 0 0px var(--primary-accent)); }
+            50% { transform: scale(1.1); filter: drop-shadow(0 0 10px var(--primary-accent)); }
+        }
+
+        @keyframes pulse-scale {
+            0%, 100% { transform: scale(0.98); }
+            50% { transform: scale(1); }
         }
 
         /* Voice Call Overlay styles */
@@ -2641,6 +2756,18 @@
 </head>
 <body class="{{ active_program | default('sebile') }}">
     <div id="app-container">
+        <!-- App Loading Overlay -->
+        <div id="chat-loading-overlay">
+            <div class="loading-content">
+                <div class="loading-logo">
+                    <svg viewBox="0 0 24 24" fill="currentColor">
+                        <path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/>
+                    </svg>
+                </div>
+                <div class="loading-text">Sanctuary</div>
+                <div class="loading-spinner-bar"></div>
+            </div>
+        </div>
         <header>
             <div class="header-title-area">
                 <h1 class="sr-only">Sanctuary</h1>
@@ -5126,6 +5253,9 @@ function applyTheme(programId, theme) {
             document.body.className = programId;
             const root = document.documentElement;
             if (theme) {
+                if (theme.main_color) root.style.setProperty('--main-color', theme.main_color);
+                if (theme.accent_color_a) root.style.setProperty('--accent-color-a', theme.accent_color_a);
+                if (theme.accent_color_b) root.style.setProperty('--accent-color-b', theme.accent_color_b);
                 if (theme.primary_accent) root.style.setProperty('--primary-accent', theme.primary_accent);
                 if (theme.primary_glow) root.style.setProperty('--primary-glow', theme.primary_glow);
                 if (theme.companion_bubble) root.style.setProperty('--companion-bubble', theme.companion_bubble);
@@ -5137,6 +5267,9 @@ function applyTheme(programId, theme) {
                 if (theme.primary_btn_text) root.style.setProperty('--primary-btn-text', theme.primary_btn_text);
             } else {
                 // Default theme values
+                root.style.setProperty('--main-color', '#8b5cf6');
+                root.style.setProperty('--accent-color-a', '#b19cd9');
+                root.style.setProperty('--accent-color-b', '#79aeff');
                 root.style.setProperty('--primary-accent', '#8b5cf6');
                 root.style.setProperty('--primary-glow', 'rgba(139, 92, 246, 0.08)');
                 root.style.setProperty('--companion-bubble', 'rgba(24, 22, 28, 0.85)');
@@ -7088,11 +7221,7 @@ async function loadHistory() {
             chatContainer.classList.remove('smooth-scroll');
 
             try {
-                // Wait for model initialization and health checks to complete
-                if (modelInitPromise) {
-                    await modelInitPromise;
-                }
-
+                // Fetch history and server images concurrently
                 const [historyRes, _] = await Promise.all([
                     fetch(`/history?session_id=${sessionId}&t=${Date.now()}`),
                     loadServerImages()
@@ -7129,7 +7258,16 @@ async function loadHistory() {
                         appendMessage(msg.role, msg.text, msg.image_url, msg.tool_calls, false, msg.timestamp);
                     });
                 } else {
-                    // History is empty! Check connection status
+                    // History is empty! Wait for model initialization and health checks to complete if they haven't yet
+                    if (modelInitPromise) {
+                        try {
+                            await modelInitPromise;
+                        } catch (e) {
+                            console.error("Error waiting for modelInitPromise in empty history block:", e);
+                        }
+                    }
+
+                    // Check connection status
                     if (!connectionStatus.gemini_configured && !connectionStatus.lm_studio_online) {
                         showOnboardingCard();
                     } else {
@@ -7162,6 +7300,12 @@ async function loadHistory() {
                 }
             } catch (error) {
                 console.error("Error loading chat history:", error);
+                // Ensure modelInitPromise finishes so connectionStatus is populated
+                if (modelInitPromise) {
+                    try {
+                        await modelInitPromise;
+                    } catch (e) {}
+                }
                 if (!connectionStatus.gemini_configured && !connectionStatus.lm_studio_online) {
                     showOnboardingCard();
                 } else {
@@ -7172,6 +7316,17 @@ async function loadHistory() {
                 setTimeout(() => {
                     chatContainer.classList.add('smooth-scroll');
                 }, 50);
+                hideLoadingOverlay();
+            }
+        }
+
+        function hideLoadingOverlay() {
+            const overlay = document.getElementById('chat-loading-overlay');
+            if (overlay) {
+                overlay.classList.add('fade-out');
+                setTimeout(() => {
+                    overlay.remove();
+                }, 400);
             }
         }
 
@@ -10045,16 +10200,16 @@ function showToolConfirmModal(callId, toolName, details) {
                                 <h4 style="margin: 0; color: #fbbf24; font-size: 0.95rem; font-weight: 600;">${quest.title}</h4>
                                 <div style="display: flex; gap: 6px;">
                                     <!-- Download ICS -->
-                                    <button class="edit-btn" onclick="downloadQuest('${quest.id}')" title="Download Calendar invite" style="padding: 4px 8px; font-size: 0.75rem; display: flex; align-items: center; gap: 4px; border-color: rgba(255,255,255,0.1);">
-                                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                                    <button class="edit-btn edit-cancel-btn" onclick="downloadQuest('${quest.id}')" title="Download Calendar invite" style="padding: 6px; border-radius: 8px; display: flex; align-items: center; justify-content: center;">
+                                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
                                             <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
                                             <polyline points="7 10 12 15 17 10"></polyline>
                                             <line x1="12" y1="15" x2="12" y2="3"></line>
                                         </svg>
                                     </button>
                                     <!-- Complete/Delete -->
-                                    <button class="edit-btn" onclick="deleteQuest('${quest.id}')" title="Complete Quest" style="padding: 4px 8px; font-size: 0.75rem; background: rgba(16, 185, 129, 0.1); border-color: rgba(16, 185, 129, 0.2); color: #34d399;">
-                                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                                    <button class="edit-btn edit-save-btn" onclick="deleteQuest('${quest.id}')" title="Complete Quest" style="padding: 6px; border-radius: 8px; display: flex; align-items: center; justify-content: center;">
+                                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
                                             <polyline points="20 6 9 17 4 12"></polyline>
                                         </svg>
                                     </button>
