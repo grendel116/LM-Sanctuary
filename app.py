@@ -18,7 +18,7 @@ if not os.path.exists(env_path):
 from flask import Flask, render_template, request, jsonify, send_file, send_from_directory, Response
 import asyncio
 from functools import wraps
-from runner_interface import GoogleAdkRunner, OpenSourceRunner
+from runner_interface import OpenSourceRunner
 
 # Load environment variables
 from dotenv import load_dotenv
@@ -31,18 +31,8 @@ _cached_active_user = None
 
 def init_runner():
     global runner
-    runner_backend = os.getenv("RUNNER_BACKEND", "opensource").lower()
-    if runner_backend == "google_adk":
-        try:
-            runner = GoogleAdkRunner(app_name="Sanctuary")
-            print(">>> Starting Sanctuary using GOOGLE ADK Runner backend!")
-        except Exception as e:
-            print(f">>>> WARNING: Failed to initialize GoogleAdkRunner backend: {e}")
-            print(">>>> Falling back to OpenSourceRunner (offline mode) so server can run.")
-            runner = OpenSourceRunner(app_name="Sanctuary")
-    else:
-        runner = OpenSourceRunner(app_name="Sanctuary")
-        print(">>> Starting Sanctuary using decoupled OPEN-SOURCE Runner backend!")
+    runner = OpenSourceRunner(app_name="Sanctuary")
+    print(">>> Starting Sanctuary using decoupled OPEN-SOURCE Runner backend!")
 
 @app.before_request
 def check_program_change():
@@ -84,10 +74,7 @@ def check_program_change():
             # Re-initialize the runner backend with the new consciousness/program/user config
             init_runner()
             
-            if hasattr(runner, 'sessions_history'):
-                runner.sessions_history.clear()
-            if hasattr(runner, 'runner') and hasattr(runner.runner, 'session_service'):
-                runner.runner.session_service.sessions.clear()
+            runner.sessions_history.clear()
             print(f">>> Dynamic check loaded new program consciousness (Program: '{current_program}', User Profile: '{current_user}')")
         except Exception as e:
             print(f"Error dynamically reloading program/user: {e}")
@@ -365,31 +352,15 @@ def get_image_prompt():
 
 def append_companion_message_to_session(runner, session_id: str, content: str):
     import time
-    if hasattr(runner, 'runner') and hasattr(runner.runner, 'session_service'):
-        # Google ADK Runner
-        from google.adk.events.event import Event
-        from google.genai import types
-        adk_session = runner.runner.session_service.get_session(runner.app_name, "user", session_id)
-        ev = Event(
-            author="companion",
-            content=types.Content(role="model", parts=[types.Part.from_text(text=content)]),
-            id=f"companion-{int(time.time())}",
-            timestamp=time.time()
-        )
-        setattr(ev, 'is_proactive', True)
-        adk_session.events.append(ev)
-        runner._save_session_to_disk(session_id)
-    else:
-        # Open Source Runner
-        if session_id not in runner.sessions_history:
-            runner._load_session_from_disk(session_id)
-        runner.sessions_history[session_id].append({
-            "role": "companion",
-            "text": content,
-            "timestamp": time.time(),
-            "is_proactive": True
-        })
-        runner._save_session_to_disk(session_id)
+    if session_id not in runner.sessions_history:
+        runner._load_session_from_disk(session_id)
+    runner.sessions_history[session_id].append({
+        "role": "companion",
+        "text": content,
+        "timestamp": time.time(),
+        "is_proactive": True
+    })
+    runner._save_session_to_disk(session_id)
 
 @app.route('/api/proactive_action', methods=['POST'])
 @requires_auth
@@ -882,58 +853,12 @@ def generate_impersonated_message(session_id, user_profile, model):
         f"Generate the User's next message to the Companion:"
     )
     
-    # Check if local model
-    from utils.models import is_local_model
-    if is_local_model(model) or model == 'local-lm-studio':
-        import requests
-        from variables import REMOTE_SERVER_URL, get_remote_server_headers
-        payload = {
-            "messages": [
-                {"role": "system", "content": system_instruction},
-                {"role": "user", "content": prompt}
-            ],
-            "temperature": temperature,
-            "max_tokens": 512
-        }
-        target_model = model if (model and model != 'local-lm-studio') else os.getenv("LOCAL_MODEL_NAME")
-        if target_model:
-            payload["model"] = target_model
-            
-        try:
-            headers = get_remote_server_headers()
-            r = requests.post(REMOTE_SERVER_URL, json=payload, headers=headers, timeout=60.0)
-            if r.status_code == 200:
-                res_json = r.json()
-                return res_json['choices'][0]['message']['content'].strip()
-            else:
-                raise Exception(f"Local server returned status code {r.status_code}: {r.text}")
-        except Exception as e:
-            print(f"Error generating impersonated message via local model: {e}")
-            raise
-    else:
-        # Remote model
-        from google import genai
-        from google.genai import types
-        api_key = os.getenv("REMOTE_API_KEY")
-        if not api_key:
-            raise Exception("REMOTE_API_KEY environment variable is not configured.")
-        client = genai.Client(api_key=api_key)
-        
-        try:
-            target_model = model if model else "gemini-2.5-flash"
-            response = client.models.generate_content(
-                model=target_model,
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    system_instruction=system_instruction,
-                    temperature=temperature,
-                    max_output_tokens=512
-                )
-            )
-            return response.text.strip()
-        except Exception as e:
-            print(f"Error generating impersonated message via Gemini: {e}")
-            raise
+    # Delegate entirely to the runner's provider-agnostic generator
+    try:
+        return asyncio.run(runner.generate_impersonation(prompt, system_instruction, model, temperature))
+    except Exception as e:
+        print(f"Error generating impersonated message via runner: {e}")
+        raise
 
 @app.route('/api/generate_user_message', methods=['POST'])
 @requires_auth
@@ -1824,10 +1749,7 @@ def save_config():
         init_runner()
         
         # Clear runner sessions history to reload character instructions
-        if hasattr(runner, 'sessions_history'):
-            runner.sessions_history.clear()
-        if hasattr(runner, 'runner') and hasattr(runner.runner, 'session_service'):
-            runner.runner.session_service.sessions.clear()
+        runner.sessions_history.clear()
                 
         # Clean up legacy GCP/Project ID lines to avoid bloat
         lines = [l for l in lines if not l.strip().startswith('PROJECT_ID=')]
@@ -2213,10 +2135,7 @@ def select_program():
         init_runner()
         
         # Clear sessions memory in the runner so they reload from the new assistant's folders
-        if hasattr(runner, 'sessions_history'):
-            runner.sessions_history.clear()
-        if hasattr(runner, 'runner') and hasattr(runner.runner, 'session_service'):
-            runner.runner.session_service.sessions.clear()
+        runner.sessions_history.clear()
             
         theme = None
         theme_path = os.path.join(program_path, "theme.json")
@@ -2315,10 +2234,7 @@ def delete_program():
             import importlib
             importlib.reload(program_config)
             init_runner()
-            if hasattr(runner, 'sessions_history'):
-                runner.sessions_history.clear()
-            if hasattr(runner, 'runner') and hasattr(runner.runner, 'session_service'):
-                runner.runner.session_service.sessions.clear()
+            runner.sessions_history.clear()
                 
         # Delete the program folder recursively
         import shutil
@@ -2510,10 +2426,7 @@ def save_program_profile():
         init_runner()
         
         # Clear sessions memory in the runner to refresh instructions
-        if hasattr(runner, 'sessions_history'):
-            runner.sessions_history.clear()
-        if hasattr(runner, 'runner') and hasattr(runner.runner, 'session_service'):
-            runner.runner.session_service.sessions.clear()
+        runner.sessions_history.clear()
             
         return jsonify({'status': 'success'})
     except Exception as e:
@@ -2663,10 +2576,7 @@ def select_user_profile():
         # Re-initialize the runner
         init_runner()
         
-        if hasattr(runner, 'sessions_history'):
-            runner.sessions_history.clear()
-        if hasattr(runner, 'runner') and hasattr(runner.runner, 'session_service'):
-            runner.runner.session_service.sessions.clear()
+        runner.sessions_history.clear()
             
         return jsonify({"status": "success", "active": profile_id})
     except Exception as e:
@@ -2710,10 +2620,7 @@ def save_user_profile():
             importlib.reload(program_config)
             
             init_runner()
-            if hasattr(runner, 'sessions_history'):
-                runner.sessions_history.clear()
-            if hasattr(runner, 'runner') and hasattr(runner.runner, 'session_service'):
-                runner.runner.session_service.sessions.clear()
+            runner.sessions_history.clear()
                 
         return jsonify({"status": "success", "profile_id": profile_id})
     except Exception as e:
@@ -2751,10 +2658,7 @@ def delete_user_profile():
             import importlib
             importlib.reload(program_config)
             init_runner()
-            if hasattr(runner, 'sessions_history'):
-                runner.sessions_history.clear()
-            if hasattr(runner, 'runner') and hasattr(runner.runner, 'session_service'):
-                runner.runner.session_service.sessions.clear()
+            runner.sessions_history.clear()
                 
         return jsonify({"status": "success", "deleted": profile_id})
     except Exception as e:
@@ -2813,10 +2717,7 @@ def rename_user_profile():
             import importlib
             importlib.reload(program_config)
             init_runner()
-            if hasattr(runner, 'sessions_history'):
-                runner.sessions_history.clear()
-            if hasattr(runner, 'runner') and hasattr(runner.runner, 'session_service'):
-                runner.runner.session_service.sessions.clear()
+            runner.sessions_history.clear()
                 
         return jsonify({"status": "success", "profile_id": new_profile_id})
     except Exception as e:
