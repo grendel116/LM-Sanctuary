@@ -1,15 +1,7 @@
 import os
 import time
 import shutil
-import warnings
 import json
-
-# Suppress Google GenAI warnings about thought_signature deprecation and non-text system instruction parts
-warnings.filterwarnings("ignore", message=".*thought_signature.*")
-warnings.filterwarnings("ignore", message=".*non-text.*")
-warnings.filterwarnings("ignore", message=".*thought.*")
-warnings.filterwarnings("ignore", category=UserWarning, message=".*thought_signature.*")
-warnings.filterwarnings("ignore", category=UserWarning, message=".*non-text.*")
 
 # Automate copying of default .env configuration if it doesn't exist
 base_dir = os.path.dirname(os.path.abspath(__file__))
