@@ -9202,7 +9202,7 @@ async function saveMessageEdit(bubble, newText) {
             if (heartElement) {
                 heartElement.classList.add('jiggling');
             }
-
+ 
             const typingIndicatorRow = document.createElement('div');
             typingIndicatorRow.className = 'message-row companion-row';
             const profileUrl = getProfileUrl();
@@ -9223,7 +9223,7 @@ async function saveMessageEdit(bubble, newText) {
             
             userInput.disabled = true;
             userInput.placeholder = "";
-
+ 
             setGenerating(true);
             startToolPolling();
             chatAbortController = new AbortController();
@@ -9235,7 +9235,8 @@ async function saveMessageEdit(bubble, newText) {
                         session_id: sessionId,
                         user_message_index: index,
                         new_text: null,
-                        model: selectedModel
+                        model: selectedModel,
+                        force_offload: true
                     }),
                     signal: chatAbortController.signal
                 });
