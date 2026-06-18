@@ -4,7 +4,6 @@ import os
 import re
 import shutil
 import sys
-from google.adk.agents.llm_agent import LlmAgent as LlmProgram
 from tools import (
     read_file, write_file, replace_in_file, run_shell_command, 
     get_workspace_structure, search_codebase, read_webpage, google_search,
@@ -297,16 +296,3 @@ if not sanitized_agent_name or not (sanitized_agent_name[0].isalpha() or sanitiz
 
 # Dynamically initialize/reload the sovereign instruction
 instruction = get_compiled_instructions()
-
-root_program = LlmProgram(
-    model=DEFAULT_REMOTE_MODEL,
-    name=sanitized_agent_name,
-    instruction=instruction,
-    tools=[
-        google_search, web_search, read_file, write_file, replace_in_file, 
-        run_shell_command, get_workspace_structure, search_codebase, 
-        read_webpage, apply_comfy_workflow, generate_local_image, 
-        replace_file_content, multi_replace_file_content, run_command_async,
-        manage_task, wait_task
-    ],
-)

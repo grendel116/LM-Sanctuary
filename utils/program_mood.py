@@ -6,8 +6,6 @@ import os
 import json
 import re
 import requests
-from google import genai
-from google.genai import types
 
 base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -23,10 +21,10 @@ def analyze_sentiment_with_llm(text: str) -> dict:
         }
         
     api_key = os.getenv("REMOTE_API_KEY")
-    project_id = os.getenv("PROJECT_ID")
+    remote_cloud_url = os.getenv("REMOTE_CLOUD_URL")
     is_remote_configured = bool(
         api_key and api_key.strip() and api_key != "your_remote_api_key_here" and
-        project_id and project_id.strip() and project_id != "your_gcp_project_id_here"
+        remote_cloud_url and remote_cloud_url.strip() and remote_cloud_url != "your_remote_cloud_url_here"
     )
     
     classification_json = None
@@ -51,17 +49,28 @@ def analyze_sentiment_with_llm(text: str) -> dict:
     if is_remote_configured:
         try:
             from variables import DEFAULT_REMOTE_MODEL
-            client = genai.Client(api_key=api_key)
-            response = client.models.generate_content(
-                model=DEFAULT_REMOTE_MODEL,
-                contents=text,
-                config=types.GenerateContentConfig(
-                    system_instruction=system_instruction,
-                    response_mime_type="application/json",
-                    temperature=0.1
-                )
-            )
-            classification_json = json.loads(response.text)
+            payload = {
+                "model": DEFAULT_REMOTE_MODEL,
+                "messages": [
+                    {"role": "system", "content": system_instruction},
+                    {"role": "user", "content": text}
+                ],
+                "temperature": 0.1,
+                "response_format": {"type": "json_object"}
+            }
+            headers = {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {api_key}"
+            }
+            response = requests.post(remote_cloud_url, json=payload, headers=headers, timeout=10)
+            if response.status_code == 200:
+                res_data = response.json()
+                content_str = res_data['choices'][0]['message']['content']
+                match = re.search(r'\{.*\}', content_str, re.DOTALL)
+                if match:
+                    classification_json = json.loads(match.group(0))
+                else:
+                    classification_json = json.loads(content_str)
         except Exception as e:
             print(f"[ERROR] Remote sentiment classification failed: {e}")
             

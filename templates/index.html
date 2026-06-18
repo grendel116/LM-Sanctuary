@@ -4033,7 +4033,7 @@
                     const onboarding = document.getElementById('onboarding-container');
                     if (onboarding) onboarding.remove();
                 } else {
-                    if (!connectionStatus.remote_configured && !connectionStatus.gemini_configured && !connectionStatus.lm_studio_online) {
+                    if (!connectionStatus.remote_configured  && !connectionStatus.lm_studio_online) {
                         showOnboardingCard();
                     } else {
                         showWelcomeMessage();
@@ -4557,7 +4557,7 @@ async function saveConfigData(apiKey, projectId, geminiModel = null) {
                 } else {
                     showCustomAlert("Configuration Saved", "Your credentials have been successfully updated.");
                     await initializeModelSelect();
-                    if (connectionStatus.remote_configured || connectionStatus.gemini_configured || connectionStatus.lm_studio_online) {
+                    if (connectionStatus.remote_configured  || connectionStatus.lm_studio_online) {
                         const onboarding = document.getElementById('onboarding-container');
                         if (onboarding) onboarding.remove();
                         showWelcomeMessage();
@@ -4619,7 +4619,7 @@ function saveModalConfig() {
 async function verifyConnections(isSilent = false) {
             try {
                 await initializeModelSelect();
-                if (connectionStatus.remote_configured || connectionStatus.gemini_configured || connectionStatus.lm_studio_online) {
+                if (connectionStatus.remote_configured  || connectionStatus.lm_studio_online) {
                     const onboarding = document.getElementById('onboarding-container');
                     if (onboarding) onboarding.remove();
                     
@@ -5468,7 +5468,7 @@ function updateConnectionStatus(status) {
             // Update Gemini badges
             geminiBadges.forEach(badge => {
                 if (!badge) return;
-                if (status.remote_configured || status.gemini_configured) {
+                if (status.remote_configured ) {
                     badge.textContent = "Configured";
                     badge.className = "status-badge status-configured";
                 } else {
@@ -5491,7 +5491,7 @@ function updateConnectionStatus(status) {
             
             // Update Header status indicator
             if (headerStatusText) {
-                if (status.remote_configured || status.gemini_configured || status.lm_studio_online) {
+                if (status.remote_configured  || status.lm_studio_online) {
                     headerStatusText.textContent = "";
                     if (headerHeart) {
                         headerHeart.style.setProperty('--heart-color', 'var(--primary-accent)');
@@ -5522,7 +5522,7 @@ function updateConnectionModalStatus() {
                 if (dynamismCurrentVal) dynamismCurrentVal.textContent = parseFloat(tempVal).toFixed(2);
             }
             
-            if (connectionStatus.remote_configured || connectionStatus.gemini_configured) {
+            if (connectionStatus.remote_configured ) {
                 if (modalApiKey && !modalApiKey.value) modalApiKey.placeholder = "•••••••••••••••• (Configured)";
                 if (modalProjectId && !modalProjectId.value && connectionStatus.remote_url) {
                     modalProjectId.value = connectionStatus.remote_url;
@@ -7326,7 +7326,7 @@ async function loadHistory() {
                     }
 
                     // Check connection status
-                    if (!connectionStatus.remote_configured && !connectionStatus.gemini_configured && !connectionStatus.lm_studio_online) {
+                    if (!connectionStatus.remote_configured  && !connectionStatus.lm_studio_online) {
                         showOnboardingCard();
                     } else {
                         showWelcomeMessage();
@@ -7367,7 +7367,7 @@ async function loadHistory() {
                         ]);
                     } catch (e) {}
                 }
-                if (!connectionStatus.remote_configured && !connectionStatus.gemini_configured && !connectionStatus.lm_studio_online) {
+                if (!connectionStatus.remote_configured  && !connectionStatus.lm_studio_online) {
                     showOnboardingCard();
                 } else {
                     showWelcomeMessage();
@@ -11892,7 +11892,7 @@ let selectedTavernCardFile = null;
                 }
                 
                 let voiceModel = selectedModel;
-                if (connectionStatus && (connectionStatus.remote_configured || connectionStatus.gemini_configured) && connectionStatus.remote_model) {
+                if (connectionStatus && (connectionStatus.remote_configured ) && connectionStatus.remote_model) {
                     voiceModel = connectionStatus.remote_model;
                 }
                 
