@@ -1814,6 +1814,9 @@ def save_config():
         if hasattr(runner, 'runner') and hasattr(runner.runner, 'session_service'):
             runner.runner.session_service.sessions.clear()
                 
+        # Clean up legacy GCP/Project ID lines to avoid bloat
+        lines = [l for l in lines if not l.strip().startswith('PROJECT_ID=')]
+        
         with open(env_path, 'w', encoding='utf-8') as f:
             f.writelines(lines)
             
