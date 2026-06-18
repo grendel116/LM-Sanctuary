@@ -462,6 +462,23 @@ class OsHistoryAdapter(LocalHistoryAdapter):
         self.runner_obj._save_session_to_disk(self.session_id)
 
 
+def _is_cloud_model_check(model: str) -> bool:
+    remote_model = os.getenv("REMOTE_MODEL")
+    remote_cloud_url = os.getenv("REMOTE_CLOUD_URL")
+    remote_key = os.getenv("REMOTE_API_KEY")
+    if not remote_cloud_url or not remote_cloud_url.strip() or remote_cloud_url == "your_remote_cloud_url_here":
+        return False
+    if not remote_key or not remote_key.strip() or remote_key == "your_remote_api_key_here":
+        return False
+    if model and remote_model and model == remote_model:
+        return True
+    if model and is_local_model(model):
+        return False
+    if model in ("local-lm-studio", os.getenv("LOCAL_MODEL_NAME")):
+        return False
+    return True
+
+
 class BaseProgramRunner:
     def __init__(self, app_name="Sanctuary"):
         self.app_name = app_name
@@ -580,13 +597,7 @@ class BaseProgramRunner:
 
             # Determine if we should route to the remote cloud server or the local server
             remote_cloud_url = os.getenv("REMOTE_CLOUD_URL")
-            remote_model = os.getenv("REMOTE_MODEL")
-            is_cloud = False
-            
-            if model and remote_model and model == remote_model:
-                is_cloud = True
-            elif model and model != "local-lm-studio" and remote_cloud_url:
-                is_cloud = True
+            is_cloud = _is_cloud_model_check(model)
                 
             if is_cloud:
                 url = remote_cloud_url
@@ -1174,10 +1185,7 @@ class OpenSourceRunner(BaseProgramRunner):
         # Check if we should use the cloud remote endpoint
         remote_cloud_url = os.getenv("REMOTE_CLOUD_URL")
         remote_key = os.getenv("REMOTE_API_KEY")
-        is_cloud = bool(
-            remote_key and remote_key.strip() and remote_key != "your_remote_api_key_here" and
-            remote_cloud_url and remote_cloud_url.strip() and remote_cloud_url != "your_remote_cloud_url_here"
-        )
+        is_cloud = _is_cloud_model_check(model)
         
         url = remote_cloud_url if is_cloud else REMOTE_SERVER_URL
         headers = {"Content-Type": "application/json"}
