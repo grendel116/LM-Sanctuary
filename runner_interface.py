@@ -737,12 +737,14 @@ class BaseProgramRunner:
 
     async def _generate_local_summary(self, text_to_summarize: str, active_model: str, prior_memories: list = None) -> str:
         import os
+        import httpx
+        
         # Check if remote model is configured to offload summary generation
         remote_key = os.getenv("REMOTE_API_KEY")
-        project_id = os.getenv("PROJECT_ID")
+        remote_cloud_url = os.getenv("REMOTE_CLOUD_URL")
         is_remote_configured = bool(
             remote_key and remote_key.strip() and remote_key != "your_remote_api_key_here" and
-            project_id and project_id.strip() and project_id != "your_gcp_project_id_here"
+            remote_cloud_url and remote_cloud_url.strip() and remote_cloud_url != "your_remote_cloud_url_here"
         )
         
         prompt = (
@@ -763,21 +765,29 @@ class BaseProgramRunner:
         
         if is_remote_configured:
             try:
-                from google import genai
-                client = genai.Client(api_key=remote_key)
-                print(f"[COMPACTION] Offloading summary generation to remote model: {DEFAULT_REMOTE_MODEL}", flush=True)
-                response = client.models.generate_content(
-                    model=DEFAULT_REMOTE_MODEL,
-                    contents=prompt,
-                )
-                if response.text:
-                    return response.text.strip()
+                target_model = os.getenv("REMOTE_MODEL", "gemini-3.1-flash-lite")
+                headers = {
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {remote_key}"
+                }
+                payload = {
+                    "model": target_model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.3,
+                    "max_tokens": 1024
+                }
+                print(f"[COMPACTION] Offloading summary generation to remote cloud model: {target_model}", flush=True)
+                async with httpx.AsyncClient() as client:
+                    response = await client.post(remote_cloud_url, json=payload, headers=headers, timeout=60.0)
+                    if response.status_code == 200:
+                        res_json = response.json()
+                        return res_json['choices'][0]['message']['content'].strip()
+                    else:
+                        print(f"[COMPACTION] Remote cloud query failed with status {response.status_code}: {response.text}", flush=True)
             except Exception as e:
                 print(f"[COMPACTION] Error generating remote summary: {e}. Falling back to local/default.", flush=True)
                 
         # Fallback to local server
-        import httpx
-        
         payload = {
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 0.3,
