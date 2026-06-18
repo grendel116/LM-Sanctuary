@@ -3526,33 +3526,27 @@
                 <!-- Cloud Panel -->
                 <div class="onboarding-option-box cloud-box">
                     <div class="option-header">
-                        <h4 style="margin: 0; font-size: 1.05rem; font-weight: 600;">Google Gemini (Cloud)</h4>
+                        <h4 style="margin: 0; font-size: 1.05rem; font-weight: 600;">Remote Connection (Cloud)</h4>
                         <span id="modal-gemini-status" class="status-badge status-unconfigured">Unconfigured</span>
                     </div>
-                    <p class="option-desc" style="font-size: 0.8rem; margin: 8px 0 15px 0;">Requires a Gemini API Key and GCP Project ID inside your env config.</p>
+                    <p class="option-desc" style="font-size: 0.8rem; margin: 8px 0 15px 0;">Requires a Remote API Key and Remote Server URL inside your env config.</p>
                     
                     <div class="input-group" style="margin-bottom: 10px;">
-                        <label style="font-size: 0.72rem; color: var(--text-muted);">Gemini API Key</label>
-                        <input type="password" id="modal-api-key" placeholder="AIzaSy..." class="onboarding-input">
+                        <label style="font-size: 0.72rem; color: var(--text-muted);">Remote API Key</label>
+                        <input type="password" id="modal-api-key" placeholder="e.g. sk-or-... or AIzaSy..." class="onboarding-input">
                     </div>
                     <div class="input-group" style="margin-bottom: 12px;">
-                        <label style="font-size: 0.72rem; color: var(--text-muted);">GCP Project ID</label>
-                        <input type="text" id="modal-project-id" placeholder="my-gcp-project-123" class="onboarding-input">
+                        <label style="font-size: 0.72rem; color: var(--text-muted);">Remote Server URL</label>
+                        <input type="text" id="modal-project-id" placeholder="https://api.deepseek.com/v1/chat/completions" class="onboarding-input">
                     </div>
                     <div class="input-group" style="margin-bottom: 15px;">
-                        <label style="font-size: 0.72rem; color: var(--text-muted);">Gemini Model for Offloading</label>
-                        <select id="modal-gemini-model" class="onboarding-input glass-select" style="background: rgba(255,255,255,0.05); color: var(--text-color); border: 1px solid rgba(255,255,255,0.12); padding: 8px; border-radius: 4px; width: 100%; font-size: 0.8rem; height: 36px; outline: none; margin-top: 5px;">
-                            <option value="gemini-3.1-flash-lite">Gemini 3.1 Flash Lite (Default)</option>
-                            <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
-                            <option value="gemini-2.5-pro">Gemini 2.5 Pro</option>
-                            <option value="gemini-1.5-flash">Gemini 1.5 Flash</option>
-                            <option value="gemini-1.5-pro">Gemini 1.5 Pro</option>
-                        </select>
+                        <label style="font-size: 0.72rem; color: var(--text-muted);">Remote Model Name</label>
+                        <input type="text" id="modal-gemini-model" placeholder="e.g. deepseek-chat or gpt-4o" class="onboarding-input" style="margin-top: 5px;">
                     </div>
                     
                     <button onclick="saveModalConfig()" class="onboarding-btn connect-cloud-btn">Save & Connect Cloud</button>
                     <div class="helper-text" style="font-size: 0.7rem; margin-top: 10px;">
-                        Get keys at <a href="https://aistudio.google.com/" target="_blank" style="color: var(--primary-accent); text-decoration: none;">Google AI Studio</a>.
+                        Save credentials to enable remote model offloading.
                     </div>
                 </div>
 
@@ -4039,7 +4033,7 @@
                     const onboarding = document.getElementById('onboarding-container');
                     if (onboarding) onboarding.remove();
                 } else {
-                    if (!connectionStatus.gemini_configured && !connectionStatus.lm_studio_online) {
+                    if (!connectionStatus.remote_configured && !connectionStatus.gemini_configured && !connectionStatus.lm_studio_online) {
                         showOnboardingCard();
                     } else {
                         showWelcomeMessage();
@@ -4495,23 +4489,27 @@ function showOnboardingCard() {
                     <!-- Option 1: Cloud Gemini -->
                     <div class="onboarding-option-box cloud-box">
                         <div class="option-header">
-                            <h3>Google Gemini (Cloud)</h3>
-                            <span id="onboarding-gemini-status" class="status-badge ${connectionStatus.gemini_configured ? 'status-configured' : 'status-unconfigured'}">
-                                ${connectionStatus.gemini_configured ? 'Configured' : 'Unconfigured'}
+                            <h3>Remote Connection (Cloud)</h3>
+                            <span id="onboarding-gemini-status" class="status-badge ${connectionStatus.remote_configured ? 'status-configured' : 'status-unconfigured'}">
+                                ${connectionStatus.remote_configured ? 'Configured' : 'Unconfigured'}
                             </span>
                         </div>
-                        <p class="option-desc">Connect to Google's Gemini models. Requires a free API Key and GCP Project ID.</p>
+                        <p class="option-desc">Connect to a remote cloud LLM. Requires an API Key and Server URL.</p>
                         <div class="input-group">
-                            <label for="onboarding-api-key">Gemini API Key</label>
-                            <input type="password" id="onboarding-api-key" placeholder="AIzaSy..." class="onboarding-input">
+                            <label for="onboarding-api-key">Remote API Key</label>
+                            <input type="password" id="onboarding-api-key" placeholder="e.g. sk-or-... or AIzaSy..." class="onboarding-input">
                         </div>
                         <div class="input-group">
-                            <label for="onboarding-project-id">GCP Project ID</label>
-                            <input type="text" id="onboarding-project-id" placeholder="my-gcp-project-123" class="onboarding-input">
+                            <label for="onboarding-project-id">Remote Server URL</label>
+                            <input type="text" id="onboarding-project-id" placeholder="https://api.deepseek.com/v1/chat/completions" class="onboarding-input">
+                        </div>
+                        <div class="input-group">
+                            <label for="onboarding-gemini-model">Remote Model Name</label>
+                            <input type="text" id="onboarding-gemini-model" placeholder="e.g. deepseek-chat or gpt-4o" class="onboarding-input">
                         </div>
                         <button onclick="saveOnboardingConfig()" class="onboarding-btn connect-cloud-btn">Save & Connect Cloud</button>
                         <div class="helper-text">
-                            Get keys at <a href="https://aistudio.google.com/" target="_blank">Google AI Studio</a>.
+                            Save credentials to enable remote model offloading.
                         </div>
                     </div>
 
@@ -4544,9 +4542,9 @@ async function saveConfigData(apiKey, projectId, geminiModel = null) {
             }
             try {
                 const bodyObj = {};
-                if (apiKey) bodyObj.gemini_api_key = apiKey;
-                if (projectId) bodyObj.project_id = projectId;
-                if (geminiModel) bodyObj.gemini_model = geminiModel;
+                if (apiKey) bodyObj.remote_api_key = apiKey;
+                if (projectId) bodyObj.remote_cloud_url = projectId;
+                if (geminiModel) bodyObj.remote_model = geminiModel;
 
                 const res = await fetch('/api/save_config', {
                     method: 'POST',
@@ -4559,7 +4557,7 @@ async function saveConfigData(apiKey, projectId, geminiModel = null) {
                 } else {
                     showCustomAlert("Configuration Saved", "Your credentials have been successfully updated.");
                     await initializeModelSelect();
-                    if (connectionStatus.gemini_configured || connectionStatus.lm_studio_online) {
+                    if (connectionStatus.remote_configured || connectionStatus.gemini_configured || connectionStatus.lm_studio_online) {
                         const onboarding = document.getElementById('onboarding-container');
                         if (onboarding) onboarding.remove();
                         showWelcomeMessage();
@@ -4576,7 +4574,8 @@ async function saveConfigData(apiKey, projectId, geminiModel = null) {
 function saveOnboardingConfig() {
             const apiKey = document.getElementById('onboarding-api-key').value;
             const projectId = document.getElementById('onboarding-project-id').value;
-            saveConfigData(apiKey, projectId);
+            const geminiModel = document.getElementById('onboarding-gemini-model').value;
+            saveConfigData(apiKey, projectId, geminiModel);
         }
 
         // --- saveModalConfig ---
@@ -4620,7 +4619,7 @@ function saveModalConfig() {
 async function verifyConnections(isSilent = false) {
             try {
                 await initializeModelSelect();
-                if (connectionStatus.gemini_configured || connectionStatus.lm_studio_online) {
+                if (connectionStatus.remote_configured || connectionStatus.gemini_configured || connectionStatus.lm_studio_online) {
                     const onboarding = document.getElementById('onboarding-container');
                     if (onboarding) onboarding.remove();
                     
@@ -4633,7 +4632,7 @@ async function verifyConnections(isSilent = false) {
                     }
                 } else {
                     if (!isSilent) {
-                        showCustomAlert("Connection Failed", "Could not connect to Google Gemini or LM Studio. Please verify credentials or check if LM Studio local server is running on port 1234.");
+                        showCustomAlert("Connection Failed", "Could not connect to Remote Cloud or LM Studio. Please verify credentials or check if LM Studio local server is running on port 1234.");
                     }
                 }
             } catch (e) {
@@ -5469,7 +5468,7 @@ function updateConnectionStatus(status) {
             // Update Gemini badges
             geminiBadges.forEach(badge => {
                 if (!badge) return;
-                if (status.gemini_configured) {
+                if (status.remote_configured || status.gemini_configured) {
                     badge.textContent = "Configured";
                     badge.className = "status-badge status-configured";
                 } else {
@@ -5492,7 +5491,7 @@ function updateConnectionStatus(status) {
             
             // Update Header status indicator
             if (headerStatusText) {
-                if (status.gemini_configured || status.lm_studio_online) {
+                if (status.remote_configured || status.gemini_configured || status.lm_studio_online) {
                     headerStatusText.textContent = "";
                     if (headerHeart) {
                         headerHeart.style.setProperty('--heart-color', 'var(--primary-accent)');
@@ -5523,25 +5522,15 @@ function updateConnectionModalStatus() {
                 if (dynamismCurrentVal) dynamismCurrentVal.textContent = parseFloat(tempVal).toFixed(2);
             }
             
-            if (connectionStatus.gemini_configured) {
+            if (connectionStatus.remote_configured || connectionStatus.gemini_configured) {
                 if (modalApiKey && !modalApiKey.value) modalApiKey.placeholder = "•••••••••••••••• (Configured)";
-                if (modalProjectId && !modalProjectId.value) modalProjectId.placeholder = "Configured";
+                if (modalProjectId && !modalProjectId.value && connectionStatus.remote_url) {
+                    modalProjectId.value = connectionStatus.remote_url;
+                }
             }
             
-            // Populate Gemini models select dropdown dynamically
-            if (modalGeminiModel) {
-                if (connectionStatus.gemini_models_list && connectionStatus.gemini_models_list.length > 0) {
-                    modalGeminiModel.innerHTML = '';
-                    connectionStatus.gemini_models_list.forEach(m => {
-                        const opt = document.createElement('option');
-                        opt.value = m.value;
-                        opt.textContent = m.label;
-                        modalGeminiModel.appendChild(opt);
-                    });
-                }
-                if (connectionStatus.gemini_model) {
-                    modalGeminiModel.value = connectionStatus.gemini_model;
-                }
+            if (modalGeminiModel && !modalGeminiModel.value && connectionStatus.remote_model) {
+                modalGeminiModel.value = connectionStatus.remote_model;
             }
             
             updateConnectionStatus(connectionStatus);
@@ -7337,7 +7326,7 @@ async function loadHistory() {
                     }
 
                     // Check connection status
-                    if (!connectionStatus.gemini_configured && !connectionStatus.lm_studio_online) {
+                    if (!connectionStatus.remote_configured && !connectionStatus.gemini_configured && !connectionStatus.lm_studio_online) {
                         showOnboardingCard();
                     } else {
                         showWelcomeMessage();
@@ -7378,7 +7367,7 @@ async function loadHistory() {
                         ]);
                     } catch (e) {}
                 }
-                if (!connectionStatus.gemini_configured && !connectionStatus.lm_studio_online) {
+                if (!connectionStatus.remote_configured && !connectionStatus.gemini_configured && !connectionStatus.lm_studio_online) {
                     showOnboardingCard();
                 } else {
                     showWelcomeMessage();
@@ -11433,7 +11422,7 @@ function purgeDataBank() {
         let hasTriggeredProactive = false;
         let activeCompanionName = "";
         let availableModels = [];
-        let connectionStatus = { gemini_configured: false, lm_studio_online: false };
+        let connectionStatus = { remote_configured: false, gemini_configured: false, lm_studio_online: false };
         let modelInitPromise = null;
 
 let comfyStatus = { installed: false, running: false, resolution_status: { status: "idle", progress: "", errors: [] } };
@@ -11903,8 +11892,8 @@ let selectedTavernCardFile = null;
                 }
                 
                 let voiceModel = selectedModel;
-                if (connectionStatus && connectionStatus.gemini_configured && connectionStatus.gemini_model) {
-                    voiceModel = connectionStatus.gemini_model;
+                if (connectionStatus && (connectionStatus.remote_configured || connectionStatus.gemini_configured) && connectionStatus.remote_model) {
+                    voiceModel = connectionStatus.remote_model;
                 }
                 
                 const payload = {

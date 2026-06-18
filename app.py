@@ -111,13 +111,7 @@ except Exception as e:
 
 def prewarm_caches():
     print(">>> Pre-warming backend caches in background...")
-    try:
-        # Prewarm gemini models cache
-        remote_key = os.getenv("REMOTE_API_KEY")
-        if remote_key and remote_key.strip() and remote_key != "your_remote_api_key_here":
-            fetch_gemini_models(remote_key)
-    except Exception as e:
-        print(f"Error prewarming gemini models cache: {e}")
+    # Gemini models cache prewarming removed to favor decoupled remote configs
         
     try:
         # Prewarm local models list
@@ -494,24 +488,29 @@ You must return a valid JSON object matching the following schema:
                 print(f"[PROACTIVE] Local LLM query failed: {e}")
         else:
             api_key = os.getenv("REMOTE_API_KEY")
-            if api_key:
-                from google import genai
-                from google.genai import types
-                client = genai.Client(api_key=api_key)
-                model_name = selected_model if selected_model else "gemini-2.5-flash"
+            remote_cloud_url = os.getenv("REMOTE_CLOUD_URL")
+            if api_key and remote_cloud_url:
+                import requests
+                target_model = selected_model if selected_model else os.getenv("REMOTE_MODEL", "gemini-3.1-flash-lite")
+                headers = {
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {api_key}"
+                }
+                payload = {
+                    "model": target_model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.7,
+                    "max_tokens": 512,
+                    "response_format": {"type": "json_object"}
+                }
                 try:
-                    response = client.models.generate_content(
-                        model=model_name,
-                        contents=prompt,
-                        config=types.GenerateContentConfig(
-                            response_mime_type="application/json",
-                            temperature=0.7,
-                            max_output_tokens=512
-                        )
-                    )
-                    raw_response = response.text.strip()
+                    r = requests.post(remote_cloud_url, json=payload, headers=headers, timeout=30.0)
+                    if r.status_code == 200:
+                        raw_response = r.json()['choices'][0]['message']['content'].strip()
+                    else:
+                        print(f"[PROACTIVE] Remote cloud query failed with status {r.status_code}: {r.text}")
                 except Exception as e:
-                    print(f"[PROACTIVE] Gemini cloud query failed: {e}")
+                    print(f"[PROACTIVE] Remote cloud query failed: {e}")
                     
         if not raw_response:
             return jsonify({'error': 'Failed to generate proactive response'}), 500
@@ -1545,151 +1544,18 @@ def approve_tool():
 
 from utils.models import fetch_local_models
 
-_cached_gemini_models = None
-
-def fetch_gemini_models(api_key):
-    """Dynamically fetches active models from the Gemini API and caches the result on disk."""
-    global _cached_gemini_models
-    if _cached_gemini_models is not None:
-        return _cached_gemini_models
-        
-    from variables import VARIABLES_DIR
-    import json
-    import time
-    cache_path = os.path.join(VARIABLES_DIR, "gemini_models_cache.json")
-    
-    # Try loading from disk cache first
-    if os.path.exists(cache_path):
-        try:
-            mtime = os.path.getmtime(cache_path)
-            # If cache is fresh (less than 24 hours old), use it and spawn bg refresh
-            if time.time() - mtime < 86400:
-                with open(cache_path, "r", encoding="utf-8") as f:
-                    _cached_gemini_models = json.load(f)
-                    if _cached_gemini_models:
-                        import threading
-                        threading.Thread(target=_background_fetch_gemini_models, args=(api_key, cache_path), daemon=True).start()
-                        return _cached_gemini_models
-        except Exception as ce:
-            print(f"Error loading gemini models cache: {ce}")
-
-    # Fallback to expired cache if available as a fallback
-    fallback_cache = None
-    if os.path.exists(cache_path):
-        try:
-            with open(cache_path, "r", encoding="utf-8") as f:
-                fallback_cache = json.load(f)
-        except Exception:
-            pass
-
-    # Perform fast synchronous fetch
-    try:
-        models = _perform_gemini_fetch(api_key)
-        if models:
-            _cached_gemini_models = models
-            try:
-                with open(cache_path, "w", encoding="utf-8") as f:
-                    json.dump(models, f, indent=2, ensure_ascii=False)
-            except Exception as se:
-                print(f"Error saving gemini models cache: {se}")
-            return models
-    except Exception as e:
-        print(f"Error fetching Gemini models: {e}")
-
-    if fallback_cache:
-        _cached_gemini_models = fallback_cache
-        return fallback_cache
-
-    # Ultimate fallback list if everything fails
-    ultimate_fallback = [
-        {"value": "gemini-2.5-flash", "label": "Gemini 2.5 Flash"},
-        {"value": "gemini-2.5-pro", "label": "Gemini 2.5 Pro"},
-        {"value": "gemini-2.0-flash", "label": "Gemini 2.0 Flash"},
-        {"value": "gemini-1.5-flash", "label": "Gemini 1.5 Flash"},
-        {"value": "gemini-1.5-pro", "label": "Gemini 1.5 Pro"},
-        {"value": "gemini-3.1-flash-lite", "label": "Gemini 3.1 Flash Lite"}
-    ]
-    _cached_gemini_models = ultimate_fallback
-    return ultimate_fallback
-
-def _background_fetch_gemini_models(api_key, cache_path):
-    try:
-        models = _perform_gemini_fetch(api_key)
-        if models:
-            global _cached_gemini_models
-            _cached_gemini_models = models
-            import json
-            with open(cache_path, "w", encoding="utf-8") as f:
-                json.dump(models, f, indent=2, ensure_ascii=False)
-    except Exception as e:
-        print(f"Background fetch of Gemini models failed: {e}")
-
-def _perform_gemini_fetch(api_key):
-    import requests
-    from bs4 import BeautifulSoup
-    
-    # Dynamically fetch shutdown models from Google's deprecations page
-    shutdown_models = set()
-    try:
-        depr_url = "https://ai.google.dev/gemini-api/docs/deprecations"
-        depr_resp = requests.get(depr_url, timeout=0.8)
-        if depr_resp.status_code == 200:
-            soup = BeautifulSoup(depr_resp.text, 'html.parser')
-            for row in soup.find_all('tr', class_='row-gray'):
-                code_elem = row.find('code')
-                if code_elem:
-                    model_name = code_elem.text.strip()
-                    if model_name:
-                        shutdown_models.add(model_name)
-    except Exception as depr_err:
-        print(f"Error fetching dynamic deprecations list: {depr_err}")
-
-    url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}&pageSize=1000"
-    response = requests.get(url, timeout=1.0)
-    if response.status_code == 200:
-        data = response.json()
-        gemini_models = []
-        for m in data.get("models", []):
-            name = m.get("name", "")
-            display_name = m.get("displayName", "")
-            methods = m.get("supportedGenerationMethods", [])
-            
-            if "generateContent" in methods and name.startswith("models/"):
-                val = name.replace("models/", "")
-                val_lower = val.lower()
-                
-                if val in shutdown_models or f"models/{val}" in shutdown_models:
-                    continue
-                    
-                exclude_keywords = [
-                    "embed", "tuning", "bidi", "aqa", "imagen", "veo", "lyria", 
-                    "gemma", "deep-research", "robotics", "antigravity", "computer-use"
-                ]
-                if any(x in val_lower for x in exclude_keywords):
-                    continue
-                    
-                exclude_suffixes = [
-                    "-tts", "-audio", "-image", "-live", "-001", "-002", "-003", "-004", "-005"
-                ]
-                if any(x in val_lower for x in exclude_suffixes):
-                    continue
-                    
-                gemini_models.append({"value": val, "label": display_name})
-        return gemini_models
-    return None
-
 @app.route('/models', methods=['GET'])
 @requires_auth
 def get_models():
     # Determine the active runner backend
     runner_backend = os.getenv("RUNNER_BACKEND", "opensource").lower()
     
-    # Check if Remote API key and Project ID are validly configured
+    # Check if Remote API key and Cloud URL are validly configured
     remote_key = os.getenv("REMOTE_API_KEY")
-    project_id = os.getenv("PROJECT_ID")
+    remote_cloud_url = os.getenv("REMOTE_CLOUD_URL")
     is_remote_configured = bool(
         remote_key and remote_key.strip() and remote_key != "your_remote_api_key_here" and
-        project_id and project_id.strip() and project_id != "your_gcp_project_id_here"
+        remote_cloud_url and remote_cloud_url.strip() and remote_cloud_url != "your_remote_cloud_url_here"
     )
     
     from utils.lms_manager import check_daemon_status, list_local_models, check_lms_cli
@@ -1698,21 +1564,11 @@ def get_models():
     # 1. Fetch dynamic local models (only actively loaded models in LM Studio)
     models = fetch_local_models()
     
-    # 3. Remote/cloud models are not appended to the model select dropdown
-    # to keep the interface strictly local-first. Offloading happens automatically in the backend.
-        
     # Default fallback: use the first loaded local model if available, otherwise "local-lm-studio"
     default_model = "local-lm-studio"
     if models and models[0]["value"] != "local-lm-studio":
         default_model = models[0]["value"]
         
-    gemini_models_list = []
-    if is_remote_configured:
-        try:
-            gemini_models_list = fetch_gemini_models(remote_key)
-        except Exception as e:
-            print(f"Error fetching gemini models list: {e}")
-            
     # Load settings to get temperature
     from variables import VARIABLES_DIR
     import json
@@ -1732,7 +1588,7 @@ def get_models():
         "status": {
             "remote_configured": is_remote_configured,
             "remote_model": os.getenv("REMOTE_MODEL", "gemini-3.1-flash-lite"),
-            "remote_models_list": gemini_models_list,
+            "remote_url": remote_cloud_url,
             "lm_studio_online": is_lm_studio_online,
             "lms_installed": check_lms_cli(),
             "temperature": temperature
@@ -1899,16 +1755,13 @@ def save_generation_params():
 def save_config():
     try:
         data = request.get_json() or {}
-        remote_api_key = data.get('gemini_api_key', '').strip()  # maps from the same frontend UI key
-        project_id = data.get('project_id', '').strip()
-        remote_model = data.get('gemini_model', '').strip()
+        remote_api_key = data.get('remote_api_key', data.get('gemini_api_key', '')).strip()
+        remote_cloud_url = data.get('remote_cloud_url', data.get('project_id', '')).strip()
+        remote_model = data.get('remote_model', data.get('gemini_model', '')).strip()
         
-        # Check existing values in environment
         existing_key = os.getenv("REMOTE_API_KEY")
-        existing_project = os.getenv("PROJECT_ID")
         
         target_key = remote_api_key or existing_key
-        target_project = project_id or existing_project
         
         if not target_key:
             return jsonify({'error': 'Remote API Key must be provided.'}), 400
@@ -1917,34 +1770,24 @@ def save_config():
         env_path = os.path.join(base_dir, '.env')
         
         # Read env lines
-        with open(env_path, 'r', encoding='utf-8') as f:
-            lines = f.readlines()
+        if os.path.exists(env_path):
+            with open(env_path, 'r', encoding='utf-8') as f:
+                lines = f.readlines()
+        else:
+            lines = []
             
         updated_key = False
-        updated_proj = False
-        updated_backend = False
+        updated_url = False
         updated_model = False
-        
-        # Dynamically set RUNNER_BACKEND to google_adk only if both project_id and key are supplied.
-        # Otherwise, preserve the current backend or default to opensource.
-        # This keeps the app completely open to other remote OpenAI-compatible LLMs.
-        backend_value = "opensource"
-        if target_project and target_project.strip() and target_project != "your_gcp_project_id_here" and target_key:
-            backend_value = "google_adk"
-        else:
-            backend_value = os.getenv("RUNNER_BACKEND", "opensource").lower()
         
         for i, line in enumerate(lines):
             stripped = line.strip()
             if stripped.startswith('REMOTE_API_KEY=') and remote_api_key:
                 lines[i] = f"REMOTE_API_KEY={remote_api_key}\n"
                 updated_key = True
-            elif stripped.startswith('PROJECT_ID=') and project_id:
-                lines[i] = f"PROJECT_ID={project_id}\n"
-                updated_proj = True
-            elif stripped.startswith('RUNNER_BACKEND='):
-                lines[i] = f"RUNNER_BACKEND={backend_value}\n"
-                updated_backend = True
+            elif stripped.startswith('REMOTE_CLOUD_URL=') and remote_cloud_url:
+                lines[i] = f"REMOTE_CLOUD_URL={remote_cloud_url}\n"
+                updated_url = True
             elif stripped.startswith('REMOTE_MODEL=') and remote_model:
                 lines[i] = f"REMOTE_MODEL={remote_model}\n"
                 updated_model = True
@@ -1953,27 +1796,15 @@ def save_config():
             if not updated_key:
                 lines.append(f"REMOTE_API_KEY={remote_api_key}\n")
             os.environ["REMOTE_API_KEY"] = remote_api_key
-            # Populate SDK environment variables
-            os.environ["GEMINI_API_KEY"] = remote_api_key
-            os.environ["OPENAI_API_KEY"] = remote_api_key
-            os.environ["ANTHROPIC_API_KEY"] = remote_api_key
-            os.environ["DEEPSEEK_API_KEY"] = remote_api_key
-        if project_id:
-            if not updated_proj:
-                lines.append(f"PROJECT_ID={project_id}\n")
-            os.environ["PROJECT_ID"] = project_id
+        if remote_cloud_url:
+            if not updated_url:
+                lines.append(f"REMOTE_CLOUD_URL={remote_cloud_url}\n")
+            os.environ["REMOTE_CLOUD_URL"] = remote_cloud_url
         if remote_model:
             if not updated_model:
                 lines.append(f"REMOTE_MODEL={remote_model}\n")
             os.environ["REMOTE_MODEL"] = remote_model
-        if not updated_backend:
-            lines.append(f"RUNNER_BACKEND={backend_value}\n")
-        os.environ["RUNNER_BACKEND"] = backend_value
-        
-        # Invalidate dynamic Gemini models cache
-        global _cached_gemini_models
-        _cached_gemini_models = None
-        
+            
         # Re-initialize the runner backend dynamically
         init_runner()
         
@@ -3050,8 +2881,10 @@ def generate_character_json(name, description, personality, scenario, first_mes,
     import os
     import json
     remote_key = os.getenv("REMOTE_API_KEY")
+    remote_cloud_url = os.getenv("REMOTE_CLOUD_URL")
     is_remote_configured = bool(
-        remote_key and remote_key.strip() and remote_key != "your_remote_api_key_here"
+        remote_key and remote_key.strip() and remote_key != "your_remote_api_key_here" and
+        remote_cloud_url and remote_cloud_url.strip() and remote_cloud_url != "your_remote_cloud_url_here"
     )
     
     prompt = f"""You are a professional companion designer. Based on the character card details below, design a structured companion profile JSON card.
@@ -3129,21 +2962,27 @@ Output a single JSON object matching this exact schema:
     else:
         if is_remote_configured:
             try:
-                from google.genai import Client
+                import requests
                 from variables import DEFAULT_REMOTE_MODEL
-                client = Client(api_key=remote_key)
-                response = client.models.generate_content(
-                    model=model if model else DEFAULT_REMOTE_MODEL,
-                    contents=prompt,
-                    config={
-                        "system_instruction": "You are a professional companion designer that outputs valid JSON character cards.",
-                        "response_mime_type": "application/json",
-                        "temperature": 0.5
-                    }
-                )
-                raw_response = response.text.strip()
+                target_model = model if model else DEFAULT_REMOTE_MODEL
+                headers = {
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {remote_key}"
+                }
+                payload = {
+                    "model": target_model,
+                    "messages": [
+                        {"role": "system", "content": "You are a professional companion designer that outputs valid JSON character cards."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    "temperature": 0.5,
+                    "response_format": {"type": "json_object"}
+                }
+                res = requests.post(remote_cloud_url, json=payload, headers=headers, timeout=60.0)
+                if res.status_code == 200:
+                    raw_response = res.json()['choices'][0]['message']['content'].strip()
             except Exception as e:
-                print(f"Error calling Gemini for JSON card generation: {e}")
+                print(f"Error calling remote cloud model for JSON card generation: {e}")
 
     parsed = {}
     if raw_response:
