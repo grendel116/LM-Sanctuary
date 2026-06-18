@@ -1,7 +1,7 @@
 {
   "name": "LM Sanctuary",
   "short_name": "LM Sanctuary",
-  "description": "Enter the Sanctuary and work with companion programs",
+  "description": "Enter the Sanctuary and work with programs",
   "start_url": "/",
   "display": "standalone",
   "orientation": "any",

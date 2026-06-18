@@ -14,13 +14,13 @@
     <!-- Modern Typography -->
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <!-- Markdown Parser (marked.js) -->
-    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js" defer></script>
     <!-- Code Syntax Highlighting (highlight.js) -->
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
     <!-- Cropper.js for circular profile cropping -->
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.5.13/cropper.min.css">
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.5.13/cropper.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.5.13/cropper.min.js" defer></script>
     <style>
         :root {
             --bg-color: #121214;
@@ -1386,7 +1386,6 @@
             background: rgba(249, 115, 22, 0.15); /* orange tint */
             color: #ff9d4d;
             border-color: rgba(249, 115, 22, 0.4);
-            box-shadow: 0 0 10px rgba(249, 115, 22, 0.35);
         }
         /* Pokeball Button */
         .pokeball-btn {
@@ -1430,7 +1429,6 @@
             background: rgba(59, 130, 246, 0.15); /* blue tint */
             color: #60a5fa; /* blue glow */
             border-color: rgba(59, 130, 246, 0.35);
-            box-shadow: 0 0 10px rgba(59, 130, 246, 0.25);
         }
 
         /* Modern styled dropdown selectors with custom arrows */
@@ -1805,7 +1803,6 @@
             gap: 10px;
             margin-top: 8px;
         }
-
         .edit-btn {
             padding: 6px 12px;
             border-radius: 8px;
@@ -1820,26 +1817,29 @@
             background: transparent;
             border: 1px solid var(--border-color);
             color: var(--text-muted);
+            box-shadow: 0 4px 10px rgba(0, 0, 0, 0.3);
         }
 
         .edit-cancel-btn:hover {
             color: var(--text-main);
-            background: rgba(255, 255, 255, 0.05);
+            border-color: rgba(255, 255, 255, 0.3);
+            background: rgba(255, 255, 255, 0.08);
+            transform: scale(1.05);
         }
 
         .edit-save-btn {
-            background: #2d3139;
-            border: 1px solid rgba(255, 255, 255, 0.1);
-            color: #f3effa;
-            font-weight: 600;
-            box-shadow: 0 2px 6px rgba(0, 0, 0, 0.2);
+            background: #1c1c22;
+            border: 1px solid var(--border-color);
+            color: var(--text-muted);
+            font-weight: 500;
+            box-shadow: 0 4px 10px rgba(0, 0, 0, 0.3);
         }
 
         .edit-save-btn:hover {
-            background: #3e4450;
-            color: #ffffff;
-            border-color: rgba(255, 255, 255, 0.2);
-            box-shadow: 0 4px 10px rgba(0, 0, 0, 0.3);
+            color: var(--text-main);
+            border-color: rgba(255, 255, 255, 0.3);
+            background: rgba(255, 255, 255, 0.08);
+            transform: scale(1.05);
         }
 
         /* Input buttons row */
@@ -2152,52 +2152,33 @@
             background: rgba(0, 0, 0, 0.4);
         }
         .onboarding-btn {
-            background: #2d3139;
-            color: #f3effa;
-            border: 1px solid rgba(255, 255, 255, 0.1);
+            background: #1c1c22;
+            color: var(--text-muted);
+            border: 1px solid var(--border-color);
             border-radius: 8px;
             padding: 9px;
             font-family: inherit;
             font-size: 0.8rem;
-            font-weight: 600;
+            font-weight: 500;
             cursor: pointer;
-            transition: all 0.2s;
+            transition: all 0.2s ease;
+            box-shadow: 0 4px 10px rgba(0, 0, 0, 0.3);
             margin-top: 4px;
         }
         .onboarding-btn:hover {
-            background: #3e4450;
-            border-color: rgba(255, 255, 255, 0.2);
-            color: #ffffff;
-            transform: translateY(-1px);
+            color: var(--text-main);
+            border-color: rgba(255, 255, 255, 0.3);
+            background: rgba(255, 255, 255, 0.08);
+            transform: scale(1.05);
         }
         .onboarding-btn:disabled {
-            opacity: 0.6;
-            background: #202226;
-            border-color: rgba(255, 255, 255, 0.05);
+            opacity: 0.5;
+            background: #1c1c22;
+            border-color: var(--border-color);
             cursor: not-allowed;
+            transform: none;
         }
-        /* Global override to ensure all primary buttons are neutral gray and highly legible */
-        button[style*="background: var(--primary-accent)"],
-        button[style*="background:var(--primary-accent)"] {
-            background: #2d3139 !important;
-            color: #f3effa !important;
-            border: 1px solid rgba(255, 255, 255, 0.1) !important;
-            font-weight: 600 !important;
-            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2) !important;
-        }
-        button[style*="background: var(--primary-accent)"]:hover,
-        button[style*="background:var(--primary-accent)"]:hover {
-            background: #3e4450 !important;
-            border-color: rgba(255, 255, 255, 0.2) !important;
-            color: #ffffff !important;
-        }
-        button[style*="background: var(--primary-accent)"]:disabled,
-        button[style*="background:var(--primary-accent)"]:disabled {
-            opacity: 0.6 !important;
-            background: #202226 !important;
-            border-color: rgba(255, 255, 255, 0.05) !important;
-            cursor: not-allowed !important;
-        }
+
         .connect-cloud-btn {
             box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
         }
@@ -2294,6 +2275,162 @@
             100% { transform: rotate(360deg); }
         }
 
+        /* Standardized List & Modal Elements */
+        .modal-section-header {
+            font-size: 0.8rem;
+            font-weight: 600;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+            padding-bottom: 6px;
+            margin-bottom: 10px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .modal-sub-header {
+            margin: 0 0 8px 0;
+            font-size: 0.85rem;
+            font-weight: 600;
+            color: var(--text-main);
+        }
+        .form-card-container {
+            background: rgba(0, 0, 0, 0.4);
+            border: 1px solid rgba(255, 255, 255, 0.05);
+            border-radius: 12px;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+        }
+        .form-section-divider {
+            border-top: 1px solid rgba(255, 255, 255, 0.05);
+            padding-top: 12px;
+        }
+        .upload-zone {
+            background: rgba(0, 0, 0, 0.4);
+            border: 1.5px dashed rgba(255, 255, 255, 0.08);
+            border-radius: 12px;
+            padding: 25px;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+        .upload-zone:hover {
+            background: rgba(255, 255, 255, 0.02);
+            border-color: var(--primary-accent);
+        }
+        .list-container {
+            flex: 1;
+            max-height: 220px;
+            overflow-y: auto;
+            border: 1px solid rgba(255, 255, 255, 0.05);
+            border-radius: 10px;
+            background: rgba(0, 0, 0, 0.25);
+        }
+        .list-entry-row {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            background: rgba(0, 0, 0, 0.2);
+            border: 1px solid rgba(255, 255, 255, 0.04);
+            border-radius: 8px;
+            padding: 10px 12px;
+            font-size: 0.8rem;
+            position: relative;
+            transition: all 0.2s ease;
+        }
+        .list-entry-row.row-layout {
+            flex-direction: row;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .list-entry-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+            padding-bottom: 4px;
+            gap: 12px;
+        }
+        .list-entry-content {
+            color: var(--text-main);
+            line-height: 1.3;
+            font-size: 0.78rem;
+        }
+        .list-entry-content.italic {
+            font-style: italic;
+        }
+        .file-list-entry {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 10px 12px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+            font-size: 0.8rem;
+        }
+        .file-list-entry:last-child {
+            border-bottom: none;
+        }
+        .badge-default {
+            font-size: 0.65rem;
+            color: var(--text-muted);
+            opacity: 0.8;
+            font-family: 'Outfit', sans-serif;
+            background: rgba(255, 255, 255, 0.04);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            padding: 2px 6px;
+            border-radius: 4px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        .or-divider {
+            display: flex;
+            align-items: center;
+            text-align: center;
+            color: var(--text-muted);
+            font-size: 0.75rem;
+            font-weight: 500;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            margin: 5px 0;
+        }
+        .or-divider-line {
+            flex-grow: 1;
+            height: 1px;
+            background: rgba(255, 255, 255, 0.08);
+        }
+        .or-divider-text {
+            padding: 0 15px;
+        }
+        .empty-state {
+            padding: 30px 15px;
+            color: var(--text-muted);
+            font-size: 0.8rem;
+            text-align: center;
+            background: rgba(0, 0, 0, 0.1);
+            border: 1px dashed rgba(255, 255, 255, 0.05);
+            border-radius: 8px;
+            margin: 10px 0;
+        }
+        .dashed-action-btn {
+            background: transparent;
+            border: 1px dashed rgba(255, 255, 255, 0.15);
+            color: var(--text-muted);
+            padding: 6px 12px;
+            font-size: 0.75rem;
+            width: 100%;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+        .dashed-action-btn:hover {
+            border-color: rgba(255, 255, 255, 0.3);
+            color: var(--text-main);
+            background: rgba(255, 255, 255, 0.02);
+        }
+
         /* App Loading Overlay */
         #chat-loading-overlay {
             position: absolute;
@@ -2323,7 +2460,7 @@
             display: flex;
             flex-direction: column;
             align-items: center;
-            gap: 20px;
+            gap: 0;
             text-align: center;
             transform: scale(0.95);
             animation: pulse-scale 2s infinite ease-in-out;
@@ -2338,7 +2475,6 @@
             justify-content: center;
             align-items: center;
             box-shadow: 0 8px 32px rgba(99, 102, 241, 0.3);
-            margin-bottom: 8px;
         }
 
         .loading-logo svg {
@@ -2764,8 +2900,6 @@
                         <path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/>
                     </svg>
                 </div>
-                <div class="loading-text">Sanctuary</div>
-                <div class="loading-spinner-bar"></div>
             </div>
         </div>
         <header>
@@ -2943,15 +3077,16 @@
     </div>
 
     <!-- Crop Modal -->
-    <div id="crop-modal" class="modal" style="display: none; z-index: 11000; align-items: center; justify-content: center;">
-        <div class="crop-modal-card" style="background: #121214; padding: 24px; border-radius: 16px; max-width: 400px; width: 90%; display: flex; flex-direction: column; gap: 16px; border: 1px solid rgba(255,255,255,0.08); box-shadow: 0 20px 40px rgba(0,0,0,0.5);" onclick="event.stopPropagation()">
+    <div id="crop-modal" class="modal" style="display: none; z-index: 11000; align-items: center; justify-content: center;" onclick="closeCropModal(event)">
+        <div class="modal-card" style="max-width: 400px; width: 90%; text-align: left; align-items: stretch;" onclick="event.stopPropagation()">
+            <span class="close-modal-btn" onclick="closeCropModal(event)">&times;</span>
             <h3 style="margin: 0; font-size: 1.2rem; color: #fff; border-bottom: 1px solid rgba(255,255,255,0.08); padding-bottom: 10px;">Crop Profile Picture</h3>
-            <div style="overflow: hidden; display: flex; justify-content: center; align-items: center; background: #000; border-radius: 8px;">
+            <div style="overflow: hidden; display: flex; justify-content: center; align-items: center; background: #000; border-radius: 8px; margin-bottom: 10px;">
                 <img id="crop-image-element" style="width: 100%; height: auto; display: block;">
             </div>
-            <div style="display: flex; justify-content: flex-end; gap: 12px; margin-top: 8px;">
-                <button onclick="closeCropModal(event)" class="btn btn-secondary" style="border-radius: 20px; padding: 8px 20px;">Cancel</button>
-                <button onclick="saveCroppedProfile(event)" class="btn btn-primary" style="background: var(--primary-accent); border-radius: 20px; padding: 8px 20px; color: var(--primary-btn-text);">Save Crop</button>
+            <div style="display: flex; justify-content: flex-end; gap: 12px;">
+                <button onclick="closeCropModal(event)" class="edit-btn edit-cancel-btn" style="padding: 8px 20px;">Cancel</button>
+                <button onclick="saveCroppedProfile(event)" class="edit-btn edit-save-btn" style="padding: 8px 20px;">Save Crop</button>
             </div>
         </div>
     </div>
@@ -2961,7 +3096,7 @@
         <div class="modal-card" style="max-width: 600px; width: 90%; text-align: left; align-items: stretch;" onclick="event.stopPropagation()">
             <span class="close-modal-btn" onclick="closeDataBank()">&times;</span>
             <h3 style="margin-bottom: 12px; display: flex; align-items: center; gap: 8px; font-size: 1.15rem; border-bottom: 1px solid rgba(255,255,255,0.08); padding-bottom: 10px;">
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--primary-accent)" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 4px;">
                     <path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"></path>
                 </svg>
                 <span>Knowledge Base</span>
@@ -2972,15 +3107,15 @@
             
             <!-- Ingestion tools tab panel -->
             <div style="display: flex; gap: 10px; margin-bottom: 15px;">
-                <button onclick="switchDataBankTab('upload')" id="tab-btn-upload" class="edit-btn" style="background: var(--primary-accent); color: white; border: none;">Add Document</button>
-                <button onclick="switchDataBankTab('settings')" id="tab-btn-settings" class="edit-btn edit-cancel-btn">Project Settings</button>
-                <button onclick="switchDataBankTab('memories')" id="tab-btn-memories" class="edit-btn edit-cancel-btn">Journals & Memories</button>
+                <button onclick="switchDataBankTab('upload')" id="tab-btn-upload" class="edit-btn" style="background: rgba(255, 255, 255, 0.08); color: var(--primary-accent); border: 1px solid var(--primary-accent); padding: 6px 12px; font-size: 0.8rem; border-radius: 6px; cursor: pointer;">Add Document</button>
+                <button onclick="switchDataBankTab('settings')" id="tab-btn-settings" class="edit-btn edit-cancel-btn" style="background: rgba(255,255,255,0.05); color: var(--text-muted); border: 1px solid rgba(255,255,255,0.1); padding: 6px 12px; font-size: 0.8rem; border-radius: 6px; cursor: pointer;">Project Settings</button>
+                <button onclick="switchDataBankTab('memories')" id="tab-btn-memories" class="edit-btn edit-cancel-btn" style="background: rgba(255,255,255,0.05); color: var(--text-muted); border: 1px solid rgba(255,255,255,0.1); padding: 6px 12px; font-size: 0.8rem; border-radius: 6px; cursor: pointer;">Journals & Memories</button>
             </div>
             
             <!-- Upload & Scrape Tab -->
             <div id="databank-tab-upload" style="margin-bottom: 20px; display: flex; flex-direction: column; gap: 15px;">
                 <!-- Drag and Drop Box -->
-                <div style="background: rgba(0, 0, 0, 0.4); border: 1px solid rgba(255, 255, 255, 0.05); border-radius: 12px; padding: 25px; text-align: center; cursor: pointer; transition: background 0.2s;" onclick="document.getElementById('databank-file-input').click()">
+                <div class="upload-zone" onclick="document.getElementById('databank-file-input').click()">
                     <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color: var(--primary-accent); margin-bottom: 10px;">
                         <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12"></path>
                     </svg>
@@ -2990,38 +3125,37 @@
                 </div>
                 
                 <!-- Divider -->
-                <div style="display: flex; align-items: center; text-align: center; color: var(--text-muted); font-size: 0.75rem; font-weight: 500; text-transform: uppercase; letter-spacing: 0.05em;">
-                    <div style="flex-grow: 1; height: 1px; background: rgba(255, 255, 255, 0.08); margin-right: 15px;"></div>
-                    <span>or</span>
-                    <div style="flex-grow: 1; height: 1px; background: rgba(255, 255, 255, 0.08); margin-left: 15px;"></div>
+                <div class="or-divider">
+                    <div class="or-divider-line"></div>
+                    <span class="or-divider-text">or</span>
+                    <div class="or-divider-line"></div>
                 </div>
 
                 <!-- URL Scrape Field -->
-                <div style="background: rgba(0, 0, 0, 0.4); border: 1px solid rgba(255,255,255,0.05); border-radius: 12px; padding: 20px;">
+                <div class="form-card-container">
                     <div style="display: flex; gap: 8px; width: 100%;">
-                        <input type="url" id="databank-url-input" placeholder="https://example.com/article" style="flex: 1; background: rgba(0, 0, 0, 0.3); border: 1px solid var(--border-color); color: var(--text-main); padding: 8px 12px; border-radius: 8px; font-size: 0.85rem; outline: none;">
-                        <button onclick="scrapeDataBankUrl()" class="edit-btn" style="background: var(--primary-accent); border: none; color: white; padding: 8px 16px;">Scrape URL</button>
+                        <input type="url" id="databank-url-input" placeholder="https://example.com/article" class="onboarding-input" style="flex: 1; font-size: 0.85rem;">
+                        <button onclick="scrapeDataBankUrl()" class="edit-btn edit-save-btn" style="padding: 8px 16px;">Scrape URL</button>
                     </div>
                     <div style="font-size: 0.7rem; color: var(--text-muted); margin-top: 6px;">The companion will fetch the page and extract readable content.</div>
                 </div>
             </div>
-            
-            <!-- Settings Tab -->
-            <div id="databank-tab-settings" style="background: rgba(0, 0, 0, 0.4); border: 1px solid rgba(255,255,255,0.05); border-radius: 12px; padding: 20px; margin-bottom: 20px; display: none; flex-direction: column; gap: 15px;">
+                        <!-- Settings Tab -->
+            <div id="databank-tab-settings" class="form-card-container" style="margin-bottom: 20px; display: none;">
                 <!-- Folders -->
                 <div>
-                    <h4 style="margin: 0 0 8px 0; font-size: 0.85rem; font-weight: 600; color: var(--text-main);">Folders</h4>
+                    <h4 class="modal-sub-header">Folders</h4>
                     <div id="project-folders-list" style="display: flex; flex-direction: column; gap: 6px; margin-bottom: 8px;">
                         <!-- Folders populated dynamically -->
                     </div>
-                    <button onclick="addProjectFolder()" class="edit-btn" style="background: transparent; border: 1px dashed rgba(255,255,255,0.15); color: var(--text-muted); padding: 6px 12px; font-size: 0.75rem; width: 100%; border-radius: 8px; cursor: pointer;">
+                    <button onclick="addProjectFolder()" class="dashed-action-btn">
                         + Add Folder
                     </button>
                 </div>
                 
                 <!-- Program Settings -->
-                <div style="border-top: 1px solid rgba(255,255,255,0.05); padding-top: 12px;">
-                    <h4 style="margin: 0 0 8px 0; font-size: 0.85rem; font-weight: 600; color: var(--text-main);">Program Settings</h4>
+                <div class="form-section-divider">
+                    <h4 class="modal-sub-header">Program Settings</h4>
                     <div style="display: flex; flex-direction: column; gap: 12px;">
                         <div style="display: flex; justify-content: space-between; align-items: center; gap: 15px;">
                             <div>
@@ -3049,10 +3183,10 @@
                         </div>
                     </div>
                 </div>
-
+ 
                 <!-- Search Settings -->
-                <div style="border-top: 1px solid rgba(255,255,255,0.05); padding-top: 12px;">
-                    <h4 style="margin: 0 0 8px 0; font-size: 0.85rem; font-weight: 600; color: var(--text-main);">Search Settings</h4>
+                <div class="form-section-divider">
+                    <h4 class="modal-sub-header">Search Settings</h4>
                     <div style="display: flex; flex-direction: column; gap: 10px;">
                         <div style="display: flex; justify-content: space-between; align-items: center; gap: 15px;">
                             <div>
@@ -3071,7 +3205,7 @@
                                 <div style="font-size: 0.8rem; color: var(--text-main); font-weight: 500;">SearXNG Custom URL</div>
                                 <div style="font-size: 0.7rem; color: var(--text-muted); margin-top: 2px;">URL of your private/preferred instance (blank for public pool).</div>
                             </div>
-                            <input type="text" id="project-searxng-url" onchange="saveProjectSettings()" placeholder="https://searx.be" style="background: rgba(0, 0, 0, 0.3); border: 1px solid var(--border-color); color: var(--text-main); padding: 6px 10px; border-radius: 8px; font-size: 0.8rem; outline: none; width: 180px;">
+                            <input type="text" id="project-searxng-url" onchange="saveProjectSettings()" placeholder="https://searx.be" class="onboarding-input" style="width: 180px; font-size: 0.8rem; padding: 6px 10px; height: 32px;">
                         </div>
                     </div>
                 </div>
@@ -3080,8 +3214,8 @@
             <!-- Memories Tab -->
             <div id="databank-tab-memories" style="display: none; flex-direction: column; gap: 15px; max-height: 480px; margin-bottom: 20px;">
                 <!-- Add new journal (Persistent Section) -->
-                <div style="background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.05); border-radius: 8px; padding: 12px;">
-                    <h4 style="margin: 0 0 10px 0; font-size: 0.85rem; font-weight: 600; color: var(--text-main);">Add Memory Journal</h4>
+                <div class="form-card-container">
+                    <h4 class="modal-sub-header">Add Memory Journal</h4>
                     <div style="display: flex; flex-direction: column; gap: 8px;">
                         <input type="text" id="journal-keyphrases-input" class="onboarding-input" style="width: 100%; font-size: 0.8rem;" placeholder="Keywords (comma-separated, e.g. cat, whiskers, job hunt)">
                         <textarea id="journal-content-input" class="onboarding-input" style="width: 100%; height: 50px; resize: vertical; font-size: 0.8rem;" placeholder="Memory content (concise, max 300 characters)"></textarea>
@@ -3093,7 +3227,7 @@
                 <div style="flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 15px; padding-right: 5px; max-height: 250px;">
                     <!-- Journals List -->
                     <div>
-                        <div style="font-size: 0.8rem; font-weight: 600; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 1px solid rgba(255,255,255,0.05); padding-bottom: 4px; margin-bottom: 8px;">
+                        <div class="modal-section-header">
                             Memory Journals (Trigger-Based)
                         </div>
                         <div id="companion-journals-list" style="display: flex; flex-direction: column; gap: 8px;">
@@ -3103,7 +3237,7 @@
 
                     <!-- Memories List -->
                     <div>
-                        <div style="font-size: 0.8rem; font-weight: 600; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 1px solid rgba(255,255,255,0.05); padding-bottom: 4px; margin-bottom: 8px; margin-top: 10px;">
+                        <div class="modal-section-header" style="margin-top: 10px;">
                             Consolidated Memories (Chat Compactions)
                         </div>
                         <div id="companion-memories-list" style="display: flex; flex-direction: column; gap: 8px;">
@@ -3121,12 +3255,12 @@
 
             <!-- Ingested documents list -->
             <div id="databank-documents-container" style="flex: 1; display: flex; flex-direction: column; min-height: 200px;">
-                <div style="font-size: 0.85rem; font-weight: 600; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 1px solid rgba(255,255,255,0.05); padding-bottom: 6px; margin-bottom: 10px; display: flex; justify-content: space-between; align-items: center;">
+                <div class="modal-section-header">
                     <span>Ingested Documents</span>
                     <button onclick="purgeDataBank()" class="edit-btn edit-cancel-btn" style="padding: 2px 8px; font-size: 0.75rem; border-color: rgba(239, 68, 68, 0.3); color: #fca5a5;">Purge All</button>
                 </div>
                 
-                <div id="databank-files-container" style="flex: 1; max-height: 220px; overflow-y: auto; border: 1px solid rgba(255,255,255,0.05); border-radius: 10px; background: rgba(0, 0, 0, 0.25);">
+                <div id="databank-files-container" class="list-container">
                     <!-- Files populated dynamically -->
                 </div>
             </div>
@@ -3165,7 +3299,7 @@
 
             <!-- Tabs -->
             <div style="display: flex; gap: 10px; margin-bottom: 20px; border-bottom: 1px solid rgba(255,255,255,0.05); padding-bottom: 10px;">
-                <button onclick="switchAssistantModalTab('companion')" id="assistant-tab-btn-companion" class="edit-btn" style="background: var(--primary-accent); color: white; border: none; padding: 6px 12px; font-size: 0.8rem; border-radius: 6px; cursor: pointer;">
+                <button onclick="switchAssistantModalTab('companion')" id="assistant-tab-btn-companion" class="edit-btn" style="background: rgba(255, 255, 255, 0.08); color: var(--primary-accent); border: 1px solid var(--primary-accent); padding: 6px 12px; font-size: 0.8rem; border-radius: 6px; cursor: pointer;">
                     Select Companion
                 </button>
                 <button onclick="switchAssistantModalTab('user')" id="assistant-tab-btn-user" class="edit-btn" style="background: rgba(255,255,255,0.05); color: var(--text-muted); border: 1px solid rgba(255,255,255,0.1); padding: 6px 12px; font-size: 0.8rem; border-radius: 6px; cursor: pointer;">
@@ -3184,7 +3318,7 @@
                 </div>
                 
                 <div style="margin-top: 15px; border-top: 1px solid rgba(255,255,255,0.08); padding-top: 12px; display: flex; justify-content: flex-end;">
-                    <button onclick="openImportCompanionModal()" class="onboarding-btn" style="background: var(--primary-accent); border: none; color: white; padding: 8px 16px; border-radius: 8px; font-weight: 500; font-size: 0.8rem; cursor: pointer; display: flex; align-items: center; gap: 6px; box-shadow: 0 4px 10px color-mix(in srgb, var(--primary-accent) 25%, transparent); transition: all 0.2s; min-width: auto; width: auto; height: auto; margin: 0;">
+                    <button onclick="openImportCompanionModal()" class="onboarding-btn" style="padding: 8px 16px; font-size: 0.8rem; display: flex; align-items: center; gap: 6px; min-width: auto; width: auto; height: auto; margin: 0;">
                         <span>+ Import / Create Companion</span>
                     </button>
                 </div>
@@ -3202,13 +3336,13 @@
                         <select id="user-profile-select" onchange="onUserProfileSelectChange()" class="onboarding-input glass-select" style="width: 100%; background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.1); color: var(--text-main); height: 38px; border-radius: 8px; font-size: 0.85rem; cursor: pointer; outline: none;"></select>
                     </div>
                     <div style="display: flex; gap: 8px;">
-                        <button id="rename-profile-btn" onclick="renameSelectedUserProfile()" class="onboarding-btn" style="padding: 10px 16px; font-size: 0.8rem; background: rgba(59, 130, 246, 0.15); border: 1px solid rgba(59, 130, 246, 0.25); min-width: auto; height: 38px; border-radius: 8px; color: #93c5fd; font-weight: 500; cursor: pointer; transition: all 0.2s; display: none;">
+                        <button id="rename-profile-btn" onclick="renameSelectedUserProfile()" class="onboarding-btn" style="padding: 10px 16px; font-size: 0.8rem; min-width: auto; height: 38px; display: none;">
                             Rename
                         </button>
-                        <button id="delete-profile-btn" onclick="deleteSelectedUserProfile()" class="onboarding-btn" style="padding: 10px 16px; font-size: 0.8rem; background: rgba(239, 68, 68, 0.15); border: 1px solid rgba(239, 68, 68, 0.25); min-width: auto; height: 38px; border-radius: 8px; color: #fca5a5; font-weight: 500; cursor: pointer; transition: all 0.2s; display: none;">
+                        <button id="delete-profile-btn" onclick="deleteSelectedUserProfile()" class="onboarding-btn" style="padding: 10px 16px; font-size: 0.8rem; min-width: auto; height: 38px; display: none;">
                             Delete
                         </button>
-                        <button onclick="createNewUserProfile()" class="onboarding-btn" style="padding: 10px 16px; font-size: 0.8rem; background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.15); min-width: auto; height: 38px; border-radius: 8px; color: var(--text-main); font-weight: 500; cursor: pointer; transition: all 0.2s;">
+                        <button onclick="createNewUserProfile()" class="onboarding-btn" style="padding: 10px 16px; font-size: 0.8rem; min-width: auto; height: 38px;">
                             + New Profile
                         </button>
                     </div>
@@ -3223,7 +3357,7 @@
                 </div>
 
                 <div style="display: flex; justify-content: flex-end; gap: 10px;">
-                    <button id="save-profile-btn" onclick="saveActiveUserProfile()" class="onboarding-btn" style="padding: 10px 24px; font-size: 0.85rem; font-weight: 500; background: var(--primary-accent); border: none; color: white; border-radius: 8px; cursor: pointer; box-shadow: 0 4px 10px color-mix(in srgb, var(--primary-accent) 25%, transparent); transition: all 0.2s;">
+                    <button id="save-profile-btn" onclick="saveActiveUserProfile()" class="onboarding-btn" style="padding: 10px 24px; font-size: 0.85rem; font-weight: 500;">
                         Save & Apply Profile
                     </button>
                 </div>
@@ -3245,7 +3379,7 @@
 
             <!-- Tabs -->
             <div style="display: flex; gap: 10px; margin-bottom: 20px; border-bottom: 1px solid rgba(255,255,255,0.05); padding-bottom: 10px;">
-                <button onclick="switchImportTab('tavern')" id="import-tab-btn-tavern" class="edit-btn" style="background: var(--primary-accent); color: white; border: none; padding: 6px 12px; font-size: 0.8rem; border-radius: 6px; cursor: pointer;">
+                <button onclick="switchImportTab('tavern')" id="import-tab-btn-tavern" class="edit-btn" style="background: rgba(255, 255, 255, 0.08); color: var(--primary-accent); border: 1px solid var(--primary-accent); padding: 6px 12px; font-size: 0.8rem; border-radius: 6px; cursor: pointer;">
                     Character Card
                 </button>
                 <button onclick="switchImportTab('describe')" id="import-tab-btn-describe" class="edit-btn" style="background: rgba(255,255,255,0.05); color: var(--text-muted); border: 1px solid rgba(255,255,255,0.1); padding: 6px 12px; font-size: 0.8rem; border-radius: 6px; cursor: pointer;">
@@ -3269,7 +3403,7 @@
                     Selected File: <span id="tavern-file-name" style="font-weight: 600; color: var(--primary-accent);">none</span>
                 </div>
                 <div style="display: flex; justify-content: flex-end;">
-                    <button onclick="submitTavernCardImport()" id="tavern-import-btn" class="onboarding-btn" style="background: var(--primary-accent); border: none; color: white; padding: 10px 24px; border-radius: 8px; font-weight: 500; font-size: 0.85rem; cursor: pointer; min-width: auto; width: auto; height: auto;">
+                    <button onclick="submitTavernCardImport()" id="tavern-import-btn" class="onboarding-btn" style="padding: 10px 24px; font-size: 0.85rem; min-width: auto; width: auto; height: auto;">
                         Import Companion
                     </button>
                 </div>
@@ -3286,7 +3420,7 @@
                     <textarea id="describe-companion-desc" placeholder="e.g. A hyper-logical robotic archivist. Speaks in a calm, analytical tone, using technical metaphors and subtle dry humor. Enthusiastic about cataloging data." class="onboarding-input" style="width: 100%; height: 120px; resize: vertical; box-sizing: border-box;"></textarea>
                 </div>
                 <div style="display: flex; justify-content: flex-end;">
-                    <button onclick="submitDescriptionImport()" id="describe-import-btn" class="onboarding-btn" style="background: var(--primary-accent); border: none; color: white; padding: 10px 24px; border-radius: 8px; font-weight: 500; font-size: 0.85rem; cursor: pointer; min-width: auto; width: auto; height: auto;">
+                    <button onclick="submitDescriptionImport()" id="describe-import-btn" class="onboarding-btn" style="padding: 10px 24px; font-size: 0.85rem; min-width: auto; width: auto; height: auto;">
                         Generate Companion
                     </button>
                 </div>
@@ -3311,10 +3445,10 @@
                 <pre style="margin: 0; background: transparent; border: none; padding: 0;"><code style="font-size: 0.75rem; color: #b0c4de; white-space: pre-wrap; word-break: break-all; max-height: 250px; overflow-y: auto; display: block;" id="tool-confirm-details">details</code></pre>
             </div>
             <div style="display: flex; gap: 12px; justify-content: flex-end;">
-                <button onclick="respondToToolCall('denied')" style="background: rgba(239, 68, 68, 0.15); border: 1px solid rgba(239, 68, 68, 0.3); color: #fca5a5; padding: 10px 20px; border-radius: 8px; font-weight: 500; cursor: pointer; transition: all 0.2s;">
+                <button onclick="respondToToolCall('denied')" class="edit-btn edit-cancel-btn" style="padding: 10px 20px;">
                     Deny Action
                 </button>
-                <button onclick="respondToToolCall('approved')" style="background: var(--primary-accent); border: none; color: white; padding: 10px 24px; border-radius: 8px; font-weight: 500; cursor: pointer; transition: all 0.2s; box-shadow: 0 4px 10px color-mix(in srgb, var(--primary-accent) 30%, transparent);">
+                <button onclick="respondToToolCall('approved')" class="edit-btn edit-save-btn" style="padding: 10px 24px;">
                     Approve & Run
                 </button>
             </div>
@@ -3494,7 +3628,7 @@
             
             <!-- Tabs -->
             <div style="display: flex; gap: 10px; margin-bottom: 15px; border-bottom: 1px solid rgba(255,255,255,0.05); padding-bottom: 10px;">
-                <button onclick="switchCompanionProfileTab('core')" id="comp-tab-btn-core" class="edit-btn" style="background: var(--primary-accent); color: white; border: none; padding: 6px 12px; font-size: 0.8rem; border-radius: 6px; cursor: pointer;">
+                <button onclick="switchCompanionProfileTab('core')" id="comp-tab-btn-core" class="edit-btn" style="background: rgba(255, 255, 255, 0.08); color: var(--primary-accent); border: 1px solid var(--primary-accent); padding: 6px 12px; font-size: 0.8rem; border-radius: 6px; cursor: pointer;">
                     Personality
                 </button>
                 <button onclick="switchCompanionProfileTab('phys')" id="comp-tab-btn-phys" class="edit-btn" style="background: rgba(255,255,255,0.05); color: var(--text-muted); border: 1px solid rgba(255,255,255,0.1); padding: 6px 12px; font-size: 0.8rem; border-radius: 6px; cursor: pointer;">
@@ -3513,7 +3647,7 @@
                         </div>
                         <div class="input-group">
                             <label for="comp-tts-voice">TTS Audio Voice</label>
-                            <select id="comp-tts-voice" class="onboarding-input" style="background: rgba(0, 0, 0, 0.3); border: 1px solid var(--border-color); color: var(--text-main); font-size: 0.85rem; height: 38px; border-radius: 8px; outline: none; padding: 0 10px; width: 100%;">
+                            <select id="comp-tts-voice" class="onboarding-input glass-select" style="background: rgba(0, 0, 0, 0.3); border: 1px solid var(--border-color); color: var(--text-main); font-size: 0.85rem; height: 38px; border-radius: 8px; outline: none; padding: 0 10px; width: 100%;">
                                 <option value="af_heart">af_heart (Default Female)</option>
                                 <option value="af_bella">af_bella (Bella - Female)</option>
                                 <option value="af_sarah">af_sarah (Sarah - Female)</option>
@@ -3614,10 +3748,10 @@
 
 
             <div style="display: flex; justify-content: flex-end; gap: 10px; margin-top: 15px; border-top: 1px solid rgba(255,255,255,0.08); padding-top: 12px;">
-                <button onclick="closeCompanionProfileModal()" class="onboarding-btn" style="background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1); color: var(--text-muted); padding: 8px 16px; border-radius: 8px; font-size: 0.8rem; cursor: pointer;">
+                <button onclick="closeCompanionProfileModal()" class="onboarding-btn" style="padding: 8px 16px; font-size: 0.8rem;">
                     Cancel
                 </button>
-                <button onclick="saveCompanionProfile()" class="onboarding-btn" style="background: var(--primary-accent); border: none; color: white; padding: 8px 20px; border-radius: 8px; font-weight: 500; font-size: 0.8rem; cursor: pointer; box-shadow: 0 4px 10px color-mix(in srgb, var(--primary-accent) 25%, transparent);">
+                <button onclick="saveCompanionProfile()" class="onboarding-btn" style="padding: 8px 20px; font-size: 0.8rem;">
                     Save Companion Persona
                 </button>
             </div>
@@ -3679,10 +3813,10 @@
             </div>
 
             <div style="display: flex; justify-content: flex-end; gap: 10px; border-top: 1px solid rgba(255,255,255,0.08); padding-top: 12px; margin-top: 10px;">
-                <button onclick="closePaletteModal()" class="onboarding-btn" style="background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1); color: var(--text-muted); padding: 8px 16px; border-radius: 8px; font-weight: 500; font-size: 0.8rem; cursor: pointer; min-width: auto; width: auto; height: auto; margin: 0;">
+                <button onclick="closePaletteModal()" class="onboarding-btn" style="padding: 8px 16px; font-size: 0.8rem; min-width: auto; width: auto; height: auto; margin: 0;">
                     Cancel
                 </button>
-                <button id="save-palette-btn" onclick="saveCompanionPalette()" class="onboarding-btn" style="background: var(--primary-accent); border: none; color: white; padding: 8px 16px; border-radius: 8px; font-weight: 500; font-size: 0.8rem; cursor: pointer; min-width: auto; width: auto; height: auto; margin: 0;">
+                <button id="save-palette-btn" onclick="saveCompanionPalette()" class="onboarding-btn" style="padding: 8px 16px; font-size: 0.8rem; min-width: auto; width: auto; height: auto; margin: 0;">
                     Apply Theme
                 </button>
             </div>
@@ -3743,9 +3877,32 @@
 
         let isAtBottom = true;
         if (chatContainer) {
-            chatContainer.addEventListener('scroll', () => {
-                isAtBottom = (chatContainer.scrollHeight - chatContainer.scrollTop - chatContainer.clientHeight < 50);
+            // Setup modern lag-free bottom sentinel using IntersectionObserver
+            const bottomSentinel = document.createElement('div');
+            bottomSentinel.id = 'bottom-sentinel';
+            bottomSentinel.style.cssText = 'height: 1px; width: 100%; flex-shrink: 0; margin-top: -20px; pointer-events: none;';
+            chatContainer.appendChild(bottomSentinel);
+
+            const scrollObserver = new IntersectionObserver((entries) => {
+                entries.forEach(entry => {
+                    isAtBottom = entry.isIntersecting;
+                });
+            }, {
+                root: chatContainer,
+                threshold: 0.1
             });
+            scrollObserver.observe(bottomSentinel);
+
+            // Automatically keep bottom-sentinel as the last child
+            const mutationObserver = new MutationObserver(() => {
+                if (chatContainer.lastChild !== bottomSentinel) {
+                    mutationObserver.disconnect();
+                    chatContainer.appendChild(bottomSentinel);
+                    mutationObserver.observe(chatContainer, { childList: true });
+                }
+            });
+            mutationObserver.observe(chatContainer, { childList: true });
+
             // Keep scroll at bottom when images load, if user was at the bottom
             chatContainer.addEventListener('load', (e) => {
                 if (e.target.tagName.toLowerCase() === 'img') {
@@ -3753,7 +3910,7 @@
                         chatContainer.scrollTop = chatContainer.scrollHeight;
                     }
                 }
-            }, true); // Capture phase is required since load event does not bubble
+            }, { capture: true, passive: true }); // Capture phase, passive scroll-safe listener
         }
 
         let skipScrollSave = false;
@@ -4283,7 +4440,7 @@ function showOnboardingCard() {
             } else if (!connectionStatus.lm_studio_online) {
                 localContent = `
                     <p class="option-desc" style="font-size: 0.8rem; margin: 8px 0 15px 0;">LM Studio is installed, but the local engine is offline. Start the service or search Hugging Face to download a model.</p>
-                    <button onclick="startLmsDaemon(this)" class="onboarding-btn" style="width: 100%; font-size: 0.85rem; padding: 10px; margin-bottom: 15px; background: var(--primary-accent);">Start Local Server</button>
+                    <button onclick="startLmsDaemon(this)" class="onboarding-btn" style="width: 100%; font-size: 0.85rem; padding: 10px; margin-bottom: 15px;">Start Local Server</button>
                     
                     <div style="border-top: 1px solid var(--border-color); padding-top: 15px;">
                         <label style="font-size: 0.72rem; color: var(--text-muted); font-weight: 500;">Search Hugging Face (GGUF)</label>
@@ -4715,7 +4872,7 @@ async function stopComfyUI(btn) {
                                 <div style="font-weight: 500; text-overflow: ellipsis; overflow: hidden; white-space: nowrap; color: var(--text-main);" title="${f.filename}">${f.filename}</div>
                                 <div style="font-size: 0.62rem; color: var(--text-muted); margin-top: 1px;">Size: ${formatBytes(f.size)} • Quant: ${f.quantization || 'Unknown'}</div>
                             </div>
-                            <button onclick="downloadHFModel('${repoId}', '${f.quantization}', this)" class="onboarding-btn" style="margin: 0; padding: 2px 6px; font-size: 0.65rem; height: 20px; flex-shrink: 0; background: var(--primary-accent); border: none; border-radius: 4px; color: white;">Download</button>
+                            <button onclick="downloadHFModel('${repoId}', '${f.quantization}', this)" class="onboarding-btn" style="margin: 0; padding: 2px 6px; font-size: 0.65rem; height: 20px; flex-shrink: 0; border-radius: 4px;">Download</button>
                         </div>
                         <div class="progress-wrapper-${cleanId}" style="display: none; width: 100%;">
                             <div style="display: flex; justify-content: space-between; font-size: 0.58rem; color: var(--text-muted); margin-bottom: 2px; width: 100%;">
@@ -4871,10 +5028,10 @@ async function fetchAndRenderLmsModels() {
                             </div>
                             <div style="display: flex; gap: 6px;">
                                 ${isLoaded ? 
-                                    `<button onclick="unloadLmsModel('${modelKey.replace(/\\/g, '\\\\')}', this)" class="onboarding-btn" style="margin: 0; padding: 4px 8px; font-size: 0.7rem; background: rgba(255, 255, 255, 0.12); border: none; border-radius: 4px; color: #cbd5e1;">Unload</button>` : 
-                                    `<button onclick="loadLmsModelDirect('${modelKey.replace(/\\/g, '\\\\')}', this)" class="onboarding-btn" style="margin: 0; padding: 4px 8px; font-size: 0.7rem; background: var(--primary-accent); border: none; border-radius: 4px; color: white;">Load</button>`
+                                    `<button onclick="unloadLmsModel('${modelKey.replace(/\\/g, '\\\\')}', this)" class="onboarding-btn" style="margin: 0; padding: 4px 8px; font-size: 0.7rem; border-radius: 4px;">Unload</button>` : 
+                                    `<button onclick="loadLmsModelDirect('${modelKey.replace(/\\/g, '\\\\')}', this)" class="onboarding-btn" style="margin: 0; padding: 4px 8px; font-size: 0.7rem; border-radius: 4px;">Load</button>`
                                 }
-                                <button onclick="deleteLmsModel('${modelKey.replace(/\\/g, '\\\\')}', this)" class="onboarding-btn" style="margin: 0; padding: 4px 8px; font-size: 0.7rem; background: rgba(239, 68, 68, 0.15); border: none; border-radius: 4px; color: #fca5a5;">Delete</button>
+                                <button onclick="deleteLmsModel('${modelKey.replace(/\\/g, '\\\\')}', this)" class="onboarding-btn" style="margin: 0; padding: 4px 8px; font-size: 0.7rem; border-radius: 4px;">Delete</button>
                             </div>
                         </div>
                     `;
@@ -5399,7 +5556,7 @@ function updateConnectionModalStatus() {
                             <span class="status-badge status-offline">Offline</span>
                         </div>
                         <p class="option-desc" style="font-size: 0.8rem; margin: 8px 0 15px 0;">LM Studio engine is offline. Start local server or search Hugging Face to download a model.</p>
-                        <button onclick="startLmsDaemon(this)" class="onboarding-btn" style="width: 100%; font-size: 0.85rem; padding: 10px; margin-bottom: 15px; background: var(--primary-accent);">Start Local Server</button>
+                        <button onclick="startLmsDaemon(this)" class="onboarding-btn" style="width: 100%; font-size: 0.85rem; padding: 10px; margin-bottom: 15px;">Start Local Server</button>
                         
                         <div style="border-top: 1px solid var(--border-color); padding-top: 15px;">
                             <label style="font-size: 0.72rem; color: var(--text-muted); font-weight: 500;">Search Hugging Face (GGUF)</label>
@@ -5518,7 +5675,7 @@ async function updateComfyModalStatus() {
                                     `;
                                 } else {
                                     controls.innerHTML = `
-                                        <button onclick="startComfyUI(this)" class="onboarding-btn" style="width: 100%; font-size: 0.85rem; padding: 10px; background: var(--primary-accent); margin-top: 5px;">Start ComfyUI</button>
+                                        <button onclick="startComfyUI(this)" class="onboarding-btn" style="width: 100%; font-size: 0.85rem; padding: 10px; margin-top: 5px;">Start ComfyUI</button>
                                     `;
                                 }
                             }
@@ -5560,7 +5717,7 @@ async function updateComfyModalStatus() {
                                         <button onclick="resolveWorkflowDependencies(this)" class="onboarding-btn" style="width: 100%; font-size: 0.85rem; padding: 10px; margin-top: 5px;">Resolve Workflow Dependencies</button>
                                         <button onclick="stopComfyUI(this)" class="onboarding-btn" style="width: 100%; font-size: 0.85rem; padding: 10px; margin-top: 8px; margin-bottom: 5px;">Stop ComfyUI</button>
                                     ` : `
-                                        <button onclick="startComfyUI(this)" class="onboarding-btn" style="width: 100%; font-size: 0.85rem; padding: 10px; background: var(--primary-accent); margin-top: 5px;">Start ComfyUI</button>
+                                        <button onclick="startComfyUI(this)" class="onboarding-btn" style="width: 100%; font-size: 0.85rem; padding: 10px; margin-top: 5px;">Start ComfyUI</button>
                                     `}
                                 </div>
                                 <div id="comfy-resolution-progress" style="font-size: 0.72rem; color: var(--text-muted); line-height: 1.3;"></div>
@@ -5632,53 +5789,6 @@ async function changeModel() {
         }
 
         // --- showCustomAlert ---
-function showCustomAlert(title, message, callback = null) {
-            document.getElementById('custom-dialog-title').innerHTML = title;
-            document.getElementById('custom-dialog-message').innerHTML = message;
-            
-            const buttonsContainer = document.getElementById('custom-dialog-buttons');
-            buttonsContainer.innerHTML = `
-                <button onclick="closeCustomDialog(true)" style="background: var(--primary-accent); border: none; color: white; padding: 10px 24px; border-radius: 8px; font-weight: 500; cursor: pointer; transition: all 0.2s; box-shadow: 0 4px 10px color-mix(in srgb, var(--primary-accent) 30%, transparent); min-width: 100px;">
-                    OK
-                </button>
-            `;
-            
-            customDialogCallback = callback;
-            customDialogCancelCallback = null;
-            document.getElementById('custom-dialog-modal').style.display = 'flex';
-        }
-
-        // --- showCustomConfirm ---
-function showCustomConfirm(title, message, onConfirm, onCancel = null) {
-            document.getElementById('custom-dialog-title').innerHTML = title;
-            document.getElementById('custom-dialog-message').innerHTML = message;
-            
-            const buttonsContainer = document.getElementById('custom-dialog-buttons');
-            buttonsContainer.innerHTML = `
-                <button onclick="closeCustomDialog(false)" style="background: rgba(255, 255, 255, 0.05); border: 1px solid rgba(255, 255, 255, 0.1); color: var(--text-muted); padding: 10px 20px; border-radius: 8px; font-weight: 500; cursor: pointer; transition: all 0.2s; min-width: 100px;">
-                    Cancel
-                </button>
-                <button onclick="closeCustomDialog(true)" style="background: var(--primary-accent); border: none; color: white; padding: 10px 24px; border-radius: 8px; font-weight: 500; cursor: pointer; transition: all 0.2s; box-shadow: 0 4px 10px color-mix(in srgb, var(--primary-accent) 30%, transparent); min-width: 100px;">
-                    Confirm
-                </button>
-            `;
-            
-            customDialogCallback = onConfirm;
-            customDialogCancelCallback = onCancel;
-            document.getElementById('custom-dialog-modal').style.display = 'flex';
-        }
-
-        // --- closeCustomDialog ---
-function closeCustomDialog(approved) {
-            document.getElementById('custom-dialog-modal').style.display = 'none';
-            if (approved && customDialogCallback) {
-                customDialogCallback();
-            } else if (!approved && customDialogCancelCallback) {
-                customDialogCancelCallback();
-            }
-        }
-
-        // --- showCustomAlert ---
         function showCustomAlert(title, message, callback = null) {
             const modalDeco = document.querySelector('#custom-dialog-modal .modal-card');
             if (modalDeco) modalDeco.style.maxWidth = '400px';
@@ -5688,7 +5798,7 @@ function closeCustomDialog(approved) {
             
             const buttonsContainer = document.getElementById('custom-dialog-buttons');
             buttonsContainer.innerHTML = `
-                <button onclick="closeCustomDialog(true)" style="background: var(--primary-accent); border: none; color: white; padding: 10px 24px; border-radius: 8px; font-weight: 500; cursor: pointer; transition: all 0.2s; box-shadow: 0 4px 10px color-mix(in srgb, var(--primary-accent) 30%, transparent); min-width: 100px;">
+                <button onclick="closeCustomDialog(true)" class="edit-btn edit-save-btn" style="min-width: 100px;">
                     OK
                 </button>
             `;
@@ -5708,10 +5818,10 @@ function closeCustomDialog(approved) {
             
             const buttonsContainer = document.getElementById('custom-dialog-buttons');
             buttonsContainer.innerHTML = `
-                <button onclick="closeCustomDialog(false)" style="background: rgba(255, 255, 255, 0.05); border: 1px solid rgba(255, 255, 255, 0.1); color: var(--text-muted); padding: 10px 20px; border-radius: 8px; font-weight: 500; cursor: pointer; transition: all 0.2s; min-width: 100px;">
+                <button onclick="closeCustomDialog(false)" class="edit-btn edit-cancel-btn" style="min-width: 100px;">
                     Cancel
                 </button>
-                <button onclick="closeCustomDialog(true)" style="background: var(--primary-accent); border: none; color: white; padding: 10px 24px; border-radius: 8px; font-weight: 500; cursor: pointer; transition: all 0.2s; box-shadow: 0 4px 10px color-mix(in srgb, var(--primary-accent) 30%, transparent); min-width: 100px;">
+                <button onclick="closeCustomDialog(true)" class="edit-btn edit-save-btn" style="min-width: 100px;">
                     Confirm
                 </button>
             `;
@@ -5739,15 +5849,15 @@ function closeCustomDialog(approved) {
             document.getElementById('custom-dialog-title').innerHTML = title;
             document.getElementById('custom-dialog-message').innerHTML = `
                 <p style="margin-top: 0; margin-bottom: 10px;">${message}</p>
-                <input type="text" id="custom-dialog-input" value="${defaultValue}" style="width: 100%; background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.15); color: var(--text-main); padding: 8px 12px; border-radius: 8px; font-size: 0.9rem; box-sizing: border-box; outline: none; margin-bottom: 10px;">
+                <input type="text" id="custom-dialog-input" value="${defaultValue}" class="onboarding-input" style="font-size: 0.9rem; margin-bottom: 10px;">
             `;
             
             const buttonsContainer = document.getElementById('custom-dialog-buttons');
             buttonsContainer.innerHTML = `
-                <button onclick="closeCustomDialog(false)" style="background: rgba(255, 255, 255, 0.05); border: 1px solid rgba(255, 255, 255, 0.1); color: var(--text-muted); padding: 10px 20px; border-radius: 8px; font-weight: 500; cursor: pointer; transition: all 0.2s; min-width: 100px;">
+                <button onclick="closeCustomDialog(false)" class="edit-btn edit-cancel-btn" style="min-width: 100px;">
                     Cancel
                 </button>
-                <button id="custom-dialog-submit-btn" style="background: var(--primary-accent); border: none; color: white; padding: 10px 24px; border-radius: 8px; font-weight: 500; cursor: pointer; transition: all 0.2s; box-shadow: 0 4px 10px color-mix(in srgb, var(--primary-accent) 30%, transparent); min-width: 100px;">
+                <button id="custom-dialog-submit-btn" class="edit-btn edit-save-btn" style="min-width: 100px;">
                     Confirm
                 </button>
             `;
@@ -5782,7 +5892,7 @@ function closeCustomDialog(approved) {
             document.getElementById('custom-dialog-title').innerHTML = title;
             document.getElementById('custom-dialog-message').innerHTML = `
                 <p style="margin-top: 0; margin-bottom: 10px;">${message}</p>
-                <textarea id="custom-dialog-input" style="width: 100%; height: 160px; background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.15); color: var(--text-main); padding: 10px 14px; border-radius: 8px; font-size: 0.9rem; box-sizing: border-box; outline: none; margin-bottom: 10px; resize: vertical; font-family: inherit; line-height: 1.5;"></textarea>
+                <textarea id="custom-dialog-input" class="onboarding-input" style="height: 160px; font-size: 0.9rem; margin-bottom: 10px; resize: vertical; font-family: inherit; line-height: 1.5;"></textarea>
             `;
             
             const inputField = document.getElementById('custom-dialog-input');
@@ -5790,10 +5900,10 @@ function closeCustomDialog(approved) {
             
             const buttonsContainer = document.getElementById('custom-dialog-buttons');
             buttonsContainer.innerHTML = `
-                <button onclick="closeCustomDialog(false)" style="background: rgba(255, 255, 255, 0.05); border: 1px solid rgba(255, 255, 255, 0.1); color: var(--text-muted); padding: 10px 20px; border-radius: 8px; font-weight: 500; cursor: pointer; transition: all 0.2s; min-width: 100px;">
+                <button onclick="closeCustomDialog(false)" class="edit-btn edit-cancel-btn" style="min-width: 100px;">
                     Cancel
                 </button>
-                <button id="custom-dialog-submit-btn" style="background: var(--primary-accent); border: none; color: white; padding: 10px 24px; border-radius: 8px; font-weight: 500; cursor: pointer; transition: all 0.2s; box-shadow: 0 4px 10px color-mix(in srgb, var(--primary-accent) 30%, transparent); min-width: 100px;">
+                <button id="custom-dialog-submit-btn" class="edit-btn edit-save-btn" style="min-width: 100px;">
                     Confirm
                 </button>
             `;
@@ -6121,9 +6231,9 @@ function closeAssistantModal() {
             if (!compBtn || !userBtn || !compTab || !userTab) return;
             
             if (tab === 'companion') {
-                compBtn.style.background = 'var(--primary-accent)';
-                compBtn.style.color = 'white';
-                compBtn.style.border = 'none';
+                compBtn.style.background = 'rgba(255, 255, 255, 0.08)';
+                compBtn.style.color = 'var(--primary-accent)';
+                compBtn.style.border = '1px solid var(--primary-accent)';
                 
                 userBtn.style.background = 'rgba(255,255,255,0.05)';
                 userBtn.style.color = 'var(--text-muted)';
@@ -6132,9 +6242,9 @@ function closeAssistantModal() {
                 compTab.style.display = 'block';
                 userTab.style.display = 'none';
             } else if (tab === 'user') {
-                userBtn.style.background = 'var(--primary-accent)';
-                userBtn.style.color = 'white';
-                userBtn.style.border = 'none';
+                userBtn.style.background = 'rgba(255, 255, 255, 0.08)';
+                userBtn.style.color = 'var(--primary-accent)';
+                userBtn.style.border = '1px solid var(--primary-accent)';
                 
                 compBtn.style.background = 'rgba(255,255,255,0.05)';
                 compBtn.style.color = 'var(--text-muted)';
@@ -6177,9 +6287,9 @@ function switchImportTab(tab) {
             if (tab === 'tavern') {
                 tabTavern.style.display = 'block';
                 tabDescribe.style.display = 'none';
-                btnTavern.style.background = 'var(--primary-accent)';
-                btnTavern.style.color = 'white';
-                btnTavern.style.border = 'none';
+                btnTavern.style.background = 'rgba(255, 255, 255, 0.08)';
+                btnTavern.style.color = 'var(--primary-accent)';
+                btnTavern.style.border = '1px solid var(--primary-accent)';
                 btnDescribe.style.background = 'rgba(255,255,255,0.05)';
                 btnDescribe.style.color = 'var(--text-muted)';
                 btnDescribe.style.border = '1px solid rgba(255,255,255,0.1)';
@@ -6189,9 +6299,9 @@ function switchImportTab(tab) {
                 btnTavern.style.background = 'rgba(255,255,255,0.05)';
                 btnTavern.style.color = 'var(--text-muted)';
                 btnTavern.style.border = '1px solid rgba(255,255,255,0.1)';
-                btnDescribe.style.background = 'var(--primary-accent)';
-                btnDescribe.style.color = 'white';
-                btnDescribe.style.border = 'none';
+                btnDescribe.style.background = 'rgba(255, 255, 255, 0.08)';
+                btnDescribe.style.color = 'var(--primary-accent)';
+                btnDescribe.style.border = '1px solid var(--primary-accent)';
             }
         }
 
@@ -6350,6 +6460,7 @@ function renderProgramsList(assistants, activeId) {
 
                 // Add Palette settings button on each companion row
                 const paletteBtn = document.createElement('button');
+                paletteBtn.className = 'action-icon-btn';
                 paletteBtn.innerHTML = `
                     <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="display: block;">
                         <path d="M12 22C17.5228 22 22 17.5228 22 12C22 6.47715 17.5228 2 12 2C6.47715 2 2 6.47715 2 12C2 14.7255 3.09032 17.1962 4.85857 19C5.34776 19.4929 6.09675 19.3881 6.55163 18.88C7.11822 18.2467 7.90993 17.8462 8.79374 17.8462C10.5645 17.8462 12 19.2816 12 21.0524C12 21.5794 12 22 12 22Z" />
@@ -6360,30 +6471,11 @@ function renderProgramsList(assistants, activeId) {
                     </svg>
                 `;
                 paletteBtn.title = 'Change Theme Color';
-                paletteBtn.style.cssText = `
-                    background: rgba(255, 255, 255, 0.04);
-                    border: 1px solid rgba(255, 255, 255, 0.08);
-                    color: var(--text-muted);
-                    width: 26px;
-                    height: 26px;
-                    border-radius: 50%;
-                    display: flex;
-                    align-items: center;
-                    justify-content: center;
-                    cursor: pointer;
-                    transition: all 0.2s;
-                    padding: 0;
-                    margin-left: auto;
-                    flex-shrink: 0;
-                `;
-                paletteBtn.onmouseover = () => {
-                    paletteBtn.style.background = 'rgba(255, 255, 255, 0.12)';
-                    paletteBtn.style.color = 'var(--text-main)';
-                };
-                paletteBtn.onmouseout = () => {
-                    paletteBtn.style.background = 'rgba(255, 255, 255, 0.04)';
-                    paletteBtn.style.color = 'var(--text-muted)';
-                };
+                paletteBtn.style.width = '26px';
+                paletteBtn.style.height = '26px';
+                paletteBtn.style.borderRadius = '6px';
+                paletteBtn.style.marginLeft = 'auto';
+                paletteBtn.style.flexShrink = '0';
                 paletteBtn.onclick = (e) => {
                     e.stopPropagation();
                     openPaletteModal(assistant.id, assistant.name);
@@ -6392,6 +6484,7 @@ function renderProgramsList(assistants, activeId) {
 
                 // Add Edit Settings button on each companion row
                 const editBtn = document.createElement('button');
+                editBtn.className = 'action-icon-btn';
                 editBtn.innerHTML = `
                     <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="display: block;">
                         <path d="M12 20h9"></path>
@@ -6399,30 +6492,11 @@ function renderProgramsList(assistants, activeId) {
                     </svg>
                 `;
                 editBtn.title = 'Edit Companion Persona';
-                editBtn.style.cssText = `
-                    background: rgba(255, 255, 255, 0.04);
-                    border: 1px solid rgba(255, 255, 255, 0.08);
-                    color: var(--text-muted);
-                    width: 26px;
-                    height: 26px;
-                    border-radius: 50%;
-                    display: flex;
-                    align-items: center;
-                    justify-content: center;
-                    cursor: pointer;
-                    transition: all 0.2s;
-                    padding: 0;
-                    margin-left: 8px;
-                    flex-shrink: 0;
-                `;
-                editBtn.onmouseover = () => {
-                    editBtn.style.background = 'rgba(255, 255, 255, 0.12)';
-                    editBtn.style.color = 'var(--text-main)';
-                };
-                editBtn.onmouseout = () => {
-                    editBtn.style.background = 'rgba(255, 255, 255, 0.04)';
-                    editBtn.style.color = 'var(--text-muted)';
-                };
+                editBtn.style.width = '26px';
+                editBtn.style.height = '26px';
+                editBtn.style.borderRadius = '6px';
+                editBtn.style.marginLeft = '8px';
+                editBtn.style.flexShrink = '0';
                 editBtn.onclick = (e) => {
                     e.stopPropagation();
                     openCompanionProfileModal(assistant.id);
@@ -6839,9 +6913,9 @@ async function deleteAssistant(assistantId, name) {
                 if (t === tab) {
                     if (content) content.style.display = 'block';
                     if (btn) {
-                        btn.style.background = 'var(--primary-accent)';
-                        btn.style.color = 'white';
-                        btn.style.border = 'none';
+                        btn.style.background = 'rgba(255, 255, 255, 0.08)';
+                        btn.style.color = 'var(--primary-accent)';
+                        btn.style.border = '1px solid var(--primary-accent)';
                     }
                 } else {
                     if (content) content.style.display = 'none';
@@ -6934,27 +7008,19 @@ async function deleteAssistant(assistantId, name) {
                 if (journalsContainer) {
                     journalsContainer.innerHTML = '';
                     if (entries.length === 0) {
-                        journalsContainer.innerHTML = '<div style="color: var(--text-muted); font-size: 0.75rem; text-align: center; padding: 15px; background: rgba(0,0,0,0.1); border-radius: 8px;">No memory journals saved for this companion yet.</div>';
+                        journalsContainer.innerHTML = '<div class="empty-state">No memory journals saved for this companion yet.</div>';
                     } else {
                         entries.forEach(e => {
                             const row = document.createElement('div');
-                            row.style.cssText = `
-                                display: flex;
-                                flex-direction: column;
-                                gap: 6px;
-                                background: rgba(255,255,255,0.02);
-                                border: 1px solid rgba(255,255,255,0.04);
-                                border-radius: 8px;
-                                padding: 10px;
-                                font-size: 0.8rem;
-                                position: relative;
-                            `;
+                            row.className = 'list-entry-row';
                             
                             const header = document.createElement('div');
-                            header.style.cssText = 'display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid rgba(255,255,255,0.04); padding-bottom: 4px; gap: 12px;';
+                            header.className = 'list-entry-header';
                             
                             const kps = document.createElement('span');
-                            kps.style.cssText = 'color: var(--primary-accent); font-weight: 600; font-size: 0.72rem;';
+                            kps.style.color = 'var(--primary-accent)';
+                            kps.style.fontWeight = '600';
+                            kps.style.fontSize = '0.72rem';
                             kps.textContent = e.keyphrases ? e.keyphrases.join(', ') : 'no triggers';
                             header.appendChild(kps);
                             
@@ -6977,7 +7043,7 @@ async function deleteAssistant(assistantId, name) {
                             row.appendChild(header);
                             
                             const text = document.createElement('div');
-                            text.style.cssText = 'color: var(--text-main); line-height: 1.3; font-size: 0.78rem;';
+                            text.className = 'list-entry-content';
                             text.textContent = e.content || '';
                             row.appendChild(text);
                             
@@ -7000,7 +7066,7 @@ async function deleteAssistant(assistantId, name) {
                     );
                     
                     if (memoryEvents.length === 0) {
-                        memoriesContainer.innerHTML = '<div style="color: var(--text-muted); font-size: 0.75rem; text-align: center; padding: 15px; background: rgba(0,0,0,0.1); border-radius: 8px;">No consolidated memories created for this session yet.</div>';
+                        memoriesContainer.innerHTML = '<div class="empty-state">No consolidated memories created for this session yet.</div>';
                     } else {
                         memoryEvents.forEach(msg => {
                             // Clean up text
@@ -7010,23 +7076,15 @@ async function deleteAssistant(assistantId, name) {
                             }
                             
                             const row = document.createElement('div');
-                            row.style.cssText = `
-                                display: flex;
-                                flex-direction: column;
-                                gap: 6px;
-                                background: rgba(255,255,255,0.02);
-                                border: 1px solid rgba(255,255,255,0.04);
-                                border-radius: 8px;
-                                padding: 10px;
-                                font-size: 0.8rem;
-                                position: relative;
-                            `;
+                            row.className = 'list-entry-row';
                             
                             const header = document.createElement('div');
-                            header.style.cssText = 'display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid rgba(255,255,255,0.04); padding-bottom: 4px; gap: 12px;';
+                            header.className = 'list-entry-header';
                             
                             const kps = document.createElement('span');
-                            kps.style.cssText = 'color: #10b981; font-weight: 600; font-size: 0.72rem;';
+                            kps.style.color = '#10b981';
+                            kps.style.fontWeight = '600';
+                            kps.style.fontSize = '0.72rem';
                             kps.textContent = 'Auto-Compacted';
                             header.appendChild(kps);
                             
@@ -7062,7 +7120,7 @@ async function deleteAssistant(assistantId, name) {
                             row.appendChild(header);
                             
                             const text = document.createElement('div');
-                            text.style.cssText = 'color: var(--text-main); line-height: 1.3; font-size: 0.78rem; font-style: italic;';
+                            text.className = 'list-entry-content italic';
                             text.textContent = cleanText;
                             row.appendChild(text);
                             
@@ -7261,7 +7319,11 @@ async function loadHistory() {
                     // History is empty! Wait for model initialization and health checks to complete if they haven't yet
                     if (modelInitPromise) {
                         try {
-                            await modelInitPromise;
+                            // Wait at most 2 seconds for model initialization status
+                            await Promise.race([
+                                modelInitPromise,
+                                new Promise(resolve => setTimeout(resolve, 2000))
+                            ]);
                         } catch (e) {
                             console.error("Error waiting for modelInitPromise in empty history block:", e);
                         }
@@ -7300,10 +7362,13 @@ async function loadHistory() {
                 }
             } catch (error) {
                 console.error("Error loading chat history:", error);
-                // Ensure modelInitPromise finishes so connectionStatus is populated
+                // Ensure modelInitPromise finishes so connectionStatus is populated (max 1.5 seconds)
                 if (modelInitPromise) {
                     try {
-                        await modelInitPromise;
+                        await Promise.race([
+                            modelInitPromise,
+                            new Promise(resolve => setTimeout(resolve, 1500))
+                        ]);
                     } catch (e) {}
                 }
                 if (!connectionStatus.gemini_configured && !connectionStatus.lm_studio_online) {
@@ -9305,7 +9370,7 @@ async function searchComfyHFCheckpoints() {
                                 <div style="font-weight: 500; font-size: 0.75rem; text-overflow: ellipsis; overflow: hidden; white-space: nowrap;" title="${item.filename}">${item.filename}</div>
                                 <div style="font-size: 0.65rem; color: var(--text-muted); text-overflow: ellipsis; overflow: hidden; white-space: nowrap;">${item.repo_id}</div>
                             </div>
-                            <button onclick="downloadComfyCheckpoint('${item.download_url}', '${item.filename}', this)" class="onboarding-btn" style="margin: 0; padding: 4px 8px; font-size: 0.68rem; background: var(--primary-accent); border: none; border-radius: 4px; color: white;">Download</button>
+                            <button onclick="downloadComfyCheckpoint('${item.download_url}', '${item.filename}', this)" class="onboarding-btn" style="margin: 0; padding: 4px 8px; font-size: 0.68rem; border-radius: 4px;">Download</button>
                         </div>
                     `;
                 });
@@ -10266,8 +10331,9 @@ function showToolConfirmModal(callId, toolName, details) {
             // Reset active buttons
             [uploadBtn, settingsBtn, memoriesBtn].forEach(btn => {
                 if (btn) {
-                    btn.style.background = 'transparent';
+                    btn.style.background = 'rgba(255,255,255,0.05)';
                     btn.style.color = 'var(--text-muted)';
+                    btn.style.border = '1px solid rgba(255,255,255,0.1)';
                     btn.classList.add('edit-cancel-btn');
                 }
             });
@@ -10284,22 +10350,25 @@ function showToolConfirmModal(callId, toolName, details) {
             if (tab === 'upload') {
                 if (uploadTab) uploadTab.style.display = 'flex';
                 if (uploadBtn) {
-                    uploadBtn.style.background = 'var(--primary-accent)';
-                    uploadBtn.style.color = 'white';
+                    uploadBtn.style.background = 'rgba(255, 255, 255, 0.08)';
+                    uploadBtn.style.color = 'var(--primary-accent)';
+                    uploadBtn.style.border = '1px solid var(--primary-accent)';
                     uploadBtn.classList.remove('edit-cancel-btn');
                 }
             } else if (tab === 'settings') {
                 if (settingsTab) settingsTab.style.display = 'flex';
                 if (settingsBtn) {
-                    settingsBtn.style.background = 'var(--primary-accent)';
-                    settingsBtn.style.color = 'white';
+                    settingsBtn.style.background = 'rgba(255, 255, 255, 0.08)';
+                    settingsBtn.style.color = 'var(--primary-accent)';
+                    settingsBtn.style.border = '1px solid var(--primary-accent)';
                     settingsBtn.classList.remove('edit-cancel-btn');
                 }
             } else if (tab === 'memories') {
                 if (memoriesTab) memoriesTab.style.display = 'flex';
                 if (memoriesBtn) {
-                    memoriesBtn.style.background = 'var(--primary-accent)';
-                    memoriesBtn.style.color = 'white';
+                    memoriesBtn.style.background = 'rgba(255, 255, 255, 0.08)';
+                    memoriesBtn.style.color = 'var(--primary-accent)';
+                    memoriesBtn.style.border = '1px solid var(--primary-accent)';
                     memoriesBtn.classList.remove('edit-cancel-btn');
                 }
             }
@@ -10360,14 +10429,7 @@ function showToolConfirmModal(callId, toolName, details) {
             currentProjectSettings.folders.forEach((folder, idx) => {
                 const isDefault = idx === 0; // The first folder is the default workspace root
                 const row = document.createElement('div');
-                row.style.display = 'flex';
-                row.style.justifyContent = 'space-between';
-                row.style.alignItems = 'center';
-                row.style.background = 'rgba(0,0,0,0.2)';
-                row.style.border = '1px solid rgba(255,255,255,0.04)';
-                row.style.padding = '8px 12px';
-                row.style.borderRadius = '8px';
-                row.style.fontSize = '0.75rem';
+                row.className = 'list-entry-row row-layout';
                 row.style.fontFamily = 'monospace';
                 
                 row.innerHTML = `
@@ -10375,7 +10437,7 @@ function showToolConfirmModal(callId, toolName, details) {
                         <span style="display: inline-flex; align-items: center; width: 14px; height: 14px; color: var(--text-muted); opacity: 0.85; vertical-align: middle;">${getLogIconSvg('folder')}</span>
                         <span title="${folder}">${folder}</span>
                     </div>
-                    ${isDefault ? '<span style="font-size: 0.65rem; color: var(--text-muted); opacity: 0.8; font-family: \'Outfit\', sans-serif;">Default</span>' : `
+                    ${isDefault ? '<span class="badge-default">Default</span>' : `
                         <span onclick="removeProjectFolder('${folder.replace(/\\/g, '\\\\')}')" style="cursor: pointer; opacity: 0.6; font-size: 1.1rem; font-family: sans-serif; line-height: 1;" title="Remove Folder">&times;</span>
                     `}
                 `;
@@ -10440,19 +10502,14 @@ async function loadDataBankFiles() {
                 }
                 const files = data.files || [];
                 if (files.length === 0) {
-                    container.innerHTML = '<div style="padding: 30px 15px; color: var(--text-muted); font-size: 0.8rem; text-align: center;">Knowledge Base is empty.</div>';
+                    container.innerHTML = '<div class="empty-state">Knowledge Base is empty.</div>';
                     return;
                 }
                 
                 container.innerHTML = '';
                 files.forEach(file => {
                     const row = document.createElement('div');
-                    row.style.display = 'flex';
-                    row.style.alignItems = 'center';
-                    row.style.justifyContent = 'space-between';
-                    row.style.padding = '10px 12px';
-                    row.style.borderBottom = '1px solid rgba(255,255,255,0.03)';
-                    row.style.fontSize = '0.8rem';
+                    row.className = 'file-list-entry';
                     
                     const formatBytes = (bytes) => {
                         if (bytes === 0) return '0 B';
@@ -11099,6 +11156,15 @@ let galleryImages = [];
         window.addEventListener('DOMContentLoaded', () => {
             updateProfileImages();
             loadHistory();
+
+            // Safety timeout: ensure loading screen is hidden even if server requests hang
+            setTimeout(() => {
+                const overlay = document.getElementById('chat-loading-overlay');
+                if (overlay && !overlay.classList.contains('fade-out')) {
+                    console.warn("Loading overlay fallback timeout reached. Forcing hide.");
+                    hideLoadingOverlay();
+                }
+            }, 6000);
         });
 
         // Edit and Reroll functionality

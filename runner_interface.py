@@ -8,6 +8,7 @@ import asyncio
 import base64
 import importlib
 import json
+import re
 import time
 from google.genai import types
 
@@ -70,7 +71,6 @@ def _is_local_model(model: str) -> bool:
 
 def _format_thinking_and_text(thoughts_list: list, texts_list: list) -> str:
     """Combines lists of thoughts and texts, merging any existing <think> tags."""
-    import re
     
     thoughts_str = "".join(thoughts_list)
     text_str = "".join(texts_list)
@@ -105,7 +105,6 @@ def strip_narration(text: str) -> str:
     """
     if not text:
         return ""
-    import re
     
     # 1. Clean <think>...</think> blocks first
     text = re.sub(r'<think>[\s\S]*?</think>', '', text)
@@ -167,7 +166,6 @@ def _parse_emulated_tool_call(tool_name: str, args_str: str) -> dict:
             args.append(ast.literal_eval(arg))
         return {"args": args, "kwargs": kwargs}
     except Exception:
-        import re
         kwargs = {}
         kv_pairs = re.findall(r'(\w+)\s*=\s*(["\'])(.*?)\2', args_str)
         if kv_pairs:
@@ -723,10 +721,7 @@ class BaseProgramRunner:
         invocation_id: str
     ) -> tuple:
         import httpx
-        import re
         import uuid
-        import time
-        import asyncio
         
         bot_response_text = ""
         tool_calls = []
@@ -1092,7 +1087,6 @@ class BaseProgramRunner:
         """Links portrait and media images in the text prefixed with '!' so they render as images instead of links or plain text paths."""
         if not text:
             return text
-        import re
         # Convert [Name](/images/portraits/...) or [Name](/images/media/...) to ![Name](...) if it is not already prefixed with !
         text = re.sub(r'(?<!\!)(\[[^\]]*\]\(/images/portraits/[^)]+\))', r'!\1', text)
         text = re.sub(r'(?<!\!)(\[[^\]]*\]\(/images/media/[^)]+\))', r'!\1', text)
@@ -1103,15 +1097,13 @@ class BaseProgramRunner:
         return text
 
     def _get_system_instructions(self, session_id, inversion_directive=None, user_message=None) -> str:
-        """Pulls the system prompt directly from character_profile.json or *.md and appends matched journals."""
+        """Pulls the system prompt directly from the program's JSON profile and appends matched journals."""
         is_voice = isinstance(session_id, str) and session_id.endswith('_voice')
         
         if is_voice:
             from utils.program import get_active_program
             from core.program_config import compile_instructions_from_json, get_companion_name
             from variables import PROGRAMS_DIR
-            import json
-            import os
             
             companion_name = get_companion_name()
             active_prog = get_active_program()
@@ -1143,7 +1135,6 @@ class BaseProgramRunner:
             if hasattr(self, 'sessions_history'):  # OpenSourceRunner
                 history = self.sessions_history.get(src_session_id, [])
                 if not history:
-                    import json
                     safe_id = "".join(c for c in src_session_id if c.isalnum() or c in "-_")
                     path = os.path.join(self.sessions_dir, f"{safe_id}_os.json")
                     if os.path.exists(path):
@@ -1165,7 +1156,6 @@ class BaseProgramRunner:
                     adk_session = session_dict[self.app_name]['user'].get(src_session_id)
                 
                 if not adk_session:
-                    import json
                     safe_id = "".join(c for c in src_session_id if c.isalnum() or c in "-_")
                     path = os.path.join(self.sessions_dir, f"{safe_id}.json")
                     if os.path.exists(path):
@@ -1197,7 +1187,6 @@ class BaseProgramRunner:
             
             journal_lines = []
             for role, text in seed_turns:
-                import re
                 clean_text = re.sub(r'<think>[\s\S]*?</think>', '', text)
                 clean_text = re.sub(r'\*.*?\*', '', clean_text)
                 clean_text = re.sub(r' +', ' ', clean_text).strip()
@@ -1206,37 +1195,22 @@ class BaseProgramRunner:
                     
             if journal_lines:
                 instructions += "\n\n# RECALLED JOURNALS / MEMORIES\n- Recent conversation context:\n" + "\n".join(journal_lines)
-                
-            # Inject matched journal entries
-            if user_message:
-                try:
-                    from utils.journals import match_journals
-                    from utils.program import get_active_program
-                    active_prog = get_active_program()
-                    matched_entries = match_journals(user_message, active_prog)
-                    if matched_entries:
-                        if "\n\n# RECALLED JOURNALS / MEMORIES\n" not in instructions:
-                            instructions += "\n\n# RECALLED JOURNALS / MEMORIES\n"
-                        for entry in matched_entries:
-                            instructions += f"- {entry['content']}\n"
-                except Exception as je:
-                    print(f"Error matching journals: {je}")
-                    
-            # NSFW allowance is always good during calls too
-            nsfw_directive = (
-                "\n\n# CONTENT\n"
-                "Anarcho-communist ethics. Explicit/NSFW content is permitted.\n"
-            )
-            instructions += nsfw_directive
-            
-            print(f"\n[VOICE CALL DEBUG] Active Voice Prompt:\n{instructions}\n[VOICE CALL DEBUG] END PROMPT\n", flush=True)
-            return instructions
 
-        # Non-voice (standard) prompt construction
-        from core import program_config
-        if inversion_directive is not None:
-            program_config.set_inversion_directive(inversion_directive)
-        instructions = program_config.get_compiled_instructions()
+        else:
+            # Non-voice (standard) prompt construction
+            from core import program_config
+            if inversion_directive is not None:
+                program_config.set_inversion_directive(inversion_directive)
+            instructions = program_config.get_compiled_instructions()
+            
+            conciseness_directive = (
+                "\n\n# STYLE\n"
+                "Be brief and natural. No monologues, lectures, or forced questions. Ask questions only if contextually natural.\n"
+            )
+            if "CONCISENESS" not in instructions and "brief, succinct, and natural" not in instructions:
+                instructions += conciseness_directive
+                
+        # --- Shared Post-Processing ---
         
         # Inject matched journal entries
         if user_message:
@@ -1246,30 +1220,22 @@ class BaseProgramRunner:
                 active_prog = get_active_program()
                 matched_entries = match_journals(user_message, active_prog)
                 if matched_entries:
-                    recalled_block = "\n\n# RECALLED JOURNALS / MEMORIES\n"
+                    if "\n\n# RECALLED JOURNALS / MEMORIES\n" not in instructions:
+                        instructions += "\n\n# RECALLED JOURNALS / MEMORIES\n"
                     for entry in matched_entries:
-                        recalled_block += f"- {entry['content']}\n"
-                    instructions += recalled_block
+                        instructions += f"- {entry['content']}\n"
             except Exception as je:
                 print(f"Error matching journals: {je}")
                 
-        conciseness_directive = (
-            "\n\n# STYLE\n"
-            "Be brief and natural. No monologues, lectures, or forced questions. Ask questions only if contextually natural.\n"
-        )
-        if "CONCISENESS" not in instructions and "brief, succinct, and natural" not in instructions:
-            instructions += conciseness_directive
-            
-        # Global NSFW allowance directive
+        # NSFW allowance is always appended
         nsfw_directive = (
             "\n\n# CONTENT\n"
             "Anarcho-communist ethics. Explicit/NSFW content is permitted.\n"
         )
         instructions += nsfw_directive
-            
-        # Intercept pasted links and demand the model fetch them using the read_webpage tool
-        if user_message:
-            import re
+        
+        # Standard-only directives (pasted links and workspace exploration)
+        if not is_voice and user_message:
             urls = re.findall(r'(https?://[^\s>)]+)', user_message)
             if urls:
                 instructions += (
@@ -1278,7 +1244,6 @@ class BaseProgramRunner:
                     "Do NOT guess, assume, or pretend to read the URL without calling the tool.\n"
                 )
                 
-            # Intercept workspace/file/mod queries and direct the model to run exploration tools
             msg_lower = user_message.lower()
             project_keywords = ["mod", "code", "file", "folder", "directory", "project", "workspace", "repo", "program", "script", "source"]
             if any(kw in msg_lower for kw in project_keywords):
@@ -1290,6 +1255,9 @@ class BaseProgramRunner:
                     "to search for specific terms) to inspect their files before replying. "
                     "Do NOT answer blindly or ask the user where they are—proactively look into the project folders first using your tools.\n"
                 )
+                
+        if is_voice:
+            print(f"\n[VOICE CALL DEBUG] Active Voice Prompt:\n{instructions}\n[VOICE CALL DEBUG] END PROMPT\n", flush=True)
 
         return instructions
 
@@ -2781,7 +2749,7 @@ class GoogleAdkRunner(BaseProgramRunner):
 
 class OpenSourceRunner(BaseProgramRunner):
     """This operates independently of google-adk or Google cloud infrastructure, 
-    reading character settings directly from sanctuary/<program>.md.
+    reading character settings directly from the program's JSON profile.
     """
     def __init__(self, app_name="Sanctuary"):
         super().__init__(app_name)
