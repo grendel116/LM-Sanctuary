@@ -3476,6 +3476,25 @@ def comfy_resolve_workflow():
                     except Exception as je1:
                         print(f"Error parsing ImageWorkflow.json for resolution: {je1}")
             
+            # Read VideoWorkflow.json
+            video_path = os.path.normpath(os.path.join(
+                PROGRAMS_DIR, active_program, "portraits", "VideoWorkflow.json"
+            ))
+            if not os.path.exists(video_path):
+                base_dir = os.path.dirname(os.path.abspath(__file__))
+                video_path = os.path.normpath(os.path.join(
+                    base_dir, "core", "skills", "portrait_generation", "VideoWorkflow.json"
+                ))
+                
+            if os.path.exists(video_path):
+                with open(video_path, "r", encoding="utf-8") as f:
+                    try:
+                        video_wf = json.load(f)
+                        for k, v in video_wf.items():
+                            combined_workflow[f"video_{k}"] = v
+                    except Exception as je2:
+                        print(f"Error parsing VideoWorkflow.json for resolution: {je2}")
+            
             if combined_workflow:
                 workflow_json = json.dumps(combined_workflow)
         except Exception as e:
