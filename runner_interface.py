@@ -2,7 +2,7 @@ import sys
 import os
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from variables import PROGRAMS_DIR, LOCAL_SERVER_URL, DEFAULT_LOCAL_MODEL, DEFAULT_GEMINI_MODEL
+from variables import PROGRAMS_DIR, REMOTE_SERVER_URL, DEFAULT_LOCAL_MODEL, DEFAULT_REMOTE_MODEL, get_remote_server_headers
 from utils.models import is_local_model
 import asyncio
 import base64
@@ -269,10 +269,10 @@ class AdkHistoryAdapter(LocalHistoryAdapter):
         import base64
         raw_messages = []
         for ev in self.adk_session.events:
-            if ev.author == 'voice-call' or getattr(ev, 'compacted', False):
-                continue
             role_str = ev.content.role if ev.content and ev.content.role else ev.author.lower()
-            role = "user" if role_str in ("user", "system-memory") else "assistant"
+            if ev.author in ('voice-call', 'system-memory') or getattr(ev, 'compacted', False) or role_str == 'system-memory':
+                continue
+            role = "user" if role_str == "user" else "assistant"
             
             text = ""
             image_url = None
@@ -342,6 +342,10 @@ class AdkHistoryAdapter(LocalHistoryAdapter):
         from google.adk.events.event import Event
         from google.genai import types
         import time
+        from utils.program_mood import extract_and_strip_mood
+        _, mood_details = extract_and_strip_mood(text)
+        winning_mode = self.runner_obj._winning_mode_cache.get(self.session_id, "")
+        
         if self.adk_session.events:
             last_ev = self.adk_session.events[-1]
             if last_ev.author.lower() in ('companion', self.runner_obj.runner.agent.name.lower(), 'model') and last_ev.invocation_id == invocation_id:
@@ -349,6 +353,8 @@ class AdkHistoryAdapter(LocalHistoryAdapter):
                     for part in last_ev.content.parts:
                         if part.text is not None:
                             part.text = text
+                            object.__setattr__(last_ev, 'inversion_active', winning_mode)
+                            object.__setattr__(last_ev, 'mood', mood_details)
                             return last_ev
                             
         companion_content = types.Content(role="model", parts=[types.Part.from_text(text=text)])
@@ -359,6 +365,8 @@ class AdkHistoryAdapter(LocalHistoryAdapter):
             id=f"companion-{int(time.time())}",
             timestamp=time.time()
         )
+        object.__setattr__(companion_event, 'inversion_active', winning_mode)
+        object.__setattr__(companion_event, 'mood', mood_details)
         self.adk_session.events.append(companion_event)
         return companion_event
 
@@ -487,7 +495,20 @@ class OsHistoryAdapter(LocalHistoryAdapter):
         for msg in history:
             history_text += msg.get('text', '') or ''
             
-        MAX_LOCAL_CONTEXT_CHARS = 24000
+        # Dynamic threshold based on LMS_CONTEXT or LOCAL_CONTEXT_THRESHOLD_CHARS
+        lms_context = os.getenv("LMS_CONTEXT")
+        if lms_context:
+            try:
+                # 1 token is approx 4 characters. Trigger threshold at 75% of context window.
+                MAX_LOCAL_CONTEXT_CHARS = int(int(lms_context) * 0.75 * 4)
+            except Exception:
+                MAX_LOCAL_CONTEXT_CHARS = 16000
+        else:
+            try:
+                MAX_LOCAL_CONTEXT_CHARS = int(os.getenv("LOCAL_CONTEXT_THRESHOLD_CHARS", "16000"))
+            except Exception:
+                MAX_LOCAL_CONTEXT_CHARS = 16000
+                
         if not force and len(history_text) <= MAX_LOCAL_CONTEXT_CHARS:
             return
             
@@ -568,7 +589,7 @@ class OsHistoryAdapter(LocalHistoryAdapter):
         history = self.runner_obj.sessions_history[self.session_id]
         raw_messages = []
         
-        filtered_history = [msg for msg in history if msg.get('role') != 'voice-call' and not msg.get('compacted')]
+        filtered_history = [msg for msg in history if msg.get('role') not in ('voice-call', 'system-memory') and not msg.get('compacted')]
         if not filtered_history:
             return [{"role": "system", "content": sys_inst}]
             
@@ -619,17 +640,25 @@ class OsHistoryAdapter(LocalHistoryAdapter):
 
     def append_assistant_message(self, text: str, tool_calls_data: list, invocation_id: str):
         import time
+        from utils.program_mood import extract_and_strip_mood
+        _, mood_details = extract_and_strip_mood(text)
+        winning_mode = self.runner_obj._winning_mode_cache.get(self.session_id, "")
+        
         history = self.runner_obj.sessions_history[self.session_id]
         if history and history[-1]['role'] == 'companion':
             history[-1]['text'] = text
             history[-1]['tool_calls'] = tool_calls_data
+            history[-1]['inversion_active'] = winning_mode
+            history[-1]['mood'] = mood_details
             return history[-1]
             
         bot_msg = {
             'role': 'companion',
             'text': text,
             'tool_calls': tool_calls_data,
-            'timestamp': time.time()
+            'timestamp': time.time(),
+            'inversion_active': winning_mode,
+            'mood': mood_details
         }
         history.append(bot_msg)
         return bot_msg
@@ -666,11 +695,17 @@ class OsHistoryAdapter(LocalHistoryAdapter):
 class BaseProgramRunner:
     def __init__(self, app_name="Sanctuary"):
         self.app_name = app_name
+        self._winning_mode_cache = {}
 
     async def _generate_local_summary(self, text_to_summarize: str, active_model: str, prior_memories: list = None) -> str:
-        import httpx
         import os
-        from variables import LOCAL_SERVER_URL
+        # Check if remote model is configured to offload summary generation
+        remote_key = os.getenv("REMOTE_API_KEY")
+        project_id = os.getenv("PROJECT_ID")
+        is_remote_configured = bool(
+            remote_key and remote_key.strip() and remote_key != "your_remote_api_key_here" and
+            project_id and project_id.strip() and project_id != "your_gcp_project_id_here"
+        )
         
         prompt = (
             "You are a memory compaction assistant. Summarize the following new chat history between the User and the Companion. "
@@ -688,6 +723,23 @@ class BaseProgramRunner:
             "SUMMARY:"
         )
         
+        if is_remote_configured:
+            try:
+                from google import genai
+                client = genai.Client(api_key=remote_key)
+                print(f"[COMPACTION] Offloading summary generation to remote model: {DEFAULT_REMOTE_MODEL}", flush=True)
+                response = client.models.generate_content(
+                    model=DEFAULT_REMOTE_MODEL,
+                    contents=prompt,
+                )
+                if response.text:
+                    return response.text.strip()
+            except Exception as e:
+                print(f"[COMPACTION] Error generating remote summary: {e}. Falling back to local/default.", flush=True)
+                
+        # Fallback to local server
+        import httpx
+        
         payload = {
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 0.3,
@@ -699,7 +751,7 @@ class BaseProgramRunner:
             
         try:
             async with httpx.AsyncClient() as client:
-                response = await client.post(LOCAL_SERVER_URL, json=payload, headers={"Content-Type": "application/json"}, timeout=60.0)
+                response = await client.post(REMOTE_SERVER_URL, json=payload, headers=get_remote_server_headers(), timeout=60.0)
                 if response.status_code == 200:
                     res_json = response.json()
                     return res_json['choices'][0]['message']['content'].strip()
@@ -746,8 +798,8 @@ class BaseProgramRunner:
                 except Exception as e:
                     print(f"Error reading project settings in _execute_local_llm_loop: {e}")
 
-            url = LOCAL_SERVER_URL
-            headers = {"Content-Type": "application/json"}
+            url = REMOTE_SERVER_URL
+            headers = get_remote_server_headers()
             payload = {
                 "messages": openai_messages,
                 "temperature": temperature,
@@ -794,13 +846,13 @@ class BaseProgramRunner:
             matches = list(re.finditer(r'\[(\w+)\((.*?)\)\]', bot_response_text))
             
             # Check for dynamic offloading triggers at execution-time
-            gemini_key = os.getenv("GEMINI_API_KEY")
+            remote_key = os.getenv("REMOTE_API_KEY")
             project_id = os.getenv("PROJECT_ID")
-            is_gemini_configured = bool(
-                gemini_key and gemini_key.strip() and gemini_key != "your_gemini_api_key_here" and
+            is_remote_configured = bool(
+                remote_key and remote_key.strip() and remote_key != "your_remote_api_key_here" and
                 project_id and project_id.strip() and project_id != "your_gcp_project_id_here"
             )
-            if is_gemini_configured and matches:
+            if is_remote_configured and matches:
                 # 1. Check for complex tools
                 complex_tools = {
                     "write_file", "replace_file_content", "multi_replace_file_content", 
@@ -1008,53 +1060,58 @@ class BaseProgramRunner:
             if not history:
                 return ""
                 
-            from utils.program_mood import analyze_emotional_state
+            companion_msgs = [msg for msg in history if msg.get('role') == 'companion']
+            if not companion_msgs:
+                return ""
+                
+            recent_msgs = companion_msgs[-6:]
+            last_msg = recent_msgs[-1]
+            last_inversion = last_msg.get('inversion_active', '')
+            
+            if last_inversion:
+                consecutive_count = 0
+                for msg in reversed(recent_msgs):
+                    if msg.get('inversion_active') == last_inversion:
+                        consecutive_count += 1
+                    else:
+                        break
+                if consecutive_count < 5:
+                    return last_inversion
+                else:
+                    return ""
+                    
+            # Counting phase
             counts = {
                 "intimate": 0,
                 "excited": 0,
                 "intense": 0,
                 "sad": 0
             }
-            
             threshold = 5
-            active_inversion = ""
-            inversion_turns_remaining = 0
+            from utils.program_mood import analyze_emotional_state
             
-            # Scan history chronologically to simulate personality state machine
-            for msg in history:
-                if msg.get('role') == 'companion':
-                    mood_details = msg.get('mood')
-                    mood = mood_details.get('name') if isinstance(mood_details, dict) else None
-                    if not mood:
-                        text = msg.get('text', '')
-                        if text:
-                            state = analyze_emotional_state(text)
-                            mood = state.get('name')
-                    
-                    if mood:
-                        if active_inversion:
-                            # Inversion is active, count down the turns
-                            inversion_turns_remaining -= 1
-                            if inversion_turns_remaining <= 0:
-                                # Inversion has worn off, reset counts and clear active state
-                                active_inversion = ""
-                                for k in counts:
-                                    counts[k] = 0
-                        else:
-                            # Count up mood frequency to check against threshold
-                            if mood in counts:
-                                counts[mood] += 1
-                                if counts[mood] >= threshold:
-                                    active_inversion = mood
-                                    inversion_turns_remaining = 5
-                                    
-            return active_inversion
+            for msg in recent_msgs:
+                if msg.get('inversion_active'):
+                    continue
+                mood_details = msg.get('mood')
+                mood = mood_details.get('name') if isinstance(mood_details, dict) else None
+                if not mood:
+                    text = msg.get('text', '')
+                    if text:
+                        state = analyze_emotional_state(text)
+                        mood = state.get('name')
+                if mood in counts:
+                    counts[mood] += 1
+                    if counts[mood] >= threshold:
+                        return mood
+            return ""
         except Exception as e:
             print(f"Error calculating inversion mode: {e}")
         return ""
 
     async def _get_inversion_directive(self, session_id: str) -> str:
         winning_mode = await self._get_inversion_mode(session_id)
+        self._winning_mode_cache[session_id] = winning_mode
         if winning_mode:
             from utils.program import get_active_program
             active_program = get_active_program()
@@ -1261,6 +1318,36 @@ class BaseProgramRunner:
                     "Do NOT answer blindly or ask the user where they are—proactively look into the project folders first using your tools.\n"
                 )
                 
+        # Fetch and inject system-memory summaries
+        system_memories = []
+        if hasattr(self, 'sessions_history'): # OpenSourceRunner
+            history = self.sessions_history.get(session_id, [])
+            for msg in history:
+                if msg.get('role') == 'system-memory' and not msg.get('compacted'):
+                    text = msg.get('text', '').strip()
+                    if text:
+                        clean_text = text.replace("[System Memory of older conversation turns]:", "").strip()
+                        system_memories.append(clean_text)
+        else: # GoogleAdkRunner
+            session_dict = self.runner.session_service.sessions if hasattr(self, 'runner') else None
+            adk_session = None
+            if session_dict and self.app_name in session_dict and 'user' in session_dict[self.app_name]:
+                adk_session = session_dict[self.app_name]['user'].get(session_id)
+                if not adk_session and isinstance(session_id, str) and session_id.endswith('_voice'):
+                    adk_session = session_dict[self.app_name]['user'].get(session_id[:-6])
+            if adk_session and adk_session.events:
+                for ev in adk_session.events:
+                    if not getattr(ev, 'compacted', False) and (ev.author == 'system-memory' or (ev.content and ev.content.role == 'system-memory')):
+                        text = ""
+                        if ev.content and ev.content.parts:
+                            text = "".join(part.text for part in ev.content.parts if part.text)
+                        if text.strip():
+                            clean_text = text.replace("[System Memory of older conversation turns]:", "").strip()
+                            system_memories.append(clean_text)
+                            
+        if system_memories:
+            instructions += f"\n\n# CONVERSATION MEMORY ARCHIVE\nThe following is a summary of older conversation turns from earlier in this chat session:\n" + "\n---\n".join(system_memories) + "\n"
+
         if is_voice:
             print(f"\n[VOICE CALL DEBUG] Active Voice Prompt:\n{instructions}\n[VOICE CALL DEBUG] END PROMPT\n", flush=True)
 
@@ -1352,8 +1439,20 @@ class GoogleAdkRunner(BaseProgramRunner):
         for ev in adk_session.events:
             history_text += self._get_event_text_helper(ev)
             
-        # Threshold: 24000 characters (~6,000 tokens)
-        MAX_LOCAL_CONTEXT_CHARS = 24000
+        # Dynamic threshold based on LMS_CONTEXT or LOCAL_CONTEXT_THRESHOLD_CHARS
+        lms_context = os.getenv("LMS_CONTEXT")
+        if lms_context:
+            try:
+                # 1 token is approx 4 characters. Trigger threshold at 75% of context window.
+                MAX_LOCAL_CONTEXT_CHARS = int(int(lms_context) * 0.75 * 4)
+            except Exception:
+                MAX_LOCAL_CONTEXT_CHARS = 16000
+        else:
+            try:
+                MAX_LOCAL_CONTEXT_CHARS = int(os.getenv("LOCAL_CONTEXT_THRESHOLD_CHARS", "16000"))
+            except Exception:
+                MAX_LOCAL_CONTEXT_CHARS = 16000
+                
         if not force and len(history_text) <= MAX_LOCAL_CONTEXT_CHARS:
             return
             
@@ -1490,7 +1589,9 @@ class GoogleAdkRunner(BaseProgramRunner):
                         'id': ev.id,
                         'timestamp': ev.timestamp,
                         'content': sanitize_for_json(content_dict) if content_dict else None,
-                        'compacted': getattr(ev, 'compacted', False)
+                        'compacted': getattr(ev, 'compacted', False),
+                        'inversion_active': getattr(ev, 'inversion_active', ''),
+                        'mood': getattr(ev, 'mood', None)
                     })
                 with open(self._get_session_path(session_id), "w", encoding="utf-8") as f:
                     json.dump(serialized_events, f, indent=2, ensure_ascii=False)
@@ -1518,6 +1619,8 @@ class GoogleAdkRunner(BaseProgramRunner):
                     timestamp=d['timestamp']
                 )
                 object.__setattr__(ev, 'compacted', d.get('compacted', False))
+                object.__setattr__(ev, 'inversion_active', d.get('inversion_active', ''))
+                object.__setattr__(ev, 'mood', d.get('mood', None))
                 events.append(ev)
             
             session = Session(
@@ -1583,7 +1686,7 @@ class GoogleAdkRunner(BaseProgramRunner):
                 self._save_session_to_disk(session_id)
             
         # Delete from memories.json vector database
-        from core.program_config import get_active_program
+        from utils.program import get_active_program
         active_program = get_active_program()
         base_dir = os.path.dirname(os.path.abspath(__file__))
         memories_path = os.path.join(base_dir, "core", "programs", active_program, "memories.json")
@@ -1764,10 +1867,19 @@ class GoogleAdkRunner(BaseProgramRunner):
                         'text': '',
                         'tool_calls': [],
                         'timestamp': ev.timestamp,
-                        'compacted': compacted
+                        'compacted': compacted,
+                        'inversion_active': getattr(ev, 'inversion_active', ''),
+                        'mood': getattr(ev, 'mood', None)
                     }
                     current_companion_thoughts = []
                     current_companion_texts = []
+                else:
+                    inv_active = getattr(ev, 'inversion_active', '')
+                    if inv_active:
+                        current_companion_msg['inversion_active'] = inv_active
+                    ev_mood = getattr(ev, 'mood', None)
+                    if ev_mood:
+                        current_companion_msg['mood'] = ev_mood
                 
                 if compacted:
                     current_companion_msg['compacted'] = True
@@ -1811,10 +1923,19 @@ class GoogleAdkRunner(BaseProgramRunner):
                         'role': 'companion',
                         'text': '',
                         'tool_calls': [],
-                        'compacted': compacted
+                        'compacted': compacted,
+                        'inversion_active': getattr(ev, 'inversion_active', ''),
+                        'mood': getattr(ev, 'mood', None)
                     }
                     current_companion_thoughts = []
                     current_companion_texts = []
+                else:
+                    inv_active = getattr(ev, 'inversion_active', '')
+                    if inv_active:
+                        current_companion_msg['inversion_active'] = inv_active
+                    ev_mood = getattr(ev, 'mood', None)
+                    if ev_mood:
+                        current_companion_msg['mood'] = ev_mood
                 if compacted:
                     current_companion_msg['compacted'] = True
                 if ev.content and ev.content.parts:
@@ -1836,20 +1957,50 @@ class GoogleAdkRunner(BaseProgramRunner):
             )
             chat_history.append(current_companion_msg)
             
+        companion_msgs = [msg for msg in chat_history if msg.get('role') == 'companion']
+        recent_companion_msgs = companion_msgs[-5:] if len(companion_msgs) > 5 else companion_msgs
+        recent_timestamps = {msg.get('timestamp') for msg in recent_companion_msgs}
+
         from utils.program_mood import extract_and_strip_mood
+        updated_any = False
         for msg in chat_history:
             if msg.get('role') == 'companion':
+                if msg.get('mood'):
+                    continue
                 m_text = msg.get('text', '')
                 if m_text:
-                    clean_text, mood_details = extract_and_strip_mood(m_text)
-                    msg['text'] = clean_text
-                    msg['mood'] = mood_details
+                    if msg.get('timestamp') in recent_timestamps:
+                        clean_text, mood_details = extract_and_strip_mood(m_text)
+                        msg['text'] = clean_text
+                        msg['mood'] = mood_details
+                        # Also cache the classified mood back onto the Event in memory
+                        if adk_session:
+                            for ev in adk_session.events:
+                                if ev.author.lower() in ('companion', self.runner.agent.name.lower(), 'model') and ev.timestamp == msg.get('timestamp'):
+                                    object.__setattr__(ev, 'mood', mood_details)
+                                    updated_any = True
+                                    break
+                    else:
+                        msg['mood'] = {
+                            "name": "calm",
+                            "color": "#85b9eb",
+                            "glow": "rgba(133, 185, 235, 0.9)",
+                            "speed": "2.00s",
+                            "intensity": 0.0
+                        }
+        if updated_any:
+            self._save_session_to_disk(session_id)
+
         return chat_history
 
     async def _execute_runner_and_collect(self, session_id, content):
         thoughts = []
         texts = []
         tool_calls = []
+        
+        session_dict = self.runner.session_service.sessions
+        adk_session = session_dict.get(self.app_name, {}).get("user", {}).get(session_id, None)
+        events_before_count = len(adk_session.events) if adk_session else 0
         
         old_config = self.runner.agent.generate_content_config
         is_voice = isinstance(session_id, str) and (session_id.endswith('_voice') or getattr(self, 'session_id', '').endswith('_voice'))
@@ -1921,19 +2072,24 @@ class GoogleAdkRunner(BaseProgramRunner):
         if is_voice:
             full_text = strip_narration(full_text)
         
-        # Update session events in memory to reflect the fixed text
-        session_dict = self.runner.session_service.sessions
-        adk_session = session_dict.get(self.app_name, {}).get("user", {}).get(session_id, None)
-        if adk_session and adk_session.events:
-            for ev in reversed(adk_session.events):
+        # Update session events in memory to reflect the fixed text, winning_mode and mood
+        if adk_session:
+            new_events = adk_session.events[events_before_count:]
+            winning_mode = self._winning_mode_cache.get(session_id, "")
+            
+            from utils.program_mood import extract_and_strip_mood
+            _, mood_details = extract_and_strip_mood(full_text)
+            
+            for ev in new_events:
                 if ev.author.lower() in ('companion', self.runner.agent.name.lower(), 'model'):
+                    object.__setattr__(ev, 'inversion_active', winning_mode)
+                    object.__setattr__(ev, 'mood', mood_details)
                     if ev.content and ev.content.parts:
                         for part in ev.content.parts:
                             if part.text:
                                 part.text = self._ensure_images_are_embedded(part.text)
                                 if is_voice:
                                     part.text = strip_narration(part.text)
-                        break
         return full_text, tool_calls
 
     async def run_async(self, session_id: str, new_message_text: str, image_data: str = None, image_mime: str = None, model: str = None, media_path: str = None) -> tuple:
@@ -1948,26 +2104,16 @@ class GoogleAdkRunner(BaseProgramRunner):
             
         adk_session = session_dict.get(self.app_name, {}).get(user_id, {}).get(session_id, None)
         
-        # Temporarily filter out voice-call and compacted events, and map system-memory role to user
+        # Temporarily filter out voice-call, compacted, and system-memory events
         voice_events = []
         compacted_events = []
         system_memory_events = []
         if adk_session and adk_session.events:
             voice_events = [ev for ev in adk_session.events if ev.author == 'voice-call']
             compacted_events = [ev for ev in adk_session.events if getattr(ev, 'compacted', False)]
+            system_memory_events = [ev for ev in adk_session.events if ev.author == 'system-memory' or (ev.content and ev.content.role == 'system-memory')]
             
-            # Map system-memory to user and keep track of it
-            for ev in adk_session.events:
-                if ev.author == 'system-memory' or (ev.content and ev.content.role == 'system-memory'):
-                    orig_author = ev.author
-                    orig_role = ev.content.role if ev.content else None
-                    system_memory_events.append((ev, orig_author, orig_role))
-                    
-                    ev.author = 'user'
-                    if ev.content:
-                        ev.content.role = 'user'
-            
-            adk_session.events = [ev for ev in adk_session.events if ev.author != 'voice-call' and not getattr(ev, 'compacted', False)]
+            adk_session.events = [ev for ev in adk_session.events if ev.author != 'voice-call' and not getattr(ev, 'compacted', False) and ev.author != 'system-memory' and not (ev.content and ev.content.role == 'system-memory')]
 
         try:
             return await self._run_async_internal(
@@ -1979,14 +2125,8 @@ class GoogleAdkRunner(BaseProgramRunner):
                 media_path=media_path
             )
         finally:
-            # Restore system-memory roles
-            for ev, orig_author, orig_role in system_memory_events:
-                ev.author = orig_author
-                if ev.content and orig_role:
-                    ev.content.role = orig_role
-                    
             restored = False
-            if adk_session and (voice_events or compacted_events):
+            if adk_session and (voice_events or compacted_events or system_memory_events):
                 existing_ids = {ev.id for ev in adk_session.events}
                 for ev in voice_events:
                     if ev.id not in existing_ids:
@@ -1996,14 +2136,38 @@ class GoogleAdkRunner(BaseProgramRunner):
                     if ev.id not in existing_ids:
                         adk_session.events.append(ev)
                         restored = True
+                for ev in system_memory_events:
+                    if ev.id not in existing_ids:
+                        adk_session.events.append(ev)
+                        restored = True
                 if restored:
                     adk_session.events.sort(key=lambda x: x.timestamp if getattr(x, 'timestamp', None) is not None else 0)
             
             # Save to disk to ensure restored system-memory roles and voice/compacted events are correctly serialized
-            if adk_session and (system_memory_events or restored):
+            if adk_session and restored:
                 self._save_session_to_disk(session_id)
 
     async def _run_async_internal(self, session_id: str, new_message_text: str, image_data: str = None, image_mime: str = None, model: str = None, media_path: str = None) -> tuple:
+        # Check routing offload commands unconditionally first
+        remote_key = os.getenv("REMOTE_API_KEY")
+        project_id = os.getenv("PROJECT_ID")
+        is_remote_configured = bool(
+            remote_key and remote_key.strip() and remote_key != "your_remote_api_key_here" and
+            project_id and project_id.strip() and project_id != "your_gcp_project_id_here"
+        )
+        
+        offload = False
+        if is_remote_configured and new_message_text:
+            clean_msg = new_message_text.strip()
+            if clean_msg.startswith('/offload') or clean_msg.startswith('/cloud'):
+                offload = True
+                if clean_msg.startswith('/offload'):
+                    new_message_text = clean_msg[len('/offload'):].strip()
+                else:
+                    new_message_text = clean_msg[len('/cloud'):].strip()
+                model = DEFAULT_REMOTE_MODEL
+                print(f"[OFFLOAD] Routing to remote model: {model}", flush=True)
+
         rag_context = _get_rag_context(new_message_text)
         memory_context = _get_memory_context(new_message_text)
         inversion_directive = await self._get_inversion_directive(session_id)
@@ -2031,35 +2195,16 @@ class GoogleAdkRunner(BaseProgramRunner):
         
         # Determine if we should perform hybrid background offloading when a local model is chosen
         if _is_local_model(model):
-            gemini_key = os.getenv("GEMINI_API_KEY")
-            project_id = os.getenv("PROJECT_ID")
-            is_gemini_configured = bool(
-                gemini_key and gemini_key.strip() and gemini_key != "your_gemini_api_key_here" and
-                project_id and project_id.strip() and project_id != "your_gcp_project_id_here"
-            )
-            
-            # 1. Compact locally if chat history is too long
-            await self._compact_and_vectorize_session_history(session_id, adk_session, model)
-            
-            if is_gemini_configured:
+            if is_remote_configured:
                 # 2. Check routing offload criteria
-                offload = False
+                auto_offload = False
                 
-                # Explicit commands: /offload or /cloud
-                clean_msg = new_message_text.strip() if new_message_text else ""
-                if clean_msg.startswith('/offload') or clean_msg.startswith('/cloud'):
-                    offload = True
-                    if clean_msg.startswith('/offload'):
-                        new_message_text = clean_msg[len('/offload'):].strip()
-                    else:
-                        new_message_text = clean_msg[len('/cloud'):].strip()
-                        
                 # Unsupported media type
                 if media_path:
                     import mimetypes
                     mime_type, _ = mimetypes.guess_type(media_path)
                     if mime_type and not mime_type.startswith('image/'):
-                        offload = True
+                        auto_offload = True
                         print(f"[OFFLOAD] Routing to remote model due to unsupported local media type: {mime_type}", flush=True)
                         
                 # Context limit
@@ -2069,11 +2214,11 @@ class GoogleAdkRunner(BaseProgramRunner):
                 
                 total_chars = len(history_text) + len(new_message_text or "") + len(rag_context or "")
                 if total_chars > 24000:
-                    offload = True
+                    auto_offload = True
                     print(f"[OFFLOAD] Routing to remote model due to context size limit ({total_chars} chars)", flush=True)
                     
-                if offload:
-                    model = DEFAULT_GEMINI_MODEL
+                if auto_offload:
+                    model = DEFAULT_REMOTE_MODEL
                     print(f"[OFFLOAD] Offloading query execution to remote model: {model}", flush=True)
                     self._reload_config(session_id, model, inversion_directive, rag_context, memory_context, user_message=new_message_text)
 
@@ -2086,7 +2231,8 @@ class GoogleAdkRunner(BaseProgramRunner):
             try:
                 if media_path.startswith('/images/'):
                     rel_path = media_path[len('/images/'):]
-                    active_program = os.getenv("ACTIVE_PROGRAM", "sebile")
+                    from utils.program import get_active_program
+                    active_program = get_active_program()
                     local_file_path = os.path.normpath(os.path.join('core', 'programs', active_program, rel_path))
                     
                     if os.path.exists(local_file_path):
@@ -2145,7 +2291,7 @@ class GoogleAdkRunner(BaseProgramRunner):
             
             adapter = AdkHistoryAdapter(self, session_id, adk_session, user_event)
             try:
-                return await self._execute_local_llm_loop(
+                res = await self._execute_local_llm_loop(
                     session_id=session_id,
                     adapter=adapter,
                     model=model,
@@ -2155,13 +2301,15 @@ class GoogleAdkRunner(BaseProgramRunner):
                     new_message_text=new_message_text,
                     invocation_id=invocation_id
                 )
+                asyncio.create_task(self._compact_and_vectorize_session_history(session_id, adk_session, model))
+                return res
             except LocalOffloadTrigger as trigger_exc:
                 print(f"[OFFLOAD] Caught LocalOffloadTrigger: {trigger_exc.reason}. Rolling back local turn and offloading to cloud.", flush=True)
                 # Rollback current assistant events matching this invocation_id
                 adk_session.events = [ev for ev in adk_session.events if ev.invocation_id != invocation_id]
                 
-                # Switch to DEFAULT_GEMINI_MODEL and recursively execute run_async
-                model = DEFAULT_GEMINI_MODEL
+                # Switch to DEFAULT_REMOTE_MODEL and recursively execute run_async
+                model = DEFAULT_REMOTE_MODEL
                 print(f"[OFFLOAD] Recursively calling run_async with remote model: {model}", flush=True)
                 return await self.run_async(
                     session_id=session_id,
@@ -2240,6 +2388,14 @@ class GoogleAdkRunner(BaseProgramRunner):
             
         orig_event = events[user_event_idx]
         
+        # Check routing offload commands unconditionally first
+        remote_key = os.getenv("REMOTE_API_KEY")
+        project_id = os.getenv("PROJECT_ID")
+        is_remote_configured = bool(
+            remote_key and remote_key.strip() and remote_key != "your_remote_api_key_here" and
+            project_id and project_id.strip() and project_id != "your_gcp_project_id_here"
+        )
+        
         # Get query text for RAG context
         query_text = ""
         if new_text is not None:
@@ -2253,14 +2409,17 @@ class GoogleAdkRunner(BaseProgramRunner):
         if new_text is None:
             new_text = "/cloud " + query_text
             
-        if new_text and (new_text.startswith('/cloud') or new_text.startswith('/offload')):
-            if new_text.startswith('/cloud'):
-                new_text = new_text[len('/cloud'):].strip()
-            else:
-                new_text = new_text[len('/offload'):].strip()
-            model = DEFAULT_GEMINI_MODEL
-            # Update query_text to be clean for configuration and RAG
-            query_text = new_text
+        if is_remote_configured and new_text:
+            clean_msg = new_text.strip()
+            if clean_msg.startswith('/offload') or clean_msg.startswith('/cloud'):
+                if clean_msg.startswith('/offload'):
+                    new_text = clean_msg[len('/offload'):].strip()
+                else:
+                    new_text = clean_msg[len('/cloud'):].strip()
+                model = DEFAULT_REMOTE_MODEL
+                
+        # Update query_text to be clean for configuration and RAG
+        query_text = new_text
             
         rag_context = _get_rag_context(query_text)
         memory_context = _get_memory_context(query_text)
@@ -2324,13 +2483,27 @@ class GoogleAdkRunner(BaseProgramRunner):
             
             # Truncate session events to exclude this user turn and everything after it
             storage_session.events = events[:user_event_idx]
+            
+            # Temporarily filter out voice-call, compacted, and system-memory events in edit_turn
+            orig_events = list(storage_session.events)
+            storage_session.events = [ev for ev in storage_session.events if ev.author != 'voice-call' and not getattr(ev, 'compacted', False) and ev.author != 'system-memory' and not (ev.content and ev.content.role == 'system-memory')]
+            
             self._save_session_to_disk(session_id)
             
-            # Re-run runner
-            res = await self._execute_runner_and_collect(session_id, new_message)
-            
-            # Save to disk after re-run
-            self._save_session_to_disk(session_id)
+            try:
+                # Re-run runner
+                res = await self._execute_runner_and_collect(session_id, new_message)
+            finally:
+                # Restore the filtered events (voice-call, compacted, system-memory)
+                restored = False
+                existing_ids = {ev.id for ev in storage_session.events}
+                for ev in orig_events:
+                    if ev.id not in existing_ids:
+                        storage_session.events.append(ev)
+                        restored = True
+                if restored:
+                    storage_session.events.sort(key=lambda x: x.timestamp if getattr(x, 'timestamp', None) is not None else 0)
+                self._save_session_to_disk(session_id)
             return res
 
     async def delete_turn(self, session_id: str, user_message_index: int) -> bool:
@@ -2381,14 +2554,9 @@ class GoogleAdkRunner(BaseProgramRunner):
         return True
 
     async def delete_message_at(self, session_id: str, role: str, index: int) -> bool:
+        self._load_session_from_disk(session_id)
         session_dict = self.runner.session_service.sessions
         user_id = "user"
-        in_memory = (self.app_name in session_dict and 
-                      user_id in session_dict[self.app_name] and 
-                      session_id in session_dict[self.app_name][user_id])
-        if not in_memory:
-            self._load_session_from_disk(session_id)
-            
         if self.app_name not in session_dict or user_id not in session_dict[self.app_name] or session_id not in session_dict[self.app_name][user_id]:
             return False
             
@@ -2591,6 +2759,12 @@ class GoogleAdkRunner(BaseProgramRunner):
             id=f"appended-{int(time.time())}",
             timestamp=time.time()
         )
+        if role != "user":
+            winning_mode = await self._get_inversion_mode(session_id)
+            from utils.program_mood import extract_and_strip_mood
+            _, mood_details = extract_and_strip_mood(text)
+            object.__setattr__(new_event, 'inversion_active', winning_mode)
+            object.__setattr__(new_event, 'mood', mood_details)
         storage_session.events.append(new_event)
         self._save_session_to_disk(session_id)
         return True
@@ -2675,14 +2849,9 @@ class GoogleAdkRunner(BaseProgramRunner):
         self._save_session_to_disk(dest_id)
         return True
     async def update_message_text(self, session_id: str, role: str, index: int, new_text: str) -> bool:
+        self._load_session_from_disk(session_id)
         session_dict = self.runner.session_service.sessions
         user_id = "user"
-        in_memory = (self.app_name in session_dict and 
-                      user_id in session_dict[self.app_name] and 
-                      session_id in session_dict[self.app_name][user_id])
-        if not in_memory:
-            self._load_session_from_disk(session_id)
-            
         if self.app_name not in session_dict or user_id not in session_dict[self.app_name] or session_id not in session_dict[self.app_name][user_id]:
             return False
             
@@ -2744,8 +2913,12 @@ class GoogleAdkRunner(BaseProgramRunner):
                     target_turn = turn
                     break
             if target_turn:
+                from utils.program_mood import extract_and_strip_mood
+                _, mood_details = extract_and_strip_mood(new_text)
+                
                 first_text_updated = False
                 for ev in target_turn:
+                    object.__setattr__(ev, 'mood', mood_details)
                     if ev.content and ev.content.parts:
                         for part in ev.content.parts:
                             if part.text is not None:
@@ -2773,6 +2946,7 @@ class GoogleAdkRunner(BaseProgramRunner):
                             id=f"companion-{int(time.time())}",
                             timestamp=time.time()
                         )
+                        object.__setattr__(fallback_ev, 'mood', mood_details)
                         events.append(fallback_ev)
                 
                 self._save_session_to_disk(session_id)
@@ -2822,17 +2996,30 @@ class OpenSourceRunner(BaseProgramRunner):
             self._load_session_from_disk(session_id)
         raw_history = self.sessions_history.get(session_id, [])
         
+        companion_msgs = [msg for msg in raw_history if msg.get('role') == 'companion']
+        recent_companion_msgs = companion_msgs[-5:] if len(companion_msgs) > 5 else companion_msgs
+        recent_timestamps = {msg.get('timestamp') for msg in recent_companion_msgs}
+
         from utils.program_mood import extract_and_strip_mood
         updated_any = False
         for msg in raw_history:
             if msg.get('role') == 'companion' and 'mood' not in msg:
                 m_text = msg.get('text', '')
                 if m_text:
-                    clean_text, mood_details = extract_and_strip_mood(m_text)
-                    msg['text'] = clean_text
-                    msg['mood'] = mood_details
-                    updated_any = True
-                    
+                    if msg.get('timestamp') in recent_timestamps:
+                        clean_text, mood_details = extract_and_strip_mood(m_text)
+                        msg['text'] = clean_text
+                        msg['mood'] = mood_details
+                        updated_any = True
+                    else:
+                        msg['mood'] = {
+                            "name": "calm",
+                            "color": "#85b9eb",
+                            "glow": "rgba(133, 185, 235, 0.9)",
+                            "speed": "2.00s",
+                            "intensity": 0.0
+                        }
+                        
         if updated_any:
             self._save_session_to_disk(session_id)
             
@@ -2848,11 +3035,12 @@ class OpenSourceRunner(BaseProgramRunner):
         if session_id not in self.sessions_history:
             self.sessions_history[session_id] = []
             
-        # Temporarily filter out voice-call and compacted messages so they do not leak to the local LLM
+        # Temporarily filter out voice-call, compacted, and system-memory messages
         history = self.sessions_history[session_id]
         voice_msgs = [msg for msg in history if msg.get('role') == 'voice-call']
         compacted_msgs = [msg for msg in history if msg.get('compacted')]
-        self.sessions_history[session_id] = [msg for msg in history if msg.get('role') != 'voice-call' and not msg.get('compacted')]
+        system_memory_msgs = [msg for msg in history if msg.get('role') == 'system-memory']
+        self.sessions_history[session_id] = [msg for msg in history if msg.get('role') not in ('voice-call', 'system-memory') and not msg.get('compacted')]
         
         try:
             return await self._run_async_internal(
@@ -2875,6 +3063,10 @@ class OpenSourceRunner(BaseProgramRunner):
                 if msg.get('timestamp') not in existing_timestamps:
                     current_history.append(msg)
                     restored = True
+            for msg in system_memory_msgs:
+                if msg.get('timestamp') not in existing_timestamps:
+                    current_history.append(msg)
+                    restored = True
             if restored:
                 current_history.sort(key=lambda x: x.get('timestamp', 0) if x.get('timestamp') is not None else 0)
             self._save_session_to_disk(session_id)
@@ -2892,7 +3084,8 @@ class OpenSourceRunner(BaseProgramRunner):
             try:
                 if media_path.startswith('/images/'):
                     rel_path = media_path[len('/images/'):]
-                    active_program = os.getenv("ACTIVE_PROGRAM", "sebile")
+                    from utils.program import get_active_program
+                    active_program = get_active_program()
                     local_file_path = os.path.normpath(os.path.join('core', 'programs', active_program, rel_path))
                     if os.path.exists(local_file_path):
                         import mimetypes
@@ -2920,8 +3113,7 @@ class OpenSourceRunner(BaseProgramRunner):
         inversion_directive = await self._get_inversion_directive(session_id)
         
         adapter = OsHistoryAdapter(self, session_id, file_path_resolved, image_data, image_mime)
-        await adapter.compact_history(model)
-        return await self._execute_local_llm_loop(
+        res = await self._execute_local_llm_loop(
             session_id=session_id,
             adapter=adapter,
             model=model,
@@ -2931,6 +3123,8 @@ class OpenSourceRunner(BaseProgramRunner):
             new_message_text=new_message_text,
             invocation_id=""
         )
+        asyncio.create_task(adapter.compact_history(model))
+        return res
  
     async def edit_turn(self, session_id: str, user_message_index: int, new_text: str = None, model: str = None) -> tuple:
         if session_id not in self.sessions_history:
@@ -3020,7 +3214,7 @@ class OpenSourceRunner(BaseProgramRunner):
                 self._save_session_to_disk(session_id)
                 
         # Delete from memories.json vector database
-        from core.program_config import get_active_program
+        from utils.program import get_active_program
         active_program = get_active_program()
         base_dir = os.path.dirname(os.path.abspath(__file__))
         memories_path = os.path.join(base_dir, "core", "programs", active_program, "memories.json")
@@ -3090,8 +3284,7 @@ class OpenSourceRunner(BaseProgramRunner):
         return True
 
     async def delete_message_at(self, session_id: str, role: str, index: int) -> bool:
-        if session_id not in self.sessions_history:
-            self._load_session_from_disk(session_id)
+        self._load_session_from_disk(session_id)
         if session_id not in self.sessions_history:
             return False
             
@@ -3236,6 +3429,12 @@ class OpenSourceRunner(BaseProgramRunner):
             'tool_calls': [],
             'timestamp': time.time()
         }
+        if role != "user":
+            winning_mode = await self._get_inversion_mode(session_id)
+            from utils.program_mood import extract_and_strip_mood
+            _, mood_details = extract_and_strip_mood(text)
+            new_msg['inversion_active'] = winning_mode
+            new_msg['mood'] = mood_details
         history.append(new_msg)
         self._save_session_to_disk(session_id)
         return True
@@ -3287,8 +3486,7 @@ class OpenSourceRunner(BaseProgramRunner):
         return True
 
     async def update_message_text(self, session_id: str, role: str, index: int, new_text: str) -> bool:
-        if session_id not in self.sessions_history:
-            self._load_session_from_disk(session_id)
+        self._load_session_from_disk(session_id)
         if session_id not in self.sessions_history:
             return False
             
@@ -3310,6 +3508,10 @@ class OpenSourceRunner(BaseProgramRunner):
                 msg_role = 'companion'
             if msg_role == target_role and msg.get('timestamp') == ts:
                 msg['text'] = new_text
+                if target_role == 'companion':
+                    from utils.program_mood import extract_and_strip_mood
+                    _, mood_details = extract_and_strip_mood(new_text)
+                    msg['mood'] = mood_details
                 found = True
                 break
                 

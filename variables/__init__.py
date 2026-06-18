@@ -12,14 +12,28 @@ USER_MD_FILE = os.path.join(VARIABLES_DIR, "user.md")
 USER_PROFILES_DIR = os.path.join(VARIABLES_DIR, "user_profiles")
 
 # Model and server configurations
-DEFAULT_GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.1-flash-lite")
+DEFAULT_REMOTE_MODEL = os.getenv("REMOTE_MODEL", "gemini-3.1-flash-lite")
 DEFAULT_LOCAL_MODEL = "local-lm-studio"
-LOCAL_SERVER_URL = os.getenv("LOCAL_SERVER_URL", "http://127.0.0.1:1234/v1/chat/completions")
+REMOTE_SERVER_URL = os.getenv("REMOTE_SERVER_URL", "http://127.0.0.1:1234/v1/chat/completions")
+REMOTE_API_KEY = os.getenv("REMOTE_API_KEY")
 
-# Dynamically derive models URL from LOCAL_SERVER_URL
+# Populate SDK environment variables dynamically
+if REMOTE_API_KEY:
+    os.environ["GEMINI_API_KEY"] = REMOTE_API_KEY
+    os.environ["OPENAI_API_KEY"] = REMOTE_API_KEY
+    os.environ["ANTHROPIC_API_KEY"] = REMOTE_API_KEY
+    os.environ["DEEPSEEK_API_KEY"] = REMOTE_API_KEY
+
+def get_remote_server_headers():
+    headers = {"Content-Type": "application/json"}
+    if REMOTE_API_KEY:
+        headers["Authorization"] = f"Bearer {REMOTE_API_KEY}"
+    return headers
+
+# Dynamically derive models URL from REMOTE_SERVER_URL
 try:
     from urllib.parse import urlparse
-    _parsed = urlparse(LOCAL_SERVER_URL)
+    _parsed = urlparse(REMOTE_SERVER_URL)
     if _parsed.path.endswith('/chat/completions'):
         _base_path = _parsed.path.rsplit('/chat/completions', 1)[0]
     else:

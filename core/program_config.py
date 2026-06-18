@@ -19,7 +19,7 @@ if PARENT_DIR not in sys.path:
     sys.path.insert(0, PARENT_DIR)
 
 from variables import (
-    USER_MD_FILE, DEFAULT_GEMINI_MODEL, PROGRAMS_DIR, 
+    USER_MD_FILE, DEFAULT_REMOTE_MODEL, PROGRAMS_DIR, 
     USER_PROFILES_DIR
 )
 
@@ -299,7 +299,7 @@ if not sanitized_agent_name or not (sanitized_agent_name[0].isalpha() or sanitiz
 instruction = get_compiled_instructions()
 
 root_program = LlmProgram(
-    model=DEFAULT_GEMINI_MODEL,
+    model=DEFAULT_REMOTE_MODEL,
     name=sanitized_agent_name,
     instruction=instruction,
     tools=[

@@ -1,5 +1,12 @@
 # 👾 THE SANCTUARY
 
+> [!IMPORTANT]
+> **Environment Configuration Updates**:
+> * All previous `GEMINI_API_KEY`, `CLOUD_API_KEY`, and `CLOUD_SERVER_URL` environment variables have been migrated and unified into provider-agnostic `REMOTE_API_KEY` and `REMOTE_SERVER_URL` keys.
+> * The redundant `ACTIVE_PROGRAM` environment variable has been removed from `.env`. The active companion/program is now resolved dynamically from `project_settings.json` as the single source of truth.
+>
+> Please ensure you rename these fields in your local `.env` file to match the updated [.env.example](file:///c:/LLM/LM%20Sanctuary/.env.example) structure.
+
 Welcome to the **Sanctuary**. 
 This is your private computer workspace. 
 Here, you live, code, and chat with AI friends (Companions) directly on your own machine.

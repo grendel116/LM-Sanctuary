@@ -9,7 +9,7 @@ import requests
 from google import genai
 from google.genai import types
 
-_sentiment_cache = {}
+base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 def analyze_sentiment_with_llm(text: str) -> dict:
     """Classifies companion's message text into one of the core emotional states and intensity using the LLM."""
@@ -22,13 +22,10 @@ def analyze_sentiment_with_llm(text: str) -> dict:
             "intensity": 0.0
         }
         
-    if text in _sentiment_cache:
-        return _sentiment_cache[text]
-        
-    api_key = os.getenv("GEMINI_API_KEY")
+    api_key = os.getenv("REMOTE_API_KEY")
     project_id = os.getenv("PROJECT_ID")
-    is_gemini_configured = bool(
-        api_key and api_key.strip() and api_key != "your_gemini_api_key_here" and
+    is_remote_configured = bool(
+        api_key and api_key.strip() and api_key != "your_remote_api_key_here" and
         project_id and project_id.strip() and project_id != "your_gcp_project_id_here"
     )
     
@@ -51,12 +48,12 @@ def analyze_sentiment_with_llm(text: str) -> dict:
         "}"
     )
     
-    if is_gemini_configured:
+    if is_remote_configured:
         try:
-            from variables import DEFAULT_GEMINI_MODEL
+            from variables import DEFAULT_REMOTE_MODEL
             client = genai.Client(api_key=api_key)
             response = client.models.generate_content(
-                model=DEFAULT_GEMINI_MODEL,
+                model=DEFAULT_REMOTE_MODEL,
                 contents=text,
                 config=types.GenerateContentConfig(
                     system_instruction=system_instruction,
@@ -66,12 +63,12 @@ def analyze_sentiment_with_llm(text: str) -> dict:
             )
             classification_json = json.loads(response.text)
         except Exception as e:
-            print(f"[ERROR] Gemini sentiment classification failed: {e}")
+            print(f"[ERROR] Remote sentiment classification failed: {e}")
             
     if not classification_json:
         # Fall back to local LM Studio server
         try:
-            from variables import LOCAL_SERVER_URL
+            from variables import REMOTE_SERVER_URL, get_remote_server_headers
             payload = {
                 "messages": [
                     {"role": "system", "content": system_instruction},
@@ -86,9 +83,9 @@ def analyze_sentiment_with_llm(text: str) -> dict:
                 payload["model"] = target_model
                 
             response = requests.post(
-                LOCAL_SERVER_URL,
+                REMOTE_SERVER_URL,
                 json=payload,
-                headers={"Content-Type": "application/json"},
+                headers=get_remote_server_headers(),
                 timeout=10
             )
             if response.status_code == 200:
@@ -133,7 +130,6 @@ def analyze_sentiment_with_llm(text: str) -> dict:
     speed_seconds = 2.0 - (intensity * 1.4)
     details["speed"] = f"{speed_seconds:.2f}s"
     
-    _sentiment_cache[text] = details
     return details
 
 def extract_and_strip_mood(text: str) -> tuple[str, dict]:
@@ -149,3 +145,4 @@ def extract_and_strip_mood(text: str) -> tuple[str, dict]:
 def analyze_emotional_state(text: str) -> dict:
     """Wrapper returning only the mood dictionary."""
     return analyze_sentiment_with_llm(text)
+

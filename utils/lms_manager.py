@@ -362,11 +362,14 @@ def load_local_model(model_name):
         # Try CLI first if functional
         if check_lms_cli():
             lms_path = get_lms_path()
-            cmd = [lms_path, "load", model_name]
+            cmd = [lms_path, "load", model_name, "--yes"]
             if lms_gpu:
                 cmd.extend(["--gpu", str(lms_gpu)])
             if lms_context:
                 cmd.extend(["--context-length", str(lms_context)])
+            lms_parallel = os.getenv("LMS_PARALLEL")
+            if lms_parallel:
+                cmd.extend(["--parallel", str(lms_parallel)])
             
             import subprocess
             print(f"[lms_manager] Loading model via CLI: {' '.join(cmd)}", flush=True)
