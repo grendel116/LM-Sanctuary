@@ -438,14 +438,12 @@ Recent Conversation History:
 
 The user ({user_display_name}) has been inactive/away for a while.
 Based on the conversation context above, decide how to react proactively.
-You must choose exactly ONE of the following action types:
-1. "thought": A private inner thought or monologue representing your feelings about the silence, the user's absence, or the last topic (1-2 sentences). Format this in character.
-2. "message": A short, casual, concise follow-up text message to check in, continue the conversation, or react to the silence.
+Generate a private inner thought or monologue representing your feelings about the silence, the user's absence, or the last topic (1-2 sentences). Format this in character.
 
 You must return a valid JSON object matching the following schema:
 {{
-  "type": "thought" | "message",
-  "content": "the actual thought or message text"
+  "type": "thought",
+  "content": "the actual thought text"
 }}
 """
 
@@ -524,20 +522,12 @@ You must return a valid JSON object matching the following schema:
             action_type = "thought"
             content = raw_response
             
-        if action_type == "message":
-            # Append message to history
-            append_companion_message_to_session(runner, session_id, content)
-            return jsonify({
-                'status': 'success',
-                'type': 'message',
-                'content': content
-            })
-        else: # thought
-            return jsonify({
-                'status': 'success',
-                'type': 'thought',
-                'content': content
-            })
+        # Force action to be a thought only
+        return jsonify({
+            'status': 'success',
+            'type': 'thought',
+            'content': content
+        })
             
     except Exception as e:
         print(f"Error in proactive_action route: {e}")
