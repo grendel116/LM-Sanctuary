@@ -10,7 +10,8 @@ beautifulsoup4
 requests
 httpx
 Pillow
-fal-client
+numpy
+pyopenssl
 psutil
 markdownify
 

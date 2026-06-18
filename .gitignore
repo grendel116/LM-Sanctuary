@@ -11,6 +11,7 @@ variables/project_settings.json
 backups/
 scratch/
 reports/
+certs/
 
 # Ignore all runtime and user variables except code dependencies, template examples, and default builder profile
 variables/*

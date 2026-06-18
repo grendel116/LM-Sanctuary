@@ -37,9 +37,10 @@ def check_lms_cli():
     try:
         lms_path = get_lms_path()
         import subprocess
-        res = subprocess.run([lms_path, "--version"], capture_output=True, text=True, encoding='utf-8', errors='ignore', shell=False)
+        res = subprocess.run([lms_path, "--version"], capture_output=True, text=True, encoding='utf-8', errors='ignore', shell=False, timeout=1.5)
         _lms_cli_cached = (res.returncode == 0)
-    except Exception:
+    except Exception as e:
+        print(f"[lms_manager] CLI check exception: {e}")
         _lms_cli_cached = False
     _lms_cli_cache_time = now
     return _lms_cli_cached
