@@ -299,8 +299,8 @@ def is_amd_gpu():
         pass
     return False
 
-def start_comfy_daemon():
-    """Starts the headless ComfyUI server daemon in the background."""
+def start_comfy_server():
+    """Starts the headless ComfyUI server in the background."""
     if check_comfy_running():
         return True, "ComfyUI is already running."
         
@@ -379,7 +379,7 @@ def start_comfy_daemon():
                 
         return False, "ComfyUI server did not start in time."
     except Exception as e:
-        return False, f"Failed to start ComfyUI daemon: {e}"
+        return False, f"Failed to start ComfyUI server: {e}"
 
 # Custom Node Database
 CUSTOM_NODE_DB_URL = "https://raw.githubusercontent.com/ltdrdata/ComfyUI-Manager/main/custom-node-list.json"
@@ -632,24 +632,46 @@ def trigger_dependency_resolution(workflow_json_str):
     thread.start()
     return True, "Dependency resolution started in the background."
 
-def stop_comfy_daemon():
-    """Stops the ComfyUI server daemon by terminating its process."""
+def stop_comfy_server():
+    """Stops the ComfyUI server by terminating its process."""
     import psutil
     try:
         terminated_any = False
-        # 1. Search by command line contents
+        
+        # 1. Search by active port using netstat (highly robust on Windows)
+        if os.name == 'nt':
+            try:
+                import subprocess
+                output = subprocess.check_output("netstat -ano", shell=True).decode('utf-8', errors='ignore')
+                for line in output.splitlines():
+                    if f":{COMFYUI_PORT}" in line and "LISTENING" in line:
+                        parts = line.strip().split()
+                        if len(parts) >= 5:
+                            pid = int(parts[-1])
+                            try:
+                                proc = psutil.Process(pid)
+                                proc.terminate()
+                                proc.wait(timeout=2.0)
+                                terminated_any = True
+                            except Exception:
+                                pass
+            except Exception as netstat_err:
+                print(f"[DEBUG] netstat termination failed: {netstat_err}", flush=True)
+
+        # 2. Search by command line contents (less restrictive)
         for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
             try:
                 cmdline = proc.info.get('cmdline') or []
                 cmdline_str = " ".join(cmdline).lower()
-                if "python" in proc.info.get('name', '').lower() and "main.py" in cmdline_str and "comfy" in cmdline_str:
-                    proc.terminate()
-                    proc.wait(timeout=2.0)
-                    terminated_any = True
+                if "python" in proc.info.get('name', '').lower() and "main.py" in cmdline_str:
+                    if "comfy" in cmdline_str or str(COMFYUI_PORT) in cmdline_str:
+                        proc.terminate()
+                        proc.wait(timeout=2.0)
+                        terminated_any = True
             except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.TimeoutExpired):
                 pass
                 
-        # 2. Search by connections (fallback)
+        # 3. Search by connections (fallback)
         for proc in psutil.process_iter(['pid', 'name']):
             try:
                 conns = proc.connections() if hasattr(proc, 'connections') else []
@@ -663,10 +685,17 @@ def stop_comfy_daemon():
                 pass
                 
         if terminated_any:
-            return True, "ComfyUI daemon stopped successfully."
-        return False, "ComfyUI daemon is not running."
+            global _comfy_running_cached
+            _comfy_running_cached = False
+            return True, "ComfyUI server stopped successfully."
+            
+        # If it was not running anyway, return success so the frontend updates cleanly
+        if not check_comfy_running(force_refresh=True):
+            return True, "ComfyUI server is already stopped."
+            
+        return False, "ComfyUI server is not running."
     except Exception as e:
-        return False, f"Failed to stop ComfyUI daemon: {e}"
+        return False, f"Failed to stop ComfyUI server: {e}"
 
 
 # --- Checkpoint Management Functions ---

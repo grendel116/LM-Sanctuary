@@ -12,8 +12,8 @@ active_jobs = {}  # model_name: job_id
 _lms_cli_cached = None
 _lms_cli_cache_time = 0.0
 
-_daemon_status_cached = None
-_daemon_status_cache_time = 0.0
+_lms_server_status_cached = None
+_lms_server_status_cache_time = 0.0
 
 def get_lms_path():
     """Returns the absolute path to the lms executable if it exists, otherwise 'lms'."""
@@ -45,42 +45,42 @@ def check_lms_cli():
     _lms_cli_cache_time = now
     return _lms_cli_cached
 
-def check_daemon_status(force_refresh=False):
-    """Checks if the LM Studio daemon is running and responsive (cached)."""
-    global _daemon_status_cached, _daemon_status_cache_time
+def check_lms_status(force_refresh=False):
+    """Checks if the LM Studio server is running and responsive (cached)."""
+    global _lms_server_status_cached, _lms_server_status_cache_time
     now = time.time()
-    if not force_refresh and _daemon_status_cached is not None and (now - _daemon_status_cache_time < 3.0):
-        return _daemon_status_cached
+    if not force_refresh and _lms_server_status_cached is not None and (now - _lms_server_status_cache_time < 3.0):
+        return _lms_server_status_cached
     try:
         from variables import LOCAL_MODELS_URL
         response = requests.get(LOCAL_MODELS_URL, timeout=0.2)
-        _daemon_status_cached = (response.status_code == 200)
+        _lms_server_status_cached = (response.status_code == 200)
     except Exception:
-        _daemon_status_cached = False
-    _daemon_status_cache_time = now
-    return _daemon_status_cached
+        _lms_server_status_cached = False
+    _lms_server_status_cache_time = now
+    return _lms_server_status_cached
 
-def start_lms_daemon():
-    """Starts the lms server daemon in the background."""
+def start_lms_server():
+    """Starts the lms server in the background."""
     try:
         lms_path = get_lms_path()
         import subprocess
         subprocess.Popen([lms_path, "server", "start"], shell=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        return True, "LM Studio daemon start initiated."
+        return True, "LM Studio server start initiated."
     except Exception as e:
-        return False, f"Failed to start LM Studio daemon: {e}"
+        return False, f"Failed to start LM Studio server: {e}"
 
-def stop_lms_daemon():
-    """Stops the LM Studio daemon."""
+def stop_lms_server():
+    """Stops the LM Studio server."""
     try:
         lms_path = get_lms_path()
         import subprocess
         process = subprocess.run([lms_path, "server", "stop"], shell=False, capture_output=True, text=True, encoding='utf-8', errors='ignore')
         if process.returncode == 0:
-            return True, "LM Studio daemon stopped successfully."
-        return False, f"Failed to stop LM Studio daemon: {process.stderr}"
+            return True, "LM Studio server stopped successfully."
+        return False, f"Failed to stop LM Studio server: {process.stderr}"
     except Exception as e:
-        return False, f"Failed to stop LM Studio daemon: {e}"
+        return False, f"Failed to stop LM Studio server: {e}"
 
 def extract_quantization_tag(filename):
     """Parses a quantization tag from a GGUF filename."""
@@ -191,9 +191,9 @@ def get_huggingface_repo_files(repo_id):
 def trigger_download(model_name, quantization=None):
     """Initiates a download job via LM Studio REST API."""
     try:
-        # Start daemon if offline
-        if not check_daemon_status():
-            start_lms_daemon()
+        # Start server if offline
+        if not check_lms_status():
+            start_lms_server()
 
         repo_id = model_name
         if "@" in repo_id and not quantization:
@@ -301,7 +301,7 @@ def list_local_models(force_refresh=False):
         
     models = []
     # If online, use native REST API to list models
-    if check_daemon_status(force_refresh=force_refresh):
+    if check_lms_status(force_refresh=force_refresh):
         try:
             url = "http://localhost:1234/api/v1/models"
             resp = requests.get(url, timeout=0.3)
@@ -353,8 +353,8 @@ def _update_env_model_name(model_name):
 def load_local_model(model_name):
     """Loads a model into memory via CLI or native REST API with GPU offload support."""
     try:
-        if not check_daemon_status():
-            start_lms_daemon()
+        if not check_lms_status():
+            start_lms_server()
 
         lms_context = os.getenv("LMS_CONTEXT")
         lms_gpu = os.getenv("LMS_GPU")

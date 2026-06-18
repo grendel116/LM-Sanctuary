@@ -4446,7 +4446,7 @@ function showOnboardingCard() {
             } else if (!connectionStatus.lm_studio_online) {
                 localContent = `
                     <p class="option-desc" style="font-size: 0.8rem; margin: 8px 0 15px 0;">LM Studio is installed, but the local engine is offline. Start the service or search Hugging Face to download a model.</p>
-                    <button onclick="startLmsDaemon(this)" class="onboarding-btn" style="width: 100%; font-size: 0.85rem; padding: 10px; margin-bottom: 15px;">Start Local Server</button>
+                    <button onclick="startLmsServer(this)" class="onboarding-btn" style="width: 100%; font-size: 0.85rem; padding: 10px; margin-bottom: 15px;">Start Local Server</button>
                     
                     <div style="border-top: 1px solid var(--border-color); padding-top: 15px;">
                         <label style="font-size: 0.72rem; color: var(--text-muted); font-weight: 500;">Search Hugging Face (GGUF)</label>
@@ -4651,7 +4651,7 @@ function checkModalStatus() {
         }
 
         /* ==========================================================================
-           IV. 3. DAEMON CONTROL MIDDLEWARE
+           IV. 3. SERVER CONTROL MIDDLEWARE
            ========================================================================== */
 
         // --- installLMStudio ---
@@ -4686,7 +4686,7 @@ function pollInstallStatus(btn) {
                     const data = await res.json();
                     if (data.installed) {
                         clearInterval(interval);
-                        await startLmsDaemon();
+                        await startLmsServer();
                         await initializeModelSelect();
                         if (document.getElementById('onboarding-container')) {
                             showOnboardingCard();
@@ -4699,8 +4699,8 @@ function pollInstallStatus(btn) {
             }, 3000);
         }
 
-        // --- startLmsDaemon ---
-async function startLmsDaemon(btn) {
+        // --- startLmsServer ---
+async function startLmsServer(btn) {
             if (btn) {
                 btn.disabled = true;
                 btn.innerHTML = `<span class="animate-spin" style="display: inline-block; width: 14px; height: 14px; border: 2px solid currentColor; border-top-color: transparent; border-radius: 50%; margin-right: 8px; vertical-align: middle;"></span>Starting server...`;
@@ -4729,7 +4729,7 @@ async function startLmsDaemon(btn) {
                             showCustomAlert("Timeout starting server", "LM Studio engine is taking longer than usual to start. Try refreshing manually in a few moments.");
                             if (btn) {
                                 btn.disabled = false;
-                                btn.textContent = "Start Local Server";
+                                  btn.textContent = "Start Local Server";
                             }
                         }
                     } catch (err) {
@@ -4745,8 +4745,8 @@ async function startLmsDaemon(btn) {
             }
         }
 
-        // --- stopLmsDaemon ---
-async function stopLmsDaemon(btn) {
+        // --- stopLmsServer ---
+async function stopLmsServer(btn) {
             if (btn) {
                 btn.disabled = true;
                 btn.innerHTML = `<span class="animate-spin" style="display: inline-block; width: 14px; height: 14px; border: 2px solid currentColor; border-top-color: transparent; border-radius: 50%; margin-right: 8px; vertical-align: middle;"></span>Stopping server...`;
@@ -5558,7 +5558,7 @@ function updateConnectionModalStatus() {
                             <span class="status-badge status-offline">Offline</span>
                         </div>
                         <p class="option-desc" style="font-size: 0.8rem; margin: 8px 0 15px 0;">LM Studio engine is offline. Start local server or search Hugging Face to download a model.</p>
-                        <button onclick="startLmsDaemon(this)" class="onboarding-btn" style="width: 100%; font-size: 0.85rem; padding: 10px; margin-bottom: 15px;">Start Local Server</button>
+                        <button onclick="startLmsServer(this)" class="onboarding-btn" style="width: 100%; font-size: 0.85rem; padding: 10px; margin-bottom: 15px;">Start Local Server</button>
                         
                         <div style="border-top: 1px solid var(--border-color); padding-top: 15px;">
                             <label style="font-size: 0.72rem; color: var(--text-muted); font-weight: 500;">Search Hugging Face (GGUF)</label>
@@ -5577,7 +5577,7 @@ function updateConnectionModalStatus() {
                         </div>
                         <p class="option-desc" style="font-size: 0.8rem; margin: 8px 0 15px 0;">LM Studio local server is online. Load downloaded models via the header selector.</p>
                         <button onclick="checkModalStatus()" class="onboarding-btn" style="width: 100%; font-size: 0.85rem; padding: 10px; margin-top: 10px;">Refresh Connection</button>
-                        <button onclick="stopLmsDaemon(this)" class="onboarding-btn" style="width: 100%; font-size: 0.85rem; padding: 10px; margin-top: 8px;">Stop Server</button>
+                        <button onclick="stopLmsServer(this)" class="onboarding-btn" style="width: 100%; font-size: 0.85rem; padding: 10px; margin-top: 8px;">Stop Server</button>
                         <div id="modal-local-models-list"></div>
                         
                         <div style="border-top: 1px solid var(--border-color); padding-top: 15px; margin-top: 15px;">
@@ -11093,16 +11093,16 @@ function purgeDataBank() {
 // --- checkModalStatus ---
 
 /* ==========================================================================
-           IV. 3. DAEMON CONTROL MIDDLEWARE
+           IV. 3. SERVER CONTROL MIDDLEWARE
            ========================================================================== */
 
         // --- installLMStudio ---
 
 // --- pollInstallStatus ---
 
-// --- startLmsDaemon ---
+// --- startLmsServer ---
 
-// --- stopLmsDaemon ---
+// --- stopLmsServer ---
 
 // --- stopComfyUI ---
 

@@ -119,7 +119,7 @@ async def trigger_auto_journal(history: list, program_id: str, model: str):
     chat_block = "\n".join(formatted_chat)
     
     prompt = (
-        "You are an AI companion's memory consolidation daemon.\n"
+        "You are an AI companion's memory consolidation assistant.\n"
         "Analyze the following conversation segment. If there are any important new details, facts, preferences, promises, or relationship developments "
         f"about {user_name} or {prog_name} that should be remembered long-term, summarize them in 1 to 3 sentences max (written in 3rd person present tense, e.g. '{user_name} mentioned...').\n"
         "Also extract 2 to 5 relevant comma-separated trigger keywords or short phrases (e.g. 'rent, job application, whiskers').\n\n"
@@ -227,7 +227,7 @@ def get_history_from_json(program_id: str, session_id: str) -> list:
         return []
 
 def background_journaling_thread(program_id: str, session_id: str, model: str):
-    """Entrypoint for background thread. Loads history and consolidation daemon."""
+    """Entrypoint for background thread. Loads history and consolidation task."""
     try:
         history = get_history_from_json(program_id, session_id)
         if len(history) > 0 and len(history) % 10 == 0:

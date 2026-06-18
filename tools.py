@@ -1048,7 +1048,7 @@ def apply_comfy_workflow(workflow_path: str, parameters: dict, save_path: str) -
             raise Exception("Did not receive a prompt ID from ComfyUI")
 
         # Poll history endpoint for output
-        for _ in range(120):
+        for _ in range(300):
             history_res = requests.get(f"{comfy_url}/history/{prompt_id}", timeout=10)
             if history_res.status_code == 200:
                 history_data = history_res.json()
@@ -1085,7 +1085,7 @@ def apply_comfy_workflow(workflow_path: str, parameters: dict, save_path: str) -
                                 else:
                                     raise Exception(f"Error downloading image: status {view_res.status_code}")
             time.sleep(1)
-        raise Exception("Image generation timed out on ComfyUI server after 120 seconds.")
+        raise Exception("Image generation timed out on ComfyUI server after 300 seconds.")
     except Exception as e:
         return f"Error executing ComfyUI workflow: {e}"
 
@@ -1106,6 +1106,14 @@ def generate_local_image(prompt: str) -> str:
     import json
     
     def get_install_instructions(reason: str) -> str:
+        from utils.comfy_manager import check_comfy_running
+        if check_comfy_running():
+            return (
+                "### ⚠️ Image Generation Failed (ComfyUI Execution Error)\n\n"
+                "ComfyUI is online, but the image generation workflow encountered an error:\n"
+                f"> **{reason}**\n\n"
+                "Please verify that your models are compatible, check the ComfyUI server logs (`comfy_server.log`) for details, or try again."
+            )
         if "Missing Checkpoint" in reason or "Missing LoRA" in reason or "Missing VAE" in reason:
             return (
                 "### ⚠️ Image Generation Failed (Missing Assets)\n\n"
