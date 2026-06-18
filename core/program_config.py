@@ -202,7 +202,7 @@ def load_dynamic_runtime_context() -> str:
         f"- Current Day: {now.strftime('%A, %B %d, %Y')}\n"
     )
     
-    backend_mode = os.getenv("RUNNER_BACKEND", "google_adk")
+    backend_mode = os.getenv("RUNNER_BACKEND", "opensource")
     env_block = (
         "### SYSTEM ENVIRONMENT CONTEXT\n"
         f"- Active Engine Backend: {backend_mode}\n"

@@ -39,11 +39,8 @@ _cached_active_user = None
 
 def init_runner():
     global runner
-    runner_backend = os.getenv("RUNNER_BACKEND", "google_adk").lower()
-    if runner_backend == "opensource":
-        runner = OpenSourceRunner(app_name="Sanctuary")
-        print(">>> Starting Sanctuary using decoupled OPEN-SOURCE Runner backend!")
-    else:
+    runner_backend = os.getenv("RUNNER_BACKEND", "opensource").lower()
+    if runner_backend == "google_adk":
         try:
             runner = GoogleAdkRunner(app_name="Sanctuary")
             print(">>> Starting Sanctuary using GOOGLE ADK Runner backend!")
@@ -51,6 +48,9 @@ def init_runner():
             print(f">>>> WARNING: Failed to initialize GoogleAdkRunner backend: {e}")
             print(">>>> Falling back to OpenSourceRunner (offline mode) so server can run.")
             runner = OpenSourceRunner(app_name="Sanctuary")
+    else:
+        runner = OpenSourceRunner(app_name="Sanctuary")
+        print(">>> Starting Sanctuary using decoupled OPEN-SOURCE Runner backend!")
 
 @app.before_request
 def check_program_change():
@@ -280,15 +280,7 @@ def program_profile_png(program_id):
     res.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
     return res
 
-@app.route('/profile.svg')
-def profile_svg():
-    from flask import redirect
-    return redirect('/profile.png')
 
-@app.route('/programs/<program_id>/profile.svg')
-def program_profile_svg(program_id):
-    from flask import redirect
-    return redirect(f'/programs/{program_id}/profile.png')
 
 @app.route('/api/programs/profile_picture/save', methods=['POST'])
 @requires_auth
@@ -1698,7 +1690,7 @@ def _perform_gemini_fetch(api_key):
 @requires_auth
 def get_models():
     # Determine the active runner backend
-    runner_backend = os.getenv("RUNNER_BACKEND", "google_adk").lower()
+    runner_backend = os.getenv("RUNNER_BACKEND", "opensource").lower()
     
     # Check if Remote API key and Project ID are validly configured
     remote_key = os.getenv("REMOTE_API_KEY")
@@ -1926,8 +1918,8 @@ def save_config():
         target_key = remote_api_key or existing_key
         target_project = project_id or existing_project
         
-        if not target_key or not target_project:
-            return jsonify({'error': 'GCP Project ID and Remote API Key must both be provided.'}), 400
+        if not target_key:
+            return jsonify({'error': 'Remote API Key must be provided.'}), 400
             
         base_dir = os.path.dirname(os.path.abspath(__file__))
         env_path = os.path.join(base_dir, '.env')
@@ -1941,6 +1933,15 @@ def save_config():
         updated_backend = False
         updated_model = False
         
+        # Dynamically set RUNNER_BACKEND to google_adk only if both project_id and key are supplied.
+        # Otherwise, preserve the current backend or default to opensource.
+        # This keeps the app completely open to other remote OpenAI-compatible LLMs.
+        backend_value = "opensource"
+        if target_project and target_project.strip() and target_project != "your_gcp_project_id_here" and target_key:
+            backend_value = "google_adk"
+        else:
+            backend_value = os.getenv("RUNNER_BACKEND", "opensource").lower()
+        
         for i, line in enumerate(lines):
             stripped = line.strip()
             if stripped.startswith('REMOTE_API_KEY=') and remote_api_key:
@@ -1950,7 +1951,7 @@ def save_config():
                 lines[i] = f"PROJECT_ID={project_id}\n"
                 updated_proj = True
             elif stripped.startswith('RUNNER_BACKEND='):
-                lines[i] = f"RUNNER_BACKEND=google_adk\n"
+                lines[i] = f"RUNNER_BACKEND={backend_value}\n"
                 updated_backend = True
             elif stripped.startswith('REMOTE_MODEL=') and remote_model:
                 lines[i] = f"REMOTE_MODEL={remote_model}\n"
@@ -1974,8 +1975,8 @@ def save_config():
                 lines.append(f"REMOTE_MODEL={remote_model}\n")
             os.environ["REMOTE_MODEL"] = remote_model
         if not updated_backend:
-            lines.append("RUNNER_BACKEND=google_adk\n")
-        os.environ["RUNNER_BACKEND"] = "google_adk"
+            lines.append(f"RUNNER_BACKEND={backend_value}\n")
+        os.environ["RUNNER_BACKEND"] = backend_value
         
         # Invalidate dynamic Gemini models cache
         global _cached_gemini_models
