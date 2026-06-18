@@ -67,6 +67,7 @@ These are the things your companion can do on your computer. By default, before 
 * **Character Accent Palette**: Colors saved in `project_settings.json` that dynamically generates and update themed CSS variables, buttons, highlights, and more.
 * **Idle Thoughts**: Inline monologue bubbles (`.thought-row`) showing a companion's thoughts during inactivity.
 * **Temperature Control**: A dynamic slider in settings to control chat creativity.
+* **Portrait Animation**: Animate companion portraits using a local ComfyUI video workflow, looping in chat and the companion gallery, with deletion support.
 
 ---
 
