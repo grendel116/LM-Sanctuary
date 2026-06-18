@@ -20,6 +20,44 @@ class LocalOffloadTrigger(Exception):
         self.reason = reason
         self.iteration = iteration
 
+def upgrade_legacy_history(legacy_data: list) -> list:
+    """Converts legacy Google ADK event format to simplified message format."""
+    simple_history = []
+    for ev in legacy_data:
+        author = ev.get('author', '').lower()
+        if author == 'user':
+            role = 'user'
+        elif author == 'system-memory':
+            role = 'system-memory'
+        elif author == 'voice-call':
+            role = 'voice-call'
+        else:
+            role = 'companion'
+            
+        parts = ev.get('content', {}).get('parts', []) if ev.get('content') else []
+        text = "".join(part.get('text', '') for part in parts if part.get('text'))
+        
+        image_url = None
+        for part in parts:
+            if part.get('inline_data'):
+                idata = part['inline_data']
+                mime = idata.get('mime_type')
+                data = idata.get('data')
+                if mime and data:
+                    image_url = f"data:{mime};base64,{data}"
+                    break
+                    
+        simple_history.append({
+            'role': role,
+            'text': text,
+            'image_url': image_url,
+            'timestamp': ev.get('timestamp') or time.time(),
+            'compacted': ev.get('compacted', False),
+            'inversion_active': ev.get('inversion_active', ''),
+            'mood': ev.get('mood', None)
+        })
+    return simple_history
+
 def _get_safe_local_path(image_url: str) -> str:
     """Converts an image URL into a local path relative to the workspace,
     supporting subdirectories like 'portraits'.
@@ -1198,11 +1236,13 @@ class BaseProgramRunner:
                 history = self.sessions_history.get(src_session_id, [])
                 if not history:
                     safe_id = "".join(c for c in src_session_id if c.isalnum() or c in "-_")
-                    path = os.path.join(self.sessions_dir, f"{safe_id}_os.json")
+                    path = os.path.join(self.sessions_dir, f"{safe_id}.json")
                     if os.path.exists(path):
                         try:
                             with open(path, "r", encoding="utf-8") as f:
                                 history = json.load(f)
+                            if history and isinstance(history[0], dict) and 'author' in history[0]:
+                                history = upgrade_legacy_history(history)
                         except Exception:
                             pass
                 for msg in history:
@@ -1568,33 +1608,41 @@ class GoogleAdkRunner(BaseProgramRunner):
             if self.app_name in session_dict and user_id in session_dict[self.app_name] and session_id in session_dict[self.app_name][user_id]:
                 storage_session = session_dict[self.app_name][user_id][session_id]
                 
-                def sanitize_for_json(obj):
-                    if isinstance(obj, dict):
-                        return {k: sanitize_for_json(v) for k, v in obj.items()}
-                    elif isinstance(obj, list):
-                        return [sanitize_for_json(x) for x in obj]
-                    elif isinstance(obj, bytes):
-                        try:
-                            return obj.decode('utf-8')
-                        except UnicodeDecodeError:
-                            return base64.b64encode(obj).decode('utf-8')
-                    return obj
-
-                serialized_events = []
+                simple_history = []
                 for ev in storage_session.events:
-                    content_dict = ev.content.model_dump() if ev.content else None
-                    serialized_events.append({
-                        'author': ev.author,
-                        'invocation_id': ev.invocation_id,
-                        'id': ev.id,
-                        'timestamp': ev.timestamp,
-                        'content': sanitize_for_json(content_dict) if content_dict else None,
+                    role = 'user' if ev.author == 'user' else 'companion'
+                    if ev.author == 'system-memory':
+                        role = 'system-memory'
+                    elif ev.author == 'voice-call':
+                        role = 'voice-call'
+                    
+                    text = ""
+                    if ev.content and ev.content.parts:
+                        text = "".join(part.text for part in ev.content.parts if part.text)
+                        
+                    image_url = None
+                    if ev.content and ev.content.parts:
+                        for part in ev.content.parts:
+                            if part.inline_data:
+                                mime = part.inline_data.mime_type
+                                data = part.inline_data.data
+                                if mime and data:
+                                    if isinstance(data, bytes):
+                                        data = base64.b64encode(data).decode('utf-8')
+                                    image_url = f"data:{mime};base64,{data}"
+                                    break
+                                    
+                    simple_history.append({
+                        'role': role,
+                        'text': text,
+                        'image_url': image_url,
+                        'timestamp': ev.timestamp or time.time(),
                         'compacted': getattr(ev, 'compacted', False),
                         'inversion_active': getattr(ev, 'inversion_active', ''),
                         'mood': getattr(ev, 'mood', None)
                     })
                 with open(self._get_session_path(session_id), "w", encoding="utf-8") as f:
-                    json.dump(serialized_events, f, indent=2, ensure_ascii=False)
+                    json.dump(simple_history, f, indent=2, ensure_ascii=False)
         except Exception as e:
             print(f"Error saving session {session_id} to disk: {e}")
 
@@ -1605,24 +1653,56 @@ class GoogleAdkRunner(BaseProgramRunner):
         try:
             from google.adk.sessions.session import Session
             from google.adk.events.event import Event
+            import uuid
+            
             with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
+                simple_history = json.load(f)
             
+            # Check if this is legacy Google ADK format
+            if simple_history and isinstance(simple_history[0], dict) and 'author' in simple_history[0]:
+                # Automatically upgrade it to the new simplified format and write to disk
+                simple_history = upgrade_legacy_history(simple_history)
+                with open(path, "w", encoding="utf-8") as f:
+                    json.dump(simple_history, f, indent=2, ensure_ascii=False)
+                print(f">>> Upgraded legacy Google ADK session file to unified format: {path}")
+
             events = []
-            for d in data:
-                content = types.Content.model_validate(d['content']) if d['content'] else None
+            for msg in simple_history:
+                role = msg.get('role', 'user')
+                author = 'user' if role == 'user' else 'model'
+                if role == 'system-memory':
+                    author = 'system-memory'
+                elif role == 'voice-call':
+                    author = 'voice-call'
+                    
+                text = msg.get('text', '')
+                parts_list = []
+                if text:
+                    parts_list.append(types.Part.from_text(text=text))
+                    
+                image_url = msg.get('image_url')
+                if image_url and image_url.startswith("data:"):
+                    try:
+                        header, data_b64 = image_url.split(",", 1)
+                        mime = header.split(";", 1)[0].split(":", 1)[1]
+                        data_bytes = base64.b64decode(data_b64)
+                        parts_list.append(types.Part.from_bytes(data=data_bytes, mime_type=mime))
+                    except Exception:
+                        pass
+                        
+                content = types.Content(role='user' if role == 'user' else 'model', parts=parts_list)
                 ev = Event(
-                    author=d['author'],
+                    author=author,
                     content=content,
-                    invocation_id=d['invocation_id'],
-                    id=d['id'],
-                    timestamp=d['timestamp']
+                    invocation_id='',
+                    id=f"event-{uuid.uuid4()}",
+                    timestamp=msg.get('timestamp') or time.time()
                 )
-                object.__setattr__(ev, 'compacted', d.get('compacted', False))
-                object.__setattr__(ev, 'inversion_active', d.get('inversion_active', ''))
-                object.__setattr__(ev, 'mood', d.get('mood', None))
+                object.__setattr__(ev, 'compacted', msg.get('compacted', False))
+                object.__setattr__(ev, 'inversion_active', msg.get('inversion_active', ''))
+                object.__setattr__(ev, 'mood', msg.get('mood', None))
                 events.append(ev)
-            
+                
             session = Session(
                 id=session_id,
                 app_name=self.app_name,
@@ -2966,7 +3046,7 @@ class OpenSourceRunner(BaseProgramRunner):
 
     def _get_session_path(self, session_id: str) -> str:
         safe_id = "".join(c for c in session_id if c.isalnum() or c in "-_")
-        return os.path.join(self.sessions_dir, f"{safe_id}_os.json")
+        return os.path.join(self.sessions_dir, f"{safe_id}.json")
 
     def _save_session_to_disk(self, session_id: str):
         try:
@@ -2983,7 +3063,16 @@ class OpenSourceRunner(BaseProgramRunner):
         try:
             with open(path, "r", encoding="utf-8") as f:
                 history = json.load(f)
-            self.sessions_history[session_id] = history
+            
+            # Check if this is legacy Google ADK format
+            if history and isinstance(history[0], dict) and 'author' in history[0]:
+                history = upgrade_legacy_history(history)
+                # Automatically save upgraded session to disk
+                self.sessions_history[session_id] = history
+                self._save_session_to_disk(session_id)
+                print(f">>> Upgraded legacy Google ADK session to unified format for session: {session_id}")
+            else:
+                self.sessions_history[session_id] = history
             return True
         except Exception as e:
             print(f"Error loading OS session {session_id} from disk: {e}")
