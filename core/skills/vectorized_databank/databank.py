@@ -287,24 +287,59 @@ class DataBankManager:
             
         print(f"[Data Bank] Deleted {len(doc_ids_to_delete)} chat history archives for session '{session_id}' in memories.")
 
-    def get_prior_chat_histories(self, session_id: str, limit: int = 2) -> list:
-        """Retrieves prior chat histories from memories.json."""
+    def get_all_memories(self) -> list:
+        """Retrieves all chat history archives from memories.json, including their concatenated chunk text."""
         data = self._load_data(self.memories_path)
         
-        prefix = f"chat_history_archive_{session_id}_"
         chat_docs = [
             d for d in data["documents"]
-            if d["source_type"] == 'chat_history' and d["name"].startswith(prefix)
+            if d.get("source_type") == 'chat_history'
         ]
         
-        chat_docs.sort(key=lambda x: x["timestamp"], reverse=True)
+        chat_docs.sort(key=lambda x: x.get("timestamp", 0), reverse=True)
+        
+        results = []
+        for doc in chat_docs:
+            doc_id = doc["id"]
+            doc_chunks = [c for c in data["chunks"] if c.get("doc_id") == doc_id]
+            doc_chunks.sort(key=lambda x: x.get("chunk_index", 0))
+            
+            text = "\n".join(c["text"] for c in doc_chunks)
+            
+            name = doc.get("name", "")
+            session_id = "default"
+            if name.startswith("chat_history_archive_"):
+                parts = name[len("chat_history_archive_"):].split("_")
+                if len(parts) >= 2:
+                    session_id = "_".join(parts[:-1])
+            
+            results.append({
+                "id": doc_id,
+                "name": name,
+                "session_id": session_id,
+                "timestamp": doc.get("timestamp", 0),
+                "text": text
+            })
+            
+        return results
+
+    def get_prior_chat_histories(self, session_id: str = None, limit: int = 2) -> list:
+        """Retrieves prior chat histories globally from memories.json."""
+        data = self._load_data(self.memories_path)
+        
+        chat_docs = [
+            d for d in data["documents"]
+            if d.get("source_type") == 'chat_history'
+        ]
+        
+        chat_docs.sort(key=lambda x: x.get("timestamp", 0), reverse=True)
         target_docs = chat_docs[:limit]
         
         archives = []
         for doc in target_docs:
             doc_id = doc["id"]
-            doc_chunks = [c for c in data["chunks"] if c["doc_id"] == doc_id]
-            doc_chunks.sort(key=lambda x: x["chunk_index"])
+            doc_chunks = [c for c in data["chunks"] if c.get("doc_id") == doc_id]
+            doc_chunks.sort(key=lambda x: x.get("chunk_index", 0))
             
             archives.append({
                 "name": doc["name"],
@@ -313,17 +348,16 @@ class DataBankManager:
             
         return archives
 
-    def prune_chat_histories(self, session_id: str, keep_limit: int = 3):
-        """Prunes older chat history archives from memories.json."""
+    def prune_chat_histories(self, session_id: str = None, keep_limit: int = 3):
+        """Prunes older chat history archives globally from memories.json."""
         data = self._load_data(self.memories_path)
         
-        prefix = f"chat_history_archive_{session_id}_"
         chat_docs = [
             d for d in data["documents"]
-            if d["source_type"] == 'chat_history' and d["name"].startswith(prefix)
+            if d.get("source_type") == 'chat_history'
         ]
         
-        chat_docs.sort(key=lambda x: x["timestamp"], reverse=True)
+        chat_docs.sort(key=lambda x: x.get("timestamp", 0), reverse=True)
         
         if len(chat_docs) > keep_limit:
             to_delete_docs = chat_docs[keep_limit:]
@@ -333,7 +367,7 @@ class DataBankManager:
             data["chunks"] = [c for c in data["chunks"] if c["doc_id"] not in to_delete_ids]
             
             self._save_data(self.memories_path, data)
-            print(f"[Data Bank] Pruned {len(to_delete_ids)} older chat history archives for session '{session_id}' in memories.")
+            print(f"[Data Bank] Pruned {len(to_delete_ids)} older chat history archives globally in memories.")
 
     def purge_all(self):
         """Purges both databank.json and memories.json."""

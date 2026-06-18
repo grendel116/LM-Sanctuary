@@ -136,7 +136,7 @@ async def trigger_auto_journal(history: list, program_id: str, model: str):
     
     try:
         if use_local:
-            local_url = os.getenv("LOCAL_SERVER_URL", "http://127.0.0.1:1234/v1/chat/completions")
+            local_url = os.getenv("REMOTE_SERVER_URL", "http://127.0.0.1:1234/v1/chat/completions")
             local_model = model if (model and model != 'local-lm-studio') else os.getenv("LOCAL_MODEL_NAME", "local-lm-studio")
             payload = {
                 "model": local_model,
@@ -154,13 +154,13 @@ async def trigger_auto_journal(history: list, program_id: str, model: str):
                     res_json = res.json()
                     response_text = res_json['choices'][0]['message']['content'].strip()
         else:
-            api_key = os.getenv("GEMINI_API_KEY")
+            api_key = os.getenv("REMOTE_API_KEY")
             if api_key:
                 from google.genai import Client
-                from variables import DEFAULT_GEMINI_MODEL
+                from variables import DEFAULT_REMOTE_MODEL
                 client = Client(api_key=api_key)
                 response = client.models.generate_content(
-                    model=model if model else DEFAULT_GEMINI_MODEL,
+                    model=model if model else DEFAULT_REMOTE_MODEL,
                     contents=prompt,
                     config={
                         "system_instruction": "You are a memory consolidation assistant."

@@ -108,10 +108,11 @@ def add_cache_control_headers(response):
     return response
 
 
-# Initialize active program
+# Initialize active program and active user cache
 try:
-    from utils.program import get_active_program
-    get_active_program()
+    from utils.program import get_active_program, get_active_user
+    _cached_active_program = get_active_program()
+    _cached_active_user = get_active_user()
 except Exception as e:
     print(f"Error initializing active program: {e}")
     raise
@@ -120,9 +121,9 @@ def prewarm_caches():
     print(">>> Pre-warming backend caches in background...")
     try:
         # Prewarm gemini models cache
-        gemini_key = os.getenv("GEMINI_API_KEY")
-        if gemini_key and gemini_key.strip() and gemini_key != "your_gemini_api_key_here":
-            fetch_gemini_models(gemini_key)
+        remote_key = os.getenv("REMOTE_API_KEY")
+        if remote_key and remote_key.strip() and remote_key != "your_remote_api_key_here":
+            fetch_gemini_models(remote_key)
     except Exception as e:
         print(f"Error prewarming gemini models cache: {e}")
         
@@ -491,7 +492,7 @@ You must return a valid JSON object matching the following schema:
         
         if is_local:
             import requests
-            from variables import LOCAL_SERVER_URL
+            from variables import REMOTE_SERVER_URL, get_remote_server_headers
             target_model = selected_model if (selected_model and selected_model != 'local-lm-studio') else os.getenv("LOCAL_MODEL_NAME")
             payload = {
                 "messages": [{"role": "user", "content": prompt}],
@@ -501,13 +502,14 @@ You must return a valid JSON object matching the following schema:
             if target_model:
                 payload["model"] = target_model
             try:
-                r = requests.post(LOCAL_SERVER_URL, json=payload, timeout=30.0)
+                headers = get_remote_server_headers()
+                r = requests.post(REMOTE_SERVER_URL, json=payload, headers=headers, timeout=30.0)
                 if r.status_code == 200:
                     raw_response = r.json()['choices'][0]['message']['content'].strip()
             except Exception as e:
                 print(f"[PROACTIVE] Local LLM query failed: {e}")
         else:
-            api_key = os.getenv("GEMINI_API_KEY")
+            api_key = os.getenv("REMOTE_API_KEY")
             if api_key:
                 from google import genai
                 from google.genai import types
@@ -714,8 +716,16 @@ def chat():
             chat_history = asyncio.run(update_history_and_get())
             response_text = sanitized_response
 
-        from utils.program_mood import extract_and_strip_mood
-        response_text, state_info = extract_and_strip_mood(response_text)
+        if chat_history is None:
+            chat_history = asyncio.run(runner.get_history(session_id))
+        state_info = None
+        for msg in reversed(chat_history):
+            if msg.get('role') == 'companion':
+                state_info = msg.get('mood')
+                break
+        if not state_info:
+            from utils.program_mood import analyze_emotional_state
+            state_info = analyze_emotional_state("")
         inversion_mode = asyncio.run(runner._get_inversion_mode(session_id, history=chat_history))
         
         # Trigger background journaling check in a separate thread
@@ -801,8 +811,16 @@ def edit():
             chat_history = asyncio.run(update_history_and_get())
             response_text = sanitized_response
 
-        from utils.program_mood import extract_and_strip_mood
-        response_text, state_info = extract_and_strip_mood(response_text)
+        if chat_history is None:
+            chat_history = asyncio.run(runner.get_history(session_id))
+        state_info = None
+        for msg in reversed(chat_history):
+            if msg.get('role') == 'companion':
+                state_info = msg.get('mood')
+                break
+        if not state_info:
+            from utils.program_mood import analyze_emotional_state
+            state_info = analyze_emotional_state("")
         inversion_mode = asyncio.run(runner._get_inversion_mode(session_id, history=chat_history))
         return jsonify({
             'response': response_text,
@@ -870,7 +888,7 @@ def generate_impersonated_message(session_id, user_profile, model):
     from utils.models import is_local_model
     if is_local_model(model) or model == 'local-lm-studio':
         import requests
-        from variables import LOCAL_SERVER_URL
+        from variables import REMOTE_SERVER_URL, get_remote_server_headers
         payload = {
             "messages": [
                 {"role": "system", "content": system_instruction},
@@ -884,7 +902,8 @@ def generate_impersonated_message(session_id, user_profile, model):
             payload["model"] = target_model
             
         try:
-            r = requests.post(LOCAL_SERVER_URL, json=payload, timeout=60.0)
+            headers = get_remote_server_headers()
+            r = requests.post(REMOTE_SERVER_URL, json=payload, headers=headers, timeout=60.0)
             if r.status_code == 200:
                 res_json = r.json()
                 return res_json['choices'][0]['message']['content'].strip()
@@ -894,12 +913,12 @@ def generate_impersonated_message(session_id, user_profile, model):
             print(f"Error generating impersonated message via local model: {e}")
             raise
     else:
-        # Gemini model
+        # Remote model
         from google import genai
         from google.genai import types
-        api_key = os.getenv("GEMINI_API_KEY")
+        api_key = os.getenv("REMOTE_API_KEY")
         if not api_key:
-            raise Exception("GEMINI_API_KEY environment variable is not configured.")
+            raise Exception("REMOTE_API_KEY environment variable is not configured.")
         client = genai.Client(api_key=api_key)
         
         try:
@@ -1161,7 +1180,8 @@ def generate_portrait():
                 user_messages = [msg for msg in hist if msg.get('role') == 'user']
                 if user_messages:
                     await runner.update_message_text(session_id, 'user', len(user_messages) - 1, original_user_message)
-                    
+            async def update_history_and_get_inversion_and_mood():
+                hist = await runner.get_history(session_id)
                 companion_messages = [msg for msg in hist if msg.get('role') == 'companion']
                 if companion_messages:
                     await runner.update_message_text(session_id, 'companion', len(companion_messages) - 1, new_markdown)
@@ -1169,15 +1189,24 @@ def generate_portrait():
                 # Fetch fresh history after updates for inversion calculation
                 hist = await runner.get_history(session_id)
                 inv = await runner._get_inversion_mode(session_id, history=hist)
-                return inv
+                
+                mood = None
+                for msg in reversed(hist):
+                    if msg.get('role') == 'companion':
+                        mood = msg.get('mood')
+                        break
+                return inv, mood
 
-            inversion_mode = asyncio.run(update_history_and_get_inversion())
+            inversion_mode, state_info = asyncio.run(update_history_and_get_inversion_and_mood())
         except Exception as he:
             print(f"Error updating message text in history: {he}")
             inversion_mode = ""
+            state_info = None
             
-        from utils.program_mood import extract_and_strip_mood
-        display_text, state_info = extract_and_strip_mood(new_markdown)
+        if not state_info:
+            from utils.program_mood import analyze_emotional_state
+            state_info = analyze_emotional_state("")
+        display_text = new_markdown
         
         return jsonify({
             'status': 'success',
@@ -1671,11 +1700,11 @@ def get_models():
     # Determine the active runner backend
     runner_backend = os.getenv("RUNNER_BACKEND", "google_adk").lower()
     
-    # Check if Gemini API key and Project ID are validly configured (not empty, not placeholder)
-    gemini_key = os.getenv("GEMINI_API_KEY")
+    # Check if Remote API key and Project ID are validly configured
+    remote_key = os.getenv("REMOTE_API_KEY")
     project_id = os.getenv("PROJECT_ID")
-    is_gemini_configured = bool(
-        gemini_key and gemini_key.strip() and gemini_key != "your_gemini_api_key_here" and
+    is_remote_configured = bool(
+        remote_key and remote_key.strip() and remote_key != "your_remote_api_key_here" and
         project_id and project_id.strip() and project_id != "your_gcp_project_id_here"
     )
     
@@ -1694,9 +1723,9 @@ def get_models():
         default_model = models[0]["value"]
         
     gemini_models_list = []
-    if is_gemini_configured:
+    if is_remote_configured:
         try:
-            gemini_models_list = fetch_gemini_models(gemini_key)
+            gemini_models_list = fetch_gemini_models(remote_key)
         except Exception as e:
             print(f"Error fetching gemini models list: {e}")
             
@@ -1717,9 +1746,9 @@ def get_models():
         "models": models,
         "default": default_model,
         "status": {
-            "gemini_configured": is_gemini_configured,
-            "gemini_model": os.getenv("GEMINI_MODEL", "gemini-3.1-flash-lite"),
-            "gemini_models_list": gemini_models_list,
+            "remote_configured": is_remote_configured,
+            "remote_model": os.getenv("REMOTE_MODEL", "gemini-3.1-flash-lite"),
+            "remote_models_list": gemini_models_list,
             "lm_studio_online": is_lm_studio_online,
             "lms_installed": check_lms_cli(),
             "temperature": temperature
@@ -1886,19 +1915,19 @@ def save_generation_params():
 def save_config():
     try:
         data = request.get_json() or {}
-        gemini_api_key = data.get('gemini_api_key', '').strip()
+        remote_api_key = data.get('gemini_api_key', '').strip()  # maps from the same frontend UI key
         project_id = data.get('project_id', '').strip()
-        gemini_model = data.get('gemini_model', '').strip()
+        remote_model = data.get('gemini_model', '').strip()
         
         # Check existing values in environment
-        existing_key = os.getenv("GEMINI_API_KEY")
+        existing_key = os.getenv("REMOTE_API_KEY")
         existing_project = os.getenv("PROJECT_ID")
         
-        target_key = gemini_api_key or existing_key
+        target_key = remote_api_key or existing_key
         target_project = project_id or existing_project
         
         if not target_key or not target_project:
-            return jsonify({'error': 'GCP Project ID and Gemini API Key must both be provided to configure Google Gemini.'}), 400
+            return jsonify({'error': 'GCP Project ID and Remote API Key must both be provided.'}), 400
             
         base_dir = os.path.dirname(os.path.abspath(__file__))
         env_path = os.path.join(base_dir, '.env')
@@ -1914,8 +1943,8 @@ def save_config():
         
         for i, line in enumerate(lines):
             stripped = line.strip()
-            if stripped.startswith('GEMINI_API_KEY=') and gemini_api_key:
-                lines[i] = f"GEMINI_API_KEY={gemini_api_key}\n"
+            if stripped.startswith('REMOTE_API_KEY=') and remote_api_key:
+                lines[i] = f"REMOTE_API_KEY={remote_api_key}\n"
                 updated_key = True
             elif stripped.startswith('PROJECT_ID=') and project_id:
                 lines[i] = f"PROJECT_ID={project_id}\n"
@@ -1923,22 +1952,27 @@ def save_config():
             elif stripped.startswith('RUNNER_BACKEND='):
                 lines[i] = f"RUNNER_BACKEND=google_adk\n"
                 updated_backend = True
-            elif stripped.startswith('GEMINI_MODEL=') and gemini_model:
-                lines[i] = f"GEMINI_MODEL={gemini_model}\n"
+            elif stripped.startswith('REMOTE_MODEL=') and remote_model:
+                lines[i] = f"REMOTE_MODEL={remote_model}\n"
                 updated_model = True
                 
-        if gemini_api_key:
+        if remote_api_key:
             if not updated_key:
-                lines.append(f"GEMINI_API_KEY={gemini_api_key}\n")
-            os.environ["GEMINI_API_KEY"] = gemini_api_key
+                lines.append(f"REMOTE_API_KEY={remote_api_key}\n")
+            os.environ["REMOTE_API_KEY"] = remote_api_key
+            # Populate SDK environment variables
+            os.environ["GEMINI_API_KEY"] = remote_api_key
+            os.environ["OPENAI_API_KEY"] = remote_api_key
+            os.environ["ANTHROPIC_API_KEY"] = remote_api_key
+            os.environ["DEEPSEEK_API_KEY"] = remote_api_key
         if project_id:
             if not updated_proj:
                 lines.append(f"PROJECT_ID={project_id}\n")
             os.environ["PROJECT_ID"] = project_id
-        if gemini_model:
+        if remote_model:
             if not updated_model:
-                lines.append(f"GEMINI_MODEL={gemini_model}\n")
-            os.environ["GEMINI_MODEL"] = gemini_model
+                lines.append(f"REMOTE_MODEL={remote_model}\n")
+            os.environ["REMOTE_MODEL"] = remote_model
         if not updated_backend:
             lines.append("RUNNER_BACKEND=google_adk\n")
         os.environ["RUNNER_BACKEND"] = "google_adk"
@@ -2137,6 +2171,23 @@ def databank_purge():
     except Exception as e:
         print(f"Error purging databank: {e}")
 
+@app.route('/api/programs/memories', methods=['GET'])
+@requires_auth
+def get_program_memories():
+    try:
+        from utils.program import get_active_program
+        program_id = request.args.get('program_id') or get_active_program()
+        
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        db_dir = os.path.join(base_dir, "core", "programs", program_id)
+        
+        manager = DataBankManager(db_dir=db_dir)
+        memories = manager.get_all_memories()
+        return jsonify({"memories": memories})
+    except Exception as e:
+        print(f"Error loading program memories: {e}")
+        return jsonify({"error": str(e)}), 500
+
 @app.route('/api/programs/memories/delete', methods=['POST'])
 @requires_auth
 def delete_memory():
@@ -2310,24 +2361,6 @@ def select_program():
         except Exception as e:
             print(f"Error persisting ACTIVE_PROGRAM: {e}")
         
-        # Update .env file to persist across restarts
-        try:
-            env_path = os.path.join(base_dir, '.env')
-            if os.path.exists(env_path):
-                with open(env_path, 'r', encoding='utf-8') as f:
-                    lines = f.readlines()
-                updated = False
-                for i, line in enumerate(lines):
-                    if line.strip().startswith('ACTIVE_PROGRAM='):
-                        lines[i] = f"ACTIVE_PROGRAM={program_id}\n"
-                        updated = True
-                        break
-                if not updated:
-                    lines.append(f"\nACTIVE_PROGRAM={program_id}\n")
-                with open(env_path, 'w', encoding='utf-8') as f:
-                    f.writelines(lines)
-        except Exception as e:
-            print(f"Error persisting ACTIVE_PROGRAM to .env: {e}")
 
         # Reload program config module to pick up new identity
         from core import program_config
@@ -2430,29 +2463,10 @@ def delete_program():
         if program_id == active_program:
             os.environ["ACTIVE_PROGRAM"] = "sebile"
             try:
-                from variables import ACTIVE_PROGRAM_FILE
-                with open(ACTIVE_PROGRAM_FILE, 'w', encoding='utf-8') as f:
-                    f.write("sebile")
+                from utils.program import set_active_program
+                set_active_program("sebile")
             except Exception as e:
                 print(f"Error resetting active program to sebile: {e}")
-                
-            try:
-                env_path = os.path.join(base_dir, '.env')
-                if os.path.exists(env_path):
-                    with open(env_path, 'r', encoding='utf-8') as f:
-                        lines = f.readlines()
-                    updated = False
-                    for i, line in enumerate(lines):
-                        if line.strip().startswith('ACTIVE_PROGRAM='):
-                            lines[i] = "ACTIVE_PROGRAM=sebile\n"
-                            updated = True
-                            break
-                    if not updated:
-                        lines.append("\nACTIVE_PROGRAM=sebile\n")
-                    with open(env_path, 'w', encoding='utf-8') as f:
-                        f.writelines(lines)
-            except Exception as e:
-                print(f"Error resetting ACTIVE_PROGRAM in .env: {e}")
                 
             # Reload program config and re-initialize the runner
             from core import program_config
@@ -3042,9 +3056,9 @@ def clean_and_normalize_profile(name, description, personality, text):
 def generate_character_json(name, description, personality, scenario, first_mes, model):
     import os
     import json
-    gemini_key = os.getenv("GEMINI_API_KEY")
-    is_gemini_configured = bool(
-        gemini_key and gemini_key.strip() and gemini_key != "your_gemini_api_key_here"
+    remote_key = os.getenv("REMOTE_API_KEY")
+    is_remote_configured = bool(
+        remote_key and remote_key.strip() and remote_key != "your_remote_api_key_here"
     )
     
     prompt = f"""You are a professional companion designer. Based on the character card details below, design a structured companion profile JSON card.
@@ -3103,7 +3117,7 @@ Output a single JSON object matching this exact schema:
     if use_local:
         try:
             import httpx
-            local_url = os.getenv("LOCAL_SERVER_URL", "http://127.0.0.1:1234/v1/chat/completions")
+            local_url = os.getenv("REMOTE_SERVER_URL", "http://127.0.0.1:1234/v1/chat/completions")
             local_model = model if (model and model != 'local-lm-studio') else os.getenv("LOCAL_MODEL_NAME", "local-lm-studio")
             payload = {
                 "model": local_model,
@@ -3120,13 +3134,13 @@ Output a single JSON object matching this exact schema:
         except Exception as e:
             print(f"Error calling local model for JSON card generation: {e}")
     else:
-        if is_gemini_configured:
+        if is_remote_configured:
             try:
                 from google.genai import Client
-                from variables import DEFAULT_GEMINI_MODEL
-                client = Client(api_key=gemini_key)
+                from variables import DEFAULT_REMOTE_MODEL
+                client = Client(api_key=remote_key)
                 response = client.models.generate_content(
-                    model=model if model else DEFAULT_GEMINI_MODEL,
+                    model=model if model else DEFAULT_REMOTE_MODEL,
                     contents=prompt,
                     config={
                         "system_instruction": "You are a professional companion designer that outputs valid JSON character cards.",

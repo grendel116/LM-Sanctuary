@@ -6,7 +6,7 @@ import time
 import uuid
 import concurrent.futures
 
-from variables import COMFYUI_SERVER_URL, COMFYUI_CHECKPOINT, COMFYUI_VAE, DEFAULT_GEMINI_MODEL, VARIABLES_DIR
+from variables import COMFYUI_SERVER_URL, COMFYUI_CHECKPOINT, COMFYUI_VAE, DEFAULT_REMOTE_MODEL, VARIABLES_DIR
 
 _search_executor = concurrent.futures.ThreadPoolExecutor(max_workers=8)
 import functools
@@ -87,7 +87,7 @@ def get_project_folders() -> list:
         from utils.program import get_active_program
         active_prog = get_active_program()
     except Exception:
-        active_prog = os.environ.get("ACTIVE_PROGRAM", "sebile")
+        active_prog = "sebile"
     default_folder = os.path.normpath(os.path.join(os.getcwd(), 'core', 'programs', active_prog))
     
     folders = [default_folder]
@@ -324,14 +324,14 @@ def web_search(query: str) -> str:
         search_engine = "web_crawling"
 
     def run_google(q):
-        gemini_api_key = os.getenv("GEMINI_API_KEY")
-        if not gemini_api_key:
+        remote_api_key = os.getenv("REMOTE_API_KEY")
+        if not remote_api_key:
             return []
         try:
             from google import genai
             from google.genai import types
             
-            client = genai.Client(api_key=gemini_api_key)
+            client = genai.Client(api_key=remote_api_key)
             grounding_tool = types.Tool(
                 google_search=types.GoogleSearch()
             )
@@ -341,7 +341,7 @@ def web_search(query: str) -> str:
             )
             
             response = client.models.generate_content(
-                model=DEFAULT_GEMINI_MODEL,
+                model=DEFAULT_REMOTE_MODEL,
                 contents=f"Perform a search for: {q}. Output only a list of search hits with their titles, URLs, and very brief snippets.",
                 config=config
             )
@@ -1127,7 +1127,8 @@ def generate_local_image(prompt: str) -> str:
         )
 
     base_dir = os.path.dirname(os.path.abspath(__file__))
-    active_program = os.getenv("ACTIVE_PROGRAM", "sebile")
+    from utils.program import get_active_program
+    active_program = get_active_program()
     workflow_path = os.path.normpath(os.path.join(
         base_dir, "core", "skills", "portrait_generation", "ImageWorkflow.json"
     ))
@@ -1255,9 +1256,9 @@ def generate_imagen(prompt: str, aspect_ratio: str = '1:1') -> str:
         base_dir = os.path.dirname(os.path.abspath(__file__))
         load_dotenv(os.path.join(base_dir, ".env"))
 
-        api_key = os.getenv("GEMINI_API_KEY")
+        api_key = os.getenv("REMOTE_API_KEY")
         if not api_key:
-            return "Error: GEMINI_API_KEY not found in environment."
+            return "Error: REMOTE_API_KEY not found in environment."
 
         client = genai.Client(api_key=api_key)
         model_name = os.getenv("IMAGEN_MODEL", "imagen-4.0-generate-001")
@@ -1280,7 +1281,8 @@ def generate_imagen(prompt: str, aspect_ratio: str = '1:1') -> str:
         if not hasattr(img_obj.image, 'image_bytes'):
             return "Error: Generated image object does not contain image bytes."
 
-        active_program = os.getenv("ACTIVE_PROGRAM", "sebile")
+        from utils.program import get_active_program
+        active_program = get_active_program()
         media_dir = os.path.normpath(os.path.join(base_dir, "core", "programs", active_program, "media"))
         os.makedirs(media_dir, exist_ok=True)
 
@@ -1317,7 +1319,8 @@ def generate_video_from_image(image_path: str, prompt: str) -> str:
     import requests
     
     base_dir = os.path.dirname(os.path.abspath(__file__))
-    active_program = os.getenv("ACTIVE_PROGRAM", "sebile")
+    from utils.program import get_active_program
+    active_program = get_active_program()
     workflow_path = os.path.normpath(os.path.join(
         base_dir, "core", "skills", "portrait_generation", "VideoWorkflow.json"
     ))

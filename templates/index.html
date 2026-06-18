@@ -7064,23 +7064,18 @@ async function deleteAssistant(assistantId, name) {
                     }
                 }
                 
-                // 2. Fetch Chat Compaction Memories (system-memory events from current session history)
+                // 2. Fetch Chat Compaction Memories (from memories.json for this program)
                 if (memoriesContainer) {
                     memoriesContainer.innerHTML = '';
-                    const historyRes = await fetch(`/history?session_id=${sessionId}&t=${Date.now()}`);
-                    const historyData = await historyRes.json();
+                    const memoriesRes = await fetch(`/api/programs/memories?program_id=${currentEditingCompanionId}&t=${Date.now()}`);
+                    const memoriesData = await memoriesRes.json();
                     
-                    const historyList = historyData.history || [];
-                    const memoryEvents = historyList.filter(msg => 
-                        (msg.role === 'system-memory' || 
-                         (msg.text && msg.text.startsWith('[System Memory of older conversation turns]:'))) &&
-                        !msg.compacted
-                    );
+                    const memoryList = memoriesData.memories || [];
                     
-                    if (memoryEvents.length === 0) {
-                        memoriesContainer.innerHTML = '<div class="empty-state">No consolidated memories created for this session yet.</div>';
+                    if (memoryList.length === 0) {
+                        memoriesContainer.innerHTML = '<div class="empty-state">No consolidated memories created for this companion yet.</div>';
                     } else {
-                        memoryEvents.forEach(msg => {
+                        memoryList.forEach(msg => {
                             // Clean up text
                             let cleanText = msg.text || '';
                             if (cleanText.startsWith('[System Memory of older conversation turns]:')) {
@@ -7125,7 +7120,7 @@ async function deleteAssistant(assistantId, name) {
                             deleteBtn.style.height = '26px';
                             deleteBtn.style.borderRadius = '6px';
                             deleteBtn.style.flexShrink = '0';
-                            deleteBtn.onclick = () => deleteConsolidatedMemory(msg.timestamp);
+                            deleteBtn.onclick = () => deleteConsolidatedMemory(msg.session_id, msg.timestamp);
                             rightContainer.appendChild(deleteBtn);
                             
                             header.appendChild(rightContainer);
@@ -7211,7 +7206,7 @@ async function deleteAssistant(assistantId, name) {
             );
         }
 
-        async function deleteConsolidatedMemory(timestamp) {
+        async function deleteConsolidatedMemory(session_id, timestamp) {
             showCustomConfirm(
                 "Delete Consolidated Memory",
                 "Are you sure you want to permanently delete this compacted chat history block? Your companion will lose this memory immediately.",
@@ -7221,7 +7216,7 @@ async function deleteAssistant(assistantId, name) {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
                             body: JSON.stringify({
-                                session_id: sessionId,
+                                session_id: session_id || sessionId,
                                 timestamp: timestamp
                             })
                         });
@@ -11581,15 +11576,6 @@ let galleryImages = [];
         window.addEventListener('DOMContentLoaded', () => {
             updateProfileImages();
             loadHistory();
-
-            // Safety timeout: ensure loading screen is hidden even if server requests hang
-            setTimeout(() => {
-                const overlay = document.getElementById('chat-loading-overlay');
-                if (overlay && !overlay.classList.contains('fade-out')) {
-                    console.warn("Loading overlay fallback timeout reached. Forcing hide.");
-                    hideLoadingOverlay();
-                }
-            }, 6000);
         });
 
         // Edit and Reroll functionality
