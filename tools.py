@@ -1070,6 +1070,17 @@ def apply_comfy_workflow(workflow_path: str, parameters: dict, save_path: str) -
                                         os.makedirs(parent_dir, exist_ok=True)
                                     with open(save_path, "wb") as img_file:
                                         img_file.write(view_res.content)
+                                    
+                                    # Delete temp file from ComfyUI's temp folder to avoid accumulation
+                                    try:
+                                        from utils.comfy_manager import COMFYUI_DIR
+                                        comfy_temp_file = os.path.normpath(os.path.join(COMFYUI_DIR, "temp", img.get("subfolder", ""), filename))
+                                        if os.path.exists(comfy_temp_file):
+                                            os.remove(comfy_temp_file)
+                                            print(f"[COMFY IMAGE] Cleaned up temp output image: {comfy_temp_file}")
+                                    except Exception as e_clean:
+                                        print(f"[COMFY IMAGE] Warning: Failed to clean up temp file: {e_clean}")
+                                        
                                     return save_path
                                 else:
                                     raise Exception(f"Error downloading image: status {view_res.status_code}")
@@ -1285,6 +1296,241 @@ def generate_imagen(prompt: str, aspect_ratio: str = '1:1') -> str:
     except Exception as e:
         print(f"[IMAGEN] Error generating image: {e}")
         return f"Error generating image: {e}"
+
+
+@track_tool_activity
+def generate_video_from_image(image_path: str, prompt: str) -> str:
+    """Animates a local image using ComfyUI with a custom video-specific workflow template.
+    
+    Args:
+        image_path: Absolute path to the source static image.
+        prompt: Prompt describing the animation/motion.
+        
+    Returns:
+        Public web serving path/URL to the generated video, or raises an Exception.
+    """
+    import os
+    import time
+    import json
+    import random
+    import shutil
+    import requests
+    
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    active_program = os.getenv("ACTIVE_PROGRAM", "sebile")
+    workflow_path = os.path.normpath(os.path.join(
+        base_dir, "core", "skills", "portrait_generation", "VideoWorkflow.json"
+    ))
+    
+    if not os.path.exists(workflow_path):
+        raise Exception(f"Video workflow template not found at '{workflow_path}'")
+        
+    if not os.path.exists(image_path):
+        raise Exception(f"Source image not found at '{image_path}'")
+        
+    # Copy source image to ComfyUI's input directory
+    from variables import COMFYUI_SERVER_URL
+    from utils.comfy_manager import COMFYUI_DIR
+    comfy_input_dir = os.path.normpath(os.path.join(COMFYUI_DIR, "input"))
+    os.makedirs(comfy_input_dir, exist_ok=True)
+    
+    # Generate unique filename to avoid collision in ComfyUI input directory
+    source_filename = os.path.basename(image_path)
+    timestamp = int(time.time())
+    unique_input_filename = f"anim_in_{timestamp}_{source_filename}"
+    comfy_input_path = os.path.join(comfy_input_dir, unique_input_filename)
+    
+    print(f"[COMFY VIDEO] Copying source image from {image_path} to {comfy_input_path}")
+    shutil.copy2(image_path, comfy_input_path)
+    
+    # Define replacements for the workflow JSON
+    seed_val = random.randint(1, 2147483647)
+    replacements = {
+        "%input_image%": unique_input_filename,
+        "%prompt%": prompt,
+        "%seed%": seed_val
+    }
+    
+    # Load and populate workflow JSON
+    with open(workflow_path, "r", encoding="utf-8") as f:
+        workflow_data = json.load(f)
+        
+    def replace_val(obj):
+        if isinstance(obj, dict):
+            return {k: replace_val(v) for k, v in obj.items()}
+        elif isinstance(obj, list):
+            return [replace_val(x) for x in obj]
+        elif isinstance(obj, str):
+            has_placeholder = any(k in obj for k in replacements)
+            for k, v in replacements.items():
+                if k in obj:
+                    obj = obj.replace(k, str(v))
+            # Try to cast numeric placeholders only if it was a placeholder
+            if has_placeholder:
+                if obj.isdigit():
+                    return int(obj)
+                try:
+                    return float(obj)
+                except ValueError:
+                    pass
+            return obj
+        return obj
+
+    populated_workflow = replace_val(workflow_data)
+    import json
+    print(f"[COMFY VIDEO] Populated workflow JSON:\n{json.dumps(populated_workflow, indent=2)}")
+    
+    comfy_url = COMFYUI_SERVER_URL
+    print(f"[COMFY VIDEO] Submitting workflow to ComfyUI server: {comfy_url}")
+    
+    res = requests.post(f"{comfy_url}/prompt", json={"prompt": populated_workflow}, timeout=10.0)
+    if res.status_code != 200:
+        # Try to clean up input image
+        try:
+            os.remove(comfy_input_path)
+        except Exception:
+            pass
+        print(f"[COMFY VIDEO] Validation error response (HTTP {res.status_code}): {res.text}")
+        try:
+            err_data = res.json()
+            formatted_err = format_comfy_validation_error(err_data)
+            if formatted_err:
+                raise Exception(formatted_err)
+        except Exception as e_inner:
+            if "Missing" in str(e_inner) or "Validation Error" in str(e_inner):
+                raise e_inner
+        raise Exception(f"ComfyUI server prompt execution failed with status {res.status_code}")
+
+        
+    prompt_id = res.json().get("prompt_id")
+    if not prompt_id:
+        try:
+            os.remove(comfy_input_path)
+        except Exception:
+            pass
+        raise Exception("ComfyUI server did not return a prompt_id")
+        
+    # Poll for completion
+    completed_filename = None
+    output_key = None
+    file_info = None
+    start_time = time.time()
+    try:
+        # Give it up to 240 seconds for cloud/slow generations
+        for _ in range(240):
+            history_res = requests.get(f"{comfy_url}/history/{prompt_id}", timeout=10)
+            if history_res.status_code == 200:
+                history_data = history_res.json()
+                if prompt_id in history_data:
+                    prompt_info = history_data[prompt_id]
+                    outputs = prompt_info.get("outputs", {})
+                    
+                    # 1. Try to find standard media in the outputs
+                    for node_id, node_output in outputs.items():
+                        for possible_key in ["images", "gifs", "videos"]:
+                            if possible_key in node_output and node_output[possible_key]:
+                                file_info = node_output[possible_key][0]
+                                completed_filename = file_info["filename"]
+                                output_key = possible_key
+                                break
+                        if completed_filename:
+                            break
+                            
+                    # 2. If no output media found in outputs, scan ComfyUI temp folder for civitai videos
+                    if not completed_filename:
+                        from utils.comfy_manager import COMFYUI_DIR
+                        temp_dir = os.path.normpath(os.path.join(COMFYUI_DIR, "temp"))
+                        if os.path.exists(temp_dir):
+                            newest_file = None
+                            newest_time = 0
+                            # Look for files matching civitai_*.mp4, civitai_*.webm, civitai_*.gif
+                            for f_name in os.listdir(temp_dir):
+                                if f_name.startswith("civitai_") and f_name.lower().endswith((".mp4", ".webm", ".gif")):
+                                    f_path = os.path.join(temp_dir, f_name)
+                                    mtime = os.path.getmtime(f_path)
+                                    # Must be created after we started (with a buffer for clock drift)
+                                    if mtime >= start_time - 10:
+                                        if mtime > newest_time:
+                                            newest_time = mtime
+                                            newest_file = f_name
+                            if newest_file:
+                                completed_filename = newest_file
+                                output_key = "videos"
+                                file_info = {
+                                    "filename": completed_filename,
+                                    "subfolder": "",
+                                    "type": "temp"
+                                }
+                                print(f"[COMFY VIDEO] Found newly generated Civitai temp video: {completed_filename}")
+                                
+                    if completed_filename:
+                        break
+                    else:
+                        status_info = prompt_info.get("status", {})
+                        status_str = status_info.get("status_str", "unknown")
+                        raise Exception(f"ComfyUI prompt execution finished (status: {status_str}), but no output video file could be resolved.")
+            time.sleep(2)
+            
+        if not completed_filename:
+            raise Exception("Video generation timed out on ComfyUI server.")
+            
+        # Download the generated media file
+        print(f"[COMFY VIDEO] Downloading generated file: {completed_filename} (type: {output_key})")
+        view_res = requests.get(f"{comfy_url}/view", params={
+            "filename": completed_filename,
+            "subfolder": file_info.get("subfolder", ""),
+            "type": file_info.get("type", "output")
+        }, timeout=30)
+        
+        if view_res.status_code != 200:
+            raise Exception(f"Failed to download generated file from ComfyUI: HTTP {view_res.status_code}")
+            
+        # Determine the correct file extension from the downloaded filename
+        _, ext = os.path.splitext(completed_filename)
+        if not ext:
+            ext = ".mp4"  # Default fallback
+            
+        # Determine save path: next to the original portrait/image
+        source_dir = os.path.dirname(image_path)
+        source_base, _ = os.path.splitext(source_filename)
+        output_filename = f"{source_base}{ext}"
+        save_path = os.path.join(source_dir, output_filename)
+        
+        print(f"[COMFY VIDEO] Saving output video/animated media to {save_path}")
+        with open(save_path, "wb") as out_file:
+            out_file.write(view_res.content)
+            
+        # Delete temp file from ComfyUI's temp/output folder to avoid accumulation
+        try:
+            folder_type = file_info.get("type", "output")
+            folder_name = "temp" if folder_type == "temp" else "output"
+            comfy_temp_file = os.path.normpath(os.path.join(COMFYUI_DIR, folder_name, file_info.get("subfolder", ""), completed_filename))
+            if os.path.exists(comfy_temp_file):
+                os.remove(comfy_temp_file)
+                print(f"[COMFY VIDEO] Cleaned up temp output video: {comfy_temp_file}")
+        except Exception as e_clean:
+            print(f"[COMFY VIDEO] Warning: Failed to clean up temp file: {e_clean}")
+            
+        # Get relative public path
+        # E.g. core/programs/sebile/portraits/portrait_123.mp4 -> /images/portraits/portrait_123.mp4
+        normalized_path = os.path.normpath(save_path)
+        parts = normalized_path.split(os.sep)
+        try:
+            prog_idx = parts.index("programs")
+            rel_parts = parts[prog_idx + 2:]
+            url_path = "/images/" + "/".join(rel_parts)
+        except ValueError:
+            url_path = f"/images/portraits/{output_filename}"
+            
+        return url_path
+        
+    finally:
+        # Clean up temporary input file from ComfyUI's input directory
+        try:
+            if os.path.exists(comfy_input_path):
+                os.remove(comfy_input_path)
+        except Exception as e:
+            print(f"[COMFY VIDEO] Warning: Failed to delete temp input image {comfy_input_path}: {e}")
 
 
 # ==============================================================================

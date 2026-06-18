@@ -3047,6 +3047,7 @@
         <!-- Image Container -->
         <div class="modal-img-container" onclick="event.stopPropagation()">
             <img class="modal-content" id="modal-img" alt="Companion Portrait">
+            <video class="modal-content" id="modal-video" controls autoplay loop muted style="display: none; max-width: 100%; max-height: 80vh; border-radius: 12px;"></video>
             
 
             <!-- Gallery Actions -->
@@ -8338,6 +8339,31 @@ function toggleThinkingBlock(headerElement) {
                             }
                         };
                         overlay.appendChild(recycleBtn);
+
+                        // Animate button
+                        const animateBtn = document.createElement('button');
+                        animateBtn.className = 'image-action-btn';
+                        animateBtn.title = 'Animate portrait (video generation)';
+                        animateBtn.innerHTML = `
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                                <polygon points="23 7 16 12 23 17 23 7"></polygon>
+                                <rect x="1" y="5" width="15" height="14" rx="2" ry="2"></rect>
+                            </svg>
+                        `;
+                        animateBtn.onclick = (e) => {
+                            e.stopPropagation();
+                            showCustomTextareaPrompt(
+                                "Animate Portrait",
+                                "Describe the motion or animation for this portrait (e.g. blinking, smiling, wind in hair, looking at camera):",
+                                "gentle head turn, smiling, blinking, looking at camera",
+                                (motionPrompt) => {
+                                    if (motionPrompt !== null) {
+                                        animateImage(animateBtn, img.src, motionPrompt);
+                                    }
+                                }
+                            );
+                        };
+                        overlay.appendChild(animateBtn);
                         
                         imgContainer.appendChild(overlay);
                     }
@@ -8373,6 +8399,31 @@ function toggleThinkingBlock(headerElement) {
                     // Make all parsed images clickable and show hand cursor, wrapped with a recycle button if applicable
                     textDiv.querySelectorAll('img').forEach((img) => {
                         if (img.classList.contains('avatar') || img.parentElement.classList.contains('message-image-container')) return;
+                        
+                        const src = img.getAttribute('src') || img.src || '';
+                        const isVideo = src.toLowerCase().endsWith('.mp4') || src.toLowerCase().endsWith('.webm');
+                        
+                        if (isVideo) {
+                            const videoContainer = document.createElement('div');
+                            videoContainer.className = 'message-video-container';
+                            videoContainer.style.marginTop = '8px';
+                            
+                            const video = document.createElement('video');
+                            video.src = src;
+                            video.controls = true;
+                            video.autoplay = false;
+                            video.loop = true;
+                            video.muted = true;
+                            video.style.maxWidth = '100%';
+                            video.style.maxHeight = '300px';
+                            video.style.borderRadius = '12px';
+                            video.style.cursor = 'pointer';
+                            video.onclick = () => expandImage(video.src);
+                            
+                            videoContainer.appendChild(video);
+                            img.parentNode.replaceChild(videoContainer, img);
+                            return;
+                        }
                         
                         const imgContainer = document.createElement('div');
                         imgContainer.className = 'message-image-container';
@@ -8443,6 +8494,31 @@ function toggleThinkingBlock(headerElement) {
                                 }
                             };
                             overlay.appendChild(recycleBtn);
+
+                            // Animate button
+                            const animateBtn = document.createElement('button');
+                            animateBtn.className = 'image-action-btn';
+                            animateBtn.title = 'Animate portrait (video generation)';
+                            animateBtn.innerHTML = `
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                                    <polygon points="23 7 16 12 23 17 23 7"></polygon>
+                                    <rect x="1" y="5" width="15" height="14" rx="2" ry="2"></rect>
+                                </svg>
+                            `;
+                            animateBtn.onclick = (e) => {
+                                e.stopPropagation();
+                                showCustomTextareaPrompt(
+                                    "Animate Portrait",
+                                    "Describe the motion or animation for this portrait (e.g. blinking, smiling, wind in hair, looking at camera):",
+                                    "gentle head turn, smiling, blinking, looking at camera",
+                                    (motionPrompt) => {
+                                        if (motionPrompt !== null) {
+                                            animateImage(animateBtn, img.src, motionPrompt);
+                                        }
+                                    }
+                                );
+                            };
+                            overlay.appendChild(animateBtn);
                             
                             imgContainer.appendChild(overlay);
                         }
@@ -9406,7 +9482,7 @@ async function loadServerImages() {
                 }
             });
             
-            // Collect any additional message images currently in the DOM
+            // Collect any additional message images and videos currently in the DOM
             const rows = document.querySelectorAll('.message-row');
             rows.forEach(row => {
                 const bubble = row.querySelector('.message');
@@ -9417,6 +9493,16 @@ async function loadServerImages() {
                             const src = img.getAttribute('src') || img.src;
                             const rel = getRelativePath(src);
                             if (!rel.includes('profile.svg') && !imgs.includes(rel)) {
+                                imgs.push(rel);
+                            }
+                        }
+                    });
+                    const messageVideos = bubble.querySelectorAll('video');
+                    messageVideos.forEach(vid => {
+                        if (vid.src) {
+                            const src = vid.getAttribute('src') || vid.src;
+                            const rel = getRelativePath(src);
+                            if (!imgs.includes(rel)) {
                                 imgs.push(rel);
                             }
                         }
@@ -9461,8 +9547,27 @@ async function loadServerImages() {
         // --- updateModalImage ---
         function updateModalImage() {
             const modalImg = document.getElementById('modal-img');
+            const modalVideo = document.getElementById('modal-video');
             const currentSrc = galleryImages[currentGalleryIndex];
-            modalImg.src = currentSrc;
+            
+            const isVideo = currentSrc.toLowerCase().endsWith('.mp4') || currentSrc.toLowerCase().endsWith('.webm');
+            if (isVideo) {
+                if (modalImg) modalImg.style.display = 'none';
+                if (modalVideo) {
+                    modalVideo.src = currentSrc;
+                    modalVideo.style.display = 'block';
+                }
+            } else {
+                if (modalVideo) {
+                    modalVideo.pause();
+                    modalVideo.style.display = 'none';
+                    modalVideo.src = '';
+                }
+                if (modalImg) {
+                    modalImg.src = currentSrc;
+                    modalImg.style.display = 'block';
+                }
+            }
             
             const prevBtn = document.querySelector('.prev-btn');
             const nextBtn = document.querySelector('.next-btn');
@@ -9486,7 +9591,7 @@ async function loadServerImages() {
             
             const setProfileBtn = document.getElementById('set-profile-btn');
             if (setProfileBtn) {
-                if (currentSrc.includes('profile.svg') || currentSrc.includes('profile.png')) {
+                if (currentSrc.includes('profile.svg') || currentSrc.includes('profile.png') || isVideo) {
                     setProfileBtn.style.display = 'none';
                 } else {
                     setProfileBtn.style.display = 'flex';
@@ -9499,6 +9604,11 @@ async function loadServerImages() {
             document.body.style.overflow = "";
             const modal = document.getElementById('image-modal');
             if (modal) modal.style.display = "none";
+            const modalVideo = document.getElementById('modal-video');
+            if (modalVideo) {
+                modalVideo.pause();
+                modalVideo.src = '';
+            }
         }
 
         // --- prevGalleryImage ---
@@ -9553,6 +9663,27 @@ async function loadServerImages() {
                                         <span>[Portrait Deleted]</span>
                                     `;
                                     parent.replaceChild(placeholder, img);
+                                }
+                            }
+                        });
+                        const allVideos = document.querySelectorAll('video');
+                        allVideos.forEach(vid => {
+                            if (vid.id === 'modal-video' || vid.id === 'preview-video') return;
+                            if (getRelativePath(vid.src) === currentSrc) {
+                                const container = vid.closest('.message-video-container') || vid;
+                                const parent = container.parentElement;
+                                if (parent) {
+                                    const placeholder = document.createElement('div');
+                                    placeholder.className = 'deleted-image-placeholder';
+                                    placeholder.innerHTML = `
+                                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 6px; display: inline-block; vertical-align: middle;">
+                                            <line x1="1" y1="1" x2="23" y2="23"></line>
+                                            <path d="M21 21H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h3m3-3h6l2 3h4a2 2 0 0 1 2 2v9.34"></path>
+                                            <circle cx="12" cy="13" r="4"></circle>
+                                        </svg>
+                                        <span>[Portrait Deleted]</span>
+                                    `;
+                                    parent.replaceChild(placeholder, container);
                                 }
                             }
                         });
@@ -9955,6 +10086,110 @@ async function regenerateImage(buttonElement, oldImageUrl, prompt) {
             } catch (error) {
                 console.error("Error regenerating image:", error);
                 showCustomAlert("Connection Error", "Failed to connect to the server for image regeneration: " + error.message);
+            } finally {
+                const container = buttonElement.closest('.message-image-container');
+                if (container) {
+                    const overlay = container.querySelector('.image-loading-overlay');
+                    if (overlay) overlay.remove();
+                }
+                buttonElement.style.pointerEvents = 'auto';
+                buttonElement.style.opacity = '';
+                stopToolPolling();
+            }
+        }
+
+
+        // --- animateImage ---
+        async function animateImage(buttonElement, oldImageUrl, motionPrompt) {
+            try {
+                const container = buttonElement.closest('.message-image-container');
+                if (!container) {
+                    showCustomAlert("Animation Failed", "Animation failed: message-image-container parent not found!");
+                    return;
+                }
+                const img = container.querySelector('img');
+                if (!img) {
+                    showCustomAlert("Animation Failed", "Animation failed: img tag inside container not found!");
+                    return;
+                }
+                
+                // Create loading overlay
+                let overlay = container.querySelector('.image-loading-overlay');
+                if (!overlay) {
+                    overlay = document.createElement('div');
+                    overlay.className = 'image-loading-overlay';
+                    overlay.innerHTML = `
+                        <div class="typing-indicator" style="gap: 6px;">
+                            <div class="typing-dot" style="background-color: var(--primary-accent);"></div>
+                            <div class="typing-dot" style="background-color: var(--primary-accent); animation-delay: -0.16s;"></div>
+                            <div class="typing-dot" style="background-color: var(--primary-accent); animation-delay: -0.32s;"></div>
+                        </div>
+                    `;
+                    container.appendChild(overlay);
+                }
+                buttonElement.style.pointerEvents = 'none';
+                buttonElement.style.opacity = '0.5';
+
+                startToolPolling();
+                
+                const response = await fetch('/api/animate_image', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        session_id: sessionId,
+                        image_url: getRelativePath(oldImageUrl),
+                        prompt: motionPrompt
+                    })
+                });
+                
+                const data = await response.json();
+                if (response.ok && data.status === 'success') {
+                    // Replace the image container with a video container in the DOM dynamically!
+                    const bubble = container.closest('.message.companion');
+                    if (bubble) {
+                        // Remove the image container
+                        container.remove();
+                        
+                        // Add the video container
+                        const videoContainer = document.createElement('div');
+                        videoContainer.className = 'message-video-container';
+                        videoContainer.style.marginTop = '8px';
+                        
+                        const video = document.createElement('video');
+                        video.src = data.new_video_url;
+                        video.controls = true;
+                        video.autoplay = true;
+                        video.loop = true;
+                        video.muted = true;
+                        video.style.maxWidth = '100%';
+                        video.style.maxHeight = '300px';
+                        video.style.borderRadius = '12px';
+                        
+                        videoContainer.appendChild(video);
+                        
+                        // Insert video right before message text or logs if possible
+                        const textDiv = bubble.querySelector('.message-text');
+                        if (textDiv) {
+                            bubble.insertBefore(videoContainer, textDiv);
+                        } else {
+                            bubble.appendChild(videoContainer);
+                        }
+                    }
+                    await loadServerImages();
+                } else {
+                    let errorMsg = data.error || 'Unknown error';
+                    if (typeof marked !== 'undefined' && marked.parse) {
+                        try {
+                            errorMsg = marked.parse(errorMsg);
+                        } catch (me) {
+                            console.error("Marked parsing error in error alert:", me);
+                        }
+                    }
+                    showCustomAlert("Animation Failed", errorMsg);
+                }
+            } catch (error) {
+                console.error("Error animating image:", error);
+                showCustomAlert("Connection Error", "Failed to connect to the server for image animation: " + error.message);
             } finally {
                 const container = buttonElement.closest('.message-image-container');
                 if (container) {
