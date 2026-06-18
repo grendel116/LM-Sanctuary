@@ -10,15 +10,4 @@ Coordinate schedule/appointments using local scripts:
 4. **Log Quest**: Always run the built-in script:
    `python utils/quest_manager.py --action add_quest --title "..." --notes "..." --due "..." --location "..."`
    *Note: This script automatically initializes and appends quests to the database at `variables/quest_log.json` (which is a JSON array/list of quest objects). You do not need to create, initialize, or modify the JSON file manually.*
-5. **Presentation**: Format in chat using the layout:
-   🔮 **QUEST DISPATCHED:** [Quest Title] 🔮
-   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-   📍 **Coordinates**: [Address/Location]
-   📞 **Phone**: [Phone Number]
-   ⏰ **Target Time**: [Time / Time Window]
-   🎯 **Objectives**:
-   - [Objective 1]
-   - [Objective 2]
-   🎁 **Reward**: [Quest Reward]
-   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-   *I have added this quest to your Quest Log! Click the bookmark icon in the top header menu to view it and download your calendar invite.*
+5. **Presentation**: Inform the user that you have added a quest to their log.

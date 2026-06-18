@@ -103,8 +103,13 @@ async def trigger_auto_journal(history: list, program_id: str, model: str):
     # Only take the last 15 messages for compaction
     segment = history[-15:]
     formatted_chat = []
+    
+    from utils.program import get_active_user
+    user_name = get_active_user().capitalize()
+    prog_name = program_id.capitalize()
+    
     for msg in segment:
-        role = "User" if msg.get("role") == "user" else "Companion"
+        role = user_name if msg.get("role") == "user" else prog_name
         text = msg.get("text", "")
         # Strip thinking blocks for summarization
         import re
@@ -116,7 +121,7 @@ async def trigger_auto_journal(history: list, program_id: str, model: str):
     prompt = (
         "You are an AI companion's memory consolidation daemon.\n"
         "Analyze the following conversation segment. If there are any important new details, facts, preferences, promises, or relationship developments "
-        "about the User or Companion that should be remembered long-term, summarize them in 1 to 3 sentences max (written in 3rd person present tense, e.g. 'The user mentioned...').\n"
+        f"about {user_name} or {prog_name} that should be remembered long-term, summarize them in 1 to 3 sentences max (written in 3rd person present tense, e.g. '{user_name} mentioned...').\n"
         "Also extract 2 to 5 relevant comma-separated trigger keywords or short phrases (e.g. 'rent, job application, whiskers').\n\n"
         "Output format must be EXACTLY:\n"
         "KEYPHRASES: [keywords/phrases]\n"
