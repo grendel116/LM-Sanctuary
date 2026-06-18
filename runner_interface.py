@@ -836,14 +836,33 @@ class BaseProgramRunner:
                 except Exception as e:
                     print(f"Error reading project settings in _execute_local_llm_loop: {e}")
 
-            url = REMOTE_SERVER_URL
-            headers = get_remote_server_headers()
+            # Determine if we should route to the remote cloud server or the local server
+            remote_cloud_url = os.getenv("REMOTE_CLOUD_URL")
+            remote_model = os.getenv("REMOTE_MODEL")
+            is_cloud = False
+            
+            if model and remote_model and model == remote_model:
+                is_cloud = True
+            elif model and model != "local-lm-studio" and remote_cloud_url:
+                is_cloud = True
+                
+            if is_cloud:
+                url = remote_cloud_url
+                headers = {"Content-Type": "application/json"}
+                remote_key = os.getenv("REMOTE_API_KEY")
+                if remote_key:
+                    headers["Authorization"] = f"Bearer {remote_key}"
+                target_model = model
+            else:
+                url = REMOTE_SERVER_URL
+                headers = get_remote_server_headers()
+                target_model = model if (model and model != 'local-lm-studio') else os.getenv("LOCAL_MODEL_NAME")
+                
             payload = {
                 "messages": openai_messages,
                 "temperature": temperature,
                 "max_tokens": 1024
             }
-            target_model = model if (model and model != 'local-lm-studio') else os.getenv("LOCAL_MODEL_NAME")
             if target_model:
                 payload["model"] = target_model
                 
@@ -877,7 +896,10 @@ class BaseProgramRunner:
                         bot_response_text = f"Error: Local model server returned status code {response.status_code} - {response.text}"
                         break
             except Exception as e:
-                bot_response_text = f"Error connecting to local LM Studio server: {e}. Please ensure LM Studio is running, a model is loaded, and the local server is started (port 1234)."
+                if is_cloud:
+                    bot_response_text = f"Error connecting to remote cloud server: {e}. Please verify your network connection and remote API settings."
+                else:
+                    bot_response_text = f"Error connecting to local LM Studio server: {e}. Please ensure LM Studio is running, a model is loaded, and the local server is started (port 1234)."
                 break
                 
             # Find all tool calls
@@ -885,12 +907,12 @@ class BaseProgramRunner:
             
             # Check for dynamic offloading triggers at execution-time
             remote_key = os.getenv("REMOTE_API_KEY")
-            project_id = os.getenv("PROJECT_ID")
             is_remote_configured = bool(
                 remote_key and remote_key.strip() and remote_key != "your_remote_api_key_here" and
-                project_id and project_id.strip() and project_id != "your_gcp_project_id_here"
+                remote_cloud_url and remote_cloud_url.strip() and remote_cloud_url != "your_remote_cloud_url_here"
             )
-            if is_remote_configured and matches:
+            
+            if is_remote_configured and matches and not is_cloud:
                 # 1. Check for complex tools
                 complex_tools = {
                     "write_file", "replace_file_content", "multi_replace_file_content", 
@@ -3202,18 +3224,36 @@ class OpenSourceRunner(BaseProgramRunner):
         inversion_directive = await self._get_inversion_directive(session_id)
         
         adapter = OsHistoryAdapter(self, session_id, file_path_resolved, image_data, image_mime)
-        res = await self._execute_local_llm_loop(
-            session_id=session_id,
-            adapter=adapter,
-            model=model,
-            inversion_directive=inversion_directive,
-            rag_context=rag_context,
-            memory_context=memory_context,
-            new_message_text=new_message_text,
-            invocation_id=""
-        )
-        asyncio.create_task(adapter.compact_history(model))
-        return res
+        try:
+            res = await self._execute_local_llm_loop(
+                session_id=session_id,
+                adapter=adapter,
+                model=model,
+                inversion_directive=inversion_directive,
+                rag_context=rag_context,
+                memory_context=memory_context,
+                new_message_text=new_message_text,
+                invocation_id=""
+            )
+            asyncio.create_task(adapter.compact_history(model))
+            return res
+        except LocalOffloadTrigger as trigger_exc:
+            print(f"[OFFLOAD] Caught LocalOffloadTrigger in OpenSourceRunner: {trigger_exc.reason}. Rolling back local turn and offloading to cloud.", flush=True)
+            # Rollback history events to initial state (discarding generated events of this turn)
+            self.sessions_history[session_id] = self.sessions_history[session_id][:adapter.initial_history_len]
+            self._save_session_to_disk(session_id)
+            
+            # Retrieve configured remote model name
+            remote_model = os.getenv("REMOTE_MODEL", "gemini-3.1-flash-lite")
+            print(f"[OFFLOAD] Recursively calling run_async in OpenSourceRunner with remote model: {remote_model}", flush=True)
+            return await self.run_async(
+                session_id=session_id,
+                new_message_text=new_message_text,
+                image_data=image_data,
+                image_mime=image_mime,
+                model=remote_model,
+                media_path=media_path
+            )
  
     async def edit_turn(self, session_id: str, user_message_index: int, new_text: str = None, model: str = None) -> tuple:
         if session_id not in self.sessions_history:
