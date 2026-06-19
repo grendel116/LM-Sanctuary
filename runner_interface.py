@@ -180,7 +180,8 @@ _LOCAL_DIRECTIVE_PROMPT = (
     "13. `[search_codebase(keyword=\"...\")]` - Search keyword in codebase.\n"
     "14. `[generate_local_image(prompt=\"...\")]` - Generate scene of yourself. (MUST be the ONLY text in your response)\n"
     "15. `[generate_imagen(prompt=\"...\", aspect_ratio=\"...\")]` - Generate landscapes or objects.\n"
-    "16. `[apply_comfy_workflow(workflow_path=\"...\", parameters={...}, save_path=\"...\")]` - Apply custom ComfyUI workflow.\n\n"
+    "16. `[apply_comfy_workflow(workflow_path=\"...\", parameters={...}, save_path=\"...\")]` - Apply custom ComfyUI workflow.\n"
+    "17. `[add_quest(title=\"...\", notes=\"...\", due=\"...\", location=\"...\", reminder_minutes=...)]` - Add a real-world task/quest to the user's quest log. Notes should contain the objectives (separated by newlines or commas). Due is an ISO 8601 string or relative time (e.g. 'tomorrow', 'in 3 hours').\n\n"
     "Rules:\n"
     "- Output exactly one tool call tag per turn when needed.\n"
     "- Call image generation tools sparingly.\n"
@@ -331,7 +332,7 @@ class OsHistoryAdapter(LocalHistoryAdapter):
             import time
             db = DataBankManager()
             db.ingest_text(
-                text=text_to_summarize,
+                text=summary,
                 name=f"chat_history_archive_{self.session_id}_{int(time.time())}",
                 source_type="chat_history"
             )
@@ -499,7 +500,8 @@ class BaseProgramRunner:
         prompt = (
             "You are a memory compaction assistant. Summarize the following new chat history between the User and the Companion. "
             "Extract key facts, user preferences, agreed instructions, file changes, and project details. "
-            "Keep the summary extremely dense, structured, and under 500 words. Do NOT include greetings or conversational filler.\n\n"
+            "Write the summary exclusively as a single cohesive paragraph of exactly 6 to 8 continuous prose sentences. "
+            "Ensure every sentence is dense with facts, details, and project progress.\n\n"
         )
         if prior_memories:
             prompt += "To maintain continuity, you are provided with excerpts of the prior conversation memory archives:\n"
@@ -772,6 +774,57 @@ class BaseProgramRunner:
                         break
                 else:
                     # Sequential execution for non-image tools
+                    is_all_non_blocking = all(m.group(1) in {"add_quest"} for m in matches)
+                    if is_all_non_blocking:
+                        # Non-blocking tools: run them, strip them, and break immediately
+                        # to prevent double-posting and redundant LLM iterations
+                        clean_response = bot_response_text
+                        for m in matches:
+                            clean_response = clean_response.replace(m.group(0), "")
+                        clean_response = re.sub(r'\s+', ' ', clean_response).strip()
+                        
+                        results = []
+                        for m_tool in matches:
+                            if session_id in cancelled_sessions:
+                                raise asyncio.CancelledError("Session cancelled by user request.")
+                            t_name = m_tool.group(1)
+                            a_str = m_tool.group(2)
+                            parsed_args = _parse_emulated_tool_call(t_name, a_str)
+                            import tools
+                            f = getattr(tools, t_name, None)
+                            if not f:
+                                output = f"Error: Tool '{t_name}' not found."
+                            else:
+                                try:
+                                    output = f(*parsed_args["args"], **parsed_args["kwargs"])
+                                except Exception as ex:
+                                    output = f"Error executing tool: {ex}"
+                            results.append((t_name, parsed_args["kwargs"], output))
+                            
+                        t_calls = []
+                        for idx, (t_name, t_args, t_output) in enumerate(results):
+                            call_id = f"call_{int(time.time())}_{idx}_{uuid.uuid4().hex[:4]}"
+                            t_calls.extend([
+                                {
+                                    'type': 'call',
+                                    'name': t_name,
+                                    'args': t_args,
+                                    'id': call_id
+                                },
+                                {
+                                    'type': 'response',
+                                    'name': t_name,
+                                    'response': str(t_output),
+                                    'id': call_id
+                                }
+                            ])
+                        tool_calls.extend(t_calls)
+                        
+                        adapter.append_assistant_message(clean_response, t_calls, invocation_id)
+                        adapter.append_tool_events(results, invocation_id)
+                        bot_response_text = clean_response
+                        break
+                        
                     first_match_start = min(m.start() for m in matches)
                     text_before = bot_response_text[:first_match_start].strip()
                     

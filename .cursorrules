@@ -1,0 +1,11 @@
+# UI Styling Directive
+
+When adding or modifying UI elements, particularly buttons, ALWAYS use the predefined global styling classes rather than hardcoding inline styles (e.g., avoid `style="background: ...; border-color: ..."` for colors).
+
+## Button Guidelines
+
+- **Standard/Cancel/Secondary Actions**: Use `class="edit-btn edit-cancel-btn"`. This provides a clean hollow border matching the dark aesthetic with a subtle hover effect.
+- **Primary/Save/Confirm Actions**: Use `class="edit-btn edit-save-btn"`. This provides a dark filled background with appropriate contrast and hover effects.
+- **General Actions**: Use `class="glass-btn"` for standard glassy UI buttons.
+
+Always match the existing app aesthetic and avoid introducing custom bright backgrounds or non-standard inline coloring unless explicitly requested.

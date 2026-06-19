@@ -1869,6 +1869,105 @@ def multi_replace_file_content(path: str, replacement_chunks: list[dict]) -> str
         return f"Error modifying file '{path}': {e}"
 
 
+@track_tool_activity
+def add_quest(title: str, notes: str, due: str = None, location: str = "", reminder_minutes: int = 15) -> str:
+    """Creates a new quest and adds it to the user's quest log.
+    
+    Args:
+        title: Title/name of the quest.
+        notes: Objectives of the quest, separated by newlines or commas.
+        due: Optional target due date/time (ISO 8601 string or description).
+        location: Optional location coordinates or address.
+        reminder_minutes: Optional alert/alarm trigger in minutes before due.
+    """
+    try:
+        from datetime import datetime, timezone, timedelta
+        import json
+        import re
+        
+        # Resolve variables directory and quest path
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        VARIABLES_DIR = os.path.normpath(os.path.join(base_dir, "variables"))
+        QUEST_LOG_PATH = os.path.join(VARIABLES_DIR, "quest_log.json")
+        
+        # Load existing quests
+        quests = []
+        if os.path.exists(QUEST_LOG_PATH):
+            try:
+                with open(QUEST_LOG_PATH, 'r', encoding='utf-8') as f:
+                    quests = json.load(f)
+            except Exception:
+                quests = []
+
+        # Parse notes into objectives
+        raw_notes = notes.replace('\\n', '\n')
+        objectives = [line.strip() for line in raw_notes.split('\n') if line.strip()]
+        if not objectives:
+            objectives = [notes.strip()]
+
+        # Generate new quest object
+        timestamp = int(time.time())
+        
+        # Handle due time parsing or format
+        due_val = due
+        if not due_val:
+            due_val = datetime.now(timezone.utc).isoformat()
+        else:
+            due_lower = due_val.lower()
+            if "tomorrow" in due_lower:
+                due_val = (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()
+            elif "today" in due_lower:
+                due_val = datetime.now(timezone.utc).isoformat()
+            else:
+                # check if there's hours/days, e.g. "in 2 hours", "in 3 days"
+                match_hours = re.search(r'in\s+(\d+)\s+hour', due_lower)
+                match_days = re.search(r'in\s+(\d+)\s+day', due_lower)
+                if match_hours:
+                    hours = int(match_hours.group(1))
+                    due_val = (datetime.now(timezone.utc) + timedelta(hours=hours)).isoformat()
+                elif match_days:
+                    days = int(match_days.group(1))
+                    due_val = (datetime.now(timezone.utc) + timedelta(days=days)).isoformat()
+                else:
+                    try:
+                        # check if it is parseable
+                        datetime.fromisoformat(due_val.replace("Z", "+00:00"))
+                    except Exception:
+                        # default to tomorrow if we cannot parse it, to prevent "Invalid Date" in UI
+                        due_val = (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()
+
+        try:
+            reminder_min_val = int(reminder_minutes)
+        except (ValueError, TypeError):
+            reminder_min_val = 15
+
+        import uuid
+        unique_suffix = uuid.uuid4().hex[:6]
+        quest = {
+            "id": f"quest_{timestamp}_{unique_suffix}",
+            "title": title.strip(),
+            "objectives": objectives,
+            "location": location.strip(),
+            "due": due_val,
+            "reminder_minutes": reminder_min_val,
+            "created_at": datetime.now(timezone.utc).isoformat()
+        }
+
+        # Avoid duplicate quest titles in the same turn
+        if any(q.get("title") == quest["title"] for q in quests[-3:]):
+            return f"Quest '{quest['title']}' is already in the log."
+
+        quests.append(quest)
+
+        os.makedirs(VARIABLES_DIR, exist_ok=True)
+        with open(QUEST_LOG_PATH, 'w', encoding='utf-8') as f:
+            json.dump(quests, f, indent=2, ensure_ascii=False)
+
+        return f"Successfully added quest: '{title}' to the quest log with {len(objectives)} objectives."
+    except Exception as e:
+        return f"Error adding quest: {e}"
+
+
 
 
 

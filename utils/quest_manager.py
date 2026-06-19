@@ -16,6 +16,7 @@ def main():
     parser.add_argument("--notes", required=True, help="Newline-separated list of objectives")
     parser.add_argument("--due", help="Due time (ISO timestamp)")
     parser.add_argument("--location", default="", help="Location coordinates / address")
+    parser.add_argument("--reminder-minutes", type=int, default=15, help="Reminder alert offset in minutes before due")
     args = parser.parse_args()
 
     # Load existing quests
@@ -34,13 +35,16 @@ def main():
         objectives = [args.notes.strip()]
 
     # Generate new quest object
+    import uuid
     timestamp = int(datetime.now(timezone.utc).timestamp())
+    unique_suffix = uuid.uuid4().hex[:6]
     quest = {
-        "id": f"quest_{timestamp}",
+        "id": f"quest_{timestamp}_{unique_suffix}",
         "title": args.title.strip(),
         "objectives": objectives,
         "location": args.location.strip(),
         "due": args.due or datetime.now(timezone.utc).isoformat(),
+        "reminder_minutes": args.reminder_minutes,
         "created_at": datetime.now(timezone.utc).isoformat()
     }
 
