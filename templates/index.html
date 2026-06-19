@@ -10385,6 +10385,7 @@ async function regenerateImage(buttonElement, oldImageUrl, prompt) {
         // --- startToolPolling ---
         function startToolPolling() {
             if (toolPollInterval) clearInterval(toolPollInterval);
+            let lastActiveToolsStr = "";
             
             const pollFunc = async () => {
                 try {
@@ -10399,13 +10400,18 @@ async function regenerateImage(buttonElement, oldImageUrl, prompt) {
                             const avatarContainer = row.querySelector('.avatar-container');
                             if (avatarContainer) {
                                 let excl = avatarContainer.querySelector('.activity-exclamation');
+                                const currentToolsStr = (data.active_tools || []).join(',');
+                                
                                 if (data.active_tools && data.active_tools.length > 0) {
+                                    const isNewCall = currentToolsStr !== lastActiveToolsStr;
+                                    lastActiveToolsStr = currentToolsStr;
+                                    
                                     if (!excl) {
                                         excl = document.createElement('div');
                                         excl.className = 'activity-exclamation';
                                         excl.textContent = '!';
                                         avatarContainer.appendChild(excl);
-                                    } else {
+                                    } else if (isNewCall) {
                                         // Reset CSS animation to trigger the quick-ping effect again
                                         excl.style.animation = 'none';
                                         excl.offsetHeight; // trigger reflow
@@ -10417,6 +10423,7 @@ async function regenerateImage(buttonElement, oldImageUrl, prompt) {
                                     }).join(', ');
                                     excl.title = `Running: ${toolsNames}`;
                                 } else {
+                                    lastActiveToolsStr = "";
                                     if (excl) {
                                         excl.remove();
                                     }
