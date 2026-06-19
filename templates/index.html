@@ -3283,11 +3283,14 @@
     <div id="quest-modal" class="modal" onclick="closeQuestLog()">
         <div class="modal-card" style="max-width: 580px; width: 95%; text-align: left; align-items: stretch;" onclick="event.stopPropagation()">
             <span class="close-modal-btn" onclick="closeQuestLog()">&times;</span>
-            <h3 style="margin-bottom: 12px; display: flex; align-items: center; gap: 8px; font-size: 1.15rem; border-bottom: 1px solid rgba(255,255,255,0.08); padding-bottom: 10px;">
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--primary-accent)" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 4px;">
-                    <path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"></path>
-                </svg>
-                <span>Quest Log</span>
+            <h3 style="margin-bottom: 12px; display: flex; align-items: center; justify-content: flex-start; gap: 12px; font-size: 1.15rem; border-bottom: 1px solid rgba(255,255,255,0.08); padding-bottom: 10px; flex-wrap: wrap;">
+                <div style="display: flex; align-items: center; gap: 8px;">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--primary-accent)" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 4px;">
+                        <path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"></path>
+                    </svg>
+                    <span>Quest Log</span>
+                </div>
+
             </h3>
             
             <div id="quests-container" style="display: flex; flex-direction: column; gap: 15px; max-height: 400px; overflow-y: auto; padding-right: 5px;">
@@ -8033,9 +8036,11 @@ function toggleThinkingBlock(headerElement) {
             row.dataset.timestamp = timestamp || '';
             row.dataset.duration = duration || '';
 
-            // Hide the user message requesting a portrait
+            // Hide the user message requesting a portrait, system quest completion, or emulated tool responses
             const isPortraitRequest = (role === 'user' && text.includes("Send me a portrait of yourself based on the context of our last message/current dialogue!"));
-            if (isPortraitRequest) {
+            const isSystemQuestCompletion = (role === 'user' && text.startsWith("[SYSTEM: User has completed the quest:"));
+            const isToolResponse = (role === 'user' && text.startsWith("[Tool Response from"));
+            if (isPortraitRequest || isSystemQuestCompletion || isToolResponse) {
                 row.style.display = 'none';
             }
 
@@ -10633,12 +10638,14 @@ function showToolConfirmModal(callId, toolName, details) {
             
             try {
                 const response = await fetch('/api/quests');
-                const quests = await response.json();
+                const data = await response.json();
                 
-                if (quests.error) {
-                    container.innerHTML = `<p style="color: #fca5a5; font-size: 0.85rem; text-align: center; margin: 20px 0;">Error loading quests: ${quests.error}</p>`;
+                if (data.error) {
+                    container.innerHTML = `<p style="color: #fca5a5; font-size: 0.85rem; text-align: center; margin: 20px 0;">Error loading quests: ${data.error}</p>`;
                     return;
                 }
+                
+                const quests = data.quests || [];
                 
                 if (!quests || quests.length === 0) {
                     container.innerHTML = `<p style="color: var(--text-muted); font-size: 0.85rem; text-align: center; margin: 20px 0;">No active quests. Ask your companion to assign you one!</p>`;
@@ -10646,7 +10653,50 @@ function showToolConfirmModal(callId, toolName, details) {
                 }
                 
                 container.innerHTML = quests.map(quest => {
-                    const dueTime = quest.due ? new Date(quest.due).toLocaleString() : 'No Target Time';
+                    let dueTime = 'No Target Time';
+                    let googleUrl = '';
+                    
+                    if (quest.due) {
+                        const parsedDate = new Date(quest.due);
+                        if (!isNaN(parsedDate.getTime())) {
+                            dueTime = parsedDate.toLocaleString();
+                            
+                            // Generate Google Calendar Link: YYYYMMDDTHHMMSSZ
+                            const startStr = parsedDate.toISOString().replace(/[-:]/g, '').split('.')[0] + 'Z';
+                            const endParsed = new Date(parsedDate.getTime() + 60 * 60 * 1000); // 1 hour duration
+                            const endStr = endParsed.toISOString().replace(/[-:]/g, '').split('.')[0] + 'Z';
+                            
+                            const title = encodeURIComponent(quest.title);
+                            const details = encodeURIComponent((quest.objectives || []).join('\n'));
+                            const loc = encodeURIComponent(quest.location || '');
+                            googleUrl = `https://calendar.google.com/calendar/r/eventedit?action=TEMPLATE&text=${title}&dates=${startStr}/${endStr}&details=${details}&location=${loc}`;
+                        } else {
+                            dueTime = quest.due;
+                            
+                            // Fallback Google Calendar Link using current time
+                            const now = new Date();
+                            const startStr = now.toISOString().replace(/[-:]/g, '').split('.')[0] + 'Z';
+                            const endParsed = new Date(now.getTime() + 60 * 60 * 1000);
+                            const endStr = endParsed.toISOString().replace(/[-:]/g, '').split('.')[0] + 'Z';
+                            
+                            const title = encodeURIComponent(quest.title);
+                            const details = encodeURIComponent((quest.objectives || []).join('\n') + `\n\n(Target time: ${quest.due})`);
+                            const loc = encodeURIComponent(quest.location || '');
+                            googleUrl = `https://calendar.google.com/calendar/r/eventedit?action=TEMPLATE&text=${title}&dates=${startStr}/${endStr}&details=${details}&location=${loc}`;
+                        }
+                    } else {
+                        // Default Google Calendar Link if no due date
+                        const now = new Date();
+                        const startStr = now.toISOString().replace(/[-:]/g, '').split('.')[0] + 'Z';
+                        const endParsed = new Date(now.getTime() + 60 * 60 * 1000);
+                        const endStr = endParsed.toISOString().replace(/[-:]/g, '').split('.')[0] + 'Z';
+                        
+                        const title = encodeURIComponent(quest.title);
+                        const details = encodeURIComponent((quest.objectives || []).join('\n'));
+                        const loc = encodeURIComponent(quest.location || '');
+                        googleUrl = `https://calendar.google.com/calendar/r/eventedit?action=TEMPLATE&text=${title}&dates=${startStr}/${endStr}&details=${details}&location=${loc}`;
+                    }
+
                     const objectivesHtml = (quest.objectives || []).map(obj => 
                         `<li style="margin-bottom: 5px; color: var(--text-main); font-size: 0.82rem;">${obj}</li>`
                     ).join('');
@@ -10656,16 +10706,15 @@ function showToolConfirmModal(callId, toolName, details) {
                             <div style="display: flex; justify-content: space-between; align-items: flex-start; gap: 10px;">
                                 <h4 style="margin: 0; color: #fbbf24; font-size: 0.95rem; font-weight: 600;">${quest.title}</h4>
                                 <div style="display: flex; gap: 6px;">
-                                    <!-- Download ICS -->
-                                    <button class="edit-btn edit-cancel-btn" onclick="downloadQuest('${quest.id}')" title="Download Calendar invite" style="padding: 6px; border-radius: 8px; display: flex; align-items: center; justify-content: center;">
+                                    <!-- Delete (Quiet) -->
+                                    <button class="edit-btn edit-cancel-btn" onclick="deleteQuest('${quest.id}')" title="Delete Quest" style="padding: 6px; border-radius: 8px; display: flex; align-items: center; justify-content: center;">
                                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-                                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
-                                            <polyline points="7 10 12 15 17 10"></polyline>
-                                            <line x1="12" y1="15" x2="12" y2="3"></line>
+                                            <polyline points="3 6 5 6 21 6"></polyline>
+                                            <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
                                         </svg>
                                     </button>
-                                    <!-- Complete/Delete -->
-                                    <button class="edit-btn edit-save-btn" onclick="deleteQuest('${quest.id}')" title="Complete Quest" style="padding: 6px; border-radius: 8px; display: flex; align-items: center; justify-content: center;">
+                                    <!-- Complete (Notifying) -->
+                                    <button class="edit-btn edit-save-btn" onclick="completeQuest('${quest.id}')" title="Complete Quest" style="padding: 6px; border-radius: 8px; display: flex; align-items: center; justify-content: center;">
                                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
                                             <polyline points="20 6 9 17 4 12"></polyline>
                                         </svg>
@@ -10679,6 +10728,26 @@ function showToolConfirmModal(callId, toolName, details) {
                                 <ul style="margin: 4px 0 0 15px; padding: 0; list-style-type: square;">
                                     ${objectivesHtml}
                                 </ul>
+                            </div>
+                            <!-- Add to Calendar Footer -->
+                            <div style="margin-top: 6px; padding-top: 8px; border-top: 1px solid rgba(255,255,255,0.06); display: flex; gap: 10px; flex-wrap: wrap;">
+                                <a href="${googleUrl}" target="_blank" class="edit-btn edit-save-btn" style="text-decoration: none; font-size: 0.72rem; padding: 4px 8px; display: inline-flex; align-items: center; gap: 4px; border-radius: 6px;">
+                                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                                        <rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect>
+                                        <line x1="16" y1="2" x2="16" y2="6"></line>
+                                        <line x1="8" y1="2" x2="8" y2="6"></line>
+                                        <line x1="3" y1="10" x2="21" y2="10"></line>
+                                    </svg>
+                                    Add to Google
+                                </a>
+                                <button onclick="downloadQuest('${quest.id}')" class="edit-btn edit-cancel-btn" style="font-size: 0.72rem; padding: 4px 8px; display: inline-flex; align-items: center; gap: 4px; border-radius: 6px; background: rgba(255, 255, 255, 0.05); color: white; border: 1px solid rgba(255,255,255,0.12);">
+                                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                                        <polyline points="7 10 12 15 17 10"></polyline>
+                                        <line x1="12" y1="15" x2="12" y2="3"></line>
+                                    </svg>
+                                    Download iCal
+                                </button>
                             </div>
                         </div>
                     `;
@@ -10696,17 +10765,135 @@ function showToolConfirmModal(callId, toolName, details) {
 
         // --- deleteQuest ---
         async function deleteQuest(questId) {
-            try {
-                const response = await fetch(`/api/quests/${questId}/delete`, { method: 'POST' });
-                const data = await response.json();
-                if (data.status === 'success') {
-                    await loadQuests();
-                } else {
-                    alert("Failed to complete quest: " + (data.error || 'unknown error'));
+            showCustomConfirm(
+                "Delete Quest",
+                "Are you sure you want to permanently delete this quest? Your companion will not be notified.",
+                async () => {
+                    try {
+                        const response = await fetch(`/api/quests/${questId}/delete`, { method: 'POST' });
+                        const data = await response.json();
+                        if (data.status === 'success') {
+                            await loadQuests();
+                        } else {
+                            showCustomAlert("Error", "Failed to delete quest: " + (data.error || 'unknown error'));
+                        }
+                    } catch (e) {
+                        console.error("Error deleting quest:", e);
+                        showCustomAlert("Error", "Error deleting quest.");
+                    }
                 }
-            } catch (e) {
-                console.error("Error deleting quest:", e);
-                alert("Error completing quest.");
+            );
+        }
+
+        // --- completeQuest ---
+        async function completeQuest(questId) {
+            closeQuestLog();
+            
+            if (isGenerating) return;
+            
+            setGenerating(true);
+            userInput.disabled = true;
+            userInput.placeholder = "";
+            updateInputGlow();
+            
+            const heartElement = document.querySelector('.heart-pulse');
+            if (heartElement) {
+                heartElement.classList.add('jiggling');
+            }
+            
+            let typingIndicatorRow = null;
+
+            try {
+                const response = await fetch(`/api/quests/${questId}/complete`, { method: 'POST' });
+                const data = await response.json();
+                if (data.error) throw new Error(data.error);
+                
+                const title = data.title || "Quest";
+                const objectives = data.objectives || [];
+                const objText = objectives.length > 0 ? ` with objectives: ${objectives.join(', ')}` : "";
+                const systemMessage = `[SYSTEM: User has completed the quest: "${title}"${objText}]`;
+                
+                appendMessage('user', systemMessage, null, null, false, Date.now() / 1000);
+                
+                const payload = {
+                    message: systemMessage,
+                    image_data: null,
+                    image_mime: null,
+                    media_path: null,
+                    session_id: sessionId,
+                    model: selectedModel
+                };
+                
+                typingIndicatorRow = document.createElement('div');
+                typingIndicatorRow.className = 'message-row companion-row';
+                const profileUrl = getProfileUrl();
+                typingIndicatorRow.innerHTML = `
+                    <div class="avatar-container">
+                        <img class="avatar companion-avatar" src="${profileUrl}" alt="Companion" onclick="expandImage('${profileUrl}')">
+                    </div>
+                    <div class="message companion">
+                        <div class="typing-indicator">
+                            <div class="typing-dot"></div>
+                            <div class="typing-dot"></div>
+                            <div class="typing-dot"></div>
+                        </div>
+                    </div>
+                `;
+                chatContainer.appendChild(typingIndicatorRow);
+                chatContainer.scrollTop = chatContainer.scrollHeight;
+                
+                startToolPolling();
+                chatAbortController = new AbortController();
+                
+                const chatResponse = await fetch('/chat', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload),
+                    signal: chatAbortController.signal
+                });
+                
+                if (typingIndicatorRow && chatContainer.contains(typingIndicatorRow)) {
+                    chatContainer.removeChild(typingIndicatorRow);
+                }
+                
+                const chatData = await chatResponse.json();
+                if (chatData.response !== undefined) {
+                    appendMessage('companion', chatData.response, null, chatData.tool_calls, true, chatData.timestamp, chatData.duration);
+                } else if (chatData.error) {
+                    let errMsg = chatData.error;
+                    if (errMsg.includes("429") || errMsg.includes("RESOURCE_EXHAUSTED")) {
+                        errMsg = "The Sanctuary is momentarily overwhelmed (Gemini Rate Limit 429: Resource Exhausted). Let us pause, take a slow breath, and try our chavruta again in 15 seconds.";
+                    }
+                    appendMessage('companion', errMsg);
+                }
+                if (chatData.state) {
+                    updateHeartState(chatData.state, chatData.inversion_active);
+                }
+                if (chatData.inversion_active && !inversionActive) {
+                    triggerHeartBurst();
+                }
+                inversionActive = chatData.inversion_active || "";
+                handleSuccessReload(chatData);
+            } catch (error) {
+                if (typingIndicatorRow && chatContainer.contains(typingIndicatorRow)) {
+                    chatContainer.removeChild(typingIndicatorRow);
+                }
+                if (error.name === 'AbortError') {
+                    appendMessage('companion', '*(Generation stopped)*');
+                } else {
+                    console.error("Error completing quest:", error);
+                    showCustomAlert("Error", "Error completing quest: " + error.message);
+                }
+                handleToolReloadOrRecovery();
+            } finally {
+                setGenerating(false);
+                userInput.disabled = false;
+                userInput.placeholder = "Ask " + (activeCompanionName || "Companion");
+                updateInputGlow();
+                stopToolPolling();
+                if (heartElement) {
+                    heartElement.classList.remove('jiggling');
+                }
             }
         }
 

@@ -51,6 +51,7 @@ These are the things your companion can do on your computer. By default, before 
 * **Find Code** (`search_codebase`): Search codebase for keywords.
 * **Shell Execution** (`run_shell_command` / `run_command_async`): Run terminal commands, or spawn headless asynchronous background subprocesses with daemon reading threads streaming stdout/stderr asynchronously (allowing the companion to multitask and write to stdin).
 * **Task Manager** (`manage_task` / `wait_task`): Monitor, write to stdin, kill, or block and wait on active background commands.
+* **Add Quest** (`add_quest`): Create and append a structured task or chore to the user's quest log with objectives, target date/time, coordinates/address, and alarm offsets.
 
 ### Network Grounding & Research (Online)
 * **Hybrid Web Search** (`web_search`): A unified search client that queries Google Grounding Search, SearXNG, and Wikipedia. SearXNG is now used as a centralized proxy for routing platform-specific queries (e.g., Baidu, Yandex). It aggregates and deduplicates URLs, and supports explicit query prefix routing (e.g. `github: query`, `arxiv: query`, `hn: query`).
@@ -66,7 +67,9 @@ These are the things your companion can do on your computer. By default, before 
 
 * **Interactive Voice Calls / Chat**: Speak with companions in real-time. Powering Kokoro ONNX voice generation, companion-specific voices, and call transcript saving.
 * **Procedural Journals & Memories**: Companions build dynamic memory structures (`memories.json`) and journal logs (`journals.json`), preserving context and relationships across sessions.
-* **Quest Log & Objectives**: Integrated quest system to dynamically track, update, and display user objectives.
+* **Quest Log & Calendar Sync**: Integrated quest system to dynamically track and display user objectives. Companions can assign quests (chores, habits, tasks) using the local `add_quest` tool. Each quest card provides quick-actions to sync the task:
+  * **Add to Google**: A direct, single-click link opening Google Calendar's web UI with pre-filled title, dates, objectives, and location.
+  * **Download iCal**: Download a standard `.ics` file containing a 15-minute `VALARM` notification alert for native desktop/mobile task clients (e.g. Apple Calendar, Outlook).
 * **Companion Editing & Imports**: Profile updating, and support for importing custom Tavern cards.
 * **Character Accent Palette**: Colors saved in `project_settings.json` that dynamically generates and update themed CSS variables, buttons, highlights, and more.
 * **Idle Thoughts**: Inline monologue bubbles (`.thought-row`) showing a companion's thoughts during inactivity.

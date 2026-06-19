@@ -1978,11 +1978,15 @@ def list_quests():
     try:
         from variables import VARIABLES_DIR
         quests_path = os.path.join(VARIABLES_DIR, 'quest_log.json')
-        if not os.path.exists(quests_path):
-            return jsonify([])
-        with open(quests_path, 'r', encoding='utf-8') as f:
-            quests = json.load(f)
-        return jsonify(quests)
+        
+        quests = []
+        if os.path.exists(quests_path):
+            with open(quests_path, 'r', encoding='utf-8') as f:
+                quests = json.load(f)
+                
+        return jsonify({
+            "quests": quests
+        })
     except Exception as e:
         print(f"Error loading quests: {e}")
         return jsonify({"error": str(e)}), 500
@@ -1993,15 +1997,46 @@ def delete_quest(quest_id):
     try:
         from variables import VARIABLES_DIR
         quests_path = os.path.join(VARIABLES_DIR, 'quest_log.json')
+        
         if os.path.exists(quests_path):
             with open(quests_path, 'r', encoding='utf-8') as f:
                 quests = json.load(f)
             quests = [q for q in quests if q['id'] != quest_id]
             with open(quests_path, 'w', encoding='utf-8') as f:
                 json.dump(quests, f, indent=2, ensure_ascii=False)
+                
         return jsonify({"status": "success"})
     except Exception as e:
         print(f"Error deleting quest {quest_id}: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/quests/<quest_id>/complete', methods=['POST'])
+@requires_auth
+def complete_quest(quest_id):
+    try:
+        from variables import VARIABLES_DIR
+        quests_path = os.path.join(VARIABLES_DIR, 'quest_log.json')
+        quest_data = None
+        
+        if os.path.exists(quests_path):
+            with open(quests_path, 'r', encoding='utf-8') as f:
+                quests = json.load(f)
+            quest_data = next((q for q in quests if q['id'] == quest_id), None)
+            if quest_data:
+                quests = [q for q in quests if q['id'] != quest_id]
+                with open(quests_path, 'w', encoding='utf-8') as f:
+                    json.dump(quests, f, indent=2, ensure_ascii=False)
+        
+        if not quest_data:
+            return jsonify({"error": "Quest not found"}), 404
+            
+        return jsonify({
+            "status": "success",
+            "title": quest_data.get("title", ""),
+            "objectives": quest_data.get("objectives", [])
+        })
+    except Exception as e:
+        print(f"Error completing quest {quest_id}: {e}")
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/quests/<quest_id>/download', methods=['GET'])
@@ -2039,6 +2074,11 @@ def download_quest(quest_id):
         
         clean_desc = notes.replace("\n", "\\n")
         
+        try:
+            trigger_minutes = int(quest.get('reminder_minutes', 15))
+        except (ValueError, TypeError):
+            trigger_minutes = 15
+
         ics_content = f"""BEGIN:VCALENDAR
 VERSION:2.0
 PRODID:-//The Sanctuary//Quest Giver//EN
@@ -2052,6 +2092,11 @@ DTEND:{end_str}
 SUMMARY:{title}
 DESCRIPTION:{clean_desc}
 LOCATION:{location}
+BEGIN:VALARM
+TRIGGER:-PT{trigger_minutes}M
+ACTION:DISPLAY
+DESCRIPTION:Reminder: {title} is due soon!
+END:VALARM
 END:VEVENT
 END:VCALENDAR"""
 
@@ -2063,6 +2108,8 @@ END:VCALENDAR"""
     except Exception as e:
         print(f"Error downloading quest {quest_id}: {e}")
         return jsonify({"error": str(e)}), 500
+
+
 
 @app.route('/api/programs', methods=['GET'])
 @requires_auth
