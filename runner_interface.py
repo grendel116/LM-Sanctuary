@@ -265,12 +265,12 @@ class OsHistoryAdapter(LocalHistoryAdapter):
         for msg in history:
             history_text += msg.get('text', '') or ''
             
-        # Dynamic threshold based on LMS_CONTEXT or LOCAL_CONTEXT_THRESHOLD_CHARS
-        lms_context = os.getenv("LMS_CONTEXT")
-        if lms_context:
+        # Dynamic threshold based on LOCAL_CONTEXT or LOCAL_CONTEXT_THRESHOLD_CHARS
+        local_context = os.getenv("LOCAL_CONTEXT")
+        if local_context:
             try:
                 # 1 token is approx 4 characters. Trigger threshold at 75% of context window.
-                MAX_LOCAL_CONTEXT_CHARS = int(int(lms_context) * 0.75 * 4)
+                MAX_LOCAL_CONTEXT_CHARS = int(int(local_context) * 0.75 * 4)
             except Exception:
                 MAX_LOCAL_CONTEXT_CHARS = 16000
         else:
@@ -474,7 +474,7 @@ def _is_cloud_model_check(model: str) -> bool:
         return True
     if model and is_local_model(model):
         return False
-    if model in ("local-lm-studio", os.getenv("LOCAL_MODEL_NAME")):
+    if model in ("local-llm", os.getenv("LOCAL_MODEL_NAME")):
         return False
     return True
 
@@ -542,7 +542,7 @@ class BaseProgramRunner:
             "temperature": 0.3,
             "max_tokens": 1024
         }
-        target_model = active_model if (active_model and active_model != 'local-lm-studio') else os.getenv("LOCAL_MODEL_NAME")
+        target_model = active_model if (active_model and active_model != 'local-llm') else os.getenv("LOCAL_MODEL_NAME")
         if target_model:
             payload["model"] = target_model
             
@@ -609,7 +609,15 @@ class BaseProgramRunner:
             else:
                 url = REMOTE_SERVER_URL
                 headers = get_remote_server_headers()
-                target_model = model if (model and model != 'local-lm-studio') else os.getenv("LOCAL_MODEL_NAME")
+                target_model = model if (model and model != 'local-llm') else os.getenv("LOCAL_MODEL_NAME")
+                try:
+                    from utils.local_llm_manager import check_status, start_server
+                    if not check_status():
+                        print("[VRAM GUARD ROUTING] Local server is offline. Triggering background startup...", flush=True)
+                        import threading
+                        threading.Thread(target=start_server, daemon=True).start()
+                except Exception as e_start:
+                    print(f"[VRAM GUARD ROUTING] Warning: failed to auto-start local server: {e_start}", flush=True)
                 
             payload = {
                 "messages": openai_messages,
@@ -651,9 +659,35 @@ class BaseProgramRunner:
             except Exception as e:
                 if is_cloud:
                     bot_response_text = f"Error connecting to remote cloud server: {e}. Please verify your network connection and remote API settings."
+                    break
                 else:
-                    bot_response_text = f"Error connecting to local LM Studio server: {e}. Please ensure LM Studio is running, a model is loaded, and the local server is started (port 1234)."
-                break
+                    # Check if remote cloud server is configured for fallback
+                    remote_key = os.getenv("REMOTE_API_KEY")
+                    is_remote_configured = bool(
+                        remote_key and remote_key.strip() and remote_key != "your_remote_api_key_here" and
+                        remote_cloud_url and remote_cloud_url.strip() and remote_cloud_url != "your_remote_cloud_url_here"
+                    )
+                    if is_remote_configured:
+                        print(f"[VRAM GUARD ROUTING] Local server offline/busy ({e}). Seamlessly routing request to remote cloud model.", flush=True)
+                        try:
+                            from variables import DEFAULT_REMOTE_MODEL
+                            fallback_headers = {"Content-Type": "application/json"}
+                            if remote_key:
+                                fallback_headers["Authorization"] = f"Bearer {remote_key}"
+                            payload["model"] = DEFAULT_REMOTE_MODEL
+                            async with httpx.AsyncClient() as client:
+                                response = await client.post(remote_cloud_url, json=payload, headers=fallback_headers, timeout=120.0)
+                                if response.status_code == 200:
+                                    res_json = response.json()
+                                    bot_response_text = res_json['choices'][0]['message']['content']
+                                else:
+                                    bot_response_text = f"Error: Local server offline, and remote server returned status {response.status_code} - {response.text}"
+                        except Exception as cloud_err:
+                            bot_response_text = f"Error: Local server offline ({e}), and fallback to remote cloud server failed: {cloud_err}"
+                        break
+                    else:
+                        bot_response_text = f"Error connecting to local LLM server: {e}. Please ensure a model is loaded and the local server is started (port 1234)."
+                        break
                 
             # Find all tool calls
             matches = list(re.finditer(r'\[(\w+)\((.*?)\)\]', bot_response_text))
@@ -1195,7 +1229,7 @@ class OpenSourceRunner(BaseProgramRunner):
         else:
             if remote_key:
                 headers["Authorization"] = f"Bearer {remote_key}"
-            target_model = model if (model and model != 'local-lm-studio') else os.getenv("LOCAL_MODEL_NAME")
+            target_model = model if (model and model != 'local-llm') else os.getenv("LOCAL_MODEL_NAME")
 
         payload = {
             "messages": [
@@ -1208,13 +1242,42 @@ class OpenSourceRunner(BaseProgramRunner):
         if target_model:
             payload["model"] = target_model
 
-        async with httpx.AsyncClient() as client:
-            r = await client.post(url, json=payload, headers=headers, timeout=60.0)
-            if r.status_code == 200:
-                res_json = r.json()
-                return res_json['choices'][0]['message']['content'].strip()
+        try:
+            async with httpx.AsyncClient() as client:
+                r = await client.post(url, json=payload, headers=headers, timeout=60.0)
+                if r.status_code == 200:
+                    res_json = r.json()
+                    return res_json['choices'][0]['message']['content'].strip()
+                else:
+                    raise Exception(f"HTTP Server returned status code {r.status_code}: {r.text}")
+        except Exception as e:
+            if is_cloud:
+                raise e
             else:
-                raise Exception(f"HTTP Server returned status code {r.status_code}: {r.text}")
+                # Check if remote cloud server is configured for fallback
+                is_remote_configured = bool(
+                    remote_key and remote_key.strip() and remote_key != "your_remote_api_key_here" and
+                    remote_cloud_url and remote_cloud_url.strip() and remote_cloud_url != "your_remote_cloud_url_here"
+                )
+                if is_remote_configured:
+                    print(f"[VRAM GUARD ROUTING] Local server offline/busy ({e}) during impersonation. Seamlessly routing request to remote cloud model.", flush=True)
+                    try:
+                        from variables import DEFAULT_REMOTE_MODEL
+                        fallback_headers = {"Content-Type": "application/json"}
+                        if remote_key:
+                            fallback_headers["Authorization"] = f"Bearer {remote_key}"
+                        payload["model"] = DEFAULT_REMOTE_MODEL
+                        async with httpx.AsyncClient() as client:
+                            r_fallback = await client.post(remote_cloud_url, json=payload, headers=fallback_headers, timeout=60.0)
+                            if r_fallback.status_code == 200:
+                                res_json = r_fallback.json()
+                                return res_json['choices'][0]['message']['content'].strip()
+                            else:
+                                raise Exception(f"Fallback HTTP Server returned status code {r_fallback.status_code}: {r_fallback.text}")
+                    except Exception as cloud_err:
+                        raise Exception(f"Local server offline ({e}), and fallback to remote cloud server failed: {cloud_err}")
+                else:
+                    raise e
 
 
     def _get_session_path(self, session_id: str) -> str:

@@ -2908,7 +2908,7 @@
                 <div class="header-subtitle">
                     <div class="model-select-wrapper" title="Select coding intelligence model">
                         <select id="model-select" onchange="changeModel()" class="glass-select" disabled>
-                            <option value="local-lm-studio">...</option>
+                            <option value="local-llm">...</option>
                         </select>
                     </div>
 
@@ -2942,7 +2942,7 @@
                     </svg>
                 </button>
 
-                <button class="share-btn" onclick="openConnectionModal()" title="LM Studio Engine / Cloud Settings">
+                <button class="share-btn" onclick="openConnectionModal()" title="Local LLM / Cloud Settings">
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                         <circle cx="12" cy="12" r="3"></circle>
                         <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
@@ -3497,27 +3497,23 @@
                 <!-- Local Panel -->
                 <div class="onboarding-option-box local-box" id="modal-local-box-container">
                     <div class="option-header">
-                        <h4 style="margin: 0; font-size: 1.05rem; font-weight: 600;">LM Studio (Local LLM)</h4>
-                        <span id="modal-lmstudio-status" class="status-badge status-offline">Offline</span>
+                        <h4 style="margin: 0; font-size: 1.05rem; font-weight: 600;">Local LLM</h4>
+                        <span id="modal-local-status" class="status-badge status-offline">Offline</span>
                     </div>
-                    <p class="option-desc" style="font-size: 0.8rem; margin: 8px 0 15px 0;">Run offline using a GGUF model loaded on your local computer.</p>
+                    <p class="option-desc" style="font-size: 0.8rem; margin: 8px 0 15px 0;">Run offline using a GGUF model served locally on port 1234 with Vulkan GPU acceleration.</p>
                     
                     <div class="local-steps" style="font-size: 0.8rem; gap: 6px; margin-bottom: 15px;">
                         <div class="step-item">
                             <span class="step-num">1</span>
-                            <span class="step-text">Launch LM Studio.</span>
+                            <span class="step-text">Choose a model in the header selector.</span>
                         </div>
                         <div class="step-item">
                             <span class="step-num">2</span>
-                            <span class="step-text">Load a GGUF model.</span>
-                        </div>
-                        <div class="step-item">
-                            <span class="step-num">3</span>
-                            <span class="step-text">Start Local Server (port 1234).</span>
+                            <span class="step-text">Click "Load" to start the server.</span>
                         </div>
                     </div>
                     
-                    <button onclick="checkModalStatus()" class="onboarding-btn check-local-btn">Check Local Connection</button>
+                    <button onclick="checkModalStatus()" class="onboarding-btn">Refresh Status</button>
                     <div class="helper-text" style="font-size: 0.7rem; margin-top: 10px;">
                         Server URL: <code class="url-code" style="font-size: 0.7rem;">http://localhost:1234</code>
                     </div>
@@ -4033,7 +4029,7 @@
                     const onboarding = document.getElementById('onboarding-container');
                     if (onboarding) onboarding.remove();
                 } else {
-                    if (!connectionStatus.remote_configured  && !connectionStatus.lm_studio_online) {
+                    if (!connectionStatus.remote_configured  && !connectionStatus.local_online) {
                         showOnboardingCard();
                     } else {
                         showWelcomeMessage();
@@ -4377,8 +4373,8 @@ async function initializeModelSelect() {
                 // If no models are available, add a disconnected local placeholder
                 if (availableModels.length === 0) {
                     const opt = document.createElement('option');
-                    opt.value = 'local-lm-studio';
-                    if (data.status && data.status.lm_studio_online) {
+                    opt.value = 'local-llm';
+                    if (data.status && data.status.local_online) {
                         opt.textContent = 'Local Model (No Model Loaded)';
                     } else {
                         opt.textContent = 'Local Model (Disconnected)';
@@ -4393,11 +4389,11 @@ async function initializeModelSelect() {
                     });
                 }
 
-                const defaultModel = data.default || 'local-lm-studio';
+                const defaultModel = data.default || 'local-llm';
                 localStorage.setItem('companion_default_model', defaultModel);
 
                 let storedModel = localStorage.getItem('companion_selected_model');
-                const isValid = availableModels.some(m => m.value === storedModel) || (storedModel === 'local-lm-studio' && availableModels.length === 0);
+                const isValid = availableModels.some(m => m.value === storedModel) || (storedModel === 'local-llm' && availableModels.length === 0);
                 if (!isValid) {
                     storedModel = defaultModel;
                     localStorage.setItem('companion_selected_model', storedModel);
@@ -4413,7 +4409,7 @@ async function initializeModelSelect() {
                     modelSelectElement.disabled = false;
                     if (modelSelectElement.children.length === 0) {
                         const opt = document.createElement('option');
-                        opt.value = 'local-lm-studio';
+                        opt.value = 'local-llm';
                         opt.textContent = 'Local Model (Disconnected)';
                         modelSelectElement.appendChild(opt);
                     }
@@ -4433,20 +4429,12 @@ function showOnboardingCard() {
             onboarding.id = 'onboarding-container';
             onboarding.className = 'onboarding-card';
 
-            // Build local LM Studio onboarding card section based on engine state
+            // Build local LLM onboarding card section based on engine state
             let localContent = '';
-            if (!connectionStatus.lms_installed) {
+            if (!connectionStatus.local_online) {
                 localContent = `
-                    <p class="option-desc" style="font-size: 0.8rem; margin: 8px 0 15px 0;">LM Studio command-line engine is not installed on this system.</p>
-                    <button onclick="installLMStudio(this)" class="onboarding-btn connect-cloud-btn" style="width: 100%; font-size: 0.85rem; padding: 10px;">Install LM Studio (Headless)</button>
-                    <div id="lms-install-progress" style="display: none; margin-top: 10px; font-size: 0.75rem; color: var(--text-muted);">
-                        Installing CLI... Please wait. This downloads and registers the 'lms' utility.
-                    </div>
-                `;
-            } else if (!connectionStatus.lm_studio_online) {
-                localContent = `
-                    <p class="option-desc" style="font-size: 0.8rem; margin: 8px 0 15px 0;">LM Studio is installed, but the local engine is offline. Start the service or search Hugging Face to download a model.</p>
-                    <button onclick="startLmsServer(this)" class="onboarding-btn" style="width: 100%; font-size: 0.85rem; padding: 10px; margin-bottom: 15px;">Start Local Server</button>
+                    <p class="option-desc" style="font-size: 0.8rem; margin: 8px 0 15px 0;">Local LLM engine is offline. Start the server or search Hugging Face below to download a GGUF model.</p>
+                    <button onclick="startLocalLLM(this)" class="onboarding-btn connect-cloud-btn" style="width: 100%; font-size: 0.85rem; padding: 10px; margin-bottom: 15px;">Start Server</button>
                     
                     <div style="border-top: 1px solid var(--border-color); padding-top: 15px;">
                         <label style="font-size: 0.72rem; color: var(--text-muted); font-weight: 500;">Search Hugging Face (GGUF)</label>
@@ -4459,14 +4447,14 @@ function showOnboardingCard() {
                 `;
             } else {
                 localContent = `
-                    <p class="option-desc" style="font-size: 0.8rem; margin: 8px 0 15px 0;">Local LM Studio engine is running and active.</p>
+                    <p class="option-desc" style="font-size: 0.8rem; margin: 8px 0 15px 0;">Local LLM engine is running and active.</p>
                     <div class="local-steps" style="font-size: 0.8rem; gap: 6px; margin-bottom: 15px;">
                         <div class="step-item" style="color: #86efac;">
                             <span class="step-num" style="background: rgba(34, 197, 94, 0.12); color: #86efac; border: 1px solid rgba(34, 197, 94, 0.25);">✓</span>
-                            <span>Engine online. Make sure a model is loaded in the header selector to start conversing.</span>
+                            <span>Engine online. Choose a model in the header selector to start conversing.</span>
                         </div>
                     </div>
-                    <button onclick="checkOnboardingStatus()" class="onboarding-btn check-local-btn" style="width: 100%; font-size: 0.85rem; padding: 10px; margin-bottom: 15px;">Refresh Connection</button>
+                    <button onclick="checkOnboardingStatus()" class="onboarding-btn" style="width: 100%; font-size: 0.85rem; padding: 10px; margin-bottom: 15px;">Refresh Connection</button>
                     
                     <div style="border-top: 1px solid var(--border-color); padding-top: 15px;">
                         <label style="font-size: 0.72rem; color: var(--text-muted); font-weight: 500;">Search Hugging Face (GGUF)</label>
@@ -4513,12 +4501,12 @@ function showOnboardingCard() {
                         </div>
                     </div>
 
-                    <!-- Option 2: LM Studio -->
+                    <!-- Option 2: Local LLM -->
                     <div class="onboarding-option-box local-box">
                         <div class="option-header">
-                            <h3>LM Studio (Local LLM)</h3>
-                            <span id="onboarding-lmstudio-status" class="status-badge ${connectionStatus.lm_studio_online ? 'status-online' : 'status-offline'}">
-                                ${connectionStatus.lm_studio_online ? 'Online' : 'Offline'}
+                            <h3>Local LLM</h3>
+                            <span id="onboarding-local-status" class="status-badge ${connectionStatus.local_online ? 'status-online' : 'status-offline'}">
+                                ${connectionStatus.local_online ? 'Online' : 'Offline'}
                             </span>
                         </div>
                         ${localContent}
@@ -4557,7 +4545,7 @@ async function saveConfigData(apiKey, projectId, geminiModel = null) {
                 } else {
                     showCustomAlert("Configuration Saved", "Your credentials have been successfully updated.");
                     await initializeModelSelect();
-                    if (connectionStatus.remote_configured  || connectionStatus.lm_studio_online) {
+                    if (connectionStatus.remote_configured  || connectionStatus.local_online) {
                         const onboarding = document.getElementById('onboarding-container');
                         if (onboarding) onboarding.remove();
                         showWelcomeMessage();
@@ -4619,7 +4607,7 @@ function saveModalConfig() {
 async function verifyConnections(isSilent = false) {
             try {
                 await initializeModelSelect();
-                if (connectionStatus.remote_configured  || connectionStatus.lm_studio_online) {
+                if (connectionStatus.remote_configured  || connectionStatus.local_online) {
                     const onboarding = document.getElementById('onboarding-container');
                     if (onboarding) onboarding.remove();
                     
@@ -4632,7 +4620,7 @@ async function verifyConnections(isSilent = false) {
                     }
                 } else {
                     if (!isSilent) {
-                        showCustomAlert("Connection Failed", "Could not connect to Remote Cloud or LM Studio. Please verify credentials or check if LM Studio local server is running on port 1234.");
+                        showCustomAlert("Connection Failed", "Could not connect to Remote Cloud or Local LLM. Please verify credentials or check if the local server is running on port 1234.");
                     }
                 }
             } catch (e) {
@@ -4654,14 +4642,14 @@ function checkModalStatus() {
            IV. 3. SERVER CONTROL MIDDLEWARE
            ========================================================================== */
 
-        // --- installLMStudio ---
-async function installLMStudio(btn) {
+        // --- installLocalLLM ---
+async function installLocalLLM(btn) {
             btn.disabled = true;
             btn.innerHTML = `<span class="animate-spin" style="display: inline-block; width: 14px; height: 14px; border: 2px solid currentColor; border-top-color: transparent; border-radius: 50%; margin-right: 8px; vertical-align: middle;"></span>Installing CLI...`;
-            const prog = document.getElementById('lms-install-progress');
+            const prog = document.getElementById('local-install-progress');
             if (prog) prog.style.display = 'block';
             try {
-                const res = await fetch('/api/lms/install', { method: 'POST' });
+                const res = await fetch('/api/local_llm/install', { method: 'POST' });
                 const data = await res.json();
                 if (data.success) {
                     // Start status polling
@@ -4669,12 +4657,12 @@ async function installLMStudio(btn) {
                 } else {
                     showCustomAlert("Installation Failed", `Failed to initiate installation: ${data.message}`);
                     btn.disabled = false;
-                    btn.textContent = "Install LM Studio (Headless)";
+                    btn.textContent = "Install llama-server";
                 }
             } catch (e) {
                 showCustomAlert("Error", "Error communicating with server.");
                 btn.disabled = false;
-                btn.textContent = "Install LM Studio (Headless)";
+                btn.textContent = "Install llama-server";
             }
         }
 
@@ -4682,11 +4670,11 @@ async function installLMStudio(btn) {
 function pollInstallStatus(btn) {
             const interval = setInterval(async () => {
                 try {
-                    const res = await fetch('/api/lms/status');
+                    const res = await fetch('/api/local_llm/status');
                     const data = await res.json();
                     if (data.installed) {
                         clearInterval(interval);
-                        await startLmsServer();
+                        await startLocalLLM();
                         await initializeModelSelect();
                         if (document.getElementById('onboarding-container')) {
                             showOnboardingCard();
@@ -4699,23 +4687,23 @@ function pollInstallStatus(btn) {
             }, 3000);
         }
 
-        // --- startLmsServer ---
-async function startLmsServer(btn) {
+        // --- startLocalLLM ---
+async function startLocalLLM(btn) {
             if (btn) {
                 btn.disabled = true;
                 btn.innerHTML = `<span class="animate-spin" style="display: inline-block; width: 14px; height: 14px; border: 2px solid currentColor; border-top-color: transparent; border-radius: 50%; margin-right: 8px; vertical-align: middle;"></span>Starting server...`;
             }
             try {
-                const res = await fetch('/api/lms/start', { method: 'POST' });
+                const res = await fetch('/api/local_llm/start', { method: 'POST' });
                 await res.json();
                 
-                // Now poll /api/lms/status until online is true
+                // Now poll /api/local_llm/status until online is true
                 let attempts = 0;
                 const maxAttempts = 15;
                 const pollInterval = setInterval(async () => {
                     attempts++;
                     try {
-                        const statusRes = await fetch('/api/lms/status');
+                        const statusRes = await fetch('/api/local_llm/status');
                         const statusData = await statusRes.json();
                         if (statusData.online) {
                             clearInterval(pollInterval);
@@ -4726,7 +4714,7 @@ async function startLmsServer(btn) {
                             updateConnectionModalStatus();
                         } else if (attempts >= maxAttempts) {
                             clearInterval(pollInterval);
-                            showCustomAlert("Timeout starting server", "LM Studio engine is taking longer than usual to start. Try refreshing manually in a few moments.");
+                            showCustomAlert("Timeout starting server", "Local LLM engine is taking longer than usual to start. Try refreshing manually in a few moments.");
                             if (btn) {
                                 btn.disabled = false;
                                   btn.textContent = "Start Local Server";
@@ -4745,14 +4733,14 @@ async function startLmsServer(btn) {
             }
         }
 
-        // --- stopLmsServer ---
-async function stopLmsServer(btn) {
+        // --- stopLocalLLM ---
+async function stopLocalLLM(btn) {
             if (btn) {
                 btn.disabled = true;
                 btn.innerHTML = `<span class="animate-spin" style="display: inline-block; width: 14px; height: 14px; border: 2px solid currentColor; border-top-color: transparent; border-radius: 50%; margin-right: 8px; vertical-align: middle;"></span>Stopping server...`;
             }
             try {
-                const res = await fetch('/api/lms/stop', { method: 'POST' });
+                const res = await fetch('/api/local_llm/stop', { method: 'POST' });
                 const data = await res.json();
                 if (data.success) {
                     await initializeModelSelect();
@@ -4819,7 +4807,7 @@ async function stopComfyUI(btn) {
 
             container.innerHTML = '<div style="color: var(--text-muted); font-size: 0.75rem; text-align: center; width: 100%; margin: 10px 0;">Searching Hugging Face...</div>';
             try {
-                const res = await fetch(`/api/lms/search?query=${encodeURIComponent(query)}`);
+                const res = await fetch(`/api/local_llm/search?query=${encodeURIComponent(query)}`);
                 const data = await res.json();
                 const results = data.results || [];
                 if (results.length === 0) {
@@ -4864,7 +4852,7 @@ async function stopComfyUI(btn) {
             btn.textContent = "Hide Files";
             
             try {
-                const res = await fetch(`/api/lms/huggingface/files?repo_id=${encodeURIComponent(repoId)}`);
+                const res = await fetch(`/api/local_llm/huggingface/files?repo_id=${encodeURIComponent(repoId)}`);
                 const data = await res.json();
                 const files = data.files || [];
                 if (files.length === 0) {
@@ -4914,7 +4902,7 @@ async function stopComfyUI(btn) {
             if (progressWrapper) progressWrapper.style.display = 'block';
 
             try {
-                const res = await fetch('/api/lms/download', {
+                const res = await fetch('/api/local_llm/download', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ model_name: repoId, quantization: quantization })
@@ -4941,7 +4929,7 @@ async function stopComfyUI(btn) {
         function pollDownloadProgress(trackingName, progressWrapper, btn) {
             const interval = setInterval(async () => {
                 try {
-                    const res = await fetch('/api/lms/status');
+                    const res = await fetch('/api/local_llm/status');
                     const data = await res.json();
                     const statusObj = data.download_status[trackingName];
                     if (statusObj) {
@@ -4976,7 +4964,7 @@ async function stopComfyUI(btn) {
                             if (barSpan) barSpan.style.width = "100%";
                             if (etaSpan) etaSpan.textContent = "Finished";
                             await initializeModelSelect();
-                            fetchAndRenderLmsModels();
+                            fetchAndRenderLocalModels();
                         } else if (statusObj.status === 'failed') {
                             clearInterval(interval);
                             showCustomAlert("Download Failed", `Model download failed:<br><code style="color: #fca5a5; font-size: 0.75rem;">${statusObj.error || 'Unknown error'}</code>`);
@@ -4991,20 +4979,15 @@ async function stopComfyUI(btn) {
             }, 2000);
         }
 
-        // --- fetchAndRenderLmsModels ---
-async function fetchAndRenderLmsModels() {
+        // --- fetchAndRenderLocalModels ---
+async function fetchAndRenderLocalModels() {
             const listContainer = document.getElementById('modal-local-models-list');
             if (!listContainer) return;
             
             listContainer.innerHTML = '<div style="color: var(--text-muted); font-size: 0.75rem; margin-top: 10px;">Loading downloaded models...</div>';
             try {
-                const res = await fetch('/api/lms/status');
+                const res = await fetch('/api/local_llm/status');
                 const data = await res.json();
-                
-                if (!data.online) {
-                    listContainer.innerHTML = '<div style="color: var(--text-muted); font-size: 0.75rem; margin-top: 10px;">Server is offline.</div>';
-                    return;
-                }
                 
                 const downloaded = data.downloaded_models || [];
                 const loaded = data.loaded_models || [];
@@ -5039,10 +5022,10 @@ async function fetchAndRenderLmsModels() {
                             </div>
                             <div style="display: flex; gap: 6px;">
                                 ${isLoaded ? 
-                                    `<button onclick="unloadLmsModel('${modelKey.replace(/\\/g, '\\\\')}', this)" class="onboarding-btn" style="margin: 0; padding: 4px 8px; font-size: 0.7rem; border-radius: 4px;">Unload</button>` : 
-                                    `<button onclick="loadLmsModelDirect('${modelKey.replace(/\\/g, '\\\\')}', this)" class="onboarding-btn" style="margin: 0; padding: 4px 8px; font-size: 0.7rem; border-radius: 4px;">Load</button>`
+                                    `<button onclick="unloadLocalModel('${modelKey.replace(/\\/g, '\\\\')}', this)" class="onboarding-btn" style="margin: 0; padding: 4px 8px; font-size: 0.7rem; border-radius: 4px;">Unload</button>` : 
+                                    `<button onclick="loadLocalModelDirect('${modelKey.replace(/\\/g, '\\\\')}', this)" class="onboarding-btn" style="margin: 0; padding: 4px 8px; font-size: 0.7rem; border-radius: 4px;">Load</button>`
                                 }
-                                <button onclick="deleteLmsModel('${modelKey.replace(/\\/g, '\\\\')}', this)" class="onboarding-btn" style="margin: 0; padding: 4px 8px; font-size: 0.7rem; border-radius: 4px;">Delete</button>
+                                <button onclick="deleteLocalModel('${modelKey.replace(/\\/g, '\\\\')}', this)" class="onboarding-btn" style="margin: 0; padding: 4px 8px; font-size: 0.7rem; border-radius: 4px;">Delete</button>
                             </div>
                         </div>
                     `;
@@ -5056,12 +5039,12 @@ async function fetchAndRenderLmsModels() {
             }
         }
 
-        // --- unloadLmsModel ---
-async function unloadLmsModel(modelKey, btn) {
+        // --- unloadLocalModel ---
+async function unloadLocalModel(modelKey, btn) {
             btn.disabled = true;
             btn.textContent = "Unloading...";
             try {
-                const res = await fetch('/api/lms/unload', {
+                const res = await fetch('/api/local_llm/unload', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ model_name: modelKey })
@@ -5069,7 +5052,7 @@ async function unloadLmsModel(modelKey, btn) {
                 const data = await res.json();
                 if (data.success) {
                     await initializeModelSelect();
-                    fetchAndRenderLmsModels();
+                    fetchAndRenderLocalModels();
                 } else {
                     showCustomAlert("Error", data.message || "Failed to unload model.");
                     btn.disabled = false;
@@ -5082,12 +5065,12 @@ async function unloadLmsModel(modelKey, btn) {
             }
         }
 
-        // --- loadLmsModelDirect ---
-async function loadLmsModelDirect(modelKey, btn) {
+        // --- loadLocalModelDirect ---
+async function loadLocalModelDirect(modelKey, btn) {
             btn.disabled = true;
             btn.textContent = "Loading...";
             try {
-                const res = await fetch('/api/lms/load', {
+                const res = await fetch('/api/local_llm/load', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ model_name: modelKey })
@@ -5095,7 +5078,7 @@ async function loadLmsModelDirect(modelKey, btn) {
                 const data = await res.json();
                 if (data.success) {
                     await initializeModelSelect();
-                    fetchAndRenderLmsModels();
+                    fetchAndRenderLocalModels();
                 } else {
                     showCustomAlert("Error", data.message || "Failed to load model.");
                     btn.disabled = false;
@@ -5108,13 +5091,13 @@ async function loadLmsModelDirect(modelKey, btn) {
             }
         }
 
-        // --- deleteLmsModel ---
-async function deleteLmsModel(modelKey, btn) {
+        // --- deleteLocalModel ---
+async function deleteLocalModel(modelKey, btn) {
             showCustomConfirm("Delete Model", `Are you sure you want to permanently delete this model from disk?<br><code style="font-size: 0.7rem; color: #fca5a5; word-break: break-all;">${modelKey}</code>`, async () => {
                 btn.disabled = true;
                 btn.textContent = "Deleting...";
                 try {
-                    const res = await fetch('/api/lms/delete', {
+                    const res = await fetch('/api/local_llm/delete', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ model_name: modelKey })
@@ -5122,7 +5105,7 @@ async function deleteLmsModel(modelKey, btn) {
                     const data = await res.json();
                     if (data.success) {
                         await initializeModelSelect();
-                        fetchAndRenderLmsModels();
+                        fetchAndRenderLocalModels();
                     } else {
                         showCustomAlert("Error", data.message || "Failed to delete model.");
                         btn.disabled = false;
@@ -5461,9 +5444,9 @@ function updateConnectionStatus(status) {
                 document.getElementById('onboarding-gemini-status'),
                 document.getElementById('modal-gemini-status')
             ];
-            const lmStudioBadges = [
-                document.getElementById('onboarding-lmstudio-status'),
-                document.getElementById('modal-lmstudio-status')
+            const localLLMBadges = [
+                document.getElementById('onboarding-local-status'),
+                document.getElementById('modal-local-status')
             ];
             
             // Update Gemini badges
@@ -5478,10 +5461,10 @@ function updateConnectionStatus(status) {
                 }
             });
             
-            // Update LM Studio badges
-            lmStudioBadges.forEach(badge => {
+            // Update Local LLM badges
+            localLLMBadges.forEach(badge => {
                 if (!badge) return;
-                if (status.lm_studio_online) {
+                if (status.local_online) {
                     badge.textContent = "Online";
                     badge.className = "status-badge status-online";
                 } else {
@@ -5492,7 +5475,7 @@ function updateConnectionStatus(status) {
             
             // Update Header status indicator
             if (headerStatusText) {
-                if (status.remote_configured  || status.lm_studio_online) {
+                if (status.remote_configured  || status.local_online) {
                     headerStatusText.textContent = "";
                     if (headerHeart) {
                         headerHeart.style.setProperty('--heart-color', 'var(--primary-accent)');
@@ -5509,7 +5492,7 @@ function updateConnectionStatus(status) {
         }
 
         // --- updateConnectionModalStatus ---
-function updateConnectionModalStatus() {
+        function updateConnectionModalStatus() {
             const modalApiKey = document.getElementById('modal-api-key');
             const modalProjectId = document.getElementById('modal-project-id');
             const modalGeminiModel = document.getElementById('modal-gemini-model');
@@ -5539,28 +5522,18 @@ function updateConnectionModalStatus() {
             // Rebuild the Local box panel dynamically inside settings modal
             const localBox = document.getElementById('modal-local-box-container');
             if (localBox) {
-                if (!connectionStatus.lms_installed) {
+                if (!connectionStatus.local_online) {
                     localBox.innerHTML = `
                         <div class="option-header">
-                            <h4 style="margin: 0; font-size: 1.05rem; font-weight: 600;">LM Studio (Local LLM)</h4>
-                            <span class="status-badge status-offline">Uninstalled</span>
-                        </div>
-                        <p class="option-desc" style="font-size: 0.8rem; margin: 8px 0 15px 0;">LM Studio command-line engine is not installed on this system.</p>
-                        <button onclick="installLMStudio(this)" class="onboarding-btn connect-cloud-btn" style="width: 100%; font-size: 0.85rem; padding: 10px;">Install LM Studio</button>
-                        <div id="lms-install-progress" style="display: none; margin-top: 10px; font-size: 0.75rem; color: var(--text-muted);">
-                            Installing CLI... Please wait. This downloads and registers the 'lms' utility.
-                        </div>
-                    `;
-                } else if (!connectionStatus.lm_studio_online) {
-                    localBox.innerHTML = `
-                        <div class="option-header">
-                            <h4 style="margin: 0; font-size: 1.05rem; font-weight: 600;">LM Studio (Local LLM)</h4>
+                            <h4 style="margin: 0; font-size: 1.05rem; font-weight: 600;">Local LLM</h4>
                             <span class="status-badge status-offline">Offline</span>
                         </div>
-                        <p class="option-desc" style="font-size: 0.8rem; margin: 8px 0 15px 0;">LM Studio engine is offline. Start local server or search Hugging Face to download a model.</p>
-                        <button onclick="startLmsServer(this)" class="onboarding-btn" style="width: 100%; font-size: 0.85rem; padding: 10px; margin-bottom: 15px;">Start Local Server</button>
+                        <p class="option-desc" style="font-size: 0.8rem; margin: 8px 0 15px 0;">Local LLM engine is offline. Start the server or search Hugging Face below to download a GGUF model.</p>
+                        <button onclick="startLocalLLM(this)" class="onboarding-btn connect-cloud-btn" style="width: 100%; font-size: 0.85rem; padding: 10px; margin-bottom: 15px;">Start Server</button>
                         
-                        <div style="border-top: 1px solid var(--border-color); padding-top: 15px;">
+                        <div id="modal-local-models-list"></div>
+
+                        <div style="border-top: 1px solid var(--border-color); padding-top: 15px; margin-top: 15px;">
                             <label style="font-size: 0.72rem; color: var(--text-muted); font-weight: 500;">Search Hugging Face (GGUF)</label>
                             <div style="display: flex; gap: 8px; margin-top: 5px;">
                                 <input type="text" id="modal-hf-search-input" placeholder="e.g. qwen2.5-0.5b" class="onboarding-input" style="flex: 1; font-size: 0.8rem; padding: 6px;" onkeydown="if(event.key==='Enter') searchHFModels('modal-hf-search-input', 'modal-hf-search-results')">
@@ -5569,15 +5542,16 @@ function updateConnectionModalStatus() {
                             <div id="modal-hf-search-results" style="margin-top: 10px; max-height: 120px; overflow-y: auto; display: flex; flex-direction: column; gap: 6px;"></div>
                         </div>
                     `;
+                    fetchAndRenderLocalModels();
                 } else {
                     localBox.innerHTML = `
                         <div class="option-header">
-                            <h4 style="margin: 0; font-size: 1.05rem; font-weight: 600;">LM Studio (Local LLM)</h4>
+                            <h4 style="margin: 0; font-size: 1.05rem; font-weight: 600;">Local LLM</h4>
                             <span class="status-badge status-online">Online</span>
                         </div>
-                        <p class="option-desc" style="font-size: 0.8rem; margin: 8px 0 15px 0;">LM Studio local server is online. Load downloaded models via the header selector.</p>
+                        <p class="option-desc" style="font-size: 0.8rem; margin: 8px 0 15px 0;">Local LLM server is running. Select active models via the header dropdown.</p>
                         <button onclick="checkModalStatus()" class="onboarding-btn" style="width: 100%; font-size: 0.85rem; padding: 10px; margin-top: 10px;">Refresh Connection</button>
-                        <button onclick="stopLmsServer(this)" class="onboarding-btn" style="width: 100%; font-size: 0.85rem; padding: 10px; margin-top: 8px;">Stop Server</button>
+                        <button onclick="stopLocalLLM(this)" class="onboarding-btn" style="width: 100%; font-size: 0.85rem; padding: 10px; margin-top: 8px;">Stop Server</button>
                         <div id="modal-local-models-list"></div>
                         
                         <div style="border-top: 1px solid var(--border-color); padding-top: 15px; margin-top: 15px;">
@@ -5589,7 +5563,7 @@ function updateConnectionModalStatus() {
                             <div id="modal-hf-search-results" style="margin-top: 10px; max-height: 120px; overflow-y: auto; display: flex; flex-direction: column; gap: 6px;"></div>
                         </div>
                     `;
-                    fetchAndRenderLmsModels();
+                    fetchAndRenderLocalModels();
                 }
             }
             updateComfyModalStatus();
@@ -7327,12 +7301,12 @@ async function loadHistory() {
                     }
 
                     // Check connection status
-                    if (!connectionStatus.remote_configured  && !connectionStatus.lm_studio_online) {
+                    if (!connectionStatus.remote_configured  && !connectionStatus.local_online) {
                         showOnboardingCard();
                     } else {
                         showWelcomeMessage();
                         // On a new chat session (no history), default to local model
-                        const defaultModel = localStorage.getItem('companion_default_model') || 'local-lm-studio';
+                        const defaultModel = localStorage.getItem('companion_default_model') || 'local-llm';
                         selectedModel = defaultModel;
                         localStorage.setItem('companion_selected_model', selectedModel);
                         const modelSelectElement = document.getElementById('model-select');
@@ -7368,7 +7342,7 @@ async function loadHistory() {
                         ]);
                     } catch (e) {}
                 }
-                if (!connectionStatus.remote_configured  && !connectionStatus.lm_studio_online) {
+                if (!connectionStatus.remote_configured  && !connectionStatus.local_online) {
                     showOnboardingCard();
                 } else {
                     showWelcomeMessage();
@@ -11103,13 +11077,13 @@ function purgeDataBank() {
            IV. 3. SERVER CONTROL MIDDLEWARE
            ========================================================================== */
 
-        // --- installLMStudio ---
+        // --- installLocalLLM ---
 
 // --- pollInstallStatus ---
 
-// --- startLmsServer ---
+// --- startLocalLLM ---
 
-// --- stopLmsServer ---
+// --- stopLocalLLM ---
 
 // --- stopComfyUI ---
 
@@ -11119,13 +11093,13 @@ function purgeDataBank() {
 
 // --- pollDownloadProgress ---
 
-// --- fetchAndRenderLmsModels ---
+// --- fetchAndRenderLocalModels ---
 
-// --- unloadLmsModel ---
+// --- unloadLocalModel ---
 
-// --- loadLmsModelDirect ---
+// --- loadLocalModelDirect ---
 
-// --- deleteLmsModel ---
+// --- deleteLocalModel ---
 
 // --- downloadComfyCheckpoint ---
 
@@ -11426,12 +11400,12 @@ function purgeDataBank() {
         }
 
         // Retrieve selected model from localStorage or use default
-        let selectedModel = localStorage.getItem('companion_selected_model') || 'local-lm-studio';
+        let selectedModel = localStorage.getItem('companion_selected_model') || 'local-llm';
         let lastInteractionTime = Date.now();
         let hasTriggeredProactive = false;
         let activeCompanionName = "";
         let availableModels = [];
-        let connectionStatus = { remote_configured: false, gemini_configured: false, lm_studio_online: false };
+        let connectionStatus = { remote_configured: false, gemini_configured: false, local_online: false };
         let modelInitPromise = null;
 
 let comfyStatus = { installed: false, running: false, resolution_status: { status: "idle", progress: "", errors: [] } };

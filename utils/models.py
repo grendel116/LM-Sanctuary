@@ -12,7 +12,7 @@ _last_fetch_time = 0.0
 CACHE_TTL = 5.0  # 5 seconds cache
 
 def fetch_local_models(force_refresh=False) -> list:
-    """Queries LM Studio for loaded models. Returns empty list if offline (cached)."""
+    """Queries Local LLM server for loaded models. Returns empty list if offline (cached)."""
     global _local_models_cache, _last_fetch_time
     now = time.time()
     if not force_refresh and _local_models_cache is not None and (now - _last_fetch_time < CACHE_TTL):
@@ -33,7 +33,7 @@ def fetch_local_models(force_refresh=False) -> list:
             _last_fetch_time = now
             return local_models
     except Exception as e:
-        print(f"[LM Studio] Native models listing offline: {e}")
+        print(f"[Local LLM] Native models listing offline: {e}")
 
     # Fallback to standard OpenAI compatibility endpoint /v1/models
     try:
@@ -55,14 +55,14 @@ def fetch_local_models(force_refresh=False) -> list:
         _last_fetch_time = now
         return local_models
     except Exception as e:
-        # Gracefully handle offline LM Studio
-        print(f"[LM Studio] Offline or unreachable at {LOCAL_MODELS_URL}: {e}")
+        # Gracefully handle offline Local LLM server
+        print(f"[Local LLM] Offline or unreachable at {LOCAL_MODELS_URL}: {e}")
         _local_models_cache = []
         _last_fetch_time = now
         return []
 
 def is_local_model(model: str) -> bool:
-    """Determines if a model is local by querying LM Studio's active list."""
+    """Determines if a model is local by querying Local LLM server's active list."""
     if not model:
         return False
     if model == DEFAULT_LOCAL_MODEL:

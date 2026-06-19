@@ -137,7 +137,7 @@ async def trigger_auto_journal(history: list, program_id: str, model: str):
     try:
         if use_local:
             local_url = os.getenv("REMOTE_SERVER_URL", "http://127.0.0.1:1234/v1/chat/completions")
-            local_model = model if (model and model != 'local-lm-studio') else os.getenv("LOCAL_MODEL_NAME", "local-lm-studio")
+            local_model = model if (model and model != 'local-llm') else os.getenv("LOCAL_MODEL_NAME", "local-llm")
             payload = {
                 "model": local_model,
                 "messages": [
