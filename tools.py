@@ -1090,7 +1090,33 @@ def apply_comfy_workflow(workflow_path: str, parameters: dict, save_path: str) -
         return f"Error executing ComfyUI workflow: {e}"
 
 
+def vram_guard(func):
+    def wrapper(*args, **kwargs):
+        loaded_model_names = []
+        try:
+            from utils.local_llm_manager import check_status
+            if check_status():
+                from utils.models import fetch_local_models
+                from utils.local_llm_manager import stop_server
+                loaded_models = fetch_local_models(force_refresh=True)
+                loaded_model_names = [m["value"] for m in loaded_models if m["value"] != "local-llm"]
+                if loaded_model_names:
+                    print(f"[VRAM GUARD] Stopping Local LLM server to free system RAM: {loaded_model_names}", flush=True)
+                    stop_server()
+        except Exception as e_unload:
+            print(f"[VRAM GUARD] Warning: failed to auto-stop server: {e_unload}", flush=True)
+            
+        try:
+            return func(*args, **kwargs)
+        finally:
+            pass
+    wrapper.__name__ = func.__name__
+    wrapper.__doc__ = func.__doc__
+    return wrapper
+
+
 @track_tool_activity
+@vram_guard
 def generate_local_image(prompt: str) -> str:
     """Generates a local image using ComfyUI with companion-specific workflow configurations.
     
@@ -1309,6 +1335,7 @@ def generate_imagen(prompt: str, aspect_ratio: str = '1:1') -> str:
 
 
 @track_tool_activity
+@vram_guard
 def generate_video_from_image(image_path: str, prompt: str) -> str:
     """Animates a local image using ComfyUI with a custom video-specific workflow template.
     

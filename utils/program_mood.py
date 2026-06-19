@@ -75,7 +75,7 @@ def analyze_sentiment_with_llm(text: str) -> dict:
             print(f"[ERROR] Remote sentiment classification failed: {e}")
             
     if not classification_json:
-        # Fall back to local LM Studio server
+        # Fall back to local LLM server
         try:
             from variables import REMOTE_SERVER_URL, get_remote_server_headers
             payload = {

@@ -109,11 +109,20 @@ def prewarm_caches():
         
     try:
         # Prewarm server status
-        from utils.lms_manager import check_lms_status, check_lms_cli
-        check_lms_status(force_refresh=True)
-        check_lms_cli()
+        from utils.local_llm_manager import check_status, check_installed
+        check_status(force_refresh=True)
+        check_installed()
     except Exception as e:
-        print(f"Error prewarming lms server status: {e}")
+        print(f"Error prewarming Local LLM server status: {e}")
+
+    try:
+        # Start Local LLM server automatically
+        from utils.local_llm_manager import start_server
+        print(">>> Starting Local LLM server in background...")
+        started, msg = start_server()
+        print(f">>> Local LLM startup: {msg}")
+    except Exception as e:
+        print(f"Error starting Local LLM automatically: {e}")
 
     try:
         # Start ComfyUI automatically
@@ -455,7 +464,7 @@ You must return a valid JSON object matching the following schema:
         if is_local:
             import requests
             from variables import REMOTE_SERVER_URL, get_remote_server_headers
-            target_model = selected_model if (selected_model and selected_model != 'local-lm-studio') else os.getenv("LOCAL_MODEL_NAME")
+            target_model = selected_model if (selected_model and selected_model != 'local-llm') else os.getenv("LOCAL_MODEL_NAME")
             payload = {
                 "messages": [{"role": "user", "content": prompt}],
                 "temperature": 0.7,
@@ -1490,15 +1499,15 @@ def get_models():
         remote_cloud_url and remote_cloud_url.strip() and remote_cloud_url != "your_remote_cloud_url_here"
     )
     
-    from utils.lms_manager import check_lms_status, list_local_models, check_lms_cli
-    is_lm_studio_online = check_lms_status()
+    from utils.local_llm_manager import check_status, list_local_models, check_installed
+    is_local_online = check_status()
     
-    # 1. Fetch dynamic local models (only actively loaded models in LM Studio)
+    # 1. Fetch dynamic local models (only actively loaded models in Local LLM server)
     models = fetch_local_models()
     
-    # Default fallback: use the first loaded local model if available, otherwise "local-lm-studio"
-    default_model = "local-lm-studio"
-    if models and models[0]["value"] != "local-lm-studio":
+    # Default fallback: use the first loaded local model if available, otherwise "local-llm"
+    default_model = "local-llm"
+    if models and models[0]["value"] != "local-llm":
         default_model = models[0]["value"]
         
     # Load settings to get temperature
@@ -1521,8 +1530,8 @@ def get_models():
             "remote_configured": is_remote_configured,
             "remote_model": os.getenv("REMOTE_MODEL", "gemini-3.1-flash-lite"),
             "remote_url": remote_cloud_url,
-            "lm_studio_online": is_lm_studio_online,
-            "lms_installed": check_lms_cli(),
+            "local_online": is_local_online,
+            "local_installed": check_installed(),
             "temperature": temperature
         }
     })
@@ -2855,7 +2864,7 @@ Output a single JSON object matching this exact schema:
         try:
             import httpx
             local_url = os.getenv("REMOTE_SERVER_URL", "http://127.0.0.1:1234/v1/chat/completions")
-            local_model = model if (model and model != 'local-lm-studio') else os.getenv("LOCAL_MODEL_NAME", "local-lm-studio")
+            local_model = model if (model and model != 'local-llm') else os.getenv("LOCAL_MODEL_NAME", "local-llm")
             payload = {
                 "model": local_model,
                 "messages": [
@@ -3138,99 +3147,99 @@ def import_describe_program():
         return jsonify({'error': str(e)}), 500
 
 
-# --- Headless LM Studio & Hugging Face Integration API ---
-from utils import lms_manager
+# --- Headless Local LLM & Hugging Face Integration API ---
+from utils import local_llm_manager
 
-@app.route('/api/lms/status', methods=['GET'])
+@app.route('/api/local_llm/status', methods=['GET'])
 @requires_auth
-def lms_status():
-    installed = lms_manager.check_lms_cli()
-    online = lms_manager.check_lms_status()
+def local_llm_status():
+    installed = local_llm_manager.check_installed()
+    online = local_llm_manager.check_status()
     loaded_models = []
-    downloaded_models = []
     if online:
         from utils.models import fetch_local_models
         loaded_models = [m["value"] for m in fetch_local_models()]
-        downloaded_models = lms_manager.list_local_models()
-        # Update download job statuses dynamically
-        lms_manager.update_download_statuses()
+    
+    downloaded_models = local_llm_manager.list_local_models()
+    local_llm_manager.update_download_statuses()
+    
     return jsonify({
         "installed": installed,
         "online": online,
         "loaded_models": loaded_models,
         "downloaded_models": downloaded_models,
-        "download_status": lms_manager.download_status
+        "download_status": local_llm_manager.download_status
     })
 
-@app.route('/api/lms/install', methods=['POST'])
+@app.route('/api/local_llm/install', methods=['POST'])
 @requires_auth
-def lms_install():
-    success, message = lms_manager.install_lms_cli()
+def local_llm_install():
+    success, message = local_llm_manager.install_server()
     return jsonify({"success": success, "message": message})
 
-@app.route('/api/lms/search', methods=['GET'])
+@app.route('/api/local_llm/search', methods=['GET'])
 @requires_auth
-def lms_search():
+def local_llm_search():
     query = request.args.get('query', '').strip()
     if not query:
         return jsonify({"results": []})
-    results = lms_manager.search_huggingface_repos(query)
+    results = local_llm_manager.search_huggingface_repos(query)
     return jsonify({"results": results})
 
-@app.route('/api/lms/huggingface/files', methods=['GET'])
+@app.route('/api/local_llm/huggingface/files', methods=['GET'])
 @requires_auth
-def lms_hf_files():
+def local_llm_hf_files():
     repo_id = request.args.get('repo_id', '').strip()
     if not repo_id:
         return jsonify({"error": "Missing repo_id"}), 400
-    files = lms_manager.get_huggingface_repo_files(repo_id)
+    files = local_llm_manager.get_huggingface_repo_files(repo_id)
     return jsonify({"files": files})
 
-@app.route('/api/lms/download', methods=['POST'])
+@app.route('/api/local_llm/download', methods=['POST'])
 @requires_auth
-def lms_download():
+def local_llm_download():
     model_name = request.json.get('model_name')
     quantization = request.json.get('quantization')
     if not model_name:
         return jsonify({"error": "Missing model_name"}), 400
-    success, message = lms_manager.trigger_download(model_name, quantization)
+    success, message = local_llm_manager.trigger_download(model_name, quantization)
     return jsonify({"success": success, "message": message})
 
-@app.route('/api/lms/load', methods=['POST'])
+@app.route('/api/local_llm/load', methods=['POST'])
 @requires_auth
-def lms_load():
+def local_llm_load():
     model_name = request.json.get('model_name')
     if not model_name:
         return jsonify({"error": "Missing model_name"}), 400
-    success, message = lms_manager.load_local_model(model_name)
+    success, message = local_llm_manager.load_local_model(model_name)
     return jsonify({"success": success, "message": message})
 
-@app.route('/api/lms/unload', methods=['POST'])
+@app.route('/api/local_llm/unload', methods=['POST'])
 @requires_auth
-def lms_unload():
+def local_llm_unload():
     model_name = request.json.get('model_name')
-    success, message = lms_manager.unload_local_model(model_name)
+    success, message = local_llm_manager.unload_local_model(model_name)
     return jsonify({"success": success, "message": message})
 
-@app.route('/api/lms/delete', methods=['POST'])
+@app.route('/api/local_llm/delete', methods=['POST'])
 @requires_auth
-def lms_delete():
+def local_llm_delete():
     model_name = request.json.get('model_name')
     if not model_name:
         return jsonify({"error": "Missing model_name"}), 400
-    success, message = lms_manager.delete_local_model(model_name)
+    success, message = local_llm_manager.delete_local_model(model_name)
     return jsonify({"success": success, "message": message})
 
-@app.route('/api/lms/start', methods=['POST'])
+@app.route('/api/local_llm/start', methods=['POST'])
 @requires_auth
-def lms_start():
-    success, message = lms_manager.start_lms_server()
+def local_llm_start():
+    success, message = local_llm_manager.start_server()
     return jsonify({"success": success, "message": message})
 
-@app.route('/api/lms/stop', methods=['POST'])
+@app.route('/api/local_llm/stop', methods=['POST'])
 @requires_auth
-def lms_stop():
-    success, message = lms_manager.stop_lms_server()
+def local_llm_stop():
+    success, message = local_llm_manager.stop_server()
     return jsonify({"success": success, "message": message})
 
 
