@@ -4,6 +4,7 @@ import threading
 import requests
 import json
 import time
+import atexit
 
 # Headless ComfyUI Manager
 
@@ -384,11 +385,13 @@ def start_comfy_server():
 # Custom Node Database
 CUSTOM_NODE_DB_URL = "https://raw.githubusercontent.com/ltdrdata/ComfyUI-Manager/main/custom-node-list.json"
 MODEL_DB_URL = "https://raw.githubusercontent.com/ltdrdata/ComfyUI-Manager/main/model-list.json"
+EXTENSION_NODE_MAP_URL = "https://raw.githubusercontent.com/ltdrdata/ComfyUI-Manager/main/extension-node-map.json"
 
 def fetch_comfy_manager_databases():
     """Downloads registry lists from ComfyUI-Manager to map class types to Git repos and download URLs."""
     node_db_path = os.path.join(COMFYUI_DIR, "custom-node-list.json")
     model_db_path = os.path.join(COMFYUI_DIR, "model-list.json")
+    extension_map_path = os.path.join(COMFYUI_DIR, "extension-node-map.json")
     
     try:
         if not os.path.exists(node_db_path) or (time.time() - os.path.getmtime(node_db_path) > 86400):
@@ -402,6 +405,12 @@ def fetch_comfy_manager_databases():
             if res2.status_code == 200:
                 with open(model_db_path, "w", encoding="utf-8") as f:
                     f.write(res2.text)
+
+        if not os.path.exists(extension_map_path) or (time.time() - os.path.getmtime(extension_map_path) > 86400):
+            res3 = requests.get(EXTENSION_NODE_MAP_URL, timeout=5)
+            if res3.status_code == 200:
+                with open(extension_map_path, "w", encoding="utf-8") as f:
+                    f.write(res3.text)
     except Exception as e:
         print(f"Error fetching ComfyUI-Manager databases: {e}")
 
@@ -423,30 +432,22 @@ def parse_workflow_dependencies(workflow_json_str):
         for node in workflow["nodes"]:
             node_type = node.get("type")
             if node_type:
-                if "lora" in node_type.lower():
-                    continue
                 required_nodes.add(node_type)
             # Find widgets or fields containing filenames
             inputs = node.get("widgets_values", [])
             for val in inputs:
                 if isinstance(val, str) and (val.endswith(".safetensors") or val.endswith(".sft") or val.endswith(".ckpt")):
-                    if "lora" not in val.lower():
-                        required_models.add(val)
+                    required_models.add(val)
     elif isinstance(workflow, dict):
         for node_id, node_data in workflow.items():
             if isinstance(node_data, dict):
                 node_type = node_data.get("class_type")
                 if node_type:
-                    if "lora" in node_type.lower():
-                        continue
                     required_nodes.add(node_type)
                 inputs = node_data.get("inputs", {})
                 for k, val in inputs.items():
-                    if k == "lora_name" or "lora" in k.lower():
-                        continue
                     if isinstance(val, str) and (val.endswith(".safetensors") or val.endswith(".sft") or val.endswith(".ckpt")):
-                        if "lora" not in val.lower():
-                            required_models.add(val)
+                        required_models.add(val)
                         
     return list(required_nodes), list(required_models)
 
@@ -491,17 +492,48 @@ def _resolver_worker(workflow_json_str):
             
         # Try to map missing nodes to repositories
         node_db_path = os.path.join(COMFYUI_DIR, "custom-node-list.json")
+        extension_map_path = os.path.join(COMFYUI_DIR, "extension-node-map.json")
         mapped_repos = set()
+        
+        extension_db = {}
+        if os.path.exists(extension_map_path):
+            try:
+                with open(extension_map_path, "r", encoding="utf-8") as f:
+                    extension_db = json.load(f)
+            except Exception as ed_err:
+                print(f"Error loading extension node map: {ed_err}")
+
+        custom_nodes_list = []
         if os.path.exists(node_db_path) and missing_nodes:
-            with open(node_db_path, "r", encoding="utf-8") as f:
-                db_data = json.load(f)
+            try:
+                with open(node_db_path, "r", encoding="utf-8") as f:
+                    db_data = json.load(f)
+                custom_nodes_list = db_data.get("custom_nodes", [])
+            except Exception as nd_err:
+                print(f"Error loading custom node list: {nd_err}")
                 
-            custom_nodes_list = db_data.get("custom_nodes", [])
-            for node_type in missing_nodes:
-                found = False
+        for node_type in missing_nodes:
+            found = False
+            # 0. Check hardcoded mappings
+            if node_type in ["ADE_AnimateDiffLoaderWithContext", "ADE_AnimateDiffUniformContextOptions", "ADE_ApplyAnimateDiffModel"]:
+                mapped_repos.add("https://github.com/Kosinkadink/ComfyUI-AnimateDiff-Evolved")
+                found = True
+                print(f"[Resolver] Hardcoded mapped {node_type} to https://github.com/Kosinkadink/ComfyUI-AnimateDiff-Evolved")
+                continue
+                
+            # 1. Check extension-node-map.json first (precise mapping)
+            for repo_url, repo_data in extension_db.items():
+                if isinstance(repo_data, list) and len(repo_data) >= 1:
+                    class_list = repo_data[0]
+                    if isinstance(class_list, list) and node_type in class_list:
+                        mapped_repos.add(repo_url)
+                        found = True
+                        print(f"[Resolver] Mapped node {node_type} to {repo_url} using extension-node-map.json")
+                        break
+                    
+            # 2. Fallback to custom-node-list.json substring search
+            if not found and custom_nodes_list:
                 for node_info in custom_nodes_list:
-                    # Check if the node class_type is listed inside the repository info
-                    # ComfyUI-Manager list typically matches by nodename_pattern or class type lists
                     nodename_pattern = node_info.get("nodename_pattern", "")
                     title = node_info.get("title", "").lower()
                     repo_url = node_info.get("reference", "")
@@ -510,13 +542,22 @@ def _resolver_worker(workflow_json_str):
                         mapped_repos.add(repo_url)
                         found = True
                         break
-                if not found:
-                    print(f"[Resolver] Could not find mapping for node type: {node_type}")
+                        
+            if not found:
+                print(f"[Resolver] Could not find mapping for node type: {node_type}")
                     
         # Clone resolved repositories
-        venv_python = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".venv", "Scripts", "python.exe")
-        if not os.path.exists(venv_python):
-            venv_python = "python"
+        portable_python = os.path.join(os.path.dirname(COMFYUI_DIR), "python_embeded", "python.exe")
+        if not os.path.exists(portable_python):
+            portable_python = os.path.join(COMFYUI_DIR, "python_embeded", "python.exe")
+        if not os.path.exists(portable_python):
+            portable_python = os.path.join(os.path.dirname(os.path.normpath(COMFYUI_DIR)), "python_embeded", "python.exe")
+            
+        if os.path.exists(portable_python):
+            comfy_python = portable_python
+        else:
+            venv_python = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".venv", "Scripts", "python.exe")
+            comfy_python = venv_python if os.path.exists(venv_python) else "python"
             
         for repo in mapped_repos:
             repo_name = repo.split("/")[-1].replace(".git", "")
@@ -528,7 +569,7 @@ def _resolver_worker(workflow_json_str):
                 req_txt = os.path.join(target_path, "requirements.txt")
                 if os.path.exists(req_txt):
                     resolution_status["progress"] = f"Installing dependencies for {repo_name}..."
-                    subprocess.run([venv_python, "-m", "pip", "install", "-r", req_txt], check=True)
+                    subprocess.run([comfy_python, "-m", "pip", "install", "-r", req_txt], check=True)
                     
         # 2. Resolve missing models (Checkpoints, LoRAs, VAEs)
         model_db_path = os.path.join(COMFYUI_DIR, "model-list.json")
@@ -546,10 +587,14 @@ def _resolver_worker(workflow_json_str):
         for filename in required_models:
             # Determine destination folders based on extension/type
             dest_subfolder = "checkpoints"
-            if "lora" in filename.lower():
+            if "lora" in filename.lower() or filename.lower() == "img2vid.safetensors":
                 dest_subfolder = "loras"
             elif "vae" in filename.lower():
                 dest_subfolder = "vae"
+            elif "hunyuan_video" in filename.lower():
+                dest_subfolder = "diffusion_models"
+            elif "animatediff" in filename.lower() or filename.startswith("mm_") or filename == "animatediff_lightning_4step_comfy.safetensors":
+                dest_subfolder = "animatediff_models"
                 
             target_path = os.path.normpath(os.path.join(COMFYUI_DIR, "models", dest_subfolder, filename))
             if os.path.exists(target_path):
@@ -563,12 +608,22 @@ def _resolver_worker(workflow_json_str):
                     download_url = m_info.get("url")
                     break
                     
-            # Hardcoded official stabilityai HF fallbacks for standard checkpoints/VAEs
+            # Hardcoded official stabilityai/Kijai HF fallbacks
             if not download_url:
                 if filename == "sd_xl_base_1.0.safetensors":
                     download_url = "https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0/resolve/main/sd_xl_base_1.0.safetensors"
                 elif filename == "sdxl_vae.safetensors":
                     download_url = "https://huggingface.co/stabilityai/sdxl-vae/resolve/main/sdxl_vae.safetensors"
+                elif filename == "hunyuan_video_720_cfgdistill_fp8_e4m3fn.safetensors":
+                    download_url = "https://huggingface.co/Kijai/HunyuanVideo_comfy/resolve/main/hunyuan_video_720_cfgdistill_fp8_e4m3fn.safetensors"
+                elif filename == "hunyuan_video_vae_bf16.safetensors":
+                    download_url = "https://huggingface.co/Kijai/HunyuanVideo_comfy/resolve/main/hunyuan_video_vae_bf16.safetensors"
+                elif filename == "img2vid.safetensors":
+                    download_url = "https://huggingface.co/leapfusion-image2vid-test/image2vid-512x320/resolve/main/img2vid.safetensors"
+                elif filename == "mm_sdxl_v10_beta.ckpt":
+                    download_url = "https://huggingface.co/guoyww/animatediff/resolve/main/mm_sdxl_v10_beta.ckpt"
+                elif filename == "animatediff_lightning_4step_comfy.safetensors":
+                    download_url = "https://huggingface.co/ByteDance/AnimateDiff-Lightning/resolve/main/animatediff_lightning_4step_comfy.safetensors"
                     
             # Fallback to searching Hugging Face directly if still not listed
             if not download_url:
@@ -599,10 +654,15 @@ def _resolver_worker(workflow_json_str):
             os.makedirs(os.path.dirname(dest), exist_ok=True)
             res = requests.get(url, stream=True, timeout=30)
             if res.status_code == 200:
+                total_size = int(res.headers.get('content-length', 0))
+                downloaded = 0
                 with open(dest, "wb") as f:
-                    for chunk in res.iter_content(chunk_size=8192):
+                    for chunk in res.iter_content(chunk_size=65536):
                         if chunk:
                             f.write(chunk)
+                            downloaded += len(chunk)
+                if total_size > 0 and downloaded < total_size:
+                    raise Exception(f"Download of {filename} was truncated ({downloaded}/{total_size} bytes downloaded)")
             else:
                 resolution_status["errors"].append(f"Failed to download {filename} (HTTP {res.status_code})")
                 
@@ -612,8 +672,23 @@ def _resolver_worker(workflow_json_str):
             # ComfyUI-Manager provides a /manager/reboot API endpoint
             try:
                 requests.post(f"{COMFYUI_URL}/manager/reboot", timeout=2)
-            except Exception:
-                pass
+                print("[Resolver] Reboot requested.")
+            except Exception as r_err:
+                print(f"[Resolver] Reboot requested (connection closed immediately as expected): {r_err}")
+                
+            # Perform robust wait for offline and online transition
+            print("[Resolver] Waiting for server to go offline...")
+            time.sleep(2)
+            for _ in range(15):
+                if not check_comfy_running(force_refresh=True):
+                    break
+                time.sleep(1)
+            print("[Resolver] Server went offline. Waiting for server to come back online...")
+            for _ in range(90):
+                if check_comfy_running(force_refresh=True):
+                    break
+                time.sleep(1)
+            print("[Resolver] Server is back online with new components loaded.")
                 
         resolution_status["status"] = "completed"
         resolution_status["progress"] = "Dependency resolution completed successfully!"
@@ -816,3 +891,17 @@ def trigger_checkpoint_download(url, filename):
     thread.daemon = True
     thread.start()
     return True, "Checkpoint download started in background."
+
+def _atexit_comfy_clean():
+    # If Flask reloader is active, let the parent process handle cleanup on Ctrl+C
+    # so we don't kill ComfyUI on child process reloads.
+    if os.environ.get('WERKZEUG_RUN_MAIN') == 'true':
+        return
+    try:
+        if check_comfy_running(force_refresh=True):
+            print(">>> Stopping ComfyUI server on application exit...", flush=True)
+            stop_comfy_server()
+    except Exception:
+        pass
+
+atexit.register(_atexit_comfy_clean)

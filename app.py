@@ -116,6 +116,14 @@ def prewarm_caches():
         print(f"Error prewarming Local LLM server status: {e}")
 
     try:
+        # Stop any existing ComfyUI server to free VRAM for Local LLM startup
+        from utils.comfy_manager import stop_comfy_server
+        print(">>> Stopping any existing ComfyUI server to free VRAM...")
+        stop_comfy_server()
+    except Exception as e:
+        print(f"Error stopping existing ComfyUI server: {e}")
+
+    try:
         # Start Local LLM server automatically
         from utils.local_llm_manager import start_server
         print(">>> Starting Local LLM server in background...")
@@ -359,17 +367,6 @@ def get_image_prompt():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
-def append_companion_message_to_session(runner, session_id: str, content: str):
-    import time
-    if session_id not in runner.sessions_history:
-        runner._load_session_from_disk(session_id)
-    runner.sessions_history[session_id].append({
-        "role": "companion",
-        "text": content,
-        "timestamp": time.time(),
-        "is_proactive": True
-    })
-    runner._save_session_to_disk(session_id)
 
 @app.route('/api/proactive_action', methods=['POST'])
 @requires_auth
@@ -655,14 +652,16 @@ def chat():
     start_time = time.time()
 
     try:
-        response_text, tool_calls = asyncio.run(
+        msg_id = request.json.get('msg_id')
+        response_text, tool_calls, user_msg_id, companion_msg_id = asyncio.run(
             runner.run_async(
                 session_id=session_id,
                 new_message_text=user_message,
                 image_data=image_data,
                 image_mime=image_mime,
                 model=selected_model,
-                media_path=media_path
+                media_path=media_path,
+                msg_id=msg_id
             )
         )
         duration = round(time.time() - start_time, 1)
@@ -670,22 +669,13 @@ def chat():
         # Apply banned words filter to output response
         from utils.banned_words import sanitize_text
         sanitized_response = sanitize_text(response_text)
-        chat_history = None
         if sanitized_response != response_text:
             print(f"[BANNED WORDS] Sanitizing response: '{response_text}' -> '{sanitized_response}'")
-            # Update the message text inside the runner history so that the change persists
-            async def update_history_and_get():
-                hist = await runner.get_history(session_id)
-                companion_count = sum(1 for msg in hist if msg.get('role') == 'companion')
-                if companion_count > 0:
-                    await runner.update_message_text(session_id, 'companion', companion_count - 1, sanitized_response)
-                    hist = await runner.get_history(session_id)
-                return hist
-            chat_history = asyncio.run(update_history_and_get())
+            if companion_msg_id:
+                asyncio.run(runner.update_message_text(session_id, companion_msg_id, sanitized_response))
             response_text = sanitized_response
 
-        if chat_history is None:
-            chat_history = asyncio.run(runner.get_history(session_id))
+        chat_history = asyncio.run(runner.get_history(session_id))
         state_info = None
         for msg in reversed(chat_history):
             if msg.get('role') == 'companion':
@@ -711,7 +701,9 @@ def chat():
             'state': state_info,
             'inversion_active': inversion_mode,
             'timestamp': time.time(),
-            'duration': duration
+            'duration': duration,
+            'user_msg_id': user_msg_id,
+            'companion_msg_id': companion_msg_id
         })
     except asyncio.CancelledError:
         print(f"[CANCEL] Chat generation cancelled for session {session_id}")
@@ -738,6 +730,7 @@ def chat():
 @requires_auth
 def edit():
     session_id = request.json.get('session_id', 'default')
+    msg_id = request.json.get('msg_id')
     user_message_index = request.json.get('user_message_index') # 0-based index of user messages
     new_text = request.json.get('new_text') # None means reroll (use original text)
     selected_model = request.json.get('model')
@@ -753,9 +746,10 @@ def edit():
     start_time = time.time()
 
     try:
-        response_text, tool_calls = asyncio.run(
+        response_text, tool_calls, user_msg_id, companion_msg_id = asyncio.run(
             runner.edit_turn(
                 session_id=session_id,
+                msg_id=msg_id,
                 user_message_index=user_message_index,
                 new_text=new_text,
                 model=selected_model,
@@ -767,22 +761,13 @@ def edit():
         # Apply banned words filter to output response
         from utils.banned_words import sanitize_text
         sanitized_response = sanitize_text(response_text)
-        chat_history = None
         if sanitized_response != response_text:
             print(f"[BANNED WORDS] Sanitizing edited response: '{response_text}' -> '{sanitized_response}'")
-            # Update the message text inside the runner history so that the change persists
-            async def update_history_and_get():
-                hist = await runner.get_history(session_id)
-                companion_count = sum(1 for msg in hist if msg.get('role') == 'companion')
-                if companion_count > 0:
-                    await runner.update_message_text(session_id, 'companion', companion_count - 1, sanitized_response)
-                    hist = await runner.get_history(session_id)
-                return hist
-            chat_history = asyncio.run(update_history_and_get())
+            if companion_msg_id:
+                asyncio.run(runner.update_message_text(session_id, companion_msg_id, sanitized_response))
             response_text = sanitized_response
 
-        if chat_history is None:
-            chat_history = asyncio.run(runner.get_history(session_id))
+        chat_history = asyncio.run(runner.get_history(session_id))
         state_info = None
         for msg in reversed(chat_history):
             if msg.get('role') == 'companion':
@@ -798,7 +783,9 @@ def edit():
             'state': state_info,
             'inversion_active': inversion_mode,
             'timestamp': time.time(),
-            'duration': duration
+            'duration': duration,
+            'user_msg_id': user_msg_id,
+            'companion_msg_id': companion_msg_id
         })
     except asyncio.CancelledError:
         print(f"[CANCEL] Edit generation cancelled for session {session_id}")
@@ -895,50 +882,104 @@ def generate_user_message():
 @requires_auth
 def update_message():
     session_id = request.json.get('session_id', 'default')
-    role = request.json.get('role')
-    index = request.json.get('index')
+    msg_id = request.json.get('msg_id')
     new_text = request.json.get('new_text')
     
-    if role not in ['user', 'companion'] or index is None or new_text is None:
-        return jsonify({'error': 'Invalid arguments'}), 400
-        
-    try:
-        success = asyncio.run(runner.update_message_text(session_id, role, int(index), new_text))
-        if success:
-            return jsonify({'status': 'success'})
-        else:
+    if msg_id and new_text is not None:
+        try:
+            success = asyncio.run(runner.update_message_text(session_id, msg_id, new_text))
+            if success:
+                return jsonify({'status': 'success'})
+            else:
+                return jsonify({'error': 'Message not found'}), 404
+        except Exception as e:
+            print(f"Error updating message text: {e}")
+            return jsonify({'error': str(e)}), 500
+            
+    # Fallback to index-based update for backwards compatibility
+    role = request.json.get('role')
+    index = request.json.get('index')
+    if role in ['user', 'companion'] and index is not None and new_text is not None:
+        try:
+            chat_history = asyncio.run(runner.get_history(session_id))
+            filtered_history = [msg for msg in chat_history if msg.get('role') not in ('system-memory', 'system')]
+            target_role = 'user' if role == 'user' else 'companion'
+            same_role_msgs = [msg for msg in filtered_history if msg.get('role') == target_role]
+            if int(index) < len(same_role_msgs):
+                target_msg_id = same_role_msgs[int(index)].get('id')
+                if target_msg_id:
+                    success = asyncio.run(runner.update_message_text(session_id, target_msg_id, new_text))
+                    if success:
+                        return jsonify({'status': 'success'})
             return jsonify({'error': 'Message not found'}), 404
-    except Exception as e:
-        print(f"Error updating message text: {e}")
-        return jsonify({'error': str(e)}), 500
+        except Exception as e:
+            print(f"Error updating message text (fallback): {e}")
+            return jsonify({'error': str(e)}), 500
+            
+    return jsonify({'error': 'Invalid arguments'}), 400
 
 @app.route('/delete', methods=['POST'])
 @requires_auth
 def delete_message():
     session_id = request.json.get('session_id', 'default')
+    msg_id = request.json.get('msg_id')
+    
+    if msg_id:
+        try:
+            success = asyncio.run(runner.delete_message_at(session_id, msg_id))
+            if success:
+                return jsonify({'status': 'success'})
+            else:
+                return jsonify({'error': 'Message not found'}), 404
+        except Exception as e:
+            print(f"Error deleting message {msg_id}: {e}")
+            return jsonify({'error': str(e)}), 500
+            
+    # Fallback to role/index
     role = request.json.get('role')
     index = request.json.get('index')
-    
-    if role is None or index is None:
-        user_message_index = request.json.get('user_message_index')
-        if user_message_index is not None:
-            try:
-                asyncio.run(runner.delete_turn(session_id, user_message_index))
-                return jsonify({'status': 'success'})
-            except Exception as e:
-                print(f"Error deleting turn in session {session_id}: {e}")
-                return jsonify({'error': str(e)}), 500
-        return jsonify({'error': 'Missing role/index or user_message_index parameters'}), 400
-        
-    try:
-        success = asyncio.run(runner.delete_message_at(session_id, role, int(index)))
-        if success:
-            return jsonify({'status': 'success'})
-        else:
+    if role is not None and index is not None:
+        try:
+            chat_history = asyncio.run(runner.get_history(session_id))
+            if role == 'voice-call':
+                voice_msgs = [msg for msg in chat_history if msg.get('role') == 'voice-call']
+                if int(index) < len(voice_msgs):
+                    target_id = voice_msgs[int(index)].get('id')
+                    if target_id:
+                        success = asyncio.run(runner.delete_message_at(session_id, target_id))
+                        if success:
+                            return jsonify({'status': 'success'})
+            else:
+                filtered_history = [msg for msg in chat_history if msg.get('role') not in ('system-memory', 'system')]
+                target_role = 'user' if role == 'user' else 'companion'
+                same_role_msgs = [msg for msg in filtered_history if msg.get('role') == target_role]
+                if int(index) < len(same_role_msgs):
+                    target_id = same_role_msgs[int(index)].get('id')
+                    if target_id:
+                        success = asyncio.run(runner.delete_message_at(session_id, target_id))
+                        if success:
+                            return jsonify({'status': 'success'})
             return jsonify({'error': 'Message not found'}), 404
-    except Exception as e:
-        print(f"Error deleting message at index {index} with role {role}: {e}")
-        return jsonify({'error': str(e)}), 500
+        except Exception as e:
+            print(f"Error deleting message (fallback) index {index} with role {role}: {e}")
+            return jsonify({'error': str(e)}), 500
+            
+    user_message_index = request.json.get('user_message_index')
+    if user_message_index is not None:
+        try:
+            chat_history = asyncio.run(runner.get_history(session_id))
+            user_msgs = [msg for msg in chat_history if msg.get('role') == 'user']
+            if int(user_message_index) < len(user_msgs):
+                user_msg_id = user_msgs[int(user_message_index)].get('id')
+                if user_msg_id:
+                    asyncio.run(runner.delete_turn(session_id, msg_id=user_msg_id))
+                    return jsonify({'status': 'success'})
+            return jsonify({'error': 'Message not found'}), 404
+        except Exception as e:
+            print(f"Error deleting turn in session {session_id}: {e}")
+            return jsonify({'error': str(e)}), 500
+            
+    return jsonify({'error': 'Missing msg_id, role/index, or user_message_index parameters'}), 400
 
 @app.route('/continue', methods=['POST'])
 @requires_auth
@@ -972,7 +1013,7 @@ def continue_generation():
                 "Start writing immediately from the exact point where you left off, connecting seamlessly to the end.]"
             )
             
-            response_text, tool_calls = asyncio.run(runner.run_async(
+            response_text, tool_calls, user_msg_id, companion_msg_id = asyncio.run(runner.run_async(
                 session_id=session_id,
                 new_message_text=continue_prompt,
                 model=model
@@ -980,10 +1021,8 @@ def continue_generation():
             duration = round(time.time() - start_time, 1)
             
             # Delete the temporary turn
-            updated_history = asyncio.run(runner.get_history(session_id))
-            user_messages = [msg for msg in updated_history if msg.get('role') == 'user']
-            last_user_index = len(user_messages) - 1
-            asyncio.run(runner.delete_message_at(session_id, 'user', last_user_index))
+            if user_msg_id:
+                asyncio.run(runner.delete_message_at(session_id, user_msg_id))
             
             # Merge continuation text dynamically
             if last_companion_text.endswith('\n') or response_text.startswith('\n'):
@@ -997,29 +1036,32 @@ def continue_generation():
                     merged_text = last_companion_text + prefix + response_text
             
             # Update the original companion message
-            companion_messages = [msg for msg in asyncio.run(runner.get_history(session_id)) if msg.get('role') == 'companion']
-            last_companion_index = len(companion_messages) - 1
-            asyncio.run(runner.update_message_text(session_id, 'companion', last_companion_index, merged_text))
+            last_companion_msg_id = last_msg.get('id')
+            if last_companion_msg_id:
+                asyncio.run(runner.update_message_text(session_id, last_companion_msg_id, merged_text))
             
             return jsonify({
                 'status': 'success',
                 'response': merged_text,
                 'tool_calls': tool_calls,
-                'duration': duration
+                'duration': duration,
+                'user_msg_id': None,
+                'companion_msg_id': last_companion_msg_id
             })
         else:
             user_text = last_msg.get('text', '')
             user_image = last_msg.get('image_url')
             
-            user_messages = [msg for msg in history if msg.get('role') == 'user']
-            last_user_index = len(user_messages) - 1
-            asyncio.run(runner.delete_message_at(session_id, 'user', last_user_index))
+            last_msg_id = last_msg.get('id')
+            if last_msg_id:
+                asyncio.run(runner.delete_message_at(session_id, last_msg_id))
             
-            response_text, tool_calls = asyncio.run(runner.run_async(
+            response_text, tool_calls, user_msg_id, companion_msg_id = asyncio.run(runner.run_async(
                 session_id=session_id,
                 new_message_text=user_text,
                 media_path=user_image if (user_image and not user_image.startswith('data:')) else None,
-                model=model
+                model=model,
+                msg_id=last_msg_id
             ))
             duration = round(time.time() - start_time, 1)
             
@@ -1027,7 +1069,9 @@ def continue_generation():
                 'status': 'success',
                 'response': response_text,
                 'tool_calls': tool_calls,
-                'duration': duration
+                'duration': duration,
+                'user_msg_id': user_msg_id,
+                'companion_msg_id': companion_msg_id
             })
             
     except asyncio.CancelledError:
@@ -1049,6 +1093,7 @@ def continue_generation():
 @requires_auth
 def generate_portrait():
     session_id = request.json.get('session_id', 'default')
+    msg_id = request.json.get('msg_id')
     model = request.json.get('model')
     
     import tools
@@ -1068,11 +1113,12 @@ def generate_portrait():
     )
     
     try:
-        response_text, tool_calls = asyncio.run(
+        response_text, tool_calls, user_msg_id, companion_msg_id = asyncio.run(
             runner.run_async(
                 session_id=session_id,
                 new_message_text=prompt_message,
-                model=model
+                model=model,
+                msg_id=msg_id
             )
         )
         duration = round(time.time() - start_time, 1)
@@ -1091,37 +1137,33 @@ def generate_portrait():
         if clean_tags.startswith("'") and clean_tags.endswith("'"):
             clean_tags = clean_tags[1:-1].strip()
             
+        # Update the chat history immediately to prevent history pollution during the long ComfyUI generation
+        original_user_message = "Send me a portrait of yourself based on the context of our last message/current dialogue."
+        try:
+            if user_msg_id:
+                asyncio.run(runner.update_message_text(session_id, user_msg_id, original_user_message))
+            if companion_msg_id:
+                asyncio.run(runner.update_message_text(session_id, companion_msg_id, "*(Generating portrait...)*"))
+        except Exception as he:
+            print(f"Error updating message text in history immediately: {he}")
+            
         # Generate the portrait using ComfyUI
         new_markdown = tools.generate_local_image(clean_tags)
         
-        # Update the chat history:
-        # 1. Restore the user message to the original button text
-        # 2. Update the companion message with the generated markdown image link
-        original_user_message = "Send me a portrait of yourself based on the context of our last message/current dialogue!"
+        # Update the companion message with the generated markdown image link
         try:
-            async def update_history_and_get_inversion():
-                hist = await runner.get_history(session_id)
-                user_messages = [msg for msg in hist if msg.get('role') == 'user']
-                if user_messages:
-                    await runner.update_message_text(session_id, 'user', len(user_messages) - 1, original_user_message)
-            async def update_history_and_get_inversion_and_mood():
-                hist = await runner.get_history(session_id)
-                companion_messages = [msg for msg in hist if msg.get('role') == 'companion']
-                if companion_messages:
-                    await runner.update_message_text(session_id, 'companion', len(companion_messages) - 1, new_markdown)
+            if companion_msg_id:
+                asyncio.run(runner.update_message_text(session_id, companion_msg_id, new_markdown))
                 
-                # Fetch fresh history after updates for inversion calculation
-                hist = await runner.get_history(session_id)
-                inv = await runner._get_inversion_mode(session_id, history=hist)
-                
-                mood = None
-                for msg in reversed(hist):
-                    if msg.get('role') == 'companion':
-                        mood = msg.get('mood')
-                        break
-                return inv, mood
-
-            inversion_mode, state_info = asyncio.run(update_history_and_get_inversion_and_mood())
+            # Fetch fresh history after updates for inversion calculation
+            hist = asyncio.run(runner.get_history(session_id))
+            inversion_mode = asyncio.run(runner._get_inversion_mode(session_id, history=hist))
+            
+            state_info = None
+            for msg in reversed(hist):
+                if msg.get('role') == 'companion':
+                    state_info = msg.get('mood')
+                    break
         except Exception as he:
             print(f"Error updating message text in history: {he}")
             inversion_mode = ""
@@ -1133,13 +1175,14 @@ def generate_portrait():
         display_text = new_markdown
         
         return jsonify({
-            'status': 'success',
             'response': display_text,
             'tool_calls': [],
             'state': state_info,
             'inversion_active': inversion_mode,
             'timestamp': time.time(),
-            'duration': duration
+            'duration': duration,
+            'user_msg_id': user_msg_id,
+            'companion_msg_id': companion_msg_id
         })
     except asyncio.CancelledError:
         print(f"[CANCEL] Portrait generation cancelled for session {session_id}")
@@ -1499,8 +1542,17 @@ def get_models():
         remote_cloud_url and remote_cloud_url.strip() and remote_cloud_url != "your_remote_cloud_url_here"
     )
     
-    from utils.local_llm_manager import check_status, list_local_models, check_installed
-    is_local_online = check_status()
+    import tools
+    has_active_img_tool = False
+    if hasattr(tools, 'active_running_tools'):
+        for t_name in list(tools.active_running_tools.keys()):
+            if any(x in t_name for x in ('portrait', 'image', 'video', 'generate')):
+                has_active_img_tool = True
+                break
+
+    from utils.local_llm_manager import check_status, check_installed
+    import utils.local_llm_manager as llm_mgr
+    is_local_online = "paused" if (llm_mgr.get_vram_paused() or has_active_img_tool) else check_status()
     
     # 1. Fetch dynamic local models (only actively loaded models in Local LLM server)
     models = fetch_local_models()
@@ -2030,10 +2082,21 @@ def complete_quest(quest_id):
         if not quest_data:
             return jsonify({"error": "Quest not found"}), 404
             
+        session_id = 'default'
+        if request.is_json:
+            session_id = request.json.get('session_id', 'default')
+            
+        title = quest_data.get("title", "")
+        objectives = quest_data.get("objectives", [])
+        obj_text = f" with objectives: {', '.join(objectives)}" if objectives else ""
+        system_message = f"[SYSTEM: User has completed the quest: \"{title}\"{obj_text}]"
+        
+        asyncio.run(runner.append_message_to_session(session_id, "user", system_message))
+        
         return jsonify({
             "status": "success",
-            "title": quest_data.get("title", ""),
-            "objectives": quest_data.get("objectives", [])
+            "title": title,
+            "objectives": objectives
         })
     except Exception as e:
         print(f"Error completing quest {quest_id}: {e}")
@@ -2313,39 +2376,7 @@ def get_program_profile():
             if os.path.exists(p):
                 try:
                     with open(p, "r", encoding="utf-8") as f:
-                        data = json.load(f)
-                    # If this is the old structure, map it to new layout
-                    if "operation" not in data and ("kindroid" in data or "ourdream" in data):
-                        kindroid = data.get("kindroid", {})
-                        ourdream = data.get("ourdream", {})
-                        profile_data = {
-                            "name": data.get("name", program_id.title()),
-                            "operation": {
-                                "description": kindroid.get("backstory", ""),
-                                "response_directive": kindroid.get("response_directive", ""),
-                                "example_message": kindroid.get("example_message", ""),
-                                "ontology": kindroid.get("key_memories", ""),
-                                "scenario": ourdream.get("scenario", ""),
-                                "personality": ourdream.get("personality_type", "")
-                            },
-                            "description": {
-                                "voice": "casual",
-                                "hair style": "",
-                                "hair color": "",
-                                "ethnicity": "",
-                                "breasts": "",
-                                "butt": "",
-                                "eyes": "",
-                                "skin": "",
-                                "body": ""
-                            },
-                            "image details": {
-                                "image details": "",
-                                "negative details": ""
-                            }
-                        }
-                    else:
-                        profile_data = data
+                        profile_data = json.load(f)
                     break
                 except Exception:
                     pass
@@ -2405,49 +2436,7 @@ def save_program_profile():
         program_id = data.get('program_id') or get_active_program()
         program_path = os.path.normpath(os.path.join(PROGRAMS_DIR, program_id))
         json_path = os.path.join(program_path, f"{program_id}.json")
-        
-        if "operation" not in data and ("kindroid" in data or "ourdream" in data):
-            kindroid = data.get("kindroid", {})
-            ourdream = data.get("ourdream", {})
-            existing_desc = {}
-            existing_img = {}
-            if os.path.exists(json_path):
-                try:
-                    with open(json_path, "r", encoding="utf-8") as f:
-                        edata = json.load(f)
-                        existing_desc = edata.get("description", {})
-                        existing_img = edata.get("image details", {})
-                except Exception:
-                    pass
-            
-            final_data = {
-                "name": data.get("name", program_id.title()),
-                "operation": {
-                    "description": kindroid.get("backstory", ""),
-                    "response_directive": kindroid.get("response_directive", ""),
-                    "example_message": kindroid.get("example_message", ""),
-                    "ontology": kindroid.get("key_memories", ""),
-                    "scenario": ourdream.get("scenario", ""),
-                    "personality": ourdream.get("personality_type", "")
-                },
-                "description": {
-                    "voice": existing_desc.get("voice", "casual"),
-                    "hair style": existing_desc.get("hair style", ""),
-                    "hair color": existing_desc.get("hair color", ""),
-                    "ethnicity": existing_desc.get("ethnicity", ""),
-                    "breasts": existing_desc.get("breasts", ""),
-                    "butt": existing_desc.get("butt", ""),
-                    "eyes": existing_desc.get("eyes", ""),
-                    "skin": existing_desc.get("skin", ""),
-                    "body": existing_desc.get("body", "")
-                },
-                "image details": {
-                    "image details": existing_img.get("image details", ""),
-                    "negative details": existing_img.get("negative details", "")
-                }
-            }
-        else:
-            final_data = data
+        final_data = data
             
         # Save companion-specific voice back to project settings
         from utils.program import set_tts_voice_for_program
@@ -2806,43 +2795,6 @@ def generate_character_theme(main_color, accent_color_a=None, accent_color_b=Non
 
 # Obsolete sprite and theme color generation functions removed
 
-def clean_and_normalize_profile(name, description, personality, text):
-    """Cleans codeblock backticks and stray preambles from the LLM output, 
-    ensuring it conforms to a raw markdown profile.
-    """
-    text = text.strip()
-    lines = text.split("\n")
-    clean_lines = []
-    in_codeblock = False
-    
-    for line in lines:
-        line_strip = line.strip()
-        if line_strip.startswith("```"):
-            in_codeblock = not in_codeblock
-            continue
-        # Skip common conversational intro/outro lines if outside codeblock
-        if not in_codeblock:
-            if any(line_strip.startswith(pfx) for pfx in ["Here is the", "I have translated", "Certainly!", "Sure, here", "Here is a", "Here's the"]):
-                continue
-        clean_lines.append(line)
-        
-    cleaned_text = "\n".join(clean_lines).strip()
-    
-    # Ensure it starts with # NAME: [Name]
-    if cleaned_text.startswith("# ROLE:"):
-        cleaned_text = cleaned_text.replace("# ROLE:", "# NAME:", 1)
-    elif cleaned_text.startswith("#ROLE:"):
-        cleaned_text = cleaned_text.replace("#ROLE:", "# NAME:", 1)
-        
-    role_header = f"# NAME: {name}"
-    if not cleaned_text.startswith("# NAME:") and not cleaned_text.startswith("#NAME:"):
-        cleaned_text = f"{role_header}\n\n{cleaned_text}"
-        
-    # Strip any stray profile_image= lines to keep it clean
-    final_lines = [l for l in cleaned_text.split("\n") if "profile_image=" not in l]
-    cleaned_text = "\n".join(final_lines).strip()
-        
-    return cleaned_text
 
 def generate_character_json(name, description, personality, scenario, first_mes, model):
     import os
@@ -2876,7 +2828,7 @@ Output a single JSON object matching this exact schema:
   }},
   "description": {{
     "voice": "casual",
-    "ethnicity": "e.g. fay, asian, caucasion, etc.",
+    "ethnicity": "e.g. fay, african, asian, etc.",
     "hair style": "e.g. long, short, wavy",
     "hair color": "e.g. silver, black, brown",
     "eyes": "e.g. purple, red, blue",
@@ -3465,8 +3417,9 @@ def comfy_checkpoint_download_status():
 
 
 # Start prewarming in a background daemon thread now that everything is fully defined
-import threading
-threading.Thread(target=prewarm_caches, daemon=True).start()
+if not app.debug or os.environ.get('WERKZEUG_RUN_MAIN') == 'true':
+    import threading
+    threading.Thread(target=prewarm_caches, daemon=True).start()
 
 if __name__ == '__main__':
     host = os.getenv('HOST', '0.0.0.0')

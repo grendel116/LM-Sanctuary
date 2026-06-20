@@ -20,43 +20,6 @@ class LocalOffloadTrigger(Exception):
         self.reason = reason
         self.iteration = iteration
 
-def upgrade_legacy_history(legacy_data: list) -> list:
-    """Converts legacy Google ADK event format to simplified message format."""
-    simple_history = []
-    for ev in legacy_data:
-        author = ev.get('author', '').lower()
-        if author == 'user':
-            role = 'user'
-        elif author == 'system-memory':
-            role = 'system-memory'
-        elif author == 'voice-call':
-            role = 'voice-call'
-        else:
-            role = 'companion'
-            
-        parts = ev.get('content', {}).get('parts', []) if ev.get('content') else []
-        text = "".join(part.get('text', '') for part in parts if part.get('text'))
-        
-        image_url = None
-        for part in parts:
-            if part.get('inline_data'):
-                idata = part['inline_data']
-                mime = idata.get('mime_type')
-                data = idata.get('data')
-                if mime and data:
-                    image_url = f"data:{mime};base64,{data}"
-                    break
-                    
-        simple_history.append({
-            'role': role,
-            'text': text,
-            'image_url': image_url,
-            'timestamp': ev.get('timestamp') or time.time(),
-            'compacted': ev.get('compacted', False),
-            'inversion_active': ev.get('inversion_active', ''),
-            'mood': ev.get('mood', None)
-        })
-    return simple_history
 
 def _get_safe_local_path(image_url: str) -> str:
     """Converts an image URL into a local path relative to the workspace,
@@ -249,7 +212,48 @@ class LocalHistoryAdapter:
         pass
 
 
-# (Google ADK History Adapter removed)
+def _get_base64_image_url(image_source) -> str:
+    """Resolves image_source (local file path or relative URL) to a base64 data URL."""
+    import base64
+    import mimetypes
+    import os
+    
+    if not image_source:
+        return None
+        
+    # If it is already a data URL, return as is
+    if str(image_source).startswith("data:"):
+        return image_source
+        
+    # Resolve relative URL path
+    local_path = image_source
+    if str(image_source).startswith("/images/"):
+        rel_path = image_source[len("/images/"):]
+        from utils.program import get_active_program
+        active_program = get_active_program()
+        project_root = os.path.dirname(os.path.abspath(__file__))
+        local_path = os.path.normpath(os.path.join(project_root, 'core', 'programs', active_program, rel_path))
+        
+    # Ensure relative paths are resolved relative to project root
+    if not os.path.isabs(local_path):
+        project_root = os.path.dirname(os.path.abspath(__file__))
+        local_path = os.path.normpath(os.path.join(project_root, local_path))
+        
+    if not os.path.exists(local_path):
+        print(f"[IMAGE RESOLVE] File not found: {local_path}")
+        return None
+        
+    try:
+        mime_type, _ = mimetypes.guess_type(local_path)
+        if not mime_type:
+            mime_type = "image/png"
+        with open(local_path, "rb") as f:
+            b64_data = base64.b64encode(f.read()).decode('utf-8')
+        return f"data:{mime_type};base64,{b64_data}"
+    except Exception as e:
+        print(f"[IMAGE RESOLVE ERROR] Failed to encode {local_path}: {e}")
+        return None
+
 
 class OsHistoryAdapter(LocalHistoryAdapter):
     def __init__(self, runner_obj, session_id, file_path_resolved, image_data, image_mime):
@@ -298,6 +302,8 @@ class OsHistoryAdapter(LocalHistoryAdapter):
         historical_turns = history[:cutoff_idx]
         text_to_summarize = ""
         for msg in historical_turns:
+            if msg.get('role') not in ('user', 'companion'):
+                continue
             role = "User" if msg.get('role') == 'user' else "Companion"
             text = (msg.get('text') or '').strip()
             if text:
@@ -347,7 +353,9 @@ class OsHistoryAdapter(LocalHistoryAdapter):
             
         # 6. Replace historical turns with single summary event in self.runner_obj.sessions_history
         import time
+        import uuid
         summary_msg = {
+            'id': f"sys_{uuid.uuid4().hex}",
             'role': 'system-memory',
             'text': f"[System Memory of older conversation turns]:\n{summary}",
             'timestamp': time.time()
@@ -364,7 +372,20 @@ class OsHistoryAdapter(LocalHistoryAdapter):
         if not filtered_history:
             return [{"role": "system", "content": sys_inst}]
             
-        for msg in filtered_history[:-1]:
+        # Find the latest actual user chat message (ignoring tool responses/updates)
+        latest_img_user_msg_idx = -1
+        has_new_image = bool((self.image_data and self.image_mime) or self.file_path_resolved)
+        
+        for idx in range(len(filtered_history) - 1, -1, -1):
+            msg = filtered_history[idx]
+            if msg.get('role') == 'user':
+                if msg.get('id', '').startswith('tool_') or msg.get('text', '').startswith('[Tool Response from'):
+                    continue
+                if has_new_image or msg.get('image_url'):
+                    latest_img_user_msg_idx = idx
+                break
+                
+        for idx, msg in enumerate(filtered_history):
             role = "assistant" if msg['role'] == 'companion' else "user"
             content_text = msg.get('text', '') or ''
             if msg.get('tool_calls'):
@@ -382,19 +403,37 @@ class OsHistoryAdapter(LocalHistoryAdapter):
                         args_str = ", ".join(args_list)
                         content_text += f"\n[{name}({args_str})]"
                         
-            if msg.get('image_url'):
-                text_content = f"{content_text} (image: [Attached Image])" if content_text else "[Attached Image]"
-                raw_messages.append({"role": role, "content": text_content})
+            if idx == latest_img_user_msg_idx:
+                image_url_to_use = None
+                if self.image_data and self.image_mime:
+                    image_url_to_use = f"data:{self.image_mime};base64,{self.image_data}"
+                elif self.file_path_resolved:
+                    image_url_to_use = self.file_path_resolved
+                else:
+                    image_url_to_use = msg.get('image_url')
+                    
+                b64_url = _get_base64_image_url(image_url_to_use)
+                if b64_url:
+                    content_payload = [
+                        {"type": "text", "text": content_text},
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": b64_url
+                            }
+                        }
+                    ]
+                    raw_messages.append({"role": role, "content": content_payload})
+                else:
+                    text_content = f"{content_text} (image: [Attached Image])" if content_text else "[Attached Image]"
+                    raw_messages.append({"role": role, "content": text_content})
             else:
-                raw_messages.append({"role": role, "content": content_text})
-                
-        latest_msg = filtered_history[-1]
-        if self.file_path_resolved or (self.image_data and self.image_mime):
-            text_content = f"{latest_msg.get('text') or ''} (image: [Attached Image])" if latest_msg.get('text') else "[Attached Image]"
-            raw_messages.append({"role": "user", "content": text_content})
-        else:
-            raw_messages.append({"role": "user", "content": latest_msg.get('text') or ''})
-            
+                if msg.get('image_url'):
+                    text_content = f"{content_text} (image: [Attached Image])" if content_text else "[Attached Image]"
+                    raw_messages.append({"role": role, "content": text_content})
+                else:
+                    raw_messages.append({"role": role, "content": content_text})
+                    
         openai_messages = [{"role": "system", "content": sys_inst}]
         if rag_context:
             openai_messages[0]["content"] += f"\n\n# KNOWLEDGE BASE CONTEXT\nUse the following verified context from your Data Bank to help answer questions if relevant:\n{rag_context}\n"
@@ -404,7 +443,15 @@ class OsHistoryAdapter(LocalHistoryAdapter):
 
         for msg in raw_messages:
             if openai_messages and openai_messages[-1]["role"] == msg["role"]:
-                openai_messages[-1]["content"] += "\n\n" + msg["content"]
+                prev_content = openai_messages[-1]["content"]
+                curr_content = msg["content"]
+                
+                if isinstance(prev_content, str) and isinstance(curr_content, str):
+                    openai_messages[-1]["content"] += "\n\n" + curr_content
+                else:
+                    prev_list = prev_content if isinstance(prev_content, list) else [{"type": "text", "text": prev_content}]
+                    curr_list = curr_content if isinstance(curr_content, list) else [{"type": "text", "text": curr_content}]
+                    openai_messages[-1]["content"] = prev_list + curr_list
             else:
                 openai_messages.append(msg)
         return openai_messages
@@ -415,6 +462,10 @@ class OsHistoryAdapter(LocalHistoryAdapter):
         _, mood_details = extract_and_strip_mood(text)
         winning_mode = self.runner_obj._winning_mode_cache.get(self.session_id, "")
         
+        if mood_details:
+            mood_name = mood_details.get('name')
+            self.runner_obj.update_inversion_state_with_mood(self.session_id, mood_name)
+            
         history = self.runner_obj.sessions_history[self.session_id]
         if history and history[-1]['role'] == 'companion':
             history[-1]['text'] = text
@@ -423,7 +474,9 @@ class OsHistoryAdapter(LocalHistoryAdapter):
             history[-1]['mood'] = mood_details
             return history[-1]
             
+        import uuid
         bot_msg = {
+            'id': f"prgm_{uuid.uuid4().hex}",
             'role': 'companion',
             'text': text,
             'tool_calls': tool_calls_data,
@@ -436,8 +489,10 @@ class OsHistoryAdapter(LocalHistoryAdapter):
 
     def append_tool_events(self, results: list, invocation_id: str):
         import time
+        import uuid
         for idx, (t_name, t_args, t_output) in enumerate(results):
             tool_resp_msg = {
+                'id': f"msg_{uuid.uuid4().hex}",
                 'role': 'user',
                 'text': f"[Tool Response from {t_name}]:\n{t_output}",
                 'tool_calls': [],
@@ -464,6 +519,8 @@ class OsHistoryAdapter(LocalHistoryAdapter):
 
 
 def _is_cloud_model_check(model: str) -> bool:
+    if not model:
+        return False
     remote_model = os.getenv("REMOTE_MODEL")
     remote_cloud_url = os.getenv("REMOTE_CLOUD_URL")
     remote_key = os.getenv("REMOTE_API_KEY")
@@ -582,6 +639,27 @@ class BaseProgramRunner:
                 cancelled_sessions.discard(session_id)
                 raise asyncio.CancelledError("Session cancelled by user request.")
                 
+            # Check if remote cloud server is configured for offloading
+            remote_cloud_url = os.getenv("REMOTE_CLOUD_URL")
+            is_cloud = _is_cloud_model_check(model)
+            
+            # Check for dynamic offloading triggers at execution-time
+            remote_key = os.getenv("REMOTE_API_KEY")
+            is_remote_configured = bool(
+                remote_key and remote_key.strip() and remote_key != "your_remote_api_key_here" and
+                remote_cloud_url and remote_cloud_url.strip() and remote_cloud_url != "your_remote_cloud_url_here"
+            )
+            
+            # Auto-offload to cloud if an image is attached to the user's message OR local server is offline OR VRAM is paused
+            from utils.local_llm_manager import check_status, get_vram_paused
+            is_paused = get_vram_paused()
+            is_offline = not check_status()
+            has_image = bool(getattr(adapter, 'file_path_resolved', None) or getattr(adapter, 'image_data', None))
+            if (has_image or is_offline or is_paused) and not is_cloud and is_remote_configured:
+                reason = "Local server is paused" if is_paused else ("Local server is offline" if is_offline else "Multimodal input (image)")
+                print(f"[OFFLOAD] {reason} detected. Intercepting and offloading to cloud.", flush=True)
+                raise LocalOffloadTrigger(reason, iteration)
+                
             sys_inst = self._get_system_instructions(session_id, inversion_directive, user_message=new_message_text)
             openai_messages = adapter.get_openai_messages(sys_inst, rag_context, memory_context)
             
@@ -615,9 +693,8 @@ class BaseProgramRunner:
                 try:
                     from utils.local_llm_manager import check_status, start_server
                     if not check_status():
-                        print("[VRAM GUARD ROUTING] Local server is offline. Triggering background startup...", flush=True)
-                        import threading
-                        threading.Thread(target=start_server, daemon=True).start()
+                        print("[VRAM GUARD ROUTING] Local server is offline. Starting server and waiting for it to load...", flush=True)
+                        await asyncio.to_thread(start_server)
                 except Exception as e_start:
                     print(f"[VRAM GUARD ROUTING] Warning: failed to auto-start local server: {e_start}", flush=True)
                 
@@ -900,11 +977,11 @@ class BaseProgramRunner:
         """Retrieves formatted chat history for the session."""
         raise NotImplementedError()
 
-    async def run_async(self, session_id: str, new_message_text: str, image_data: str = None, image_mime: str = None, model: str = None) -> tuple:
-        """Runs the program with a new turn and returns (response_text, tool_calls_list)."""
+    async def run_async(self, session_id: str, new_message_text: str, image_data: str = None, image_mime: str = None, model: str = None, media_path: str = None, msg_id: str = None) -> tuple:
+        """Runs the program with a new turn and returns (response_text, tool_calls, user_msg_id, companion_msg_id)."""
         raise NotImplementedError()
 
-    async def edit_turn(self, session_id: str, user_message_index: int, new_text: str = None, model: str = None, force_offload: bool = False) -> tuple:
+    async def edit_turn(self, session_id: str, msg_id: str = None, user_message_index: int = None, new_text: str = None, model: str = None, force_offload: bool = False) -> tuple:
         """Edits an existing user message, truncates downstream history, and re-evaluates."""
         raise NotImplementedError()
 
@@ -912,7 +989,7 @@ class BaseProgramRunner:
         """Clears the session data from memory and deletes its file on disk."""
         raise NotImplementedError()
 
-    async def delete_turn(self, session_id: str, user_message_index: int) -> bool:
+    async def delete_turn(self, session_id: str, msg_id: str = None, user_message_index: int = None) -> bool:
         """Deletes an existing user message and its subsequent turn events from the history."""
         raise NotImplementedError()
 
@@ -945,69 +1022,68 @@ class BaseProgramRunner:
         """Deletes a consolidated system-memory block from active history and the vector database."""
         raise NotImplementedError()
 
-    async def update_message_text(self, session_id: str, role: str, index: int, new_text: str) -> bool:
+    async def update_message_text(self, session_id: str, msg_id: str, new_text: str) -> bool:
         """Updates the text of a specific message inside the session history without re-evaluation."""
         raise NotImplementedError()
 
-    async def delete_message_at(self, session_id: str, role: str, index: int) -> bool:
-        """Deletes a specific message inside the session history, merging surrounding messages of the same role if needed."""
+    async def delete_message_at(self, session_id: str, msg_id: str) -> bool:
+        """Deletes a specific message inside the session history."""
         raise NotImplementedError()
 
-    async def _get_inversion_mode(self, session_id: str, history: list = None) -> str:
-        try:
-            if history is None:
-                history = await self.get_history(session_id)
-            if not history:
-                return ""
-                
-            companion_msgs = [msg for msg in history if msg.get('role') == 'companion']
-            if not companion_msgs:
-                return ""
-                
-            recent_msgs = companion_msgs[-6:]
-            last_msg = recent_msgs[-1]
-            last_inversion = last_msg.get('inversion_active', '')
-            
-            if last_inversion:
-                consecutive_count = 0
-                for msg in reversed(recent_msgs):
-                    if msg.get('inversion_active') == last_inversion:
-                        consecutive_count += 1
-                    else:
-                        break
-                if consecutive_count < 5:
-                    return last_inversion
-                else:
-                    return ""
-                    
-            # Counting phase
-            counts = {
+    def update_inversion_state_with_mood(self, session_id: str, mood_name: str):
+        state = self.sessions_inversion_state.setdefault(session_id, {
+            "active_inversion": "",
+            "inversion_consecutive_turns": 0,
+            "mood_tally": {
                 "intimate": 0,
                 "excited": 0,
                 "intense": 0,
                 "sad": 0
             }
-            threshold = 5
-            from utils.program_mood import analyze_emotional_state
+        })
+        
+        # If there is an active inversion, it remains active for a consecutive count of turns.
+        if state.get("active_inversion"):
+            state["inversion_consecutive_turns"] = state.get("inversion_consecutive_turns", 0) + 1
+            if state["inversion_consecutive_turns"] >= 5:
+                # Inversion mode expires after 5 turns!
+                state["active_inversion"] = ""
+                state["inversion_consecutive_turns"] = 0
+            return
             
-            for msg in recent_msgs:
-                if msg.get('inversion_active'):
-                    continue
-                mood_details = msg.get('mood')
-                mood = mood_details.get('name') if isinstance(mood_details, dict) else None
-                if not mood:
-                    text = msg.get('text', '')
-                    if text:
-                        state = analyze_emotional_state(text)
-                        mood = state.get('name')
-                if mood in counts:
-                    counts[mood] += 1
-                    if counts[mood] >= threshold:
-                        return mood
-            return ""
-        except Exception as e:
-            print(f"Error calculating inversion mode: {e}")
-        return ""
+        # If no active inversion, count the mood
+        tally = state.setdefault("mood_tally", {
+            "intimate": 0,
+            "excited": 0,
+            "intense": 0,
+            "sad": 0
+        })
+        if mood_name in tally:
+            tally[mood_name] += 1
+            if tally[mood_name] >= 5:
+                # Trigger inversion!
+                state["active_inversion"] = mood_name
+                state["inversion_consecutive_turns"] = 0
+                # Reset tally
+                state["mood_tally"] = {
+                    "intimate": 0,
+                    "excited": 0,
+                    "intense": 0,
+                    "sad": 0
+                }
+
+    async def _get_inversion_mode(self, session_id: str, history: list = None) -> str:
+        state = self.sessions_inversion_state.setdefault(session_id, {
+            "active_inversion": "",
+            "inversion_consecutive_turns": 0,
+            "mood_tally": {
+                "intimate": 0,
+                "excited": 0,
+                "intense": 0,
+                "sad": 0
+            }
+        })
+        return state.get("active_inversion", "")
 
     async def _get_inversion_directive(self, session_id: str) -> str:
         winning_mode = await self._get_inversion_mode(session_id)
@@ -1102,9 +1178,11 @@ class BaseProgramRunner:
                     if os.path.exists(path):
                         try:
                             with open(path, "r", encoding="utf-8") as f:
-                                history = json.load(f)
-                            if history and isinstance(history[0], dict) and 'author' in history[0]:
-                                history = upgrade_legacy_history(history)
+                                data = json.load(f)
+                            if isinstance(data, dict) and "messages" in data:
+                                history = data["messages"]
+                            else:
+                                history = data
                         except Exception:
                             pass
                 for msg in history:
@@ -1265,6 +1343,9 @@ class OpenSourceRunner(BaseProgramRunner):
     def __init__(self, app_name="Sanctuary"):
         super().__init__(app_name)
         self.sessions_history = {} # Simple in-memory session logs dictionary
+        self.sessions_inversion_state = {} # Session-specific personality inversion states
+        import threading
+        self._lock = threading.RLock()
 
     async def generate_impersonation(self, prompt: str, system_instruction: str, model: str = None, temperature: float = 0.7) -> str:
         """Generates an impersonated message from the companion using the active remote or local model."""
@@ -1338,118 +1419,149 @@ class OpenSourceRunner(BaseProgramRunner):
         return os.path.join(self.sessions_dir, f"{safe_id}.json")
 
     def _save_session_to_disk(self, session_id: str):
-        try:
-            history = self.sessions_history.get(session_id, [])
-            with open(self._get_session_path(session_id), "w", encoding="utf-8") as f:
-                json.dump(history, f, indent=2, ensure_ascii=False)
-        except Exception as e:
-            print(f"Error saving OS session {session_id} to disk: {e}")
+        with self._lock:
+            try:
+                history = self.sessions_history.get(session_id, [])
+                inversion_state = self.sessions_inversion_state.get(session_id, {
+                    "active_inversion": "",
+                    "inversion_consecutive_turns": 0,
+                    "mood_tally": {
+                        "intimate": 0,
+                        "excited": 0,
+                        "intense": 0,
+                        "sad": 0
+                    }
+                })
+                data = {
+                    "messages": history,
+                    "inversion_state": inversion_state
+                }
+                with open(self._get_session_path(session_id), "w", encoding="utf-8") as f:
+                    json.dump(data, f, indent=2, ensure_ascii=False)
+            except Exception as e:
+                print(f"Error saving OS session {session_id} to disk: {e}")
 
     def _load_session_from_disk(self, session_id: str):
-        path = self._get_session_path(session_id)
-        if not os.path.exists(path):
-            return False
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                history = json.load(f)
-            
-            # Check if this is legacy Google ADK format
-            if history and isinstance(history[0], dict) and 'author' in history[0]:
-                history = upgrade_legacy_history(history)
-                # Automatically save upgraded session to disk
-                self.sessions_history[session_id] = history
-                self._save_session_to_disk(session_id)
-                print(f">>> Upgraded legacy Google ADK session to unified format for session: {session_id}")
-            else:
-                self.sessions_history[session_id] = history
-            return True
-        except Exception as e:
-            print(f"Error loading OS session {session_id} from disk: {e}")
-            return False
+        with self._lock:
+            path = self._get_session_path(session_id)
+            if not os.path.exists(path):
+                return False
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                
+                self.sessions_history[session_id] = data["messages"]
+                self.sessions_inversion_state[session_id] = data.get("inversion_state", {
+                    "active_inversion": "",
+                    "inversion_consecutive_turns": 0,
+                    "mood_tally": {
+                        "intimate": 0,
+                        "excited": 0,
+                        "intense": 0,
+                        "sad": 0
+                    }
+                })
+                return True
+            except Exception as e:
+                print(f"Error loading OS session {session_id} from disk: {e}")
+                return False
 
 
 
     async def get_history(self, session_id: str) -> list:
-        if session_id not in self.sessions_history:
-            self._load_session_from_disk(session_id)
-        raw_history = self.sessions_history.get(session_id, [])
-        
-        companion_msgs = [msg for msg in raw_history if msg.get('role') == 'companion']
-        recent_companion_msgs = companion_msgs[-5:] if len(companion_msgs) > 5 else companion_msgs
-        recent_timestamps = {msg.get('timestamp') for msg in recent_companion_msgs}
-
-        from utils.program_mood import extract_and_strip_mood
-        updated_any = False
-        for msg in raw_history:
-            if msg.get('role') == 'companion' and 'mood' not in msg:
-                m_text = msg.get('text', '')
-                if m_text:
-                    if msg.get('timestamp') in recent_timestamps:
-                        clean_text, mood_details = extract_and_strip_mood(m_text)
-                        msg['text'] = clean_text
-                        msg['mood'] = mood_details
-                        updated_any = True
-                    else:
-                        msg['mood'] = {
-                            "name": "calm",
-                            "color": "#85b9eb",
-                            "glow": "rgba(133, 185, 235, 0.9)",
-                            "speed": "2.00s",
-                            "intensity": 0.0
-                        }
-                        
-        if updated_any:
-            self._save_session_to_disk(session_id)
+        with self._lock:
+            if session_id not in self.sessions_history:
+                self._load_session_from_disk(session_id)
+            raw_history = self.sessions_history.get(session_id, [])
             
-        chat_history = []
-        for msg in raw_history:
-            chat_history.append(msg.copy())
-        return chat_history
+            companion_msgs = [msg for msg in raw_history if msg.get('role') == 'companion']
+            recent_companion_msgs = companion_msgs[-5:] if len(companion_msgs) > 5 else companion_msgs
+            recent_timestamps = {msg.get('timestamp') for msg in recent_companion_msgs}
 
-    async def run_async(self, session_id: str, new_message_text: str, image_data: str = None, image_mime: str = None, model: str = None, media_path: str = None) -> tuple:
-        if session_id not in self.sessions_history:
-            self._load_session_from_disk(session_id)
-            
-        if session_id not in self.sessions_history:
-            self.sessions_history[session_id] = []
-            
-        # Temporarily filter out voice-call, compacted, and system-memory messages
-        history = self.sessions_history[session_id]
-        voice_msgs = [msg for msg in history if msg.get('role') == 'voice-call']
-        compacted_msgs = [msg for msg in history if msg.get('compacted')]
-        system_memory_msgs = [msg for msg in history if msg.get('role') == 'system-memory']
-        self.sessions_history[session_id] = [msg for msg in history if msg.get('role') not in ('voice-call', 'system-memory') and not msg.get('compacted')]
-        
-        try:
-            return await self._run_async_internal(
-                session_id=session_id,
-                new_message_text=new_message_text,
-                image_data=image_data,
-                image_mime=image_mime,
-                model=model,
-                media_path=media_path
-            )
-        finally:
-            current_history = self.sessions_history.get(session_id, [])
-            existing_timestamps = {msg.get('timestamp') for msg in current_history if msg.get('timestamp') is not None}
-            restored = False
-            for msg in voice_msgs:
-                if msg.get('timestamp') not in existing_timestamps:
-                    current_history.append(msg)
-                    restored = True
-            for msg in compacted_msgs:
-                if msg.get('timestamp') not in existing_timestamps:
-                    current_history.append(msg)
-                    restored = True
-            for msg in system_memory_msgs:
-                if msg.get('timestamp') not in existing_timestamps:
-                    current_history.append(msg)
-                    restored = True
-            if restored:
-                current_history.sort(key=lambda x: x.get('timestamp', 0) if x.get('timestamp') is not None else 0)
-            self._save_session_to_disk(session_id)
+            from utils.program_mood import extract_and_strip_mood
+            updated_any = False
+            for msg in raw_history:
+                if msg.get('role') == 'companion' and 'mood' not in msg:
+                    m_text = msg.get('text', '')
+                    if m_text:
+                        if msg.get('timestamp') in recent_timestamps:
+                            clean_text, mood_details = extract_and_strip_mood(m_text)
+                            msg['text'] = clean_text
+                            msg['mood'] = mood_details
+                            updated_any = True
+                        else:
+                            msg['mood'] = {
+                                "name": "calm",
+                                "color": "#85b9eb",
+                                "glow": "rgba(133, 185, 235, 0.9)",
+                                "speed": "2.00s",
+                                "intensity": 0.0
+                            }
+                            
+            if updated_any:
+                self._save_session_to_disk(session_id)
+                
+            chat_history = []
+            for msg in raw_history:
+                chat_history.append(msg.copy())
+            return chat_history
 
-    async def _run_async_internal(self, session_id: str, new_message_text: str, image_data: str = None, image_mime: str = None, model: str = None, media_path: str = None) -> tuple:
+    async def run_async(self, session_id: str, new_message_text: str, image_data: str = None, image_mime: str = None, model: str = None, media_path: str = None, msg_id: str = None) -> tuple:
+        with self._lock:
+            if session_id not in self.sessions_history:
+                self._load_session_from_disk(session_id)
+                
+            if session_id not in self.sessions_history:
+                self.sessions_history[session_id] = []
+                
+            try:
+                return await self._run_async_internal(
+                    session_id=session_id,
+                    new_message_text=new_message_text,
+                    image_data=image_data,
+                    image_mime=image_mime,
+                    model=model,
+                    media_path=media_path,
+                    msg_id=msg_id
+                )
+            finally:
+                self._save_session_to_disk(session_id)
+
+    async def _run_async_internal(self, session_id: str, new_message_text: str, image_data: str = None, image_mime: str = None, model: str = None, media_path: str = None, msg_id: str = None) -> tuple:
+        # Check if the server was paused for ComfyUI. If so, restart it for user/program messages!
+        import utils.local_llm_manager as llm_mgr
+        import asyncio
+        if llm_mgr.get_vram_paused():
+            prefix = ""
+            if msg_id:
+                prefix = msg_id.split('_')[0] + "_"
+            else:
+                if new_message_text.startswith("[SYSTEM: User has completed"):
+                    prefix = "quest_"
+                elif "Send me a portrait of yourself" in new_message_text:
+                    prefix = "port_"
+                elif new_message_text.startswith("[Tool Response from"):
+                    prefix = "tool_"
+                else:
+                    prefix = "usr_"
+            
+            if prefix in ("usr_", "prgm_"):
+                # Only auto-restart if we CANNOT offload to the remote cloud
+                remote_key = os.getenv("REMOTE_API_KEY")
+                remote_cloud_url = os.getenv("REMOTE_CLOUD_URL")
+                is_remote_configured = bool(
+                    remote_key and remote_key.strip() and remote_key != "your_remote_api_key_here" and
+                    remote_cloud_url and remote_cloud_url.strip() and remote_cloud_url != "your_remote_cloud_url_here"
+                )
+                if not is_remote_configured:
+                    print(f"[VRAM GUARD] Restarting Local LLM server for the next message (prefix: {prefix}) because remote cloud is not configured...", flush=True)
+                    llm_mgr.set_vram_paused(False)
+                    try:
+                        from utils.local_llm_manager import start_server
+                        await asyncio.to_thread(start_server)
+                    except Exception as e_start:
+                        print(f"[VRAM GUARD] Error auto-starting local server: {e_start}", flush=True)
+
         if session_id not in self.sessions_history:
             self._load_session_from_disk(session_id)
             
@@ -1474,7 +1586,21 @@ class OpenSourceRunner(BaseProgramRunner):
                 print(f"Error handling media_path in OpenSourceRunner: {e}")
 
         # Log User input
+        import uuid
+        if not msg_id:
+            if new_message_text.startswith("[SYSTEM: User has completed"):
+                prefix = "quest_"
+            elif "Send me a portrait of yourself" in new_message_text:
+                prefix = "port_"
+            elif new_message_text.startswith("[Tool Response from"):
+                prefix = "tool_"
+            else:
+                prefix = "usr_"
+            user_msg_id = f"{prefix}{uuid.uuid4().hex}"
+        else:
+            user_msg_id = msg_id
         user_msg = {
+            'id': user_msg_id,
             'role': 'user',
             'text': new_message_text,
             'image_url': media_path if media_path else (f"data:{image_mime};base64,{image_data}" if image_data else None),
@@ -1503,7 +1629,15 @@ class OpenSourceRunner(BaseProgramRunner):
                 invocation_id=""
             )
             asyncio.create_task(adapter.compact_history(model))
-            return res
+            
+            bot_response_text, tool_calls = res
+            companion_msg_id = None
+            history = self.sessions_history.get(session_id, [])
+            for msg in reversed(history):
+                if msg.get('role') == 'companion':
+                    companion_msg_id = msg.get('id')
+                    break
+            return bot_response_text, tool_calls, user_msg_id, companion_msg_id
         except LocalOffloadTrigger as trigger_exc:
             print(f"[OFFLOAD] Caught LocalOffloadTrigger in OpenSourceRunner: {trigger_exc.reason}. Rolling back local turn and offloading to cloud.", flush=True)
             # Rollback history events to initial state (discarding generated events of this turn)
@@ -1519,10 +1653,11 @@ class OpenSourceRunner(BaseProgramRunner):
                 image_data=image_data,
                 image_mime=image_mime,
                 model=remote_model,
-                media_path=media_path
+                media_path=media_path,
+                msg_id=msg_id
             )
  
-    async def edit_turn(self, session_id: str, user_message_index: int, new_text: str = None, model: str = None, force_offload: bool = False) -> tuple:
+    async def edit_turn(self, session_id: str, msg_id: str = None, user_message_index: int = None, new_text: str = None, model: str = None, force_offload: bool = False) -> tuple:
         if session_id not in self.sessions_history:
             self._load_session_from_disk(session_id)
             
@@ -1531,34 +1666,46 @@ class OpenSourceRunner(BaseProgramRunner):
         
         history = self.sessions_history[session_id]
         
-        print(f"[DEBUG OS edit_turn] session_id={session_id}, user_message_index={user_message_index}, history_count={len(history)}, force_offload={force_offload}")
-        # Find corresponding N-th user event
+        print(f"[DEBUG OS edit_turn] session_id={session_id}, msg_id={msg_id}, user_message_index={user_message_index}, history_count={len(history)}, force_offload={force_offload}")
         user_idx = -1
-        user_count = 0
-        for i, ev in enumerate(history):
-            is_user = ev.get('role') == 'user'
-            print(f"  History item {i}: role={ev.get('role')}, is_user={is_user}")
-            if is_user:
-                if user_count == user_message_index:
+        if msg_id:
+            for i, ev in enumerate(history):
+                if ev.get('id') == msg_id:
                     user_idx = i
                     break
-                user_count += 1
-                
-        if user_idx == -1:
-            print(f"[DEBUG OS edit_turn ERROR] user_idx not found! user_count reached={user_count}")
-            raise ValueError("User message out of bounds")
+            if user_idx == -1:
+                print(f"[DEBUG OS edit_turn ERROR] msg_id={msg_id} not found!")
+                raise ValueError("Message not found")
+        elif user_message_index is not None:
+            # Fallback to index-based lookup
+            user_count = 0
+            for i, ev in enumerate(history):
+                is_user = ev.get('role') == 'user'
+                if is_user:
+                    if user_count == user_message_index:
+                        user_idx = i
+                        break
+                    user_count += 1
+            if user_idx == -1:
+                print(f"[DEBUG OS edit_turn ERROR] user_message_index={user_message_index} not found!")
+                raise ValueError("User message out of bounds")
+        else:
+            raise ValueError("Either msg_id or user_message_index must be specified")
             
         orig_msg = history[user_idx]
         
-        # Parse image_data if exists in original message to preserve it
+        # Parse image_data or media_path if exists in original message to preserve it
         img_data = None
         img_mime = None
+        media_path = None
         if orig_msg.get('image_url'):
             url_str = orig_msg['image_url']
             if url_str.startswith("data:") and ";base64," in url_str:
                 parts = url_str.split(";base64,")
                 img_mime = parts[0].split("data:")[-1]
                 img_data = parts[1]
+            else:
+                media_path = url_str
                 
         # Truncate history
         history = history[:user_idx]
@@ -1573,352 +1720,361 @@ class OpenSourceRunner(BaseProgramRunner):
 
         # Re-run turn
         new_input = new_text if new_text is not None else orig_msg.get('text', '')
-        res = await self.run_async(session_id, new_input, image_data=img_data, image_mime=img_mime, model=model)
+        res = await self.run_async(session_id, new_input, image_data=img_data, image_mime=img_mime, model=model, media_path=media_path, msg_id=msg_id)
         
         # Save to disk
         self._save_session_to_disk(session_id)
         return res
 
     async def reset_session(self, session_id: str):
-        if session_id in self.sessions_history:
-            del self.sessions_history[session_id]
-        path = self._get_session_path(session_id)
-        if os.path.exists(path):
+        with self._lock:
+            if session_id in self.sessions_history:
+                del self.sessions_history[session_id]
+            path = self._get_session_path(session_id)
+            if os.path.exists(path):
+                try:
+                    os.remove(path)
+                except Exception as e:
+                    print(f"Error deleting OS session file {path}: {e}")
+                    
+            # Clean up database chat history archives for this session
             try:
-                os.remove(path)
+                from core.skills.vectorized_databank.databank import DataBankManager
+                db = DataBankManager()
+                db.delete_chat_history(session_id)
             except Exception as e:
-                print(f"Error deleting OS session file {path}: {e}")
-                
-        # Clean up database chat history archives for this session
-        try:
-            from core.skills.vectorized_databank.databank import DataBankManager
-            db = DataBankManager()
-            db.delete_chat_history(session_id)
-        except Exception as e:
-            print(f"Error cleaning up databank history on session reset: {e}")
-                
-        from core import program_config
-        program_config.set_inversion_directive("")
+                print(f"Error cleaning up databank history on session reset: {e}")
+                    
+            from core import program_config
+            program_config.set_inversion_directive("")
 
     async def delete_system_memory(self, session_id: str, timestamp: float) -> bool:
-        if session_id not in self.sessions_history:
-            self._load_session_from_disk(session_id)
+        with self._lock:
+            if session_id not in self.sessions_history:
+                self._load_session_from_disk(session_id)
+                
+            marked_compacted = False
+            if session_id in self.sessions_history:
+                history = self.sessions_history[session_id]
+                for msg in history:
+                    if msg.get('role') == 'system-memory' and abs(msg.get('timestamp', 0) - timestamp) < 1.0:
+                        msg['compacted'] = True
+                        marked_compacted = True
+                        print(f"[MEMORY DELETE] Marked OS message as compacted.", flush=True)
+                if marked_compacted:
+                    self._save_session_to_disk(session_id)
+                    
+            # Delete from memories.json vector database
+            from utils.program import get_active_program
+            active_program = get_active_program()
+            base_dir = os.path.dirname(os.path.abspath(__file__))
+            memories_path = os.path.join(base_dir, "core", "programs", active_program, "memories.json")
+            deleted_from_db = False
+            if os.path.exists(memories_path):
+                try:
+                    with open(memories_path, "r", encoding="utf-8") as f:
+                        m_data = json.load(f)
+                    docs = m_data.get("documents", [])
+                    chunks = m_data.get("chunks", [])
+                    
+                    prefix = f"chat_history_archive_{session_id}_"
+                    matching_ids = []
+                    for doc in docs:
+                        doc_name = doc.get("name", "")
+                        if doc.get("source_type") == "chat_history" and doc_name.startswith(prefix) and abs(doc.get("timestamp", 0) - timestamp) < 10.0:
+                            matching_ids.append(doc.get("id"))
+                            
+                    if matching_ids:
+                        m_data["documents"] = [d for d in docs if d.get("id") not in matching_ids]
+                        m_data["chunks"] = [c for c in chunks if c.get("doc_id") not in matching_ids]
+                        with open(memories_path, "w", encoding="utf-8") as f:
+                            json.dump(m_data, f, indent=2, ensure_ascii=False)
+                        deleted_from_db = True
+                        print(f"[MEMORY DELETE] Deleted docs {matching_ids} from memories.json.", flush=True)
+                except Exception as e:
+                    print(f"[MEMORY DELETE ERROR] Failed to clean memories.json: {e}", flush=True)
+                    
+            return marked_compacted or deleted_from_db
+
+    async def delete_turn(self, session_id: str, msg_id: str = None, user_message_index: int = None) -> bool:
+        with self._lock:
+            if session_id not in self.sessions_history:
+                self._load_session_from_disk(session_id)
+                
+            if session_id not in self.sessions_history:
+                raise ValueError("Session not found")
             
-        marked_compacted = False
-        if session_id in self.sessions_history:
             history = self.sessions_history[session_id]
-            for msg in history:
-                if msg.get('role') == 'system-memory' and abs(msg.get('timestamp', 0) - timestamp) < 1.0:
-                    msg['compacted'] = True
-                    marked_compacted = True
-                    print(f"[MEMORY DELETE] Marked OS message as compacted.", flush=True)
-            if marked_compacted:
-                self._save_session_to_disk(session_id)
-                
-        # Delete from memories.json vector database
-        from utils.program import get_active_program
-        active_program = get_active_program()
-        base_dir = os.path.dirname(os.path.abspath(__file__))
-        memories_path = os.path.join(base_dir, "core", "programs", active_program, "memories.json")
-        deleted_from_db = False
-        if os.path.exists(memories_path):
-            try:
-                with open(memories_path, "r", encoding="utf-8") as f:
-                    m_data = json.load(f)
-                docs = m_data.get("documents", [])
-                chunks = m_data.get("chunks", [])
-                
-                prefix = f"chat_history_archive_{session_id}_"
-                matching_ids = []
-                for doc in docs:
-                    doc_name = doc.get("name", "")
-                    if doc.get("source_type") == "chat_history" and doc_name.startswith(prefix) and abs(doc.get("timestamp", 0) - timestamp) < 10.0:
-                        matching_ids.append(doc.get("id"))
+            
+            user_idx = -1
+            if msg_id:
+                for i, ev in enumerate(history):
+                    if ev.get('id') == msg_id:
+                        user_idx = i
+                        break
+            elif user_message_index is not None:
+                user_count = 0
+                for i, ev in enumerate(history):
+                    if ev['role'] == 'user':
+                        if user_count == user_message_index:
+                            user_idx = i
+                            break
+                        user_count += 1
                         
-                if matching_ids:
-                    m_data["documents"] = [d for d in docs if d.get("id") not in matching_ids]
-                    m_data["chunks"] = [c for c in chunks if c.get("doc_id") not in matching_ids]
-                    with open(memories_path, "w", encoding="utf-8") as f:
-                        json.dump(m_data, f, indent=2, ensure_ascii=False)
-                    deleted_from_db = True
-                    print(f"[MEMORY DELETE] Deleted docs {matching_ids} from memories.json.", flush=True)
-            except Exception as e:
-                print(f"[MEMORY DELETE ERROR] Failed to clean memories.json: {e}", flush=True)
+            if user_idx == -1:
+                raise ValueError("User message not found")
                 
-        return marked_compacted or deleted_from_db
-
-    async def delete_turn(self, session_id: str, user_message_index: int) -> bool:
-        if session_id not in self.sessions_history:
-            self._load_session_from_disk(session_id)
-            
-        if session_id not in self.sessions_history:
-            raise ValueError("Session not found")
-        
-        history = self.sessions_history[session_id]
-        
-        # Find corresponding N-th user event
-        user_idx = -1
-        user_count = 0
-        for i, ev in enumerate(history):
-            if ev['role'] == 'user':
-                if user_count == user_message_index:
-                    user_idx = i
+            # Find the next user event
+            next_user_idx = -1
+            for i in range(user_idx + 1, len(history)):
+                if history[i]['role'] == 'user':
+                    next_user_idx = i
                     break
-                user_count += 1
+                    
+            if next_user_idx != -1:
+                new_history = history[:user_idx] + history[next_user_idx:]
+            else:
+                new_history = history[:user_idx]
                 
-        if user_idx == -1:
-            raise ValueError("User message out of bounds")
-            
-        # Find the next user event
-        next_user_idx = -1
-        for i in range(user_idx + 1, len(history)):
-            if history[i]['role'] == 'user':
-                next_user_idx = i
-                break
-                
-        if next_user_idx != -1:
-            new_history = history[:user_idx] + history[next_user_idx:]
-        else:
-            new_history = history[:user_idx]
-            
-        self.sessions_history[session_id] = new_history
-        self._save_session_to_disk(session_id)
-        return True
+            self.sessions_history[session_id] = new_history
+            self._save_session_to_disk(session_id)
+            return True
 
-    async def delete_message_at(self, session_id: str, role: str, index: int) -> bool:
-        self._load_session_from_disk(session_id)
-        if session_id not in self.sessions_history:
-            return False
-            
-        if role == 'voice-call':
-            voice_indices = [i for i, msg in enumerate(self.sessions_history[session_id]) if msg.get('role') == 'voice-call']
-            if index >= len(voice_indices):
+    async def delete_message_at(self, session_id: str, msg_id: str) -> bool:
+        with self._lock:
+            self._load_session_from_disk(session_id)
+            if session_id not in self.sessions_history:
                 return False
-            target_idx = voice_indices[index]
-            del self.sessions_history[session_id][target_idx]
-            self._save_session_to_disk(session_id)
-            return True
-            
-        chat_history = await self.get_history(session_id)
-        new_history = [msg for msg in chat_history if msg.get('role') not in ('system-memory', 'system')]
-        target_role = 'user' if role == 'user' else 'companion'
-        same_role_msgs = [msg for msg in new_history if msg.get('role') == target_role]
-        if index >= len(same_role_msgs):
-            return False
-            
-        target_msg = same_role_msgs[index]
-        ts = target_msg.get('timestamp')
-        
-        real_history = self.sessions_history[session_id]
-        found_idx = -1
-        for i, msg in enumerate(real_history):
-            msg_role = msg.get('role')
-            if msg_role in ('companion', 'model'):
-                msg_role = 'companion'
-            if msg_role == target_role and msg.get('timestamp') == ts:
-                found_idx = i
-                break
                 
-        if found_idx != -1:
-            del real_history[found_idx]
-            self._save_session_to_disk(session_id)
-            return True
-        return False
+            real_history = self.sessions_history[session_id]
+            found_idx = -1
+            for i, msg in enumerate(real_history):
+                if msg.get('id') == msg_id:
+                    found_idx = i
+                    break
+                    
+            if found_idx != -1:
+                del real_history[found_idx]
+                self._save_session_to_disk(session_id)
+                return True
+            return False
 
     async def delete_image_from_session(self, session_id: str, image_url: str) -> bool:
-        if session_id not in self.sessions_history:
-            self._load_session_from_disk(session_id)
-        if session_id not in self.sessions_history:
-            # Session not found in memory or disk. Still delete the local image from the portraits folder!
-            return self._delete_local_image(image_url)
-            
-        history = self.sessions_history[session_id]
-        modified = False
-        
-        for msg in history:
-            if msg.get('text') and image_url in msg['text']:
-                import re
-                pattern = r'!\[[^\]]*\]\(' + re.escape(image_url) + r'\)'
-                msg['text'] = re.sub(pattern, '[Portrait Deleted]', msg['text'])
-                modified = True
-            if msg.get('image_url') == image_url:
-                msg['image_url'] = None
-                modified = True
-            if msg.get('tool_calls'):
-                for tc in msg['tool_calls']:
-                    if tc.get('type') == 'response' and tc.get('response') and image_url in tc['response']:
-                        import re
-                        pattern = r'!\[[^\]]*\]\(' + re.escape(image_url) + r'\)'
-                        tc['response'] = re.sub(pattern, '[Portrait Deleted]', tc['response'])
-                        modified = True
+        with self._lock:
+            if session_id not in self.sessions_history:
+                self._load_session_from_disk(session_id)
+            if session_id not in self.sessions_history:
+                # Session not found in memory or disk. Still delete the local image from the portraits folder!
+                return self._delete_local_image(image_url)
                 
-        # Clean up the actual image file from the server's local disk
-        file_deleted = self._delete_local_image(image_url)
-                    
-        if modified:
-            self._save_session_to_disk(session_id)
+            history = self.sessions_history[session_id]
+            modified = False
             
-        return modified or file_deleted
+            for msg in history:
+                if msg.get('text') and image_url in msg['text']:
+                    import re
+                    pattern = r'!\[[^\]]*\]\(' + re.escape(image_url) + r'\)'
+                    msg['text'] = re.sub(pattern, '[Portrait Deleted]', msg['text'])
+                    modified = True
+                if msg.get('image_url') == image_url:
+                    msg['image_url'] = None
+                    modified = True
+                if msg.get('tool_calls'):
+                    for tc in msg['tool_calls']:
+                        if tc.get('type') == 'response' and tc.get('response') and image_url in tc['response']:
+                            import re
+                            pattern = r'!\[[^\]]*\]\(' + re.escape(image_url) + r'\)'
+                            tc['response'] = re.sub(pattern, '[Portrait Deleted]', tc['response'])
+                            modified = True
+                    
+            # Clean up the actual image file from the server's local disk
+            file_deleted = self._delete_local_image(image_url)
+            
+            # If the server was paused, unpause and restart it now that the image is deleted
+            # (which signals they are done with that generation step and returning to normal state)
+            import utils.local_llm_manager as llm_mgr
+            if llm_mgr.get_vram_paused():
+                print("[VRAM GUARD] Image deleted. Unpausing VRAM and starting Local LLM server...", flush=True)
+                llm_mgr.set_vram_paused(False)
+                try:
+                    from utils.local_llm_manager import start_server
+                    import threading
+                    threading.Thread(target=start_server, daemon=True).start()
+                except Exception as e_start:
+                    print(f"[VRAM GUARD] Error starting server on image delete: {e_start}", flush=True)
+                        
+            if modified:
+                self._save_session_to_disk(session_id)
+                
+            return modified or file_deleted
 
     async def replace_image_in_session(self, session_id: str, old_image_url: str, new_image_url: str) -> bool:
-        if session_id not in self.sessions_history:
-            self._load_session_from_disk(session_id)
-        if session_id not in self.sessions_history:
-            return False
-            
-        history = self.sessions_history[session_id]
-        modified = False
-        
-        for msg in history:
-            if msg.get('text') and old_image_url in msg['text']:
-                msg['text'] = msg['text'].replace(old_image_url, new_image_url)
-                modified = True
-            if msg.get('image_url') == old_image_url:
-                msg['image_url'] = new_image_url
-                modified = True
-            if msg.get('tool_calls'):
-                for tc in msg['tool_calls']:
-                    if tc.get('type') == 'response' and tc.get('response') and old_image_url in tc['response']:
-                        tc['response'] = tc['response'].replace(old_image_url, new_image_url)
-                        modified = True
+        with self._lock:
+            if session_id not in self.sessions_history:
+                self._load_session_from_disk(session_id)
+            if session_id not in self.sessions_history:
+                return False
                 
-        # Clean up the old image file from the server's local disk
-        self._delete_local_image(old_image_url)
+            history = self.sessions_history[session_id]
+            modified = False
+            
+            for msg in history:
+                if msg.get('text') and old_image_url in msg['text']:
+                    msg['text'] = msg['text'].replace(old_image_url, new_image_url)
+                    modified = True
+                if msg.get('image_url') == old_image_url:
+                    msg['image_url'] = new_image_url
+                    modified = True
+                if msg.get('tool_calls'):
+                    for tc in msg['tool_calls']:
+                        if tc.get('type') == 'response' and tc.get('response') and old_image_url in tc['response']:
+                            tc['response'] = tc['response'].replace(old_image_url, new_image_url)
+                            modified = True
                     
-        if modified:
-            self._save_session_to_disk(session_id)
-            return True
-        return False
+            # Clean up the old image file from the server's local disk
+            self._delete_local_image(old_image_url)
+                        
+            if modified:
+                self._save_session_to_disk(session_id)
+                return True
+            return False
 
     async def replace_image_with_video_in_session(self, session_id: str, old_image_url: str, new_video_url: str) -> bool:
-        if session_id not in self.sessions_history:
-            self._load_session_from_disk(session_id)
-        if session_id not in self.sessions_history:
-            return False
+        with self._lock:
+            if session_id not in self.sessions_history:
+                self._load_session_from_disk(session_id)
+            if session_id not in self.sessions_history:
+                return False
+                
+            history = self.sessions_history[session_id]
+            modified = False
             
-        history = self.sessions_history[session_id]
-        modified = False
-        
-        for msg in history:
-            if msg.get('text') and old_image_url in msg['text']:
-                msg['text'] = msg['text'].replace(old_image_url, new_video_url)
-                modified = True
-            if msg.get('image_url') == old_image_url:
-                msg['image_url'] = new_video_url
-                modified = True
-            if msg.get('tool_calls'):
-                for tc in msg['tool_calls']:
-                    if tc.get('type') == 'response' and tc.get('response') and old_image_url in tc['response']:
-                        tc['response'] = tc['response'].replace(old_image_url, new_video_url)
-                        modified = True
-                        
-        if modified:
-            self._save_session_to_disk(session_id)
-            return True
-        return False
+            for msg in history:
+                if msg.get('text') and old_image_url in msg['text']:
+                    msg['text'] = msg['text'].replace(old_image_url, new_video_url)
+                    modified = True
+                if msg.get('image_url') == old_image_url:
+                    msg['image_url'] = new_video_url
+                    modified = True
+                if msg.get('tool_calls'):
+                    for tc in msg['tool_calls']:
+                        if tc.get('type') == 'response' and tc.get('response') and old_image_url in tc['response']:
+                            tc['response'] = tc['response'].replace(old_image_url, new_video_url)
+                            modified = True
+                            
+            if modified:
+                self._save_session_to_disk(session_id)
+                return True
+            return False
 
 
     async def append_message_to_session(self, session_id: str, role: str, text: str) -> bool:
-        if session_id not in self.sessions_history:
-            self._load_session_from_disk(session_id)
-        if session_id not in self.sessions_history:
-            return False
-            
-        history = self.sessions_history[session_id]
-        new_msg = {
-            'role': 'user' if role == 'user' else 'companion',
-            'text': text,
-            'tool_calls': [],
-            'timestamp': time.time()
-        }
-        if role != "user":
-            winning_mode = await self._get_inversion_mode(session_id)
-            from utils.program_mood import extract_and_strip_mood
-            _, mood_details = extract_and_strip_mood(text)
-            new_msg['inversion_active'] = winning_mode
-            new_msg['mood'] = mood_details
-        history.append(new_msg)
-        self._save_session_to_disk(session_id)
-        return True
-
-    async def append_voice_call(self, session_id: str, transcript: str, timestamp: float = None, start_time: float = None) -> bool:
-        if session_id not in self.sessions_history:
-            self._load_session_from_disk(session_id)
-        if session_id not in self.sessions_history:
-            self.sessions_history[session_id] = []
-            
-        import time
-        if timestamp is None:
-            timestamp = time.time()
-            
-        # Remove individual user/companion messages that were part of this voice call
-        if start_time is not None:
-            self.sessions_history[session_id] = [
-                msg for msg in self.sessions_history[session_id]
-                if not (msg.get('role') in ('user', 'companion') and msg.get('timestamp', 0) >= start_time)
-            ]
-            
-        new_msg = {
-            'role': 'voice-call',
-            'text': transcript,
-            'timestamp': timestamp
-        }
-        self.sessions_history[session_id].append(new_msg)
-        self._save_session_to_disk(session_id)
-        return True
-
-    async def clone_history(self, src_id: str, dest_id: str, messages: list) -> bool:
-        if dest_id.endswith('_voice'):
-            self.sessions_history[dest_id] = []
-            self._save_session_to_disk(dest_id)
-            return True
-            
-        if src_id not in self.sessions_history:
-            self._load_session_from_disk(src_id)
-            
-        src_hist = self.sessions_history.get(src_id, [])
-        filtered_msgs = [msg for msg in src_hist if msg.get('role') != 'voice-call']
-        limit = 6
-        seed_msgs = filtered_msgs[-limit:] if len(filtered_msgs) > limit else filtered_msgs
-        
-        import copy
-        cloned_msgs = copy.deepcopy(seed_msgs)
-        self.sessions_history[dest_id] = cloned_msgs
-        self._save_session_to_disk(dest_id)
-        return True
-
-    async def update_message_text(self, session_id: str, role: str, index: int, new_text: str) -> bool:
-        self._load_session_from_disk(session_id)
-        if session_id not in self.sessions_history:
-            return False
-            
-        chat_history = await self.get_history(session_id)
-        new_history = [msg for msg in chat_history if msg.get('role') not in ('system-memory', 'system')]
-        target_role = 'user' if role == 'user' else 'companion'
-        same_role_msgs = [msg for msg in new_history if msg.get('role') == target_role]
-        if index >= len(same_role_msgs):
-            return False
-            
-        target_msg = same_role_msgs[index]
-        ts = target_msg.get('timestamp')
-        
-        real_history = self.sessions_history[session_id]
-        found = False
-        for msg in real_history:
-            msg_role = msg.get('role')
-            if msg_role in ('companion', 'model'):
-                msg_role = 'companion'
-            if msg_role == target_role and msg.get('timestamp') == ts:
-                msg['text'] = new_text
-                if target_role == 'companion':
-                    from utils.program_mood import extract_and_strip_mood
-                    _, mood_details = extract_and_strip_mood(new_text)
-                    msg['mood'] = mood_details
-                found = True
-                break
+        with self._lock:
+            if session_id not in self.sessions_history:
+                self._load_session_from_disk(session_id)
+            if session_id not in self.sessions_history:
+                self.sessions_history[session_id] = []
                 
-        if found:
+            import uuid
+            prefix = 'usr_' if role == 'user' else 'prgm_'
+            if role == 'user':
+                if text.startswith("[SYSTEM: User has completed"):
+                    prefix = "quest_"
+                elif "Send me a portrait of yourself" in text:
+                    prefix = "port_"
+                elif text.startswith("[Tool Response from"):
+                    prefix = "tool_"
+            history = self.sessions_history[session_id]
+            new_msg = {
+                'id': f"{prefix}{uuid.uuid4().hex}",
+                'role': 'user' if role == 'user' else 'companion',
+                'text': text,
+                'tool_calls': [],
+                'timestamp': time.time()
+            }
+            if role != "user":
+                winning_mode = await self._get_inversion_mode(session_id)
+                from utils.program_mood import extract_and_strip_mood
+                _, mood_details = extract_and_strip_mood(text)
+                if mood_details:
+                    mood_name = mood_details.get('name')
+                    self.update_inversion_state_with_mood(session_id, mood_name)
+                new_msg['inversion_active'] = winning_mode
+                new_msg['mood'] = mood_details
+            history.append(new_msg)
             self._save_session_to_disk(session_id)
             return True
-        return False
+
+    async def append_voice_call(self, session_id: str, transcript: str, timestamp: float = None, start_time: float = None) -> bool:
+        with self._lock:
+            if session_id not in self.sessions_history:
+                self._load_session_from_disk(session_id)
+            if session_id not in self.sessions_history:
+                self.sessions_history[session_id] = []
+                
+            import time
+            if timestamp is None:
+                timestamp = time.time()
+                
+            # Remove individual user/companion messages that were part of this voice call
+            if start_time is not None:
+                self.sessions_history[session_id] = [
+                    msg for msg in self.sessions_history[session_id]
+                    if not (msg.get('role') in ('user', 'companion') and msg.get('timestamp', 0) >= start_time)
+                ]
+                
+            import uuid
+            new_msg = {
+                'id': f"vc_{uuid.uuid4().hex}",
+                'role': 'voice-call',
+                'text': transcript,
+                'timestamp': timestamp
+            }
+            self.sessions_history[session_id].append(new_msg)
+            self._save_session_to_disk(session_id)
+            return True
+
+    async def clone_history(self, src_id: str, dest_id: str, messages: list) -> bool:
+        with self._lock:
+            if dest_id.endswith('_voice'):
+                self.sessions_history[dest_id] = []
+                self._save_session_to_disk(dest_id)
+                return True
+                
+            if src_id not in self.sessions_history:
+                self._load_session_from_disk(src_id)
+                
+            src_hist = self.sessions_history.get(src_id, [])
+            filtered_msgs = [msg for msg in src_hist if msg.get('role') != 'voice-call']
+            limit = 6
+            seed_msgs = filtered_msgs[-limit:] if len(filtered_msgs) > limit else filtered_msgs
+            
+            import copy
+            cloned_msgs = copy.deepcopy(seed_msgs)
+            self.sessions_history[dest_id] = cloned_msgs
+            self._save_session_to_disk(dest_id)
+            return True
+
+    async def update_message_text(self, session_id: str, msg_id: str, new_text: str) -> bool:
+        with self._lock:
+            self._load_session_from_disk(session_id)
+            if session_id not in self.sessions_history:
+                return False
+                
+            real_history = self.sessions_history[session_id]
+            found = False
+            for msg in real_history:
+                if msg.get('id') == msg_id:
+                    msg['text'] = new_text
+                    if msg.get('role') in ('companion', 'model'):
+                        from utils.program_mood import extract_and_strip_mood
+                        _, mood_details = extract_and_strip_mood(new_text)
+                        msg['mood'] = mood_details
+                    found = True
+                    break
+                    
+            if found:
+                self._save_session_to_disk(session_id)
+                return True
+            return False
 

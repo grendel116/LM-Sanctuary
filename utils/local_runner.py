@@ -45,8 +45,27 @@ _current_model = None
 def start_local_server(model_key):
     global _proc, _current_model
     is_online = check_local_server_status()
-    if is_online and _current_model == model_key:
-        return True, "Already running"
+    
+    model_path = resolve_model_path(model_key)
+    if not model_path: return False, f"Model not found: {model_key}"
+    
+    # Check if a llama-server process is already running with the correct model
+    if is_online:
+        import psutil
+        model_basename = os.path.basename(model_path).lower()
+        for proc in psutil.process_iter(['name', 'cmdline']):
+            try:
+                if "llama-server" in proc.info['name'].lower():
+                    cmdline = proc.info.get('cmdline') or []
+                    cmdline_basenames = [os.path.basename(arg).lower() for arg in cmdline]
+                    if model_basename in cmdline_basenames:
+                        _current_model = model_key
+                        if not _proc:
+                            _proc = proc
+                        return True, "Online (already running)"
+            except Exception:
+                pass
+                
     if is_online:
         stop_local_server()
         
@@ -55,9 +74,6 @@ def start_local_server(model_key):
         
     if not os.path.exists(SERVER_EXE):
         if not download_llama_server(): return False, "Failed download"
-        
-    model_path = resolve_model_path(model_key)
-    if not model_path: return False, f"Model not found: {model_key}"
     
     cmd = [SERVER_EXE, "-m", model_path, "-c", "4096", "--port", "1234", "--host", "127.0.0.1", "-ngl", "32", "--no-warmup"]
     try:
@@ -124,4 +140,11 @@ def check_local_server_status():
     except Exception:
         return False
 
-atexit.register(stop_local_server)
+def _atexit_clean():
+    # If Flask reloader is active, let the parent process handle cleanup on Ctrl+C
+    # so we don't kill the server on child process reloads.
+    if os.environ.get('WERKZEUG_RUN_MAIN') == 'true':
+        return
+    stop_local_server()
+
+atexit.register(_atexit_clean)

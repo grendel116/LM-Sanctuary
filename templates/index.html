@@ -2114,6 +2114,11 @@
             color: #86efac;
             border: 1px solid rgba(34, 197, 94, 0.25);
         }
+        .status-paused {
+            background: rgba(245, 158, 11, 0.12);
+            color: #fbd38d;
+            border: 1px solid rgba(245, 158, 11, 0.3);
+        }
         .option-desc {
             margin: 0 0 12px 0;
             font-size: 0.78rem;
@@ -3503,22 +3508,23 @@
                         <h4 style="margin: 0; font-size: 1.05rem; font-weight: 600;">Local LLM</h4>
                         <span id="modal-local-status" class="status-badge status-offline">Offline</span>
                     </div>
-                    <p class="option-desc" style="font-size: 0.8rem; margin: 8px 0 15px 0;">Run offline using a GGUF model served locally on port 1234 with Vulkan GPU acceleration.</p>
+                    <p id="modal-local-desc" class="option-desc" style="font-size: 0.8rem; margin: 8px 0 15px 0;">Local LLM engine is offline. Start the server or search Hugging Face below to download a GGUF model.</p>
                     
-                    <div class="local-steps" style="font-size: 0.8rem; gap: 6px; margin-bottom: 15px;">
-                        <div class="step-item">
-                            <span class="step-num">1</span>
-                            <span class="step-text">Choose a model in the header selector.</span>
-                        </div>
-                        <div class="step-item">
-                            <span class="step-num">2</span>
-                            <span class="step-text">Click "Load" to start the server.</span>
-                        </div>
+                    <div style="display: flex; flex-direction: column; gap: 8px; margin-bottom: 15px;">
+                        <button id="modal-local-start-btn" onclick="startLocalLLM(this)" class="onboarding-btn connect-cloud-btn" style="width: 100%; font-size: 0.85rem; padding: 10px;">Start Server</button>
+                        <button id="modal-local-stop-btn" onclick="stopLocalLLM(this)" class="onboarding-btn" style="width: 100%; font-size: 0.85rem; padding: 10px; display: none;">Stop Server</button>
+                        <button onclick="checkModalStatus()" class="onboarding-btn" style="width: 100%; font-size: 0.85rem; padding: 10px;">Refresh Connection</button>
                     </div>
+
+                    <div id="modal-local-models-list" style="margin-bottom: 15px;"></div>
                     
-                    <button onclick="checkModalStatus()" class="onboarding-btn">Refresh Status</button>
-                    <div class="helper-text" style="font-size: 0.7rem; margin-top: 10px;">
-                        Server URL: <code class="url-code" style="font-size: 0.7rem;">http://localhost:1234</code>
+                    <div style="border-top: 1px solid var(--border-color); padding-top: 15px;">
+                        <label style="font-size: 0.72rem; color: var(--text-muted); font-weight: 500;">Search Hugging Face (GGUF)</label>
+                        <div style="display: flex; gap: 8px; margin-top: 5px;">
+                            <input type="text" id="modal-hf-search-input" placeholder="e.g. qwen2.5-0.5b" class="onboarding-input" style="flex: 1; font-size: 0.8rem; padding: 6px;" onkeydown="if(event.key==='Enter') searchHFModels('modal-hf-search-input', 'modal-hf-search-results')">
+                            <button onclick="searchHFModels('modal-hf-search-input', 'modal-hf-search-results')" class="onboarding-btn" style="margin: 0; padding: 0 12px; font-size: 0.8rem;">Search</button>
+                        </div>
+                        <div id="modal-hf-search-results" style="margin-top: 10px; max-height: 120px; overflow-y: auto; display: flex; flex-direction: column; gap: 6px;"></div>
                     </div>
                 </div>
 
@@ -3977,11 +3983,8 @@
                 updateProfileImages();
                 modelInitPromise = initializeModelSelect();
 
-                // Get existing message rows in the DOM
-                const existingRows = Array.from(chatContainer.querySelectorAll('.message-row:not(#welcome-message):not(#onboarding-container)'));
                 const newHistory = (data.history || []).filter(msg => {
-                    if (msg.role === 'system-memory' || msg.role === 'system') return false;
-                    if (msg.text && msg.text.startsWith('[System Memory of older conversation turns]:')) return false;
+                    if (msg.id && msg.id.startsWith('sys_')) return false;
                     return true;
                 });
                 
@@ -3995,32 +3998,59 @@
                     const msgText = msg.text || '';
                     const msgImg = msg.image_url || '';
                     const msgTools = JSON.stringify(msg.tool_calls || []);
+                    const msgTimestamp = msg.timestamp || '';
+                    const msgDuration = msg.duration || '';
+                    const msgId = msg.id;
                     
-                    const existingRow = existingRows[idx];
+                    // Find if a row with this msgId already exists in the DOM
+                    let existingRow = null;
+                    if (msgId) {
+                        existingRow = chatContainer.querySelector(`.message-row[data-msg-id="${msgId}"]`);
+                    }
+                    
                     if (existingRow) {
                         const roleMatches = existingRow.dataset.role === msgRole;
                         const textMatches = existingRow.dataset.rawText === msgText;
                         const imgMatches = existingRow.dataset.imageUrl === msgImg;
                         const toolsMatches = existingRow.dataset.toolCalls === msgTools;
-                        const timestampMatches = existingRow.dataset.timestamp === String(msg.timestamp || '');
+                        const timestampMatches = existingRow.dataset.timestamp === String(msgTimestamp);
                         
                         if (!roleMatches || !textMatches || !imgMatches || !toolsMatches || !timestampMatches) {
                             // Elements changed, replace in-place
-                            const newRow = appendMessage(msgRole, msgText, msg.image_url, msg.tool_calls, false, msg.timestamp);
+                            const newRow = appendMessage(msgRole, msgText, msg.image_url, msg.tool_calls, false, msgTimestamp, msgDuration, false, msgId);
                             chatContainer.replaceChild(newRow, existingRow);
+                            existingRow = newRow;
                             domUpdated = true;
                         }
                     } else {
-                        // Element is new, append it
-                        appendMessage(msgRole, msgText, msg.image_url, msg.tool_calls, false, msg.timestamp);
+                        // Element is new, create it
+                        existingRow = appendMessage(msgRole, msgText, msg.image_url, msg.tool_calls, false, msgTimestamp, msgDuration, false, msgId);
+                        domUpdated = true;
+                    }
+                    
+                    // Ensure existingRow is at the correct position (relative to message-rows)
+                    const liveRows = Array.from(chatContainer.querySelectorAll('.message-row:not(#welcome-message):not(#onboarding-container)'));
+                    const currentChildAtIdx = liveRows[idx];
+                    if (currentChildAtIdx !== existingRow) {
+                        if (currentChildAtIdx) {
+                            chatContainer.insertBefore(existingRow, currentChildAtIdx);
+                        } else {
+                            const sentinel = document.getElementById('bottom-sentinel');
+                            if (sentinel) {
+                                chatContainer.insertBefore(existingRow, sentinel);
+                            } else {
+                                chatContainer.appendChild(existingRow);
+                            }
+                        }
                         domUpdated = true;
                     }
                 });
                 
                 // Remove extra rows if any were deleted
-                if (existingRows.length > newHistory.length) {
-                    for (let i = newHistory.length; i < existingRows.length; i++) {
-                        existingRows[i].remove();
+                const liveRows = Array.from(chatContainer.querySelectorAll('.message-row:not(#welcome-message):not(#onboarding-container)'));
+                if (liveRows.length > newHistory.length) {
+                    for (let i = newHistory.length; i < liveRows.length; i++) {
+                        liveRows[i].remove();
                     }
                     domUpdated = true;
                 }
@@ -4166,7 +4196,29 @@ function getRelativePath(url) {
         }
 
         // --- generateMessageId ---
-function generateMessageId(text) {
+function generateMessageId(text, role = 'user') {
+            let prefix = 'msg_';
+            if (role === 'companion') {
+                if (text && (text.includes('Error') || text.includes('failed') || text.includes('momentarily overwhelmed'))) {
+                    prefix = 'err_';
+                } else {
+                    prefix = 'prgm_';
+                }
+            } else if (role === 'voice-call') {
+                prefix = 'vc_';
+            } else if (role === 'system-memory' || role === 'system') {
+                prefix = 'sys_';
+            } else if (role === 'user') {
+                if (text && text.includes("Send me a portrait of yourself")) {
+                    prefix = 'port_';
+                } else if (text && text.startsWith("[SYSTEM: User has completed")) {
+                    prefix = 'quest_';
+                } else if (text && text.startsWith("[Tool Response from")) {
+                    prefix = 'tool_';
+                } else {
+                    prefix = 'usr_';
+                }
+            }
             let hash = 0;
             const str = text || '';
             for (let i = 0; i < str.length; i++) {
@@ -4174,7 +4226,7 @@ function generateMessageId(text) {
                 hash = ((hash << 5) - hash) + char;
                 hash = hash & hash;
             }
-            return 'msg_' + Math.abs(hash).toString(36) + '_' + str.length;
+            return prefix + Math.abs(hash).toString(36) + '_' + str.length;
         }
 
         // --- escapeHtml ---
@@ -4361,9 +4413,6 @@ async function initializeModelSelect() {
                 const modelSelectElement = document.getElementById('model-select');
                 if (!modelSelectElement) return;
 
-                modelSelectElement.innerHTML = '';
-                availableModels = data.models || [];
-                
                 // Update connection status variables
                 if (data.status) {
                     connectionStatus = data.status;
@@ -4373,37 +4422,48 @@ async function initializeModelSelect() {
                     }
                 }
 
-                // If no models are available, add a disconnected local placeholder
-                if (availableModels.length === 0) {
-                    const opt = document.createElement('option');
-                    opt.value = 'local-llm';
-                    if (data.status && data.status.local_online) {
-                        opt.textContent = 'Local Model (No Model Loaded)';
-                    } else {
-                        opt.textContent = 'Local Model (Disconnected)';
-                    }
-                    modelSelectElement.appendChild(opt);
-                } else {
-                    availableModels.forEach(model => {
+                // Check if the models list has actually changed
+                const currentModelsJSON = JSON.stringify(data.models || []);
+                const lastModelsJSON = modelSelectElement.dataset.lastModelsJson || "";
+                if (currentModelsJSON !== lastModelsJSON) {
+                    modelSelectElement.dataset.lastModelsJson = currentModelsJSON;
+                    modelSelectElement.innerHTML = '';
+                    availableModels = data.models || [];
+                    
+                    // If no models are available, add a disconnected/paused local placeholder
+                    if (availableModels.length === 0) {
                         const opt = document.createElement('option');
-                        opt.value = model.value;
-                        opt.textContent = model.label;
+                        opt.value = 'local-llm';
+                        if (data.status && data.status.local_online === 'paused') {
+                            opt.textContent = 'Local Model (Paused)';
+                        } else if (data.status && data.status.local_online) {
+                            opt.textContent = 'Local Model (No Model Loaded)';
+                        } else {
+                            opt.textContent = 'Local Model (Disconnected)';
+                        }
                         modelSelectElement.appendChild(opt);
-                    });
-                }
+                    } else {
+                        availableModels.forEach(model => {
+                            const opt = document.createElement('option');
+                            opt.value = model.value;
+                            opt.textContent = model.label;
+                            modelSelectElement.appendChild(opt);
+                        });
+                    }
 
-                const defaultModel = data.default || 'local-llm';
-                localStorage.setItem('companion_default_model', defaultModel);
+                    const defaultModel = data.default || 'local-llm';
+                    localStorage.setItem('companion_default_model', defaultModel);
 
-                let storedModel = localStorage.getItem('companion_selected_model');
-                const isValid = availableModels.some(m => m.value === storedModel) || (storedModel === 'local-llm' && availableModels.length === 0);
-                if (!isValid) {
-                    storedModel = defaultModel;
-                    localStorage.setItem('companion_selected_model', storedModel);
+                    let storedModel = localStorage.getItem('companion_selected_model');
+                    const isValid = availableModels.some(m => m.value === storedModel) || (storedModel === 'local-llm' && availableModels.length === 0);
+                    if (!isValid) {
+                        storedModel = defaultModel;
+                        localStorage.setItem('companion_selected_model', storedModel);
+                    }
+                    
+                    selectedModel = storedModel;
+                    modelSelectElement.value = selectedModel;
                 }
-                
-                selectedModel = storedModel;
-                modelSelectElement.value = selectedModel;
                 modelSelectElement.disabled = false;
             } catch (error) {
                 console.error("Error fetching model configuration:", error);
@@ -4434,7 +4494,21 @@ function showOnboardingCard() {
 
             // Build local LLM onboarding card section based on engine state
             let localContent = '';
-            if (!connectionStatus.local_online) {
+            if (connectionStatus.local_online === 'paused') {
+                localContent = `
+                    <p class="option-desc" style="font-size: 0.8rem; margin: 8px 0 15px 0;">Local LLM engine is temporarily paused to free VRAM for ComfyUI generation. It will resume automatically.</p>
+                    <button onclick="checkOnboardingStatus()" class="onboarding-btn" style="width: 100%; font-size: 0.85rem; padding: 10px; margin-bottom: 15px;">Refresh Connection</button>
+                    
+                    <div style="border-top: 1px solid var(--border-color); padding-top: 15px;">
+                        <label style="font-size: 0.72rem; color: var(--text-muted); font-weight: 500;">Search Hugging Face (GGUF)</label>
+                        <div style="display: flex; gap: 8px; margin-top: 5px;">
+                            <input type="text" id="hf-search-input" placeholder="e.g. qwen2.5-0.5b" class="onboarding-input" style="flex: 1; font-size: 0.8rem; padding: 6px;" onkeydown="if(event.key==='Enter') searchHFModels('hf-search-input', 'hf-search-results')">
+                            <button onclick="searchHFModels('hf-search-input', 'hf-search-results')" class="onboarding-btn" style="margin: 0; padding: 0 15px; font-size: 0.8rem;">Search</button>
+                        </div>
+                        <div id="hf-search-results" style="margin-top: 10px; max-height: 150px; overflow-y: auto; font-size: 0.8rem; display: flex; flex-direction: column; gap: 6px;"></div>
+                    </div>
+                `;
+            } else if (!connectionStatus.local_online) {
                 localContent = `
                     <p class="option-desc" style="font-size: 0.8rem; margin: 8px 0 15px 0;">Local LLM engine is offline. Start the server or search Hugging Face below to download a GGUF model.</p>
                     <button onclick="startLocalLLM(this)" class="onboarding-btn connect-cloud-btn" style="width: 100%; font-size: 0.85rem; padding: 10px; margin-bottom: 15px;">Start Server</button>
@@ -4508,8 +4582,8 @@ function showOnboardingCard() {
                     <div class="onboarding-option-box local-box">
                         <div class="option-header">
                             <h3>Local LLM</h3>
-                            <span id="onboarding-local-status" class="status-badge ${connectionStatus.local_online ? 'status-online' : 'status-offline'}">
-                                ${connectionStatus.local_online ? 'Online' : 'Offline'}
+                            <span id="onboarding-local-status" class="status-badge ${connectionStatus.local_online === 'paused' ? 'status-paused' : (connectionStatus.local_online ? 'status-online' : 'status-offline')}">
+                                ${connectionStatus.local_online === 'paused' ? 'Paused' : (connectionStatus.local_online ? 'Online' : 'Offline')}
                             </span>
                         </div>
                         ${localContent}
@@ -4987,7 +5061,9 @@ async function fetchAndRenderLocalModels() {
             const listContainer = document.getElementById('modal-local-models-list');
             if (!listContainer) return;
             
-            listContainer.innerHTML = '<div style="color: var(--text-muted); font-size: 0.75rem; margin-top: 10px;">Loading downloaded models...</div>';
+            if (!listContainer.innerHTML.trim()) {
+                listContainer.innerHTML = '<div style="color: var(--text-muted); font-size: 0.75rem; margin-top: 10px;">Loading downloaded models...</div>';
+            }
             try {
                 const res = await fetch('/api/local_llm/status');
                 const data = await res.json();
@@ -5467,7 +5543,10 @@ function updateConnectionStatus(status) {
             // Update Local LLM badges
             localLLMBadges.forEach(badge => {
                 if (!badge) return;
-                if (status.local_online) {
+                if (status.local_online === "paused") {
+                    badge.textContent = "Paused";
+                    badge.className = "status-badge status-paused";
+                } else if (status.local_online) {
                     badge.textContent = "Online";
                     badge.className = "status-badge status-online";
                 } else {
@@ -5522,52 +5601,27 @@ function updateConnectionStatus(status) {
             
             updateConnectionStatus(connectionStatus);
 
-            // Rebuild the Local box panel dynamically inside settings modal
+            // Update the Local box panel states inside settings modal
             const localBox = document.getElementById('modal-local-box-container');
             if (localBox) {
-                if (!connectionStatus.local_online) {
-                    localBox.innerHTML = `
-                        <div class="option-header">
-                            <h4 style="margin: 0; font-size: 1.05rem; font-weight: 600;">Local LLM</h4>
-                            <span class="status-badge status-offline">Offline</span>
-                        </div>
-                        <p class="option-desc" style="font-size: 0.8rem; margin: 8px 0 15px 0;">Local LLM engine is offline. Start the server or search Hugging Face below to download a GGUF model.</p>
-                        <button onclick="startLocalLLM(this)" class="onboarding-btn connect-cloud-btn" style="width: 100%; font-size: 0.85rem; padding: 10px; margin-bottom: 15px;">Start Server</button>
-                        
-                        <div id="modal-local-models-list"></div>
-
-                        <div style="border-top: 1px solid var(--border-color); padding-top: 15px; margin-top: 15px;">
-                            <label style="font-size: 0.72rem; color: var(--text-muted); font-weight: 500;">Search Hugging Face (GGUF)</label>
-                            <div style="display: flex; gap: 8px; margin-top: 5px;">
-                                <input type="text" id="modal-hf-search-input" placeholder="e.g. qwen2.5-0.5b" class="onboarding-input" style="flex: 1; font-size: 0.8rem; padding: 6px;" onkeydown="if(event.key==='Enter') searchHFModels('modal-hf-search-input', 'modal-hf-search-results')">
-                                <button onclick="searchHFModels('modal-hf-search-input', 'modal-hf-search-results')" class="onboarding-btn" style="margin: 0; padding: 0 12px; font-size: 0.8rem;">Search</button>
-                            </div>
-                            <div id="modal-hf-search-results" style="margin-top: 10px; max-height: 120px; overflow-y: auto; display: flex; flex-direction: column; gap: 6px;"></div>
-                        </div>
-                    `;
-                    fetchAndRenderLocalModels();
+                const localDesc = document.getElementById('modal-local-desc');
+                const startBtn = document.getElementById('modal-local-start-btn');
+                const stopBtn = document.getElementById('modal-local-stop-btn');
+                
+                if (connectionStatus.local_online === "paused") {
+                    if (localDesc) localDesc.textContent = "Local LLM engine is temporarily paused to free VRAM for ComfyUI generation. It will resume automatically.";
+                    if (startBtn) startBtn.style.display = 'none';
+                    if (stopBtn) stopBtn.style.display = 'block';
+                } else if (!connectionStatus.local_online) {
+                    if (localDesc) localDesc.textContent = "Local LLM engine is offline. Start the server or search Hugging Face below to download a GGUF model.";
+                    if (startBtn) startBtn.style.display = 'block';
+                    if (stopBtn) stopBtn.style.display = 'none';
                 } else {
-                    localBox.innerHTML = `
-                        <div class="option-header">
-                            <h4 style="margin: 0; font-size: 1.05rem; font-weight: 600;">Local LLM</h4>
-                            <span class="status-badge status-online">Online</span>
-                        </div>
-                        <p class="option-desc" style="font-size: 0.8rem; margin: 8px 0 15px 0;">Local LLM server is running. Select active models via the header dropdown.</p>
-                        <button onclick="checkModalStatus()" class="onboarding-btn" style="width: 100%; font-size: 0.85rem; padding: 10px; margin-top: 10px;">Refresh Connection</button>
-                        <button onclick="stopLocalLLM(this)" class="onboarding-btn" style="width: 100%; font-size: 0.85rem; padding: 10px; margin-top: 8px;">Stop Server</button>
-                        <div id="modal-local-models-list"></div>
-                        
-                        <div style="border-top: 1px solid var(--border-color); padding-top: 15px; margin-top: 15px;">
-                            <label style="font-size: 0.72rem; color: var(--text-muted); font-weight: 500;">Search Hugging Face (GGUF)</label>
-                            <div style="display: flex; gap: 8px; margin-top: 5px;">
-                                <input type="text" id="modal-hf-search-input" placeholder="e.g. qwen2.5-0.5b" class="onboarding-input" style="flex: 1; font-size: 0.8rem; padding: 6px;" onkeydown="if(event.key==='Enter') searchHFModels('modal-hf-search-input', 'modal-hf-search-results')">
-                                <button onclick="searchHFModels('modal-hf-search-input', 'modal-hf-search-results')" class="onboarding-btn" style="margin: 0; padding: 0 12px; font-size: 0.8rem;">Search</button>
-                            </div>
-                            <div id="modal-hf-search-results" style="margin-top: 10px; max-height: 120px; overflow-y: auto; display: flex; flex-direction: column; gap: 6px;"></div>
-                        </div>
-                    `;
-                    fetchAndRenderLocalModels();
+                    if (localDesc) localDesc.textContent = "Local LLM server is running. Select active models via the header dropdown.";
+                    if (startBtn) startBtn.style.display = 'none';
+                    if (stopBtn) stopBtn.style.display = 'block';
                 }
+                fetchAndRenderLocalModels();
             }
             updateComfyModalStatus();
         }
@@ -5740,6 +5794,7 @@ function openConnectionModal() {
             document.getElementById('connection-modal').style.display = 'flex';
             updateConnectionModalStatus();
             verifyConnections(true);
+            updateComfyModalStatus();
         }
 
         // --- closeConnectionModal ---
@@ -7287,7 +7342,7 @@ async function loadHistory() {
                     
                     // Render history
                     data.history.forEach(msg => {
-                        appendMessage(msg.role, msg.text, msg.image_url, msg.tool_calls, false, msg.timestamp);
+                        appendMessage(msg.role, msg.text, msg.image_url, msg.tool_calls, false, msg.timestamp, null, false, msg.id);
                     });
                 } else {
                     // History is empty! Wait for model initialization and health checks to complete if they haven't yet
@@ -7872,7 +7927,7 @@ function toggleThinkingBlock(headerElement) {
         }
 
         // --- appendMessage ---
-        function appendMessage(role, text, imageUrl = null, toolCalls = null, isLive = false, timestamp = null, duration = null, isTransient = false) {
+        function appendMessage(role, text, imageUrl = null, toolCalls = null, isLive = false, timestamp = null, duration = null, isTransient = false, msgId = null) {
             if (role === 'system-memory' || role === 'system') return;
             if (text && text.startsWith('[System Memory of older conversation turns]:')) return;
             
@@ -7887,6 +7942,7 @@ function toggleThinkingBlock(headerElement) {
                 row.dataset.role = 'voice-call';
                 row.dataset.rawText = text;
                 row.dataset.timestamp = timestamp || '';
+                row.dataset.msgId = msgId || generateMessageId(text, role);
 
                 let transcriptData = { duration: '0s', turns: [] };
                 try {
@@ -8035,12 +8091,16 @@ function toggleThinkingBlock(headerElement) {
             row.dataset.toolCalls = JSON.stringify(toolCalls || []);
             row.dataset.timestamp = timestamp || '';
             row.dataset.duration = duration || '';
+            row.dataset.msgId = msgId || generateMessageId(text, role);
 
-            // Hide the user message requesting a portrait, system quest completion, or emulated tool responses
-            const isPortraitRequest = (role === 'user' && text.includes("Send me a portrait of yourself based on the context of our last message/current dialogue!"));
-            const isSystemQuestCompletion = (role === 'user' && text.startsWith("[SYSTEM: User has completed the quest:"));
-            const isToolResponse = (role === 'user' && text.startsWith("[Tool Response from"));
-            if (isPortraitRequest || isSystemQuestCompletion || isToolResponse) {
+            // Hide system, tool, portrait request, and quest completion messages
+            const isHidden = row.dataset.msgId && (
+                row.dataset.msgId.startsWith('sys_') ||
+                row.dataset.msgId.startsWith('tool_') ||
+                row.dataset.msgId.startsWith('port_') ||
+                row.dataset.msgId.startsWith('quest_')
+            );
+            if (isHidden) {
                 row.style.display = 'none';
             }
 
@@ -8063,7 +8123,7 @@ function toggleThinkingBlock(headerElement) {
             const bubble = document.createElement('div');
             bubble.className = `message ${role}`;
             bubble.dataset.rawText = text || '';
-            bubble.dataset.msgId = generateMessageId(text);
+            bubble.dataset.msgId = msgId || generateMessageId(text, role);
             if (isMsgTransient) {
                 bubble.dataset.isTransient = "true";
             }
@@ -8712,7 +8772,8 @@ function triggerFileInput() {
             } else if (attachedBase64) {
                 userImageUrl = `data:${attachedMime};base64,${attachedBase64}`;
             }
-            appendMessage('user', text, userImageUrl, null, false, Date.now() / 1000);
+            const userMsgId = 'usr_' + Math.random().toString(36).substr(2, 9) + Date.now().toString(36);
+            appendMessage('user', text, userImageUrl, null, false, Date.now() / 1000, null, false, userMsgId);
 
             // Trigger heart jiggle on high user interaction or when Companion is generating/responding
             const heartElement = document.querySelector('.heart-pulse');
@@ -8722,6 +8783,7 @@ function triggerFileInput() {
 
             const payload = {
                 message: text || "",
+                msg_id: userMsgId,
                 image_data: attachedBase64,
                 image_mime: attachedMime,
                 media_path: attachedMediaPath,
@@ -8766,8 +8828,20 @@ function triggerFileInput() {
                 chatContainer.removeChild(typingIndicatorRow);
 
                 const data = await response.json();
+                
+                // Update user message row/bubble msgId
+                const userBubbles = Array.from(chatContainer.querySelectorAll('.message.user'));
+                const lastUserBubble = userBubbles[userBubbles.length - 1];
+                if (lastUserBubble && data.user_msg_id) {
+                    lastUserBubble.dataset.msgId = data.user_msg_id;
+                    const row = lastUserBubble.closest('.message-row');
+                    if (row) {
+                        row.dataset.msgId = data.user_msg_id;
+                    }
+                }
+                
                 if (data.response !== undefined) {
-                    appendMessage('companion', data.response, null, data.tool_calls, true, data.timestamp, data.duration);
+                    appendMessage('companion', data.response, null, data.tool_calls, true, data.timestamp, data.duration, false, data.companion_msg_id);
                 } else if (data.error) {
                     let errMsg = data.error;
                     if (errMsg.includes("429") || errMsg.includes("RESOURCE_EXHAUSTED")) {
@@ -8802,6 +8876,7 @@ function triggerFileInput() {
                 if (heartElement) {
                     heartElement.classList.remove('jiggling');
                 }
+                await initializeModelSelect();
             }
         }
 
@@ -8882,6 +8957,7 @@ function triggerFileInput() {
                 if (heartElement) {
                     heartElement.classList.remove('jiggling');
                 }
+                await initializeModelSelect();
             }
         }
 
@@ -8972,14 +9048,11 @@ async function saveMessageEdit(bubble, newText) {
                 return;
             }
             
-            const isUser = bubble.classList.contains('user');
-            const role = isUser ? 'user' : 'companion';
-            
-            const selector = isUser ? '.message.user' : '.message.companion';
-            const allSameRoleBubbles = Array.from(chatContainer.querySelectorAll(selector))
-                .filter(el => !el.closest('#welcome-message') && !el.closest('#onboarding-container') && el.dataset.isTransient !== "true");
-            const index = allSameRoleBubbles.indexOf(bubble);
-            if (index === -1) return;
+            const msgId = bubble.dataset.msgId;
+            if (!msgId) {
+                showCustomAlert("Error", "Message ID not found.");
+                return;
+            }
             
             // Show inline saving status on save button
             const saveBtn = bubble.querySelector('.edit-save-btn');
@@ -8995,8 +9068,7 @@ async function saveMessageEdit(bubble, newText) {
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                         session_id: sessionId,
-                        role: role,
-                        index: index,
+                        msg_id: msgId,
                         new_text: trimmedText
                     })
                 });
@@ -9063,9 +9135,11 @@ async function saveMessageEdit(bubble, newText) {
             const row = bubble.closest('.message-row.user-row');
             if (!row) return;
             
-            const userRows = Array.from(chatContainer.querySelectorAll('.message-row.user-row'));
-            const index = userRows.indexOf(row);
-            if (index === -1) return;
+            const msgId = bubble.dataset.msgId;
+            if (!msgId) {
+                showCustomAlert("Error", "Message ID not found.");
+                return;
+            }
             
             truncateChatAfter(row);
             
@@ -9105,7 +9179,7 @@ async function saveMessageEdit(bubble, newText) {
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                         session_id: sessionId,
-                        user_message_index: index,
+                        msg_id: msgId,
                         new_text: bubble.dataset.rawText || '',
                         model: selectedModel
                     }),
@@ -9118,7 +9192,7 @@ async function saveMessageEdit(bubble, newText) {
                 
                 const data = await response.json();
                 if (data.response !== undefined) {
-                    appendMessage('companion', data.response, null, data.tool_calls, true, data.timestamp, data.duration);
+                    appendMessage('companion', data.response, null, data.tool_calls, true, data.timestamp, data.duration, false, data.companion_msg_id);
                 } else if (data.error) {
                     let errMsg = data.error;
                     if (errMsg.includes("429") || errMsg.includes("RESOURCE_EXHAUSTED")) {
@@ -9171,9 +9245,12 @@ async function saveMessageEdit(bubble, newText) {
                 return;
             }
             
-            const userRows = Array.from(chatContainer.querySelectorAll('.message-row.user-row'));
-            const index = userRows.indexOf(prevRow);
-            if (index === -1) return;
+            const prevBubble = prevRow.querySelector('.message.user');
+            const msgId = prevBubble ? prevBubble.dataset.msgId : null;
+            if (!msgId) {
+                showCustomAlert("Reroll Error", "Cannot find preceding user message ID.");
+                return;
+            }
             
             truncateChatAfter(prevRow);
             
@@ -9213,7 +9290,7 @@ async function saveMessageEdit(bubble, newText) {
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                         session_id: sessionId,
-                        user_message_index: index,
+                        msg_id: msgId,
                         new_text: null,
                         model: selectedModel,
                         force_offload: true
@@ -9227,7 +9304,7 @@ async function saveMessageEdit(bubble, newText) {
                 
                 const data = await response.json();
                 if (data.response !== undefined) {
-                    appendMessage('companion', data.response, null, data.tool_calls, true, data.timestamp, data.duration);
+                    appendMessage('companion', data.response, null, data.tool_calls, true, data.timestamp, data.duration, false, data.companion_msg_id);
                 } else if (data.error) {
                     let errMsg = data.error;
                     if (errMsg.includes("429") || errMsg.includes("RESOURCE_EXHAUSTED")) {
@@ -9261,6 +9338,7 @@ async function saveMessageEdit(bubble, newText) {
                 if (heartElement) {
                     heartElement.classList.remove('jiggling');
                 }
+                await initializeModelSelect();
             }
         }
 
@@ -9272,34 +9350,17 @@ async function saveMessageEdit(bubble, newText) {
                 
                 if (!bubble && !voiceCallRow) return;
                 
-                let role = 'user';
-                let index = -1;
-                
-                if (bubble) {
-                    const isUser = bubble.classList.contains('user');
-                    role = isUser ? 'user' : 'companion';
-                    
-                    // Handle transient companion message deletion (just remove from DOM since it's not on the server)
-                    if (bubble.dataset.isTransient === "true") {
-                        const row = bubble.closest('.message-row');
-                        if (row) {
-                            row.remove();
-                        }
-                        return;
+                if (bubble && bubble.dataset.isTransient === "true") {
+                    const row = bubble.closest('.message-row');
+                    if (row) {
+                        row.remove();
                     }
-                    
-                    const selector = isUser ? '.message.user' : '.message.companion';
-                    const allSameRoleBubbles = Array.from(chatContainer.querySelectorAll(selector))
-                        .filter(el => !el.closest('#welcome-message') && !el.closest('#onboarding-container') && el.dataset.isTransient !== "true");
-                    index = allSameRoleBubbles.indexOf(bubble);
-                } else if (voiceCallRow) {
-                    role = 'voice-call';
-                    const allVoiceCallRows = Array.from(chatContainer.querySelectorAll('.voice-call-row'));
-                    index = allVoiceCallRows.indexOf(voiceCallRow);
+                    return;
                 }
                 
-                if (index === -1) {
-                    showCustomAlert("Error", "Could not find message index.");
+                const msgId = bubble ? bubble.dataset.msgId : (voiceCallRow ? voiceCallRow.dataset.msgId : null);
+                if (!msgId) {
+                    showCustomAlert("Error", "Could not find message ID.");
                     return;
                 }
                 
@@ -9309,8 +9370,7 @@ async function saveMessageEdit(bubble, newText) {
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({
                             session_id: sessionId,
-                            role: role,
-                            index: index
+                            msg_id: msgId
                         })
                     });
                     const data = await response.json();
@@ -9832,6 +9892,11 @@ function handleSwipeGesture() {
         async function generatePortraitPrompt() {
             if (isGenerating) return;
             
+            // Set state to paused immediately
+            connectionStatus.local_online = 'paused';
+            updateConnectionModalStatus();
+            initializeModelSelect();
+            
             hasApprovedToolThisTurn = false;
             setGenerating(true);
             userInput.disabled = true;
@@ -9844,7 +9909,8 @@ function handleSwipeGesture() {
             }
             
             const text = "Send me a portrait of yourself based on the context of our last message/current dialogue!";
-            appendMessage('user', text, null, null, false, Date.now() / 1000);
+            const portMsgId = 'port_' + Math.random().toString(36).substr(2, 9) + Date.now().toString(36);
+            appendMessage('user', text, null, null, false, Date.now() / 1000, null, false, portMsgId);
             
             const typingIndicatorRow = document.createElement('div');
             typingIndicatorRow.className = 'message-row companion-row';
@@ -9871,6 +9937,7 @@ function handleSwipeGesture() {
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                         session_id: sessionId,
+                        msg_id: portMsgId,
                         model: selectedModel
                     }),
                     signal: chatAbortController.signal
@@ -9880,7 +9947,7 @@ function handleSwipeGesture() {
                 
                 const data = await response.json();
                 if (data.response !== undefined) {
-                    appendMessage('companion', data.response, null, data.tool_calls, true, data.timestamp, data.duration);
+                    appendMessage('companion', data.response, null, data.tool_calls, true, data.timestamp, data.duration, false, data.companion_msg_id);
                     await softReloadApp();
                 } else if (data.error) {
                     let errMsg = data.error;
@@ -9914,6 +9981,7 @@ function handleSwipeGesture() {
                 if (heartElement) {
                     heartElement.classList.remove('jiggling');
                 }
+                await initializeModelSelect();
             }
         }
 
@@ -9974,6 +10042,10 @@ function handleSwipeGesture() {
 
         // --- regenerateImage ---
 async function regenerateImage(buttonElement, oldImageUrl, prompt) {
+            // Set state to paused immediately
+            connectionStatus.local_online = 'paused';
+            updateConnectionModalStatus();
+            initializeModelSelect();
             try {
                 const container = buttonElement.closest('.message-image-container');
                 if (!container) {
@@ -10074,6 +10146,7 @@ async function regenerateImage(buttonElement, oldImageUrl, prompt) {
                 buttonElement.style.pointerEvents = 'auto';
                 buttonElement.style.opacity = '';
                 stopToolPolling();
+                await initializeModelSelect();
             }
         }
 
@@ -10299,6 +10372,10 @@ async function regenerateImage(buttonElement, oldImageUrl, prompt) {
 
         // --- animateImage ---
         async function animateImage(buttonElement, oldImageUrl, motionPrompt) {
+            // Set state to paused immediately
+            connectionStatus.local_online = 'paused';
+            updateConnectionModalStatus();
+            initializeModelSelect();
             try {
                 const container = buttonElement.closest('.message-image-container');
                 if (!container) {
@@ -10354,6 +10431,7 @@ async function regenerateImage(buttonElement, oldImageUrl, prompt) {
             } finally {
                 buttonElement.style.pointerEvents = 'auto';
                 buttonElement.style.opacity = '';
+                await initializeModelSelect();
             }
         }
 
@@ -10382,6 +10460,12 @@ async function regenerateImage(buttonElement, oldImageUrl, prompt) {
                                 const currentToolsStr = (data.active_tools || []).join(',');
                                 
                                 if (data.active_tools && data.active_tools.length > 0) {
+                                    const hasImgTool = data.active_tools.some(t => t.includes('portrait') || t.includes('image') || t.includes('video') || t.includes('generate'));
+                                    if (hasImgTool && connectionStatus.local_online !== 'paused') {
+                                        connectionStatus.local_online = 'paused';
+                                        updateConnectionModalStatus();
+                                        await initializeModelSelect();
+                                    }
                                     const isNewCall = currentToolsStr !== lastActiveToolsStr;
                                     lastActiveToolsStr = currentToolsStr;
                                     
@@ -10789,22 +10873,12 @@ function showToolConfirmModal(callId, toolName, details) {
         async function completeQuest(questId) {
             closeQuestLog();
             
-            if (isGenerating) return;
-            
-            setGenerating(true);
-            userInput.disabled = true;
-            userInput.placeholder = "";
-            updateInputGlow();
-            
-            const heartElement = document.querySelector('.heart-pulse');
-            if (heartElement) {
-                heartElement.classList.add('jiggling');
-            }
-            
-            let typingIndicatorRow = null;
-
             try {
-                const response = await fetch(`/api/quests/${questId}/complete`, { method: 'POST' });
+                const response = await fetch(`/api/quests/${questId}/complete`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ session_id: sessionId })
+                });
                 const data = await response.json();
                 if (data.error) throw new Error(data.error);
                 
@@ -10812,88 +10886,17 @@ function showToolConfirmModal(callId, toolName, details) {
                 const objectives = data.objectives || [];
                 const objText = objectives.length > 0 ? ` with objectives: ${objectives.join(', ')}` : "";
                 const systemMessage = `[SYSTEM: User has completed the quest: "${title}"${objText}]`;
+                const questMsgId = 'quest_' + Math.random().toString(36).substr(2, 9) + Date.now().toString(36);
                 
-                appendMessage('user', systemMessage, null, null, false, Date.now() / 1000);
+                // Append message locally (invisible/hidden user message)
+                appendMessage('user', systemMessage, null, null, false, Date.now() / 1000, null, false, questMsgId);
                 
-                const payload = {
-                    message: systemMessage,
-                    image_data: null,
-                    image_mime: null,
-                    media_path: null,
-                    session_id: sessionId,
-                    model: selectedModel
-                };
+                // Reload quest list UI
+                await loadQuests();
                 
-                typingIndicatorRow = document.createElement('div');
-                typingIndicatorRow.className = 'message-row companion-row';
-                const profileUrl = getProfileUrl();
-                typingIndicatorRow.innerHTML = `
-                    <div class="avatar-container">
-                        <img class="avatar companion-avatar" src="${profileUrl}" alt="Companion" onclick="expandImage('${profileUrl}')">
-                    </div>
-                    <div class="message companion">
-                        <div class="typing-indicator">
-                            <div class="typing-dot"></div>
-                            <div class="typing-dot"></div>
-                            <div class="typing-dot"></div>
-                        </div>
-                    </div>
-                `;
-                chatContainer.appendChild(typingIndicatorRow);
-                chatContainer.scrollTop = chatContainer.scrollHeight;
-                
-                startToolPolling();
-                chatAbortController = new AbortController();
-                
-                const chatResponse = await fetch('/chat', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(payload),
-                    signal: chatAbortController.signal
-                });
-                
-                if (typingIndicatorRow && chatContainer.contains(typingIndicatorRow)) {
-                    chatContainer.removeChild(typingIndicatorRow);
-                }
-                
-                const chatData = await chatResponse.json();
-                if (chatData.response !== undefined) {
-                    appendMessage('companion', chatData.response, null, chatData.tool_calls, true, chatData.timestamp, chatData.duration);
-                } else if (chatData.error) {
-                    let errMsg = chatData.error;
-                    if (errMsg.includes("429") || errMsg.includes("RESOURCE_EXHAUSTED")) {
-                        errMsg = "The Sanctuary is momentarily overwhelmed (Gemini Rate Limit 429: Resource Exhausted). Let us pause, take a slow breath, and try our chavruta again in 15 seconds.";
-                    }
-                    appendMessage('companion', errMsg);
-                }
-                if (chatData.state) {
-                    updateHeartState(chatData.state, chatData.inversion_active);
-                }
-                if (chatData.inversion_active && !inversionActive) {
-                    triggerHeartBurst();
-                }
-                inversionActive = chatData.inversion_active || "";
-                handleSuccessReload(chatData);
             } catch (error) {
-                if (typingIndicatorRow && chatContainer.contains(typingIndicatorRow)) {
-                    chatContainer.removeChild(typingIndicatorRow);
-                }
-                if (error.name === 'AbortError') {
-                    appendMessage('companion', '*(Generation stopped)*');
-                } else {
-                    console.error("Error completing quest:", error);
-                    showCustomAlert("Error", "Error completing quest: " + error.message);
-                }
-                handleToolReloadOrRecovery();
-            } finally {
-                setGenerating(false);
-                userInput.disabled = false;
-                userInput.placeholder = "Ask " + (activeCompanionName || "Companion");
-                updateInputGlow();
-                stopToolPolling();
-                if (heartElement) {
-                    heartElement.classList.remove('jiggling');
-                }
+                console.error("Error completing quest:", error);
+                showCustomAlert("Error", "Error completing quest: " + error.message);
             }
         }
 
@@ -11730,6 +11733,8 @@ let galleryImages = [];
                 }
             }
         }, 5000);
+
+
 
 // Load previous chat history on DOM ready
         window.addEventListener('DOMContentLoaded', () => {

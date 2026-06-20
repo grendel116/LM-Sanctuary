@@ -639,7 +639,7 @@ def web_search(query: str) -> str:
                     
             # Fallback to Wikipedia if other sources failed or returned empty list
             if not unique_results:
-                print("[Web Crawling] All primary sources empty or failed. Falling back to Wikipedia.")
+                print("[Web Crawling] All primary sources empty or failed. Using Wikipedia.")
                 wiki_results = run_wikipedia(query)
                 for r in wiki_results:
                     url_clean = r["url"].lower().strip().rstrip('/')
@@ -1092,17 +1092,16 @@ def apply_comfy_workflow(workflow_path: str, parameters: dict, save_path: str) -
 
 def vram_guard(func):
     def wrapper(*args, **kwargs):
-        loaded_model_names = []
+        was_running = False
         try:
             from utils.local_llm_manager import check_status
             if check_status():
-                from utils.models import fetch_local_models
+                was_running = True
+                print("[VRAM GUARD] Stopping Local LLM server to free system VRAM.", flush=True)
+                from utils import local_llm_manager
+                local_llm_manager.set_vram_paused(True)
                 from utils.local_llm_manager import stop_server
-                loaded_models = fetch_local_models(force_refresh=True)
-                loaded_model_names = [m["value"] for m in loaded_models if m["value"] != "local-llm"]
-                if loaded_model_names:
-                    print(f"[VRAM GUARD] Stopping Local LLM server to free system RAM: {loaded_model_names}", flush=True)
-                    stop_server()
+                stop_server()
         except Exception as e_unload:
             print(f"[VRAM GUARD] Warning: failed to auto-stop server: {e_unload}", flush=True)
             
@@ -1366,9 +1365,10 @@ def generate_video_from_image(image_path: str, prompt: str) -> str:
     if not os.path.exists(image_path):
         raise Exception(f"Source image not found at '{image_path}'")
         
-    # Copy source image to ComfyUI's input directory
+    # Copy and resize source image to ComfyUI's input directory using PIL
     from variables import COMFYUI_SERVER_URL
     from utils.comfy_manager import COMFYUI_DIR
+    from PIL import Image
     comfy_input_dir = os.path.normpath(os.path.join(COMFYUI_DIR, "input"))
     os.makedirs(comfy_input_dir, exist_ok=True)
     
@@ -1378,15 +1378,35 @@ def generate_video_from_image(image_path: str, prompt: str) -> str:
     unique_input_filename = f"anim_in_{timestamp}_{source_filename}"
     comfy_input_path = os.path.join(comfy_input_dir, unique_input_filename)
     
-    print(f"[COMFY VIDEO] Copying source image from {image_path} to {comfy_input_path}")
-    shutil.copy2(image_path, comfy_input_path)
+    # Determine dimensions maintaining aspect ratio, maximum 1280, rounded to multiples of 16
+    with Image.open(image_path) as img:
+        orig_w, orig_h = img.size
+    
+    max_dim = 720
+    if orig_w > orig_h:
+        new_w = max_dim
+        new_h = int(orig_h * (max_dim / orig_w))
+    else:
+        new_h = max_dim
+        new_w = int(orig_w * (max_dim / orig_h))
+        
+    # Align to nearest multiple of 16
+    new_w = max(64, (new_w // 16) * 16)
+    new_h = max(64, (new_h // 16) * 16)
+    
+    print(f"[COMFY VIDEO] Resizing source image from {orig_w}x{orig_h} to {new_w}x{new_h} and saving to {comfy_input_path}")
+    with Image.open(image_path) as img:
+        resized_img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+        resized_img.save(comfy_input_path)
     
     # Define replacements for the workflow JSON
     seed_val = random.randint(1, 2147483647)
     replacements = {
         "%input_image%": unique_input_filename,
         "%prompt%": prompt,
-        "%seed%": seed_val
+        "%seed%": seed_val,
+        "%width%": new_w,
+        "%height%": new_h
     }
     
     # Load and populate workflow JSON
@@ -1416,6 +1436,31 @@ def generate_video_from_image(image_path: str, prompt: str) -> str:
 
     populated_workflow = replace_val(workflow_data)
     import json
+    
+    # Ensure ComfyUI server is running
+    from utils.comfy_manager import check_comfy_running, start_comfy_server
+    if not check_comfy_running(force_refresh=True):
+        print("[COMFY VIDEO] ComfyUI server is offline. Starting ComfyUI server...")
+        started, startup_msg = start_comfy_server()
+        if not started:
+            raise Exception(f"ComfyUI server is offline and failed to start: {startup_msg}")
+            
+    # Run dependency resolution inline to ensure missing custom nodes or models are downloaded/installed
+    from utils.comfy_manager import _resolver_worker, resolution_status
+    print("[COMFY VIDEO] Checking and resolving workflow dependencies inline...")
+    _resolver_worker(json.dumps(populated_workflow))
+    if resolution_status.get("status") == "failed":
+        print(f"[COMFY VIDEO] Dependency resolution failed: {resolution_status.get('progress')}")
+        raise Exception(f"Failed to resolve workflow dependencies: {resolution_status.get('progress')}")
+    print("[COMFY VIDEO] Dependency resolution completed successfully.")
+    
+    # Wait for ComfyUI to come back online if it was restarted
+    print("[COMFY VIDEO] Waiting for ComfyUI server to be responsive...")
+    for _ in range(60): # up to 60 seconds
+        if check_comfy_running(force_refresh=True):
+            break
+        time.sleep(1)
+        
     print(f"[COMFY VIDEO] Populated workflow JSON:\n{json.dumps(populated_workflow, indent=2)}")
     
     comfy_url = COMFYUI_SERVER_URL
@@ -1454,8 +1499,8 @@ def generate_video_from_image(image_path: str, prompt: str) -> str:
     file_info = None
     start_time = time.time()
     try:
-        # Give it up to 240 seconds for cloud/slow generations
-        for _ in range(240):
+        # Give it up to 1800 seconds (30 minutes) for slow/high-res generations
+        for _ in range(900):
             history_res = requests.get(f"{comfy_url}/history/{prompt_id}", timeout=10)
             if history_res.status_code == 200:
                 history_data = history_res.json()
