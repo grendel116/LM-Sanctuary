@@ -782,6 +782,7 @@
             border: 1px solid color-mix(in srgb, var(--primary-accent) 15%, transparent);
             border-radius: 10px;
             overflow: hidden;
+            width: 100%;
         }
         .thinking-block-header {
             padding: 8px 12px;
@@ -818,8 +819,6 @@
             overflow-wrap: break-word;
             word-break: normal;
             font-family: inherit;
-            max-height: 200px; /* Limit height for thoughts */
-            overflow-y: auto;
         }
 
         /* Unified Antigravity Activity Log Design */
@@ -7557,9 +7556,8 @@ async function speakMessage(btn) {
                 resetSpeakButtons();
             }
         }
-
         // --- toggleThinkingBlock ---
-function toggleThinkingBlock(headerElement) {
+        function toggleThinkingBlock(headerElement) {
             const body = headerElement.nextElementSibling;
             const chevron = headerElement.querySelector('.thinking-block-chevron');
             body.classList.toggle('expanded');
@@ -8251,16 +8249,41 @@ function toggleThinkingBlock(headerElement) {
             }
 
             // --- NEW THINKING BLOCK LOGIC ---
-            // Matches XML/HTML and BBCode tags with flexible spacing (e.g. </think>, [/think], </ think>)
-            const thoughtRegex = /(?:<think>|\[think\])([\s\S]*?)(?:<\/think>|\[\/think\]|<\/\s*think>|\[\s*\/think\s*\])([\s\S]*)/i;
-            const match = text.match(thoughtRegex);
-            let thoughtContent = '';
-            let actualResponse = text;
-
-            if (match) {
-                thoughtContent = match[1].trim();
-                actualResponse = match[2] ? match[2].trim() : '';
+            // Parses thoughts robustly: handles text before, multiple blocks, and unclosed tags (streaming)
+            let thoughts = [];
+            let tempText = text;
+            while (true) {
+                const openMatch = tempText.match(/(?:<think>|\[think\])/i);
+                if (!openMatch) break;
+                
+                const openIdx = openMatch.index;
+                const openTagLength = openMatch[0].length;
+                const beforeText = tempText.substring(0, openIdx);
+                const remainingText = tempText.substring(openIdx + openTagLength);
+                
+                const closePattern = /(?:<\/think>|\[\/think\]|<\/\s*think>|\[\s*\/think\s*\])/i;
+                const closeMatch = remainingText.match(closePattern);
+                
+                if (closeMatch) {
+                    const closeIdx = closeMatch.index;
+                    const closeTagLength = closeMatch[0].length;
+                    
+                    const thought = remainingText.substring(0, closeIdx).trim();
+                    if (thought) thoughts.push(thought);
+                    
+                    const afterText = remainingText.substring(closeIdx + closeTagLength);
+                    tempText = beforeText + afterText;
+                } else {
+                    // Unclosed think tag (streaming)
+                    const thought = remainingText.trim();
+                    if (thought) thoughts.push(thought);
+                    tempText = beforeText;
+                    break;
+                }
             }
+            
+            let thoughtContent = thoughts.join("\n\n").trim();
+            let actualResponse = tempText.trim();
 
             if (thoughtContent) {
                 const thinkingBlockContainer = document.createElement('div');

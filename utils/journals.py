@@ -105,24 +105,36 @@ async def trigger_auto_journal(history: list, program_id: str, model: str):
     formatted_chat = []
     
     from utils.program import get_active_user
-    user_name = get_active_user().capitalize()
-    prog_name = program_id.capitalize()
+    from core.program_config import get_companion_name
     
+    user_name = get_active_user().capitalize()
+    try:
+        prog_name = get_companion_name()
+    except Exception:
+        prog_name = program_id.capitalize()
+        
     for msg in segment:
         role = user_name if msg.get("role") == "user" else prog_name
         text = msg.get("text", "")
-        # Strip thinking blocks for summarization
-        import re
-        text = re.sub(r'<think>[\s\S]*?</think>', '', text).strip()
+        text = re.sub(r'(?:<think>|\[think\])[\s\S]*?(?:</think>|\[/think\]|<\/\s*think>|\[\s*/\s*think\s*\]|$)', '', text, flags=re.IGNORECASE).strip()
         formatted_chat.append(f"{role}: {text}")
         
     chat_block = "\n".join(formatted_chat)
     
+    # Load last 20 journal entries to prevent duplication in LLM generation
+    existing_entries = get_journal_entries(program_id)[-20:]
+    existing_memories_text = ""
+    if existing_entries:
+        existing_memories_text = "Existing remembered facts / journals:\n" + "\n".join([f"- {e.get('content')}" for e in existing_entries]) + "\n\n"
+    
     prompt = (
         "You are an AI companion's memory consolidation assistant.\n"
-        "Analyze the following conversation segment. If there are any important new details, facts, preferences, promises, or relationship developments "
-        f"about {user_name} or {prog_name} that should be remembered long-term, summarize them in 1 to 3 sentences max (written in 3rd person present tense, e.g. '{user_name} mentioned...').\n"
+        f"Analyze the following conversation segment. Sparingly extract only significant milestones, preferences, or important long-term facts about {user_name} or {prog_name}, if applicable. Keep the memory bank focused and poignant.\n"
+        f"Summarize the new facts in 1 to 3 sentences max (written in 3rd person present tense, e.g. '{user_name} mentioned...').\n"
+        f"Always refer to the user as '{user_name}' and the companion as '{prog_name}' in your response, using their actual names instead of generic descriptors.\n"
         "Also extract 2 to 5 relevant comma-separated trigger keywords or short phrases (e.g. 'rent, job application, whiskers').\n\n"
+        f"{existing_memories_text}"
+        "Compare the conversation segment against the existing remembered facts list. Only extract completely new facts that are absent from this list.\n\n"
         "Output format must be EXACTLY:\n"
         "KEYPHRASES: [keywords/phrases]\n"
         "CONTENT: [concise summary of 1-3 sentences, maximum 300 characters]\n\n"
@@ -182,57 +194,86 @@ async def trigger_auto_journal(history: list, program_id: str, model: str):
         keyphrases_str = kp_match.group(1).strip()
         content = content_match.group(1).strip()
         if keyphrases_str and content:
-            # Add to journals.json
-            add_journal_entry(keyphrases_str, content, program_id)
-            print(f"[BACKGROUND JOURNALING] Created new memory journal entry for '{program_id}': {content}")
+            # Check for duplication in python before adding
+            existing_contents = [e.get('content', '').lower() for e in get_journal_entries(program_id)]
+            is_dup = False
+            clean_new = re.sub(r'[^a-z0-9]', '', content.lower())
+            for ec in existing_contents:
+                clean_ec = re.sub(r'[^a-z0-9]', '', ec)
+                if clean_new in clean_ec or clean_ec in clean_new:
+                    is_dup = True
+                    break
+            
+            if not is_dup:
+                add_journal_entry(keyphrases_str, content, program_id)
+                print(f"[BACKGROUND JOURNALING] Created new memory journal entry for '{program_id}': {content}")
+            else:
+                print(f"[BACKGROUND JOURNALING] Skipped duplicate memory: {content}")
 
 def get_history_from_json(program_id: str, session_id: str) -> list:
     """Reads session JSON directly from disk and parses it into standard history format."""
     path = os.path.normpath(os.path.join(PROGRAMS_DIR, program_id, "sessions", f"{session_id}.json"))
-    is_os = False
     if not os.path.exists(path):
         path = os.path.normpath(os.path.join(PROGRAMS_DIR, program_id, "sessions", f"{session_id}_os.json"))
-        is_os = True
     if not os.path.exists(path):
         return []
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
+            
+            # Support both root list (old/Gemini format) and root dict with "messages" (OS format)
+            messages_list = []
+            if isinstance(data, dict):
+                if "messages" in data:
+                    messages_list = data["messages"]
+            elif isinstance(data, list):
+                messages_list = data
+                
             history = []
-            for item in data:
-                if is_os:
-                    role = item.get("role", "user")
-                    text = item.get("text", "")
-                    history.append({"role": role, "text": text})
-                else:
+            for item in messages_list:
+                role = item.get("role", "")
+                if not role:
                     role = item.get("content", {}).get("role", "")
-                    if not role:
-                        role = item.get("author", "user")
-                    if role.lower() in ["model", "companion", "sebile", "arthur"]:
-                        role = "companion"
-                    else:
-                        role = "user"
-                    
+                if not role:
+                    role = item.get("author", "user")
+                
+                # Normalize role
+                if role.lower() in ["model", "companion", "sebile", "arthur"]:
+                    role = "companion"
+                else:
+                    role = "user"
+                
+                # Extract text
+                text = item.get("text", "")
+                if not text:
                     parts = item.get("content", {}).get("parts", [])
-                    text = ""
                     for part in parts:
                         if isinstance(part, dict) and "text" in part:
                             text += part["text"]
                         elif isinstance(part, str):
                             text += part
-                    history.append({"role": role, "text": text})
+                history.append({"role": role, "text": text})
             return history
     except Exception as e:
         print(f"Error reading session JSON in get_history_from_json: {e}")
         return []
 
+_last_processed_lens = {}
+
 def background_journaling_thread(program_id: str, session_id: str, model: str):
     """Entrypoint for background thread. Loads history and consolidation task."""
     try:
         history = get_history_from_json(program_id, session_id)
-        if len(history) > 0 and len(history) % 10 == 0:
-            import asyncio
-            asyncio.run(trigger_auto_journal(history, program_id, model))
+        h_len = len(history)
+        if h_len >= 6:
+            key = f"{program_id}_{session_id}"
+            last_len = _last_processed_lens.get(key, 0)
+            
+            # Trigger every 3 turns (6 messages) starting from turn 3 (6 messages)
+            if h_len - last_len >= 6:
+                _last_processed_lens[key] = h_len
+                import asyncio
+                asyncio.run(trigger_auto_journal(history, program_id, model))
     except Exception as e:
         print(f"Error in background_journaling_thread: {e}")
 

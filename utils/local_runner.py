@@ -75,7 +75,21 @@ def start_local_server(model_key):
     if not os.path.exists(SERVER_EXE):
         if not download_llama_server(): return False, "Failed download"
     
-    cmd = [SERVER_EXE, "-m", model_path, "-c", "4096", "--port", "1234", "--host", "127.0.0.1", "-ngl", "32", "--no-warmup"]
+    context_size = os.getenv("LOCAL_CONTEXT", "4096")
+    gpu_layers = os.getenv("LOCAL_GPU_LAYERS", "99")
+    flash_attn = os.getenv("LOCAL_FLASH_ATTN", "true").lower() == "true"
+
+    cmd = [
+        SERVER_EXE,
+        "-m", model_path,
+        "-c", context_size,
+        "--port", "1234",
+        "--host", "127.0.0.1",
+        "-ngl", gpu_layers,
+        "--no-warmup"
+    ]
+    if flash_attn:
+        cmd.extend(["-fa", "on"])
     try:
         log_file = os.path.join(BASE_DIR, "llama_server.log")
         with open(log_file, "a", encoding="utf-8") as log_fd:

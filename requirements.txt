@@ -11,3 +11,4 @@ numpy
 pyopenssl
 psutil
 markdownify
+pypdf

@@ -1,4 +1,6 @@
-# Core Engineering Principles
+# Project Scoped Rules
+
+## Core Engineering Principles
 - **Root Cause Resolution**: Resolve structural errors directly at their source schemas, configs, and formats.
 - **Simplicity**: Maintain direct, transparent control flows.
 - **Minimal Footprint**: Reuse logic and keep files small.
@@ -12,11 +14,3 @@
 
 
 
----
-
-# UI Styling Directive
-Use predefined classes for buttons.
-- **Secondary/Cancel**: `class="edit-btn edit-cancel-btn"` (hollow border, dark hover).
-- **Primary/Save/Confirm**: `class="edit-btn edit-save-btn"` (filled dark background).
-- **General**: `class="glass-btn"` (glassy).
-- **Aesthetic**: Maintain a dark theme throughout the styling.

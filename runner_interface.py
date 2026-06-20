@@ -71,26 +71,52 @@ def _is_local_model(model: str) -> bool:
 
 
 def _format_thinking_and_text(thoughts_list: list, texts_list: list) -> str:
-    """Combines lists of thoughts and texts, merging any existing <think> tags."""
-    
+    """Combines lists of thoughts and texts, merging any existing <think> tags (closed or unclosed)."""
     thoughts_str = "".join(thoughts_list)
     text_str = "".join(texts_list)
     
-    # Extract any <think>...</think> blocks from text_str and move them to thoughts_str
-    # to avoid nested or multiple think blocks in the final message.
-    # Handles XML/HTML tags and BBCode tags with flexible spacing (e.g. </think>, [/think], </ think>)
-    think_pattern = re.compile(r'(?:<think>|\[think\])([\s\S]*?)(?:</think>|\[/think\]|<\/\s*think>|\[\s*/\s*think\s*\])', re.IGNORECASE)
-    matches = think_pattern.findall(text_str)
-    if matches:
-        additional_thoughts = "\n".join(m.strip() for m in matches if m.strip())
-        if additional_thoughts:
-            if thoughts_str.strip():
-                thoughts_str += "\n" + additional_thoughts
-            else:
-                thoughts_str = additional_thoughts
-        # Remove the <think> blocks from the response text
-        text_str = think_pattern.sub('', text_str).strip()
+    additional_thoughts = []
+    cleaned_text_parts = []
+    
+    temp_text = text_str
+    while True:
+        open_match = re.search(r'(?:<think>|\[think\])', temp_text, re.IGNORECASE)
+        if not open_match:
+            cleaned_text_parts.append(temp_text)
+            break
+            
+        start_idx = open_match.start()
+        end_open_idx = open_match.end()
         
+        cleaned_text_parts.append(temp_text[:start_idx])
+        remaining = temp_text[end_open_idx:]
+        
+        close_match = re.search(r'(?:</think>|\[/think\]|<\/\s*think>|\[\s*/\s*think\s*\])', remaining, re.IGNORECASE)
+        if close_match:
+            close_start = close_match.start()
+            close_end = close_match.end()
+            
+            thought = remaining[:close_start].strip()
+            if thought:
+                additional_thoughts.append(thought)
+            temp_text = remaining[close_end:]
+        else:
+            # Unclosed think tag (streaming/cutoff)
+            thought = remaining.strip()
+            if thought:
+                additional_thoughts.append(thought)
+            temp_text = ""
+            break
+            
+    text_str = "".join(cleaned_text_parts).strip()
+    
+    if additional_thoughts:
+        add_str = "\n".join(additional_thoughts)
+        if thoughts_str.strip():
+            thoughts_str = thoughts_str.strip() + "\n" + add_str
+        else:
+            thoughts_str = add_str
+            
     thoughts_str = thoughts_str.strip()
     text_str = text_str.strip()
     
@@ -107,8 +133,8 @@ def strip_narration(text: str) -> str:
     if not text:
         return ""
     
-    # 1. Clean <think>...</think> blocks first
-    text = re.sub(r'<think>[\s\S]*?</think>', '', text)
+    # 1. Clean <think>...</think> blocks first (handles closed and unclosed tags)
+    text = re.sub(r'(?:<think>|\[think\])[\s\S]*?(?:</think>|\[/think\]|<\/\s*think>|\[\s*/\s*think\s*\]|$)', '', text, flags=re.IGNORECASE)
     
     # 2. Strip single asterisks action narration, e.g. *giggles* or *I pull you close*
     pattern = re.compile(r'(?<!\*)\*(?!\*)([\s\S]*?)(?<!\*)\*(?!\*)')
@@ -492,7 +518,7 @@ class OsHistoryAdapter(LocalHistoryAdapter):
         import uuid
         for idx, (t_name, t_args, t_output) in enumerate(results):
             tool_resp_msg = {
-                'id': f"msg_{uuid.uuid4().hex}",
+                'id': f"tool_{uuid.uuid4().hex}",
                 'role': 'user',
                 'text': f"[Tool Response from {t_name}]:\n{t_output}",
                 'tool_calls': [],
@@ -554,8 +580,18 @@ class BaseProgramRunner:
             remote_cloud_url and remote_cloud_url.strip() and remote_cloud_url != "your_remote_cloud_url_here"
         )
         
+        from utils.program import get_active_user
+        from core.program_config import get_companion_name
+        
+        user_name = get_active_user().capitalize()
+        try:
+            companion_name = get_companion_name()
+        except Exception:
+            companion_name = "Companion"
+            
         prompt = (
-            "You are a memory compaction assistant. Summarize the following new chat history between the User and the Companion. "
+            f"You are a memory compaction assistant. Summarize the following new chat history between the User ({user_name}) and the Companion ({companion_name}). "
+            f"Always refer to the user as '{user_name}' and the companion as '{companion_name}' instead of using generic terms like 'the user' or 'the companion'. "
             "Extract key facts, user preferences, agreed instructions, file changes, and project details. "
             "Write the summary exclusively as a single cohesive paragraph of exactly 6 to 8 continuous prose sentences. "
             "Ensure every sentence is dense with facts, details, and project progress.\n\n"
@@ -655,8 +691,22 @@ class BaseProgramRunner:
             is_paused = get_vram_paused()
             is_offline = not check_status()
             has_image = bool(getattr(adapter, 'file_path_resolved', None) or getattr(adapter, 'image_data', None))
-            if (has_image or is_offline or is_paused) and not is_cloud and is_remote_configured:
-                reason = "Local server is paused" if is_paused else ("Local server is offline" if is_offline else "Multimodal input (image)")
+            
+            # Check for keyword triggers in the user message
+            has_offload_keyword = False
+            if new_message_text:
+                msg_lower = new_message_text.lower()
+                if "/cloud" in msg_lower or "/offload" in msg_lower:
+                    has_offload_keyword = True
+                    
+            if (has_image or is_offline or is_paused or has_offload_keyword) and not is_cloud and is_remote_configured:
+                reason = (
+                    "Local server is paused" if is_paused else (
+                        "Local server is offline" if is_offline else (
+                            "User requested offload (/cloud or /offload)" if has_offload_keyword else "Multimodal input (image)"
+                        )
+                    )
+                )
                 print(f"[OFFLOAD] {reason} detected. Intercepting and offloading to cloud.", flush=True)
                 raise LocalOffloadTrigger(reason, iteration)
                 
@@ -1229,7 +1279,7 @@ class BaseProgramRunner:
             
             journal_lines = []
             for role, text in seed_turns:
-                clean_text = re.sub(r'<think>[\s\S]*?</think>', '', text)
+                clean_text = re.sub(r'(?:<think>|\[think\])[\s\S]*?(?:</think>|\[/think\]|<\/\s*think>|\[\s*/\s*think\s*\]|$)', '', text, flags=re.IGNORECASE)
                 clean_text = re.sub(r'\*.*?\*', '', clean_text)
                 clean_text = re.sub(r' +', ' ', clean_text).strip()
                 if clean_text:
@@ -1528,6 +1578,12 @@ class OpenSourceRunner(BaseProgramRunner):
                 self._save_session_to_disk(session_id)
 
     async def _run_async_internal(self, session_id: str, new_message_text: str, image_data: str = None, image_mime: str = None, model: str = None, media_path: str = None, msg_id: str = None) -> tuple:
+        # Clean up keyword triggers if routing to the cloud model
+        is_cloud = _is_cloud_model_check(model)
+        if is_cloud and new_message_text:
+            import re
+            new_message_text = re.sub(r'(?i)/cloud|/offload', '', new_message_text).strip()
+
         # Check if the server was paused for ComfyUI. If so, restart it for user/program messages!
         import utils.local_llm_manager as llm_mgr
         import asyncio
@@ -1640,8 +1696,8 @@ class OpenSourceRunner(BaseProgramRunner):
             return bot_response_text, tool_calls, user_msg_id, companion_msg_id
         except LocalOffloadTrigger as trigger_exc:
             print(f"[OFFLOAD] Caught LocalOffloadTrigger in OpenSourceRunner: {trigger_exc.reason}. Rolling back local turn and offloading to cloud.", flush=True)
-            # Rollback history events to initial state (discarding generated events of this turn)
-            self.sessions_history[session_id] = self.sessions_history[session_id][:adapter.initial_history_len]
+            # Rollback history events to initial state (discarding user message and generated events of this turn)
+            self.sessions_history[session_id] = self.sessions_history[session_id][:max(0, adapter.initial_history_len - 1)]
             self._save_session_to_disk(session_id)
             
             # Retrieve configured remote model name
