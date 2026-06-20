@@ -1,7 +1,9 @@
 import os
+from dotenv import load_dotenv
 
 # Base directory of the Sanctuary application
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+load_dotenv(os.path.join(BASE_DIR, ".env"), override=True)
 
 # Variables directory path
 VARIABLES_DIR = os.path.dirname(os.path.abspath(__file__))
