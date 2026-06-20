@@ -1355,9 +1355,9 @@ def generate_video_from_image(image_path: str, prompt: str) -> str:
     base_dir = os.path.dirname(os.path.abspath(__file__))
     from utils.program import get_active_program
     active_program = get_active_program()
-    workflow_path = os.path.normpath(os.path.join(
-        base_dir, "core", "skills", "portrait_generation", "VideoWorkflow.json"
-    ))
+    
+    workflow_env_path = os.getenv("COMFYUI_VIDEO_WORKFLOW", "core/skills/portrait_generation/VideoWorkflow.json")
+    workflow_path = os.path.normpath(os.path.join(base_dir, workflow_env_path))
     
     if not os.path.exists(workflow_path):
         raise Exception(f"Video workflow template not found at '{workflow_path}'")
@@ -1378,11 +1378,11 @@ def generate_video_from_image(image_path: str, prompt: str) -> str:
     unique_input_filename = f"anim_in_{timestamp}_{source_filename}"
     comfy_input_path = os.path.join(comfy_input_dir, unique_input_filename)
     
-    # Determine dimensions maintaining aspect ratio, maximum 1280, rounded to multiples of 16
+    # Determine dimensions maintaining aspect ratio, maximum 768, rounded to multiples of 32
     with Image.open(image_path) as img:
         orig_w, orig_h = img.size
     
-    max_dim = 720
+    max_dim = 768
     if orig_w > orig_h:
         new_w = max_dim
         new_h = int(orig_h * (max_dim / orig_w))
@@ -1390,9 +1390,9 @@ def generate_video_from_image(image_path: str, prompt: str) -> str:
         new_h = max_dim
         new_w = int(orig_w * (max_dim / orig_h))
         
-    # Align to nearest multiple of 16
-    new_w = max(64, (new_w // 16) * 16)
-    new_h = max(64, (new_h // 16) * 16)
+    # Align to nearest multiple of 32 (works universally for both SDXL/AnimateDiff and LTX 2.3/Hunyuan/Flux)
+    new_w = max(32, (new_w // 32) * 32)
+    new_h = max(32, (new_h // 32) * 32)
     
     print(f"[COMFY VIDEO] Resizing source image from {orig_w}x{orig_h} to {new_w}x{new_h} and saving to {comfy_input_path}")
     with Image.open(image_path) as img:
