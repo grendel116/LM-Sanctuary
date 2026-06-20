@@ -5,9 +5,37 @@ import time
 import threading
 from utils import local_runner
 
+import json
+
 download_status = {}
 _local_models_list_cached = None
 _local_models_list_cache_time = 0.0
+
+def get_vram_paused():
+    try:
+        from variables import VARIABLES_DIR
+        path = os.path.normpath(os.path.join(VARIABLES_DIR, "project_settings.json"))
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                settings = json.load(f)
+                return settings.get("is_vram_paused", False)
+    except Exception as e:
+        print(f"Error loading vram paused status: {e}", flush=True)
+    return False
+
+def set_vram_paused(value: bool):
+    try:
+        from variables import VARIABLES_DIR
+        path = os.path.normpath(os.path.join(VARIABLES_DIR, "project_settings.json"))
+        settings = {}
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                settings = json.load(f)
+        settings["is_vram_paused"] = value
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(settings, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        print(f"Error saving vram paused status: {e}", flush=True)
 
 def get_server_path(): return "llama-server"
 def check_installed(): return os.path.exists(local_runner.SERVER_EXE)
@@ -18,6 +46,7 @@ def install_server():
     return False, "Failed to download llama-server."
 def check_status(force_refresh=False): return local_runner.check_local_server_status()
 def start_server():
+    set_vram_paused(False)
     model_name = os.getenv("LOCAL_MODEL_NAME", "")
     if not local_runner.resolve_model_path(model_name):
         downloaded = list_local_models()
@@ -170,6 +199,7 @@ def list_local_models(force_refresh=False):
     return _local_models_list_cached
 
 def load_local_model(model_name):
+    set_vram_paused(False)
     success, msg = local_runner.start_local_server(model_name)
     if success:
         try:
