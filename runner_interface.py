@@ -547,18 +547,18 @@ class OsHistoryAdapter(LocalHistoryAdapter):
 def _is_cloud_model_check(model: str) -> bool:
     if not model:
         return False
-    remote_model = os.getenv("REMOTE_MODEL")
-    remote_cloud_url = os.getenv("REMOTE_CLOUD_URL")
-    remote_key = os.getenv("REMOTE_API_KEY")
-    if not remote_cloud_url or not remote_cloud_url.strip() or remote_cloud_url == "your_remote_cloud_url_here":
+    remote_cloud_url = os.getenv("REMOTE_CLOUD_URL", "").strip()
+    remote_key = os.getenv("REMOTE_API_KEY", "").strip()
+    if not remote_cloud_url or remote_cloud_url == "your_remote_cloud_url_here":
         return False
-    if not remote_key or not remote_key.strip() or remote_key == "your_remote_api_key_here":
+    if not remote_key or remote_key == "your_remote_api_key_here":
         return False
-    if model and remote_model and model == remote_model:
+        
+    m_norm = model.replace('\\', '/').strip().lower()
+    remote_model = os.getenv("REMOTE_MODEL", "").replace('\\', '/').strip().lower()
+    if m_norm == remote_model:
         return True
-    if model and is_local_model(model):
-        return False
-    if model in ("local-llm", os.getenv("LOCAL_MODEL_NAME")):
+    if is_local_model(model):
         return False
     return True
 

@@ -62,15 +62,16 @@ def fetch_local_models(force_refresh=False) -> list:
         return []
 
 def is_local_model(model: str) -> bool:
-    """Determines if a model is local by querying Local LLM server's active list."""
+    """Determines if a model is local by checking name format, env vars, or active list."""
     if not model:
         return False
-    if model == DEFAULT_LOCAL_MODEL:
+    m_norm = model.replace('\\', '/').strip().lower()
+    local_env = os.getenv("LOCAL_MODEL_NAME", "").replace('\\', '/').strip().lower()
+    if m_norm in ("local-llm", local_env) or m_norm.endswith(".gguf") or m_norm.endswith(".bin"):
         return True
     try:
         loaded_models = fetch_local_models()
-        loaded_ids = [m["value"] for m in loaded_models]
-        return model in loaded_ids
+        return any(m_norm == m["value"].replace('\\', '/').strip().lower() for m in loaded_models)
     except Exception:
         pass
     return False
