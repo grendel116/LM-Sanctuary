@@ -1162,9 +1162,9 @@ def generate_local_image(prompt: str) -> str:
     base_dir = os.path.dirname(os.path.abspath(__file__))
     from utils.program import get_active_program
     active_program = get_active_program()
-    workflow_path = os.path.normpath(os.path.join(
-        base_dir, "core", "skills", "portrait_generation", "ImageWorkflow.json"
-    ))
+    
+    workflow_env_path = os.getenv("COMFYUI_IMAGE_WORKFLOW", "core/skills/portrait_generation/ImageWorkflow.json")
+    workflow_path = os.path.normpath(os.path.join(base_dir, workflow_env_path))
     
     if not os.path.exists(workflow_path):
         return get_install_instructions(f"Workflow template not found at '{workflow_path}'")
