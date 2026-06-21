@@ -72,9 +72,7 @@ These are the things your companion can do on your computer. By default, before 
 
 * **Interactive Voice Calls / Chat**: Speak with companions in real-time. Powering Kokoro ONNX voice generation, companion-specific voices, and call transcript saving.
 * **Procedural Journals & Memories**: Companions build dynamic memory structures (`memories.json`) and journal logs (`journals.json`), preserving context and relationships across sessions.
-* **Quest Log & Calendar Export**: Integrated quest system to track and display user objectives in the UI. Companions can assign quests (chores, habits, tasks) using the local `add_quest` tool. Each quest card provides quick-actions to manually export the task to your calendar:
-  * **Add to Google**: A direct, single-click link opening Google Calendar's web UI with pre-filled title, dates, objectives, and location.
-  * **Download iCal**: Download a standard `.ics` file containing a 15-minute `VALARM` notification alert for native desktop/mobile task/calendar clients (e.g. Apple Calendar, Outlook).
+* **Quest Log**: Integrated quest system to track and display user objectives in the UI. Companions can assign quests (chores, habits, tasks) using the local `add_quest` tool.
 * **Companion Editing & Imports**: Profile updating, and support for importing custom Tavern cards.
 * **Character Accent Palette**: Dynamic accent colors resolved from your companion's profile card that automatically generate and update themed CSS variables (buttons, borders, highlights, and active states).
 * **Idle Thoughts**: Inline monologue bubbles (`.thought-row`) showing a companion's thoughts during inactivity.
