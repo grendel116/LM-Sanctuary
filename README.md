@@ -66,6 +66,7 @@ These are the things your companion can do on your computer. By default, before 
 * **Idle Thoughts**: Inline monologue bubbles (`.thought-row`) showing a companion's thoughts during inactivity.
 * **Temperature Control**: A dynamic slider in settings to control chat creativity.
 * **Portrait Animation**: Animate companion portraits using ComfyUI video.
+* **Story Mode**: Toggle between first-person conversational chat and third-person descriptive narrative storytelling styles.
 
 ---
 
