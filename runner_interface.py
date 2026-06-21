@@ -1521,8 +1521,8 @@ class OpenSourceRunner(BaseProgramRunner):
 
     async def get_history(self, session_id: str) -> list:
         with self._lock:
-            if session_id not in self.sessions_history:
-                self._load_session_from_disk(session_id)
+            # Always reload from disk to prevent cache desynchronization across worker threads/processes
+            self._load_session_from_disk(session_id)
             raw_history = self.sessions_history.get(session_id, [])
             
             companion_msgs = [msg for msg in raw_history if msg.get('role') == 'companion']
