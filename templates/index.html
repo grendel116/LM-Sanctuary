@@ -763,6 +763,16 @@
             border-radius: 50% !important;
             opacity: 0.95 !important;
             box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
+            position: relative;
+        }
+        /* Expand touch target size for cropper handles on mobile/touch interfaces */
+        .cropper-point::after {
+            content: '';
+            position: absolute;
+            top: -15px;
+            left: -15px;
+            right: -15px;
+            bottom: -15px;
         }
         .cropper-line {
             background-color: transparent !important;
@@ -771,6 +781,11 @@
         .cropper-view-box {
             outline: 2px solid rgba(255, 255, 255, 0.8) !important;
             outline-offset: -1px;
+        }
+        /* Prevent default browser gestures/scrolling on the cropper area */
+        .cropper-container,
+        .cropper-container * {
+            touch-action: none !important;
         }
 
         .message-row.companion-row {
@@ -3156,8 +3171,8 @@
         <div class="modal-card" style="max-width: 400px; width: 90%; text-align: left; align-items: stretch;" onclick="event.stopPropagation()">
             <span class="close-modal-btn" onclick="closeCropModal(event)">&times;</span>
             <h3 style="margin: 0; font-size: 1.2rem; color: #fff; border-bottom: 1px solid rgba(255,255,255,0.08); padding-bottom: 10px;">Crop Profile Picture</h3>
-            <div style="overflow: hidden; display: flex; justify-content: center; align-items: center; background: #000; border-radius: 8px; margin-bottom: 10px;">
-                <img id="crop-image-element" style="width: 100%; height: auto; display: block;">
+            <div style="position: relative; width: 100%; height: 300px; max-height: 50vh; overflow: hidden; background: #000; border-radius: 8px; margin-bottom: 15px;">
+                <img id="crop-image-element" style="max-width: 100%; display: block;">
             </div>
             <div style="display: flex; justify-content: flex-end; gap: 12px;">
                 <button onclick="closeCropModal(event)" class="edit-btn edit-cancel-btn" style="padding: 8px 20px;">Cancel</button>
@@ -10084,41 +10099,57 @@ async function loadServerImages() {
             const cropImg = document.getElementById('crop-image-element');
             
             if (cropModal && cropImg) {
-                cropImg.src = currentSrc;
-                cropModal.style.display = 'flex';
-                
-                // Initialize CropperJS on the image
                 if (profileCropper) {
                     profileCropper.destroy();
+                    profileCropper = null;
                 }
+
+                cropModal.style.display = 'flex';
                 
-                // Add a slight delay to allow modal display rendering
-                setTimeout(() => {
-                    profileCropper = new Cropper(cropImg, {
-                        aspectRatio: 1,
-                        viewMode: 1,
-                        dragMode: 'none',
-                        autoCropArea: 0.8,
-                        restore: false,
-                        guides: true,
-                        center: true,
-                        highlight: true,
-                        cropBoxMovable: true,
-                        cropBoxResizable: true,
-                        toggleDragModeOnDblclick: false,
-                        background: false,
-                        ready() {
-                            const canvasData = profileCropper.getCanvasData();
-                            const size = Math.min(canvasData.width, canvasData.height) * 0.8;
-                            profileCropper.setCropBoxData({
-                                left: canvasData.left + (canvasData.width - size) / 2,
-                                top: canvasData.top + (canvasData.height - size) / 2,
-                                width: size,
-                                height: size
-                            });
+                const initCropper = () => {
+                    setTimeout(() => {
+                        if (profileCropper) {
+                            profileCropper.destroy();
                         }
-                    });
-                }, 50);
+                        profileCropper = new Cropper(cropImg, {
+                            aspectRatio: 1,
+                            viewMode: 1,
+                            dragMode: 'move', // Optimize for mobile: allow dragging the image
+                            autoCropArea: 0.8,
+                            restore: false,
+                            guides: true,
+                            center: true,
+                            highlight: true,
+                            cropBoxMovable: true,
+                            cropBoxResizable: true,
+                            toggleDragModeOnDblclick: false,
+                            background: false,
+                            ready() {
+                                const canvasData = profileCropper.getCanvasData();
+                                const size = Math.min(canvasData.width, canvasData.height) * 0.8;
+                                profileCropper.setCropBoxData({
+                                    left: canvasData.left + (canvasData.width - size) / 2,
+                                    top: canvasData.top + (canvasData.height - size) / 2,
+                                    width: size,
+                                    height: size
+                                });
+                            }
+                        });
+                    }, 100); // Wait for flex layout inside modal to stabilize
+                };
+
+                // Clear previous handler if any, and initialize on load
+                cropImg.onload = function() {
+                    initCropper();
+                    cropImg.onload = null;
+                };
+                cropImg.src = currentSrc;
+
+                // Force load if image is already cached / complete
+                if (cropImg.complete && cropImg.naturalWidth !== 0) {
+                    initCropper();
+                    cropImg.onload = null;
+                }
             }
         }
 
