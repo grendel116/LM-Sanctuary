@@ -75,7 +75,7 @@ def start_local_server(model_key):
     if not os.path.exists(SERVER_EXE):
         if not download_llama_server(): return False, "Failed download"
     
-    context_size = os.getenv("LOCAL_CONTEXT", "4096")
+    context_size = os.getenv("LOCAL_CONTEXT", "8192")
     gpu_layers = os.getenv("LOCAL_GPU_LAYERS", "99")
     flash_attn = os.getenv("LOCAL_FLASH_ATTN", "true").lower() == "true"
 
