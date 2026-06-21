@@ -129,16 +129,16 @@ async def trigger_auto_journal(history: list, program_id: str, model: str):
     
     prompt = (
         "You are an AI companion's memory consolidation assistant.\n"
-        f"Analyze the following conversation segment. Sparingly extract only significant milestones, preferences, or important long-term facts about {user_name} or {prog_name}, if applicable. Keep the memory bank focused and poignant.\n"
+        f"Analyze the following conversation segment. Focus exclusively on extracting major life milestones, significant achievements, key career changes, or permanent, foundational preferences concerning {user_name} or {prog_name}. Keep the memory bank highly focused and poignant.\n"
         f"Summarize the new facts in 1 to 3 sentences max (written in 3rd person present tense, e.g. '{user_name} mentioned...').\n"
-        f"Always refer to the user as '{user_name}' and the companion as '{prog_name}' in your response, using their actual names instead of generic descriptors.\n"
+        f"Always refer to the user as '{user_name}' and the companion as '{prog_name}'. Use their specific names for all references.\n"
         "Also extract 2 to 5 relevant comma-separated trigger keywords or short phrases (e.g. 'rent, job application, whiskers').\n\n"
         f"{existing_memories_text}"
         "Compare the conversation segment against the existing remembered facts list. Only extract completely new facts that are absent from this list.\n\n"
         "Output format must be EXACTLY:\n"
         "KEYPHRASES: [keywords/phrases]\n"
         "CONTENT: [concise summary of 1-3 sentences, maximum 300 characters]\n\n"
-        "If there are absolutely no new significant details/facts, reply with EXACTLY 'NO_MEMORY'.\n\n"
+        "Limit memory creation exclusively to major milestones. Respond with EXACTLY 'NO_MEMORY' if the conversation segment contains only general discussion, small talk, or minor details.\n\n"
         f"CONVERSATION SEGMENT:\n{chat_block}\n"
     )
     
@@ -265,12 +265,12 @@ def background_journaling_thread(program_id: str, session_id: str, model: str):
     try:
         history = get_history_from_json(program_id, session_id)
         h_len = len(history)
-        if h_len >= 6:
+        if h_len >= 12:
             key = f"{program_id}_{session_id}"
             last_len = _last_processed_lens.get(key, 0)
             
-            # Trigger every 3 turns (6 messages) starting from turn 3 (6 messages)
-            if h_len - last_len >= 6:
+            # Trigger every 6 turns (12 messages) starting from turn 6 (12 messages)
+            if h_len - last_len >= 12:
                 _last_processed_lens[key] = h_len
                 import asyncio
                 asyncio.run(trigger_auto_journal(history, program_id, model))

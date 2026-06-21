@@ -2174,6 +2174,38 @@ END:VCALENDAR"""
 
 
 
+@app.route('/api/sessions', methods=['GET'])
+@requires_auth
+def list_sessions():
+    try:
+        active_program = os.environ.get("ACTIVE_PROGRAM", "sebile")
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        sessions_dir = os.path.join(base_dir, "core", "programs", active_program, "sessions")
+        
+        sessions = []
+        if os.path.exists(sessions_dir):
+            for file in os.listdir(sessions_dir):
+                if file.endswith('.json') and not file.endswith('_voice.json'):
+                    session_name = file[:-5]
+                    sessions.append(session_name)
+        
+        # Ensure 'default' is always in the list
+        if 'default' not in sessions:
+            sessions.insert(0, 'default')
+        else:
+            sessions.remove('default')
+            sessions.insert(0, 'default')
+            
+        return jsonify({
+            'status': 'success',
+            'sessions': sessions
+        })
+    except Exception as e:
+        print(f"Error listing sessions: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+
 @app.route('/api/programs', methods=['GET'])
 @requires_auth
 def list_programs():
