@@ -1,6 +1,6 @@
 ---
 name: quest_system
-description: Frame local resources, business meetings, appointments, and chores as game-like quests, syncing them with Google Calendar and sending SMS reminders.
+description: Frame local resources, business meetings, appointments, and chores as game-like quests, generating Google Calendar links and exporting iCal calendar files.
 ---
 # SKILL: The Companion Quest System
 Coordinate schedule/appointments:
