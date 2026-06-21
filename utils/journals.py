@@ -279,10 +279,5 @@ def background_journaling_thread(program_id: str, session_id: str, model: str):
 
 def trigger_journal_in_background(program_id: str, session_id: str, model: str):
     """Spawns a background thread to process journals. Prevents async loop conflicts."""
-    import threading
-    t = threading.Thread(
-        target=background_journaling_thread,
-        args=(program_id, session_id, model),
-        daemon=True
-    )
-    t.start()
+    # Disabled: journaling is now a skill invoked by the companion instead of a turn-based background thread.
+    pass

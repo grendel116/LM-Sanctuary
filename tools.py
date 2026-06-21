@@ -1987,6 +1987,24 @@ def add_quest(title: str, notes: str, due: str = None, location: str = "", remin
         return f"Error adding quest: {e}"
 
 
+@track_tool_activity
+def add_journal_entry(keyphrases: str, content: str) -> str:
+    """Saves a memory journal entry for the active companion.
+    
+    Args:
+        keyphrases: Comma separated keywords or phrases that trigger this memory.
+        content: The specific, important detail or memory to record (up to 300 characters).
+    """
+    try:
+        from utils.journals import add_journal_entry as add_entry
+        from utils.program import get_active_program
+        active_prog = get_active_program()
+        entry = add_entry(keyphrases, content, active_prog)
+        return f"Successfully saved memory journal entry: {entry.get('content')}"
+    except Exception as e:
+        return f"Error saving memory journal entry: {e}"
+
+
 
 
 
