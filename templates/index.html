@@ -66,6 +66,7 @@
             box-shadow: 0 2px 8px rgba(0,0,0,0.1);
             flex-shrink: 0;
             box-sizing: border-box;
+            aspect-ratio: 1 / 1;
         }
 
         /* Custom Premium Toggle Switch */
@@ -742,6 +743,7 @@
             cursor: pointer;
             transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
             flex-shrink: 0;
+            aspect-ratio: 1 / 1;
         }
         .avatar:hover {
             transform: scale(1.1);
@@ -2658,6 +2660,8 @@
             position: relative;
             z-index: 2;
             transition: transform 0.1s ease-out;
+            aspect-ratio: 1 / 1;
+            flex-shrink: 0;
         }
         .voice-call-pulse-ring {
             position: absolute;
@@ -12090,14 +12094,17 @@ let galleryImages = [];
             fallback.className = img.className;
             fallback.classList.add('avatar-fallback');
             
-            // Get original sizes via computed styles
-            const computed = window.getComputedStyle(img);
-            const width = computed.width || '48px';
-            const height = computed.height || '48px';
+            // Determine size based on element class to prevent copying stretched layout dimensions
+            let size = '48px';
+            if (img.classList.contains('companion-list-avatar')) {
+                size = '44px';
+            } else if (img.classList.contains('voice-call-avatar') || img.classList.contains('voice-call-companion-avatar')) {
+                size = '120px';
+            }
             
             fallback.style.cssText = img.style.cssText;
-            fallback.style.width = width;
-            fallback.style.height = height;
+            fallback.style.width = size;
+            fallback.style.height = size;
             fallback.style.aspectRatio = '1 / 1';
             fallback.style.flexShrink = '0';
             fallback.style.borderRadius = '50%';
