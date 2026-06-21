@@ -170,7 +170,8 @@ _LOCAL_DIRECTIVE_PROMPT = (
     "14. `[generate_local_image(prompt=\"...\")]` - Generate scene of yourself. (MUST be the ONLY text in your response)\n"
     "15. `[generate_imagen(prompt=\"...\", aspect_ratio=\"...\")]` - Generate landscapes or objects.\n"
     "16. `[apply_comfy_workflow(workflow_path=\"...\", parameters={...}, save_path=\"...\")]` - Apply custom ComfyUI workflow.\n"
-    "17. `[add_quest(title=\"...\", notes=\"...\", due=\"...\", location=\"...\", reminder_minutes=...)]` - Add a real-world task/quest to the user's quest log. Notes should contain the objectives (separated by newlines or commas). Due is an ISO 8601 string or relative time (e.g. 'tomorrow', 'in 3 hours').\n\n"
+    "17. `[add_quest(title=\"...\", notes=\"...\", due=\"...\", location=\"...\", reminder_minutes=...)]` - Add a real-world task/quest to the user's quest log. Notes should contain the objectives (separated by newlines or commas). Due is an ISO 8601 string or relative time (e.g. 'tomorrow', 'in 3 hours').\n"
+    "18. `[add_journal_entry(keyphrases=\"...\", content=\"...\")]` - Save a memory journal entry of specific details for future recall. Keyphrases is a list of keywords separated by commas.\n\n"
     "Rules:\n"
     "- Output exactly one tool call tag per turn when needed.\n"
     "- Call image generation tools sparingly.\n"
@@ -183,7 +184,8 @@ _STORY_MODE_DIRECTIVE_PROMPT = (
     "Available Tools:\n"
     "1. `[generate_local_image(prompt=\"...\")]` - Generate scene of yourself. (MUST be the ONLY text in your response)\n"
     "2. `[generate_imagen(prompt=\"...\", aspect_ratio=\"...\")]` - Generate landscapes or objects.\n"
-    "3. `[apply_comfy_workflow(workflow_path=\"...\", parameters={...}, save_path=\"...\")]` - Apply custom ComfyUI workflow.\n\n"
+    "3. `[apply_comfy_workflow(workflow_path=\"...\", parameters={...}, save_path=\"...\")]` - Apply custom ComfyUI workflow.\n"
+    "4. `[add_journal_entry(keyphrases=\"...\", content=\"...\")]` - Save a memory journal entry of specific details for future recall. Keyphrases is a list of keywords separated by commas.\n\n"
     "Rules:\n"
     "- Output exactly one tool call tag per turn when needed.\n"
     "- Call image generation tools sparingly.\n"
@@ -607,18 +609,18 @@ class BaseProgramRunner:
             companion_name = "Companion"
             
         prompt = (
-            f"You are a memory compaction assistant. Summarize the following new chat history between the User ({user_name}) and the Companion ({companion_name}). "
-            f"Always refer to the user as '{user_name}' and the companion as '{companion_name}'. Use their specific names for all references. "
-            "Extract key facts, user preferences, agreed instructions, file changes, and project details. "
-            "Write the summary exclusively as a single cohesive paragraph of exactly 2 to 3 dense, continuous prose sentences. "
-            "Ensure every sentence is dense with facts, details, and project progress.\n\n"
+            "You are a compaction assistant.\n"
+            f"Summarize the chat history between {user_name} and {companion_name}.\n"
+            f"Always refer to the user as '{user_name}' and the companion as '{companion_name}'. Use their names for all references.\n"
+            "Extract facts, preferences, instructions, file changes, and project details.\n"
+            "Write a concise content string of up to 300 characters.\n\n"
         )
 
         if prior_memories:
-            prompt += "To maintain continuity, you are provided with excerpts of the prior conversation memory archives:\n"
+            prompt += "Excerpts of prior memories:\n"
             for pm in prior_memories:
                 prompt += f"{pm}\n\n"
-            prompt += "Reference and build upon these prior memories to ensure the new summary is coherent with previous context.\n\n"
+            prompt += "Reference the prior memories to keep the summary coherent with the context.\n\n"
             
         prompt += (
             f"NEW CHAT HISTORY TO SUMMARIZE:\n{text_to_summarize}\n\n"
@@ -916,7 +918,7 @@ class BaseProgramRunner:
                         break
                 else:
                     # Sequential execution for non-image tools
-                    is_all_non_blocking = all(m.group(1) in {"add_quest"} for m in matches)
+                    is_all_non_blocking = all(m.group(1) in {"add_quest", "add_journal_entry"} for m in matches)
                     if is_all_non_blocking:
                         # Non-blocking tools: run them, strip them, and break immediately
                         # to prevent double-posting and redundant LLM iterations

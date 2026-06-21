@@ -705,14 +705,7 @@ def chat():
             state_info = analyze_emotional_state("")
         inversion_mode = asyncio.run(runner._get_inversion_mode(session_id, history=chat_history))
         
-        # Trigger background journaling check in a separate thread
-        try:
-            from utils.program import get_active_program
-            from utils.journals import trigger_journal_in_background
-            active_prog = get_active_program()
-            trigger_journal_in_background(active_prog, session_id, selected_model)
-        except Exception as e:
-            print(f"Error launching background journaling: {e}")
+
             
         return jsonify({
             'response': response_text,
