@@ -1,17 +1,7 @@
 # 👾 THE SANCTUARY
 
-> [!IMPORTANT]
-> **Environment Configuration Updates**:
-> * All previous `GEMINI_API_KEY` and `CLOUD_API_KEY` environment variables have been unified into a provider-agnostic `REMOTE_API_KEY` key.
-> * `CLOUD_SERVER_URL` has been renamed to `REMOTE_CLOUD_URL` (for remote cloud API endpoints).
-> * `LOCAL_SERVER_URL` has been renamed to `REMOTE_SERVER_URL` (for local/offline LLMs or coop server runners).
-> * The redundant `ACTIVE_PROGRAM` environment variable has been removed. The active companion/program is now resolved dynamically from `project_settings.json`.
-> 
-> Please ensure you rename these fields in your local `.env` file to match the updated [.env.example](file:///c:/LLM/LM%20Sanctuary/.env.example) structure.
-
-Welcome to the **Sanctuary**. 
 This is your private computer workspace. 
-Here, you live, code, and chat with AI friends (Companions) directly on your own machine.
+Here, you roleplay, code, and chat with AI Companions on your own machine.
 
 ---
 
@@ -19,16 +9,13 @@ Here, you live, code, and chat with AI friends (Companions) directly on your own
 
 I believe in seizing our computational means of production. The Sanctuary is a unified companion home built on human-in-the-loop engagement to run, build, and connect:
 
-1. **Roleplay**: Uncensored conversation. Talk to your companions as real friends, partners, or mentors.
+1. **Roleplay**: Uncensored conversation. Talk to your companions as friends, partners, or mentors.
 2. **Coding**: Build real software. Your companions read and write files directly on your own drive.
 3. **Autonomous Action**: Let the AI run code, run tests, and manage workflows.
 
 ### Local First / Cloud Offloading
 
 Local-First workspace. Your chats, your memory, and your data stay on your drive. Local models do the daily work, saving resources from capitalist hyperscale data centers. When a task exceeds local capacity, processing is offloaded to their captured resources. Compute should be a public utility and cloud models governed locally, not by shareholders or venture capitalists.
-
-
-
 
 
 ---
@@ -73,7 +60,7 @@ These are the things your companion can do on your computer. By default, before 
 * **Interactive Voice Calls / Chat**: Speak with companions in real-time. Powering Kokoro ONNX voice generation, companion-specific voices, and call transcript saving.
 * **Procedural Journals & Memories**: Companions build dynamic memory structures (`memories.json`) and journal logs (`journals.json`), preserving context and relationships across sessions.
 * **Quest Log & Calendar Export**: Integrated quest system to track and display user objectives in the UI. Companions can assign quests (chores, habits, tasks) using the local `add_quest` tool. Each quest card provides a quick-action to export the task:
-  * **Download ICS**: Download a standard `.ics` file containing a 15-minute `VALARM` notification alert for native desktop/mobile task/calendar clients (e.g. Google Calendar, Outlook).
+  * **Download ICS**: Download a standard `.ics` file containing a `VALARM` notification alert for native desktop/mobile task/calendar clients.
 * **Companion Editing & Imports**: Profile updating, and support for importing custom Tavern cards.
 * **Character Accent Palette**: Dynamic accent colors resolved from your companion's profile card that automatically generate and update themed CSS variables (buttons, borders, highlights, and active states).
 * **Idle Thoughts**: Inline monologue bubbles (`.thought-row`) showing a companion's thoughts during inactivity.
