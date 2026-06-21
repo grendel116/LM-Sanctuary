@@ -14,13 +14,13 @@
     <!-- Modern Typography -->
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <!-- Markdown Parser (marked.js) -->
-    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js" defer></script>
+    <script src="{{ url_for('static', filename='js/marked.min.js') }}" defer></script>
     <!-- Code Syntax Highlighting (highlight.js) -->
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/github-dark.min.css') }}">
+    <script src="{{ url_for('static', filename='js/highlight.min.js') }}" defer></script>
     <!-- Cropper.js for circular profile cropping -->
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.5.13/cropper.min.css">
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.5.13/cropper.min.js" defer></script>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/cropper.min.css') }}">
+    <script src="{{ url_for('static', filename='js/cropper.min.js') }}" defer></script>
     <style>
         :root {
             --bg-color: #121214;
@@ -763,7 +763,7 @@
             border-radius: 50% !important;
             opacity: 0.95 !important;
             box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
-            position: relative;
+            position: absolute !important;
         }
         /* Expand touch target size for cropper handles on mobile/touch interfaces */
         .cropper-point::after {
@@ -773,6 +773,13 @@
             left: -15px;
             right: -15px;
             bottom: -15px;
+        }
+        /* Hide side handles, keeping only corner anchors */
+        .cropper-point.point-n,
+        .cropper-point.point-s,
+        .cropper-point.point-e,
+        .cropper-point.point-w {
+            display: none !important;
         }
         .cropper-line {
             background-color: transparent !important;
@@ -3171,7 +3178,7 @@
         <div class="modal-card" style="max-width: 400px; width: 90%; text-align: left; align-items: stretch;" onclick="event.stopPropagation()">
             <span class="close-modal-btn" onclick="closeCropModal(event)">&times;</span>
             <h3 style="margin: 0; font-size: 1.2rem; color: #fff; border-bottom: 1px solid rgba(255,255,255,0.08); padding-bottom: 10px;">Crop Profile Picture</h3>
-            <div style="position: relative; width: 100%; height: 300px; max-height: 50vh; overflow: hidden; background: #000; border-radius: 8px; margin-bottom: 15px;">
+            <div id="crop-container" style="position: relative; max-height: 50vh; overflow: hidden; background: transparent; border-radius: 8px; margin-bottom: 15px; margin-left: auto; margin-right: auto;">
                 <img id="crop-image-element" style="max-width: 100%; display: block;">
             </div>
             <div style="display: flex; justify-content: flex-end; gap: 12px;">
@@ -5586,12 +5593,46 @@ function updateInputGlow() {
             return `/profile.png?t=${profileCacheBuster}`;
         }
 
+        // Helper to update profile/list avatars, automatically restoring from fallback DIVs to IMGs
+        function updateAvatarElement(el, newSrc) {
+            if (el.classList.contains('avatar-fallback') || el.tagName === 'DIV') {
+                const img = document.createElement('img');
+                img.className = el.className.replace('avatar-fallback', '').trim();
+                img.src = newSrc;
+                img.alt = el.getAttribute('alt') || 'Companion';
+                
+                // Copy all attributes back
+                for (let attr of el.attributes) {
+                    if (attr.name !== 'class' && attr.name !== 'style' && attr.name !== 'src') {
+                        img.setAttribute(attr.name, attr.value);
+                    }
+                }
+                
+                img.style.cssText = el.style.cssText;
+                
+                // Ensure proper display type for standard image
+                img.style.display = 'block';
+                
+                if (el.onclick) {
+                    img.onclick = el.onclick;
+                } else if (el.classList.contains('companion-avatar')) {
+                    img.onclick = () => expandImage(newSrc);
+                }
+                
+                el.replaceWith(img);
+            } else {
+                el.src = newSrc;
+                if (el.classList.contains('companion-avatar')) {
+                    el.onclick = () => expandImage(newSrc);
+                }
+            }
+        }
+
         // --- updateProfileImages ---
-function updateProfileImages() {
+        function updateProfileImages() {
             const url = getProfileUrl();
             document.querySelectorAll('.companion-avatar').forEach(img => {
-                img.src = url;
-                img.onclick = () => expandImage(url);
+                updateAvatarElement(img, url);
             });
         }
 
@@ -10107,6 +10148,24 @@ async function loadServerImages() {
                 cropModal.style.display = 'flex';
                 
                 const initCropper = () => {
+                    const container = document.getElementById('crop-container');
+                    if (container && cropImg.naturalWidth && cropImg.naturalHeight) {
+                        const aspect = cropImg.naturalWidth / cropImg.naturalHeight;
+                        const padding = window.innerWidth <= 768 ? 40 : 60;
+                        const availWidth = cropModal.querySelector('.modal-card').clientWidth - padding;
+                        const availHeight = window.innerHeight * 0.5; // 50vh
+                        
+                        let finalWidth = availWidth;
+                        let finalHeight = finalWidth / aspect;
+                        
+                        if (finalHeight > availHeight) {
+                            finalHeight = availHeight;
+                            finalWidth = finalHeight * aspect;
+                        }
+                        
+                        container.style.width = `${finalWidth}px`;
+                        container.style.height = `${finalHeight}px`;
+                    }
                     setTimeout(() => {
                         if (profileCropper) {
                             profileCropper.destroy();
@@ -10163,6 +10222,11 @@ async function loadServerImages() {
                 profileCropper.destroy();
                 profileCropper = null;
             }
+            const container = document.getElementById('crop-container');
+            if (container) {
+                container.style.width = '';
+                container.style.height = '';
+            }
         }
 
         async function saveCroppedProfile(event) {
@@ -10202,7 +10266,11 @@ async function loadServerImages() {
                     updateProfileImages();
                     // Refresh other list avatars instantly
                     document.querySelectorAll('.companion-list-avatar').forEach(img => {
-                        img.src = img.src.split('?')[0] + `?t=${profileCacheBuster}`;
+                        const originalSrc = img.tagName === 'DIV' ? img.getAttribute('src') : img.src;
+                        if (originalSrc) {
+                            const newSrc = originalSrc.split('?')[0] + `?t=${profileCacheBuster}`;
+                            updateAvatarElement(img, newSrc);
+                        }
                     });
                 } else {
                     const err = await response.json();
@@ -12125,6 +12193,13 @@ let galleryImages = [];
             fallback.className = img.className;
             fallback.classList.add('avatar-fallback');
             
+            // Copy all original attributes to fallback div to preserve properties like src, data-*
+            for (let attr of img.attributes) {
+                if (attr.name !== 'class' && attr.name !== 'style') {
+                    fallback.setAttribute(attr.name, attr.value);
+                }
+            }
+            
             // Determine size based on element class to prevent copying stretched layout dimensions
             let size = '48px';
             if (img.classList.contains('companion-list-avatar')) {
@@ -12275,7 +12350,10 @@ let selectedTavernCardFile = null;
             overlay.style.display = 'flex';
             
             document.getElementById('voice-call-companion-name').textContent = activeCompanionName || "Companion";
-            document.getElementById('voice-call-companion-avatar').src = getProfileUrl();
+            const voiceAvatar = document.getElementById('voice-call-companion-avatar');
+            if (voiceAvatar) {
+                updateAvatarElement(voiceAvatar, getProfileUrl());
+            }
             
             updateVoiceCallStatus("Connecting...");
             document.getElementById('voice-call-transcript-turns').innerHTML = "";

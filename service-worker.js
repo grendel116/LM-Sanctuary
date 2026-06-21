@@ -1,11 +1,13 @@
-const CACHE_NAME = 'program-sanctuary-v4';
+const CACHE_NAME = 'program-sanctuary-v5';
 const ASSETS = [
   '/profile.png',
   '/app_icon.png',
   'https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap',
-  'https://cdn.jsdelivr.net/npm/marked/marked.min.js',
-  'https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css',
-  'https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js'
+  '/static/js/marked.min.js',
+  '/static/css/github-dark.min.css',
+  '/static/js/highlight.min.js',
+  '/static/css/cropper.min.css',
+  '/static/js/cropper.min.js'
 ];
 
 self.addEventListener('install', (event) => {
