@@ -7425,6 +7425,29 @@ async function loadHistory() {
             chatContainer.classList.remove('smooth-scroll');
 
             try {
+                // If the session ID came from localStorage, verify it still exists on the server.
+                // If it is missing, default to 'default'.
+                if (!sessionFromUrl && sessionId !== 'default') {
+                    try {
+                        const res = await fetch('/api/sessions');
+                        const data = await res.json();
+                        if (data.sessions && !data.sessions.includes(sessionId)) {
+                            console.warn(`Last opened session "${sessionId}" is missing on the server. Falling back to default.`);
+                            sessionId = 'default';
+                            localStorage.setItem('companion_session_id', 'default');
+                            
+                            // Update the UI header ID display if it exists
+                            const sessionDisplay = document.getElementById('session-id-display');
+                            if (sessionDisplay) {
+                                sessionDisplay.textContent = `• ID: ${sessionId.slice(-4)}`;
+                                sessionDisplay.title = `Full Session ID: ${sessionId}`;
+                            }
+                        }
+                    } catch (err) {
+                        console.error("Error verifying last opened session:", err);
+                    }
+                }
+
                 // Fetch history and server images concurrently
                 const [historyRes, _] = await Promise.all([
                     fetch(`/history?session_id=${sessionId}&t=${Date.now()}`),
@@ -11713,6 +11736,7 @@ function purgeDataBank() {
 
 // Initialize session ID, reading from URL parameter if present for device syncing
         const urlParams = new URLSearchParams(window.location.search);
+        const sessionFromUrl = !!urlParams.get('session_id');
         let sessionId = urlParams.get('session_id');
         if (sessionId) {
             localStorage.setItem('companion_session_id', sessionId);
