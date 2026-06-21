@@ -98,7 +98,7 @@ Open browser: **`http://localhost:5000`**
 
 ---
 
-## 🧠 SYSTEM PARTS
+## SYSTEM PARTS
 
 * **`app.py`**: The server brain. Runs locally on your PC.
 * **`templates/index.html`**: The UI. Completely responsive for phone and PC.
