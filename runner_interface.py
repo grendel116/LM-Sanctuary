@@ -704,9 +704,8 @@ class BaseProgramRunner:
                 remote_cloud_url and remote_cloud_url.strip() and remote_cloud_url != "your_remote_cloud_url_here"
             )
             
-            # Auto-offload to cloud if an image is attached to the user's message OR local server is offline OR VRAM is paused
-            from utils.local_llm_manager import check_status, get_vram_paused
-            is_paused = get_vram_paused()
+            # Auto-offload to cloud if an image is attached to the user's message OR local server is offline
+            from utils.local_llm_manager import check_status
             is_offline = not check_status()
             has_image = bool(getattr(adapter, 'file_path_resolved', None) or getattr(adapter, 'image_data', None))
             
@@ -717,12 +716,10 @@ class BaseProgramRunner:
                 if "/cloud" in msg_lower or "/offload" in msg_lower:
                     has_offload_keyword = True
                     
-            if (has_image or is_offline or is_paused or has_offload_keyword) and not is_cloud and is_remote_configured:
+            if (has_image or is_offline or has_offload_keyword) and not is_cloud and is_remote_configured:
                 reason = (
-                    "Local server is paused" if is_paused else (
-                        "Local server is offline" if is_offline else (
-                            "User requested offload (/cloud or /offload)" if has_offload_keyword else "Multimodal input (image)"
-                        )
+                    "Local server is offline" if is_offline else (
+                        "User requested offload (/cloud or /offload)" if has_offload_keyword else "Multimodal input (image)"
                     )
                 )
                 print(f"[OFFLOAD] {reason} detected. Intercepting and offloading to cloud.", flush=True)
@@ -1603,30 +1600,6 @@ class OpenSourceRunner(BaseProgramRunner):
             import re
             new_message_text = re.sub(r'(?i)/cloud|/offload', '', new_message_text).strip()
 
-        # Check if the server was paused for ComfyUI. If so, restart it before processing the next message response!
-        import utils.local_llm_manager as llm_mgr
-        import asyncio
-        if llm_mgr.get_vram_paused():
-            prefix = ""
-            if msg_id:
-                prefix = msg_id.split('_')[0] + "_"
-            else:
-                if new_message_text.startswith("[SYSTEM: User has completed"):
-                    prefix = "quest_"
-                elif "Send me a portrait of yourself" in new_message_text:
-                    prefix = "port_"
-                elif new_message_text.startswith("[Tool Response from"):
-                    prefix = "tool_"
-                else:
-                    prefix = "usr_"
-            
-            print(f"[VRAM GUARD] Restarting Local LLM server for the next message (prefix: {prefix}) before processing response...", flush=True)
-            llm_mgr.set_vram_paused(False)
-            try:
-                from utils.local_llm_manager import start_server
-                await asyncio.to_thread(start_server)
-            except Exception as e_start:
-                print(f"[VRAM GUARD] Error auto-starting local server: {e_start}", flush=True)
 
         if session_id not in self.sessions_history:
             self._load_session_from_disk(session_id)
@@ -1956,18 +1929,6 @@ class OpenSourceRunner(BaseProgramRunner):
             # Clean up the actual image file from the server's local disk
             file_deleted = self._delete_local_image(image_url)
             
-            # If the server was paused, unpause and restart it now that the image is deleted
-            # (which signals they are done with that generation step and returning to normal state)
-            import utils.local_llm_manager as llm_mgr
-            if llm_mgr.get_vram_paused():
-                print("[VRAM GUARD] Image deleted. Unpausing VRAM and starting Local LLM server...", flush=True)
-                llm_mgr.set_vram_paused(False)
-                try:
-                    from utils.local_llm_manager import start_server
-                    import threading
-                    threading.Thread(target=start_server, daemon=True).start()
-                except Exception as e_start:
-                    print(f"[VRAM GUARD] Error starting server on image delete: {e_start}", flush=True)
                         
             if modified:
                 self._save_session_to_disk(session_id)
