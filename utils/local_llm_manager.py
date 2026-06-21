@@ -67,7 +67,9 @@ def start_server():
                 os.environ["LOCAL_MODEL_NAME"] = model_name
             except Exception: pass
     return local_runner.start_local_server(model_name)
-def stop_server(): return local_runner.stop_local_server()
+def stop_server():
+    set_vram_paused(False)
+    return local_runner.stop_local_server()
 
 def extract_quantization_tag(filename):
     tags = ["IQ1_M", "IQ1_S", "IQ2_XXS", "IQ2_XS", "IQ2_S", "IQ2_M", "Q2_K_S", "Q2_K", "IQ3_XXS", "IQ3_XS", "Q3_K_S", "IQ3_S", "IQ3_M", "Q3_K_M", "Q3_K_L", "IQ4_XS", "IQ4_NL", "Q4_0", "Q4_1", "Q4_K_M", "Q4_K_S", "Q5_0", "Q5_1", "Q5_K_M", "Q5_K_S", "Q6_K", "Q8_0", "F16", "BF16", "FP16"]
@@ -218,7 +220,9 @@ def load_local_model(model_name):
         except Exception: pass
     return success, msg
 
-def unload_local_model(model_name=None): return local_runner.stop_local_server()
+def unload_local_model(model_name=None):
+    set_vram_paused(False)
+    return local_runner.stop_local_server()
 
 def delete_local_model(model_key):
     target_path = local_runner.resolve_model_path(model_key)
