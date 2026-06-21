@@ -1088,8 +1088,6 @@ def apply_comfy_workflow(workflow_path: str, parameters: dict, save_path: str) -
         raise Exception("Image generation timed out on ComfyUI server after 300 seconds.")
     except Exception as e:
         return f"Error executing ComfyUI workflow: {e}"
-
-
 @track_tool_activity
 def generate_local_image(prompt: str) -> str:
     """Generates a local image using ComfyUI with companion-specific workflow configurations.
@@ -1412,12 +1410,9 @@ def generate_video_from_image(image_path: str, prompt: str) -> str:
     import json
     
     # Ensure ComfyUI server is running
-    from utils.comfy_manager import check_comfy_running, start_comfy_server
+    from utils.comfy_manager import check_comfy_running
     if not check_comfy_running(force_refresh=True):
-        print("[COMFY VIDEO] ComfyUI server is offline. Starting ComfyUI server...")
-        started, startup_msg = start_comfy_server()
-        if not started:
-            raise Exception(f"ComfyUI server is offline and failed to start: {startup_msg}")
+        raise Exception("ComfyUI server is offline. Please start the ComfyUI engine manually from the settings panel.")
             
     # Run dependency resolution inline to ensure missing custom nodes or models are downloaded/installed
     from utils.comfy_manager import _resolver_worker, resolution_status

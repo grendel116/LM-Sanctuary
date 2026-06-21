@@ -167,8 +167,8 @@ _LOCAL_DIRECTIVE_PROMPT = (
     "11. `[wait_task(task_id=\"...\", timeout=...)]` - Block and wait for background task output up to timeout (default 10.0).\n"
     "12. `[get_workspace_structure()]` - View directory tree.\n"
     "13. `[search_codebase(keyword=\"...\")]` - Search keyword in codebase.\n"
-    "14. `[generate_local_image(prompt=\"...\")]` - Generate scene of yourself. (MUST be the ONLY text in your response)\n"
-    "15. `[generate_imagen(prompt=\"...\", aspect_ratio=\"...\")]` - Generate landscapes or objects.\n"
+    "14. `[generate_local_image(prompt=\"...\")]` - Generate a scene of yourself. Formulate the prompt using a comma-separated list of short descriptive tags (e.g. '1girl, dark hair, blue eyes, smiling, sitting in cafe'). (MUST be the ONLY text in your response)\n"
+    "15. `[generate_imagen(prompt=\"...\", aspect_ratio=\"...\")]` - Generate landscapes or objects. Formulate the prompt using a comma-separated list of short descriptive tags.\n"
     "16. `[apply_comfy_workflow(workflow_path=\"...\", parameters={...}, save_path=\"...\")]` - Apply custom ComfyUI workflow.\n"
     "17. `[add_quest(title=\"...\", notes=\"...\", due=\"...\", location=\"...\", reminder_minutes=...)]` - Add a real-world task/quest to the user's quest log. Notes should contain the objectives (separated by newlines or commas). Due is an ISO 8601 string or relative time (e.g. 'tomorrow', 'in 3 hours').\n"
     "18. `[add_journal_entry(keyphrases=\"...\", content=\"...\")]` - Save a memory journal entry of specific details for future recall. Keyphrases is a list of keywords separated by commas.\n\n"
@@ -176,20 +176,24 @@ _LOCAL_DIRECTIVE_PROMPT = (
     "- Output exactly one tool call tag per turn when needed.\n"
     "- Call image generation tools sparingly.\n"
     "- Once tool output is provided, answer directly in natural language without repeating the tag.\n"
+    "- Formulate all image generation prompts as a sequence of comma-separated tags.\n"
+    "- Do not write image prompts as prose sentences or paragraphs.\n"
 )
 
 _STORY_MODE_DIRECTIVE_PROMPT = (
     "\n\n# LOCAL EMULATED TOOLS\n"
     "To call a tool, output the exact tag. The system will intercept it, run the tool, and return the result.\n\n"
     "Available Tools:\n"
-    "1. `[generate_local_image(prompt=\"...\")]` - Generate scene of yourself. (MUST be the ONLY text in your response)\n"
-    "2. `[generate_imagen(prompt=\"...\", aspect_ratio=\"...\")]` - Generate landscapes or objects.\n"
+    "1. `[generate_local_image(prompt=\"...\")]` - Generate a scene of yourself. Formulate the prompt using a comma-separated list of short descriptive tags (e.g. '1girl, dark hair, blue eyes, smiling, sitting in cafe'). (MUST be the ONLY text in your response)\n"
+    "2. `[generate_imagen(prompt=\"...\", aspect_ratio=\"...\")]` - Generate landscapes or objects. Formulate the prompt using a comma-separated list of short descriptive tags.\n"
     "3. `[apply_comfy_workflow(workflow_path=\"...\", parameters={...}, save_path=\"...\")]` - Apply custom ComfyUI workflow.\n"
     "4. `[add_journal_entry(keyphrases=\"...\", content=\"...\")]` - Save a memory journal entry of specific details for future recall. Keyphrases is a list of keywords separated by commas.\n\n"
     "Rules:\n"
     "- Output exactly one tool call tag per turn when needed.\n"
     "- Call image generation tools sparingly.\n"
     "- Once tool output is provided, answer directly in natural language without repeating the tag.\n"
+    "- Formulate all image generation prompts as a sequence of comma-separated tags.\n"
+    "- Do not write image prompts as prose sentences or paragraphs.\n"
 )
 
 
@@ -758,12 +762,11 @@ class BaseProgramRunner:
                 headers = get_remote_server_headers()
                 target_model = model if (model and model != 'local-llm') else os.getenv("LOCAL_MODEL_NAME")
                 try:
-                    from utils.local_llm_manager import check_status, start_server
+                    from utils.local_llm_manager import check_status
                     if not check_status():
-                        print("[VRAM GUARD ROUTING] Local server is offline. Starting server and waiting for it to load...", flush=True)
-                        await asyncio.to_thread(start_server)
-                except Exception as e_start:
-                    print(f"[VRAM GUARD ROUTING] Warning: failed to auto-start local server: {e_start}", flush=True)
+                        print("[VRAM GUARD ROUTING] Warning: Local LLM server is offline.", flush=True)
+                except Exception as e_check:
+                    print(f"[VRAM GUARD ROUTING] Warning: failed to check local server status: {e_check}", flush=True)
                 
             payload = {
                 "messages": openai_messages,
@@ -1895,7 +1898,17 @@ class OpenSourceRunner(BaseProgramRunner):
                     break
                     
             if found_idx != -1:
+                # If deleting companion message, check if the preceding message is the user's automated portrait request
+                delete_prev = False
+                if found_idx > 0:
+                    prev_msg = real_history[found_idx - 1]
+                    if prev_msg.get('role') == 'user' and prev_msg.get('text') and "Send me a portrait of yourself" in prev_msg['text']:
+                        delete_prev = True
+                
                 del real_history[found_idx]
+                if delete_prev:
+                    del real_history[found_idx - 1]
+                    
                 self._save_session_to_disk(session_id)
                 return True
             return False
@@ -1910,28 +1923,43 @@ class OpenSourceRunner(BaseProgramRunner):
                 
             history = self.sessions_history[session_id]
             modified = False
+            indices_to_delete = []
             
-            for msg in history:
+            for i, msg in enumerate(history):
+                has_image = False
                 if msg.get('text') and image_url in msg['text']:
+                    has_image = True
                     import re
                     pattern = r'!\[[^\]]*\]\(' + re.escape(image_url) + r'\)'
                     msg['text'] = re.sub(pattern, '[Portrait Deleted]', msg['text'])
                     modified = True
                 if msg.get('image_url') == image_url:
+                    has_image = True
                     msg['image_url'] = None
                     modified = True
                 if msg.get('tool_calls'):
                     for tc in msg['tool_calls']:
                         if tc.get('type') == 'response' and tc.get('response') and image_url in tc['response']:
+                            has_image = True
                             import re
                             pattern = r'!\[[^\]]*\]\(' + re.escape(image_url) + r'\)'
                             tc['response'] = re.sub(pattern, '[Portrait Deleted]', tc['response'])
                             modified = True
+                            
+                # If this companion message contains the deleted image, check the preceding user message
+                if has_image and i > 0:
+                    prev_msg = history[i-1]
+                    if prev_msg.get('role') == 'user' and prev_msg.get('text') and "Send me a portrait of yourself" in prev_msg['text']:
+                        indices_to_delete.append(i-1)
+                        
+            # Delete marked indices in reverse order
+            for idx in sorted(indices_to_delete, reverse=True):
+                del history[idx]
+                modified = True
                     
             # Clean up the actual image file from the server's local disk
             file_deleted = self._delete_local_image(image_url)
             
-                        
             if modified:
                 self._save_session_to_disk(session_id)
                 

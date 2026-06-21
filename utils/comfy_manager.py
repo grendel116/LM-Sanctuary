@@ -72,12 +72,28 @@ def check_comfy_running(force_refresh=False):
     try:
         # Fallback to GET / (static HTML, very lightweight)
         res = requests.get(f"{COMFYUI_URL}/", timeout=0.3)
-        _comfy_running_cached = (res.status_code == 200)
+        if res.status_code == 200:
+            _comfy_running_cached = True
+            _comfy_running_cache_time = now
+            return True
     except Exception:
-        _comfy_running_cached = False
+        pass
+
+    import psutil
+    for proc in psutil.process_iter(['name', 'cmdline']):
+        try:
+            cmdline = proc.info.get('cmdline') or []
+            cmdline_str = " ".join(cmdline).lower()
+            if "python" in proc.info.get('name', '').lower() and "main.py" in cmdline_str and "8188" in cmdline_str:
+                _comfy_running_cached = "starting"
+                _comfy_running_cache_time = now
+                return "starting"
+        except Exception:
+            pass
         
+    _comfy_running_cached = False
     _comfy_running_cache_time = now
-    return _comfy_running_cached
+    return False
 
 def install_comfy():
     """Downloads the portable ComfyUI package matching the GPU architecture, extracts it, and registers ComfyUI-Manager."""
