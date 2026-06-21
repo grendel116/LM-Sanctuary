@@ -591,11 +591,12 @@ class BaseProgramRunner:
             
         prompt = (
             f"You are a memory compaction assistant. Summarize the following new chat history between the User ({user_name}) and the Companion ({companion_name}). "
-            f"Always refer to the user as '{user_name}' and the companion as '{companion_name}' instead of using generic terms like 'the user' or 'the companion'. "
+            f"Always refer to the user as '{user_name}' and the companion as '{companion_name}'. Use their specific names for all references. "
             "Extract key facts, user preferences, agreed instructions, file changes, and project details. "
-            "Write the summary exclusively as a single cohesive paragraph of exactly 6 to 8 continuous prose sentences. "
+            "Write the summary exclusively as a single cohesive paragraph of exactly 2 to 3 dense, continuous prose sentences. "
             "Ensure every sentence is dense with facts, details, and project progress.\n\n"
         )
+
         if prior_memories:
             prompt += "To maintain continuity, you are provided with excerpts of the prior conversation memory archives:\n"
             for pm in prior_memories:

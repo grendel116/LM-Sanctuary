@@ -151,8 +151,8 @@
             display: flex;
             align-items: center;
             justify-content: center;
-            width: 14px;
-            height: 14px;
+            width: 32px;
+            height: 32px;
             /* Dynamic variables for Companion's emotional state */
             --heart-color: #85b9eb;
             --heart-glow: rgba(133, 185, 235, 0.9);
@@ -176,24 +176,10 @@
             -webkit-backface-visibility: hidden;
         }
 
-        /* Excitement Jiggle/Typing Animation */
-        .heart-pulse.jiggling {
-            /* Keep her current color but pulse much faster while active/generating */
-            animation: heartPulse var(--heart-speed-active, 0.7s) infinite ease-in-out;
-        }
-        .heart-pulse.jiggling svg {
-            animation: heartJiggle 0.15s infinite alternate ease-in-out;
-        }
-
         @keyframes heartPulse {
             0% { transform: scale(0.95) translateZ(0); }
             50% { transform: scale(1.2) translateZ(0); }
             100% { transform: scale(0.95) translateZ(0); }
-        }
-
-        @keyframes heartJiggle {
-            0% { transform: rotate(-4deg) scale(1.15) translateZ(0); }
-            100% { transform: rotate(4deg) scale(1.15) translateZ(0); }
         }
 
         /* Inversion Burst Animation */
@@ -1859,16 +1845,7 @@
         }
 
         .model-select-wrapper {
-            position: relative;
-            background: rgba(255, 255, 255, 0.04);
-            border: 1px solid rgba(255, 255, 255, 0.08);
-            border-radius: 16px;
-            padding: 0 20px 0 10px;
-            display: flex;
-            align-items: center;
-            height: 32px;
-            transition: all 0.2s ease;
-            box-sizing: border-box;
+            display: none !important;
         }
 
         .model-select-wrapper:hover {
@@ -1937,16 +1914,6 @@
             }
             .header-actions {
                 gap: 6px;
-            }
-            .model-select-wrapper {
-                padding: 0 10px 0 6px;
-                height: 26px;
-                border-radius: 12px;
-            }
-            #model-select {
-                max-width: 75px;
-                min-width: 60px;
-                font-size: 0.7rem;
             }
             #chat-container {
                 padding: 15px;
@@ -2918,7 +2885,7 @@
 
                     <div class="header-status" style="flex-direction: row-reverse;">
                         <div id="header-heart-pulse" class="heart-pulse" title="Companion's Encoded Heart">
-                            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="1" stroke-linecap="round" stroke-linejoin="round">
+                            <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="1" stroke-linecap="round" stroke-linejoin="round">
                                 <path d="M20.42 4.58a5.4 5.4 0 0 0-7.65 0l-.77.78-.77-.78a5.4 5.4 0 0 0-7.65 0C1.46 6.7 1.33 10.28 4 13l8 8 8-8c2.67-2.72 2.54-6.3.42-8.42z"></path>
                             </svg>
                         </div>
@@ -3324,6 +3291,9 @@
                 <button onclick="switchAssistantModalTab('user')" id="assistant-tab-btn-user" class="edit-btn" style="background: rgba(255,255,255,0.05); color: var(--text-muted); border: 1px solid rgba(255,255,255,0.1); padding: 6px 12px; font-size: 0.8rem; border-radius: 6px; cursor: pointer;">
                     User Profiles
                 </button>
+                <button onclick="switchAssistantModalTab('sessions')" id="assistant-tab-btn-sessions" class="edit-btn" style="background: rgba(255,255,255,0.05); color: var(--text-muted); border: 1px solid rgba(255,255,255,0.1); padding: 6px 12px; font-size: 0.8rem; border-radius: 6px; cursor: pointer;">
+                    Chat Sessions
+                </button>
             </div>
 
             <!-- Select Companion Tab Content -->
@@ -3379,6 +3349,28 @@
                     <button id="save-profile-btn" onclick="saveActiveUserProfile()" class="onboarding-btn" style="padding: 10px 24px; font-size: 0.85rem; font-weight: 500;">
                         Save & Apply Profile
                     </button>
+                </div>
+            </div>
+
+            <!-- Chat Sessions Tab Content -->
+            <div id="assistant-tab-content-sessions" style="display: none;">
+                <p style="color: var(--text-muted); font-size: 0.85rem; margin-bottom: 20px; line-height: 1.4;">
+                    Switch between different chat timelines or create a new session for your active companion.
+                </p>
+
+                <div style="display: flex; gap: 15px; align-items: flex-end; margin-bottom: 15px; flex-wrap: wrap;">
+                    <div style="flex: 1; min-width: 200px;">
+                        <label style="font-size: 0.72rem; color: var(--text-muted); display: block; margin-bottom: 4px;">Active Session</label>
+                        <select id="chat-sessions-select" onchange="onChatSessionSelectChange()" class="onboarding-input glass-select" style="width: 100%; background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.1); color: var(--text-main); height: 38px; border-radius: 8px; font-size: 0.85rem; cursor: pointer; outline: none;"></select>
+                    </div>
+                    <div style="display: flex; gap: 8px;">
+                        <button id="delete-session-btn" onclick="deleteSelectedChatSession()" class="onboarding-btn" style="padding: 10px 16px; font-size: 0.8rem; min-width: auto; height: 38px; background: rgba(239, 68, 68, 0.1); color: #f87171; border: 1px solid rgba(239, 68, 68, 0.2);">
+                            Delete
+                        </button>
+                        <button onclick="createNewChatSession()" class="onboarding-btn" style="padding: 10px 16px; font-size: 0.8rem; min-width: auto; height: 38px;">
+                            + New Session
+                        </button>
+                    </div>
                 </div>
             </div>
         </div>
@@ -6212,6 +6204,122 @@ async function renameSelectedUserProfile() {
             });
         }
 
+        /* ==========================================================================
+           VI. 5.b CHAT TIMELINE / SESSIONS MANAGEMENT
+           ========================================================================== */
+
+        async function loadChatSessions() {
+            try {
+                const res = await fetch('/api/sessions');
+                const data = await res.json();
+                if (data.sessions) {
+                    const select = document.getElementById('chat-sessions-select');
+                    if (select) {
+                        select.innerHTML = '';
+                        data.sessions.forEach(sess => {
+                            const opt = document.createElement('option');
+                            opt.value = sess;
+                            opt.textContent = sess;
+                            if (sess === sessionId) {
+                                opt.selected = true;
+                            }
+                            select.appendChild(opt);
+                        });
+                        updateDeleteSessionButtonLabel();
+                    }
+                }
+            } catch (e) {
+                console.error("Error loading chat sessions:", e);
+            }
+        }
+
+        function updateDeleteSessionButtonLabel() {
+            const select = document.getElementById('chat-sessions-select');
+            const deleteBtn = document.getElementById('delete-session-btn');
+            if (select && deleteBtn) {
+                const val = select.value;
+                if (val === 'default') {
+                    deleteBtn.textContent = 'Clear Chat';
+                } else {
+                    deleteBtn.textContent = 'Delete';
+                }
+            }
+        }
+
+        function onChatSessionSelectChange() {
+            const select = document.getElementById('chat-sessions-select');
+            if (select) {
+                const selected = select.value;
+                updateDeleteSessionButtonLabel();
+                window.location.href = `?session_id=${encodeURIComponent(selected)}`;
+            }
+        }
+
+        function createNewChatSession() {
+            showCustomPrompt("New Chat Session", "Enter a name for the new chat timeline:", "", (name) => {
+                if (!name || !name.trim()) {
+                    showCustomAlert("Error", "Session name cannot be empty.");
+                    return;
+                }
+                const sanitized = name.trim().toLowerCase().replace(/[^a-z0-9-_]/g, '_');
+                if (!sanitized) {
+                    showCustomAlert("Error", "Invalid session name. Use only letters, numbers, hyphens, and underscores.");
+                    return;
+                }
+                window.location.href = `?session_id=${encodeURIComponent(sanitized)}`;
+            });
+        }
+
+        function deleteSelectedChatSession() {
+            const select = document.getElementById('chat-sessions-select');
+            if (!select) return;
+            const selected = select.value;
+            
+            if (selected === 'default') {
+                showCustomConfirm("Clear Chat Timeline", "Are you sure you want to clear all messages in this main chat timeline? This will reset the conversation.", async () => {
+                    try {
+                        const res = await fetch('/reset', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ session_id: 'default' })
+                        });
+                        const data = await res.json();
+                        if (data.status === 'success') {
+                            showCustomAlert("Cleared", "Main chat timeline cleared.", () => {
+                                window.location.href = '?session_id=default';
+                            });
+                        } else {
+                            throw new Error(data.error || "Failed to clear.");
+                        }
+                    } catch (e) {
+                        console.error("Error clearing session:", e);
+                        showCustomAlert("Error", "Failed to clear timeline: " + e.message);
+                    }
+                });
+            } else {
+                showCustomConfirm("Delete Chat Session", `Are you sure you want to permanently delete the chat session "${selected}"? This action cannot be undone.`, async () => {
+                    try {
+                        const res = await fetch('/reset', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ session_id: selected })
+                        });
+                        const data = await res.json();
+                        if (data.status === 'success') {
+                            showCustomAlert("Deleted", "Chat session deleted successfully.", () => {
+                                window.location.href = '?session_id=default';
+                            });
+                        } else {
+                            throw new Error(data.error || "Failed to delete.");
+                        }
+                    } catch (e) {
+                        console.error("Error deleting session:", e);
+                        showCustomAlert("Error", "Failed to delete the chat session: " + e.message);
+                    }
+                });
+            }
+        }
+
         // --- updateProfileButtonsVisibility ---
 function updateProfileButtonsVisibility() {
             const select = document.getElementById('user-profile-select');
@@ -6258,36 +6366,46 @@ function closeAssistantModal() {
         function switchAssistantModalTab(tab) {
             const compBtn = document.getElementById('assistant-tab-btn-companion');
             const userBtn = document.getElementById('assistant-tab-btn-user');
+            const sessBtn = document.getElementById('assistant-tab-btn-sessions');
             const compTab = document.getElementById('assistant-tab-content-companion');
             const userTab = document.getElementById('assistant-tab-content-user');
+            const sessTab = document.getElementById('assistant-tab-content-sessions');
             
             if (!compBtn || !userBtn || !compTab || !userTab) return;
+            
+            // De-activate all tab buttons by default
+            [compBtn, userBtn, sessBtn].forEach(btn => {
+                if (btn) {
+                    btn.style.background = 'rgba(255,255,255,0.05)';
+                    btn.style.color = 'var(--text-muted)';
+                    btn.style.border = '1px solid rgba(255,255,255,0.1)';
+                }
+            });
+            
+            // Hide all tab panels by default
+            [compTab, userTab, sessTab].forEach(panel => {
+                if (panel) panel.style.display = 'none';
+            });
             
             if (tab === 'companion') {
                 compBtn.style.background = 'rgba(255, 255, 255, 0.08)';
                 compBtn.style.color = 'var(--primary-accent)';
                 compBtn.style.border = '1px solid var(--primary-accent)';
-                
-                userBtn.style.background = 'rgba(255,255,255,0.05)';
-                userBtn.style.color = 'var(--text-muted)';
-                userBtn.style.border = '1px solid rgba(255,255,255,0.1)';
-                
                 compTab.style.display = 'block';
-                userTab.style.display = 'none';
             } else if (tab === 'user') {
                 userBtn.style.background = 'rgba(255, 255, 255, 0.08)';
                 userBtn.style.color = 'var(--primary-accent)';
                 userBtn.style.border = '1px solid var(--primary-accent)';
-                
-                compBtn.style.background = 'rgba(255,255,255,0.05)';
-                compBtn.style.color = 'var(--text-muted)';
-                compBtn.style.border = '1px solid rgba(255,255,255,0.1)';
-                
-                compTab.style.display = 'none';
                 userTab.style.display = 'block';
-                
-                // Initialize user profiles load
                 loadUserProfiles();
+            } else if (tab === 'sessions') {
+                if (sessBtn) {
+                    sessBtn.style.background = 'rgba(255, 255, 255, 0.08)';
+                    sessBtn.style.color = 'var(--primary-accent)';
+                    sessBtn.style.border = '1px solid var(--primary-accent)';
+                }
+                if (sessTab) sessTab.style.display = 'block';
+                loadChatSessions();
             }
         }
 
