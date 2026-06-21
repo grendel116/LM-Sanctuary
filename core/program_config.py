@@ -259,6 +259,22 @@ def load_user_instructions() -> str:
         )
         return f"\n\n# USER PROFILE & RELATIONSHIP CONTEXT\n{fallback_msg}"
 
+def is_narration_mode() -> bool:
+    """Checks if narration mode (Story Mode) is enabled in the active program profile JSON."""
+    from utils.program import get_active_program
+    import json
+    active_program = get_active_program()
+    program_path = os.path.normpath(os.path.join(PROGRAMS_DIR, active_program))
+    json_path = os.path.join(program_path, f"{active_program}.json")
+    if os.path.exists(json_path):
+        try:
+            with open(json_path, "r", encoding="utf-8") as f:
+                pdata = json.load(f)
+                return pdata.get("narration_mode", False)
+        except Exception:
+            pass
+    return False
+
 inversion_directive = ""
 
 def set_inversion_directive(directive: str):
@@ -277,19 +293,7 @@ def get_compiled_instructions() -> str:
     except Exception:
         current_companion_name = "Companion"
     
-    # Check if narration mode is enabled in the active program profile JSON
-    import json
-    narration_mode = False
-    active_program = get_active_program()
-    program_path = os.path.normpath(os.path.join(PROGRAMS_DIR, active_program))
-    json_path = os.path.join(program_path, f"{active_program}.json")
-    if os.path.exists(json_path):
-        try:
-            with open(json_path, "r", encoding="utf-8") as f:
-                pdata = json.load(f)
-                narration_mode = pdata.get("narration_mode", False)
-        except Exception:
-            pass
+    narration_mode = is_narration_mode()
 
     if narration_mode:
         global_formatting = (

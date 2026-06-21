@@ -177,6 +177,19 @@ _LOCAL_DIRECTIVE_PROMPT = (
     "- Once tool output is provided, answer directly in natural language without repeating the tag.\n"
 )
 
+_STORY_MODE_DIRECTIVE_PROMPT = (
+    "\n\n# LOCAL EMULATED TOOLS\n"
+    "To call a tool, output the exact tag. The system will intercept it, run the tool, and return the result.\n\n"
+    "Available Tools:\n"
+    "1. `[generate_local_image(prompt=\"...\")]` - Generate scene of yourself. (MUST be the ONLY text in your response)\n"
+    "2. `[generate_imagen(prompt=\"...\", aspect_ratio=\"...\")]` - Generate landscapes or objects.\n"
+    "3. `[apply_comfy_workflow(workflow_path=\"...\", parameters={...}, save_path=\"...\")]` - Apply custom ComfyUI workflow.\n\n"
+    "Rules:\n"
+    "- Output exactly one tool call tag per turn when needed.\n"
+    "- Call image generation tools sparingly.\n"
+    "- Once tool output is provided, answer directly in natural language without repeating the tag.\n"
+)
+
 
 def _parse_emulated_tool_call(tool_name: str, args_str: str) -> dict:
     """Parses arguments from an emulated tool call string.
@@ -465,7 +478,11 @@ class OsHistoryAdapter(LocalHistoryAdapter):
             openai_messages[0]["content"] += f"\n\n# KNOWLEDGE BASE CONTEXT\nUse the following verified context from your Data Bank to help answer questions if relevant:\n{rag_context}\n"
         if memory_context:
             openai_messages[0]["content"] += f"\n\n# ARCHIVED CONVERSATION MEMORY\nThe following is a chronological sequence of messages from earlier in this conversation:\n{memory_context}\n"
-        openai_messages[0]["content"] += _LOCAL_DIRECTIVE_PROMPT
+        from core.program_config import is_narration_mode
+        if is_narration_mode():
+            openai_messages[0]["content"] += _STORY_MODE_DIRECTIVE_PROMPT
+        else:
+            openai_messages[0]["content"] += _LOCAL_DIRECTIVE_PROMPT
 
         for msg in raw_messages:
             if openai_messages and openai_messages[-1]["role"] == msg["role"]:
@@ -1327,8 +1344,9 @@ class BaseProgramRunner:
         )
         instructions += nsfw_directive
         
-        # Standard-only directives (pasted links and workspace exploration)
-        if not is_voice and user_message:
+        # Standard-only directives (pasted links and workspace exploration) - skipped in Story Mode
+        from core.program_config import is_narration_mode
+        if not is_voice and user_message and not is_narration_mode():
             urls = re.findall(r'(https?://[^\s>)]+)', user_message)
             if urls:
                 instructions += (
@@ -1585,7 +1603,7 @@ class OpenSourceRunner(BaseProgramRunner):
             import re
             new_message_text = re.sub(r'(?i)/cloud|/offload', '', new_message_text).strip()
 
-        # Check if the server was paused for ComfyUI. If so, restart it for user/program messages!
+        # Check if the server was paused for ComfyUI. If so, restart it before processing the next message response!
         import utils.local_llm_manager as llm_mgr
         import asyncio
         if llm_mgr.get_vram_paused():
@@ -1602,22 +1620,13 @@ class OpenSourceRunner(BaseProgramRunner):
                 else:
                     prefix = "usr_"
             
-            if prefix in ("usr_", "prgm_"):
-                # Only auto-restart if we CANNOT offload to the remote cloud
-                remote_key = os.getenv("REMOTE_API_KEY")
-                remote_cloud_url = os.getenv("REMOTE_CLOUD_URL")
-                is_remote_configured = bool(
-                    remote_key and remote_key.strip() and remote_key != "your_remote_api_key_here" and
-                    remote_cloud_url and remote_cloud_url.strip() and remote_cloud_url != "your_remote_cloud_url_here"
-                )
-                if not is_remote_configured:
-                    print(f"[VRAM GUARD] Restarting Local LLM server for the next message (prefix: {prefix}) because remote cloud is not configured...", flush=True)
-                    llm_mgr.set_vram_paused(False)
-                    try:
-                        from utils.local_llm_manager import start_server
-                        await asyncio.to_thread(start_server)
-                    except Exception as e_start:
-                        print(f"[VRAM GUARD] Error auto-starting local server: {e_start}", flush=True)
+            print(f"[VRAM GUARD] Restarting Local LLM server for the next message (prefix: {prefix}) before processing response...", flush=True)
+            llm_mgr.set_vram_paused(False)
+            try:
+                from utils.local_llm_manager import start_server
+                await asyncio.to_thread(start_server)
+            except Exception as e_start:
+                print(f"[VRAM GUARD] Error auto-starting local server: {e_start}", flush=True)
 
         if session_id not in self.sessions_history:
             self._load_session_from_disk(session_id)
