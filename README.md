@@ -50,7 +50,7 @@ These are the things your companion can do on your computer. By default, before 
 * **Read URL** (`read_webpage`): Fetch and extract text content from any webpage.
 
 ### Generative Media (Local & Cloud)
-* **Render Portrait** (`generate_local_image`): Render yourself in a scene using ComfyUI.
+* **Render Portrait** (`generate_local_image`): Render companion in a scene using ComfyUI. Triggered natively by the companion or via the chat interface button.
 * **Render Concept** (`generate_imagen`): Render landscapes, diagrams, or objects using Google Imagen.
 * **Comfy Workflow** (`apply_comfy_workflow`): Run custom workflows against a local ComfyUI API.
 ---
