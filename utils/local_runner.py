@@ -150,9 +150,20 @@ def stop_local_server():
 
 def check_local_server_status():
     try:
-        return requests.get("http://127.0.0.1:1234/health", timeout=0.2).status_code == 200
+        if requests.get("http://127.0.0.1:1234/health", timeout=0.2).status_code == 200:
+            return True
     except Exception:
-        return False
+        pass
+
+    import psutil
+    for proc in psutil.process_iter(['name']):
+        try:
+            if "llama-server" in proc.info['name'].lower():
+                return "starting"
+        except Exception:
+            pass
+            
+    return False
 
 def _atexit_clean():
     # If Flask reloader is active, let the parent process handle cleanup on Ctrl+C
