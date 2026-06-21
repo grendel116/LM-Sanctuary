@@ -34,6 +34,19 @@ def init_runner():
     runner = OpenSourceRunner(app_name="Sanctuary")
     print(">>> Starting Sanctuary using decoupled OPEN-SOURCE Runner backend!")
 
+import threading
+_prewarm_started = False
+_prewarm_lock = threading.Lock()
+
+@app.before_request
+def start_prewarm_on_first_request():
+    global _prewarm_started
+    if not _prewarm_started:
+        with _prewarm_lock:
+            if not _prewarm_started:
+                _prewarm_started = True
+                threading.Thread(target=prewarm_caches, daemon=True).start()
+
 @app.before_request
 def check_program_change():
     global _cached_active_program, _cached_active_user
@@ -3612,10 +3625,7 @@ def comfy_checkpoint_download_status():
     return jsonify(checkpoint_download_status)
 
 
-# Start prewarming in a background daemon thread now that everything is fully defined
-if not app.debug or os.environ.get('WERKZEUG_RUN_MAIN') == 'true':
-    import threading
-    threading.Thread(target=prewarm_caches, daemon=True).start()
+# Prewarming is now handled on the first request inside start_prewarm_on_first_request()
 
 if __name__ == '__main__':
     host = os.getenv('HOST', '0.0.0.0')

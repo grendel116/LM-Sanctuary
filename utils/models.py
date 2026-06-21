@@ -33,7 +33,10 @@ def fetch_local_models(force_refresh=False) -> list:
             _last_fetch_time = now
             return local_models
     except Exception as e:
-        print(f"[Local LLM] Native models listing offline: {e}")
+        if isinstance(e, (requests.exceptions.ConnectionError, requests.exceptions.Timeout)):
+            print("[Local LLM] Native models listing offline (Server is not running or unreachable)")
+        else:
+            print(f"[Local LLM] Native models listing offline: {e}")
 
     # Fallback to standard OpenAI compatibility endpoint /v1/models
     try:
@@ -56,7 +59,10 @@ def fetch_local_models(force_refresh=False) -> list:
         return local_models
     except Exception as e:
         # Gracefully handle offline Local LLM server
-        print(f"[Local LLM] Offline or unreachable at {LOCAL_MODELS_URL}: {e}")
+        if isinstance(e, (requests.exceptions.ConnectionError, requests.exceptions.Timeout)):
+            print(f"[Local LLM] Offline or unreachable at {LOCAL_MODELS_URL} (Server is not running or unreachable)")
+        else:
+            print(f"[Local LLM] Offline or unreachable at {LOCAL_MODELS_URL}: {e}")
         _local_models_cache = []
         _last_fetch_time = now
         return []
