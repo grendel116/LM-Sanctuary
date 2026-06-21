@@ -117,9 +117,15 @@ def prewarm_caches():
 
     try:
         # Stop any existing ComfyUI server to free VRAM for Local LLM startup
-        from utils.comfy_manager import stop_comfy_server
+        from utils.comfy_manager import stop_comfy_server, check_comfy_running
         print(">>> Stopping any existing ComfyUI server to free VRAM...")
         stop_comfy_server()
+        # Wait up to ten seconds for ComfyUI to stop and release GPU resources
+        for _ in range(10):
+            if not check_comfy_running():
+                break
+            time.sleep(1.0)
+        time.sleep(3.0)
     except Exception as e:
         print(f"Error stopping existing ComfyUI server: {e}")
 
