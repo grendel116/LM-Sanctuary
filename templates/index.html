@@ -10838,7 +10838,7 @@ async function regenerateImage(buttonElement, oldImageUrl, prompt) {
                                 let excl = avatarContainer.querySelector('.activity-exclamation');
                                 const currentToolsStr = (data.active_tools || []).join(',');
                                 
-
+                                if (data.active_tools && data.active_tools.length > 0) {
                                     const isNewCall = currentToolsStr !== lastActiveToolsStr;
                                     lastActiveToolsStr = currentToolsStr;
                                     
