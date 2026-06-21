@@ -1965,7 +1965,7 @@ class OpenSourceRunner(BaseProgramRunner):
                 
             return modified or file_deleted
 
-    async def replace_image_in_session(self, session_id: str, old_image_url: str, new_image_url: str) -> bool:
+    async def replace_image_in_session(self, session_id: str, old_image_url: str, new_image_url: str, new_prompt: str = None) -> bool:
         with self._lock:
             if session_id not in self.sessions_history:
                 self._load_session_from_disk(session_id)
@@ -1983,10 +1983,21 @@ class OpenSourceRunner(BaseProgramRunner):
                     msg['image_url'] = new_image_url
                     modified = True
                 if msg.get('tool_calls'):
+                    call_ids_to_update = set()
                     for tc in msg['tool_calls']:
                         if tc.get('type') == 'response' and tc.get('response') and old_image_url in tc['response']:
                             tc['response'] = tc['response'].replace(old_image_url, new_image_url)
                             modified = True
+                            if tc.get('id'):
+                                call_ids_to_update.add(tc['id'])
+                                
+                    if new_prompt and call_ids_to_update:
+                        for tc in msg['tool_calls']:
+                            if tc.get('type') == 'call' and tc.get('id') in call_ids_to_update:
+                                if not tc.get('args'):
+                                    tc['args'] = {}
+                                tc['args']['prompt'] = new_prompt
+                                modified = True
                     
             # Clean up the old image file from the server's local disk
             self._delete_local_image(old_image_url)

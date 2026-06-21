@@ -22,7 +22,7 @@
     "body": "slim"
   },
   "image details": {
-    "image details": "translucent fairy wings, realistic skin texture, 8k, simple forms, soft focus, (gorgeous:0.7), (plump:0.7), straight hair, big lips, saggy breasts, slim legs, dark background",
-    "negative details": "hair up, old, anime, wrinkles, muscular, washed out, sepia, muted, logo, signature, dark skin, watermark, pov, selfie, bangs, overexposed, oversaturated"
+    "image details": "translucent fairy wings, realistic skin texture, simple forms, (gorgeous:0.7), (plump:0.7), straight hair, big lips, saggy breasts, slim legs, dark background",
+    "negative details": "hair up, old, wrinkles, muscular, washed out, sepia, muted, logo, signature, dark skin, watermark, pov, selfie, bangs, overexposed, anime"
   }
 }
