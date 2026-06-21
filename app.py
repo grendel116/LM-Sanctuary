@@ -1238,7 +1238,7 @@ def regenerate_image():
             return jsonify({'error': f'Failed to parse generated image markdown: {new_markdown}'}), 500
             
         # Replace in session history
-        success = asyncio.run(runner.replace_image_in_session(session_id, old_image_url, new_image_url))
+        success = asyncio.run(runner.replace_image_in_session(session_id, old_image_url, new_image_url, new_prompt=prompt))
         if success:
             return jsonify({
                 'status': 'success',

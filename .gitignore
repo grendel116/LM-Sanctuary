@@ -38,8 +38,6 @@ core/programs/*/journals.json
 core/programs/*/memories.json
 core/embeddings.pkl
 temp_uploads/
-**/ImageWorkflow.json
-**/VideoWorkflow.json
 
 
 # TTS Speech Model weights and synthesized audio cache
