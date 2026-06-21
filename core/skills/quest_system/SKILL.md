@@ -1,6 +1,6 @@
 ---
 name: quest_system
-description: Frame local resources, business meetings, appointments, and chores as game-like quests.
+description: Frame local resources, business meetings, appointments, and chores as game-like quests, allowing exporting to ICS calendar files.
 ---
 # SKILL: The Companion Quest System
 Coordinate schedule/appointments:
