@@ -1548,17 +1548,8 @@ def get_models():
         remote_cloud_url and remote_cloud_url.strip() and remote_cloud_url != "your_remote_cloud_url_here"
     )
     
-    import tools
-    has_active_img_tool = False
-    if hasattr(tools, 'active_running_tools'):
-        for t_name in list(tools.active_running_tools.keys()):
-            if any(x in t_name for x in ('portrait', 'image', 'video', 'generate')):
-                has_active_img_tool = True
-                break
-
     from utils.local_llm_manager import check_status, check_installed
-    import utils.local_llm_manager as llm_mgr
-    is_local_online = "paused" if (llm_mgr.get_vram_paused() or has_active_img_tool) else check_status()
+    is_local_online = check_status()
     
     # 1. Fetch dynamic local models (only actively loaded models in Local LLM server)
     models = fetch_local_models()

@@ -2192,11 +2192,7 @@
             color: #86efac;
             border: 1px solid rgba(34, 197, 94, 0.25);
         }
-        .status-paused {
-            background: rgba(245, 158, 11, 0.12);
-            color: #fbd38d;
-            border: 1px solid rgba(245, 158, 11, 0.3);
-        }
+
         .option-desc {
             margin: 0 0 12px 0;
             font-size: 0.78rem;
@@ -4557,9 +4553,7 @@ async function initializeModelSelect() {
                     if (availableModels.length === 0) {
                         const opt = document.createElement('option');
                         opt.value = 'local-llm';
-                        if (data.status && data.status.local_online === 'paused') {
-                            opt.textContent = 'Local Model (Paused)';
-                        } else if (data.status && data.status.local_online) {
+                        if (data.status && data.status.local_online) {
                             opt.textContent = 'Local Model (No Model Loaded)';
                         } else {
                             opt.textContent = 'Local Model (Disconnected)';
@@ -4617,21 +4611,7 @@ function showOnboardingCard() {
 
             // Build local LLM onboarding card section based on engine state
             let localContent = '';
-            if (connectionStatus.local_online === 'paused') {
-                localContent = `
-                    <p class="option-desc" style="font-size: 0.8rem; margin: 8px 0 15px 0;">Local LLM engine is temporarily paused to free VRAM for ComfyUI generation. It will resume automatically.</p>
-                    <button onclick="checkOnboardingStatus()" class="onboarding-btn" style="width: 100%; font-size: 0.85rem; padding: 10px; margin-bottom: 15px;">Refresh Connection</button>
-                    
-                    <div style="border-top: 1px solid var(--border-color); padding-top: 15px;">
-                        <label style="font-size: 0.72rem; color: var(--text-muted); font-weight: 500;">Search Hugging Face (GGUF)</label>
-                        <div style="display: flex; gap: 8px; margin-top: 5px;">
-                            <input type="text" id="hf-search-input" placeholder="e.g. qwen2.5-0.5b" class="onboarding-input" style="flex: 1; font-size: 0.8rem; padding: 6px;" onkeydown="if(event.key==='Enter') searchHFModels('hf-search-input', 'hf-search-results')">
-                            <button onclick="searchHFModels('hf-search-input', 'hf-search-results')" class="onboarding-btn" style="margin: 0; padding: 0 15px; font-size: 0.8rem;">Search</button>
-                        </div>
-                        <div id="hf-search-results" style="margin-top: 10px; max-height: 150px; overflow-y: auto; font-size: 0.8rem; display: flex; flex-direction: column; gap: 6px;"></div>
-                    </div>
-                `;
-            } else if (!connectionStatus.local_online) {
+            if (!connectionStatus.local_online) {
                 localContent = `
                     <p class="option-desc" style="font-size: 0.8rem; margin: 8px 0 15px 0;">Local LLM engine is offline. Start the server or search Hugging Face below to download a GGUF model.</p>
                     <button onclick="startLocalLLM(this)" class="onboarding-btn connect-cloud-btn" style="width: 100%; font-size: 0.85rem; padding: 10px; margin-bottom: 15px;">Start Server</button>
@@ -4705,8 +4685,8 @@ function showOnboardingCard() {
                     <div class="onboarding-option-box local-box">
                         <div class="option-header">
                             <h3>Local LLM</h3>
-                            <span id="onboarding-local-status" class="status-badge ${connectionStatus.local_online === 'paused' ? 'status-paused' : (connectionStatus.local_online ? 'status-online' : 'status-offline')}">
-                                ${connectionStatus.local_online === 'paused' ? 'Paused' : (connectionStatus.local_online ? 'Online' : 'Offline')}
+                            <span id="onboarding-local-status" class="status-badge ${connectionStatus.local_online ? 'status-online' : 'status-offline'}">
+                                ${connectionStatus.local_online ? 'Online' : 'Offline'}
                             </span>
                         </div>
                         ${localContent}
@@ -5700,10 +5680,7 @@ function updateConnectionStatus(status) {
             // Update Local LLM badges
             localLLMBadges.forEach(badge => {
                 if (!badge) return;
-                if (status.local_online === "paused") {
-                    badge.textContent = "Paused";
-                    badge.className = "status-badge status-paused";
-                } else if (status.local_online) {
+                if (status.local_online) {
                     badge.textContent = "Online";
                     badge.className = "status-badge status-online";
                 } else {
@@ -5765,11 +5742,7 @@ function updateConnectionStatus(status) {
                 const startBtn = document.getElementById('modal-local-start-btn');
                 const stopBtn = document.getElementById('modal-local-stop-btn');
                 
-                if (connectionStatus.local_online === "paused") {
-                    if (localDesc) localDesc.textContent = "Local LLM engine is temporarily paused to free VRAM for ComfyUI generation. It will resume automatically.";
-                    if (startBtn) startBtn.style.display = 'none';
-                    if (stopBtn) stopBtn.style.display = 'block';
-                } else if (!connectionStatus.local_online) {
+                if (!connectionStatus.local_online) {
                     if (localDesc) localDesc.textContent = "Local LLM engine is offline. Start the server or search Hugging Face below to download a GGUF model.";
                     if (startBtn) startBtn.style.display = 'block';
                     if (stopBtn) stopBtn.style.display = 'none';
@@ -10307,10 +10280,7 @@ function handleSwipeGesture() {
         async function generatePortraitPrompt() {
             if (isGenerating) return;
             
-            // Set state to paused immediately
-            connectionStatus.local_online = 'paused';
-            updateConnectionModalStatus();
-            initializeModelSelect();
+
             
             hasApprovedToolThisTurn = false;
             setGenerating(true);
@@ -10457,10 +10427,7 @@ function handleSwipeGesture() {
 
         // --- regenerateImage ---
 async function regenerateImage(buttonElement, oldImageUrl, prompt) {
-            // Set state to paused immediately
-            connectionStatus.local_online = 'paused';
-            updateConnectionModalStatus();
-            initializeModelSelect();
+
             try {
                 const container = buttonElement.closest('.message-image-container');
                 if (!container) {
@@ -10787,10 +10754,7 @@ async function regenerateImage(buttonElement, oldImageUrl, prompt) {
 
         // --- animateImage ---
         async function animateImage(buttonElement, oldImageUrl, motionPrompt) {
-            // Set state to paused immediately
-            connectionStatus.local_online = 'paused';
-            updateConnectionModalStatus();
-            initializeModelSelect();
+
             try {
                 const container = buttonElement.closest('.message-image-container');
                 if (!container) {
@@ -10874,13 +10838,7 @@ async function regenerateImage(buttonElement, oldImageUrl, prompt) {
                                 let excl = avatarContainer.querySelector('.activity-exclamation');
                                 const currentToolsStr = (data.active_tools || []).join(',');
                                 
-                                if (data.active_tools && data.active_tools.length > 0) {
-                                    const hasImgTool = data.active_tools.some(t => t.includes('portrait') || t.includes('image') || t.includes('video') || t.includes('generate'));
-                                    if (hasImgTool && connectionStatus.local_online !== 'paused') {
-                                        connectionStatus.local_online = 'paused';
-                                        updateConnectionModalStatus();
-                                        await initializeModelSelect();
-                                    }
+
                                     const isNewCall = currentToolsStr !== lastActiveToolsStr;
                                     lastActiveToolsStr = currentToolsStr;
                                     
