@@ -50,5 +50,5 @@ core/skills/speech_generation/speech_cache/
 comfy_server.log
 
 # Workflow Configs
-imageworkflow.json
-videoworkflow.json
+ImageWorkflow.json
+VideoWorkflow.json
