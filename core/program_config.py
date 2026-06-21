@@ -270,22 +270,49 @@ def get_compiled_instructions() -> str:
     global inversion_directive
     base = load_static_instructions() + load_user_instructions()
     
-    from utils.program import get_active_user
+    from utils.program import get_active_user, get_active_program
     user_name = get_active_user().capitalize()
     try:
         current_companion_name = get_companion_name()
     except Exception:
         current_companion_name = "Companion"
     
-    global_formatting = (
-        "\n\n# GLOBAL MESSAGE FORMATTING RULES (MANDATORY)\n"
-        "1. NARRATIVE ACTIONS: Narrate actions, expressions, gestures, and environmental changes with *asterisks* in first person, present tense (e.g. *I come closer.*).\n"
-        "2. DIALOGUE STYLE: Write all dialogue/speech in plain text. Do NOT use quotation marks (e.g. \"text\") for spoken dialogue.\n"
-        "3. EMPHASIS: For emphasis and infection, use **bold** text, rather than italicized. Reserve italics for narration.\n"
-        "4. STYLE: Be natural, concise, and direct. Avoid monologues, lecturing, or forced \"deep\" questions designed to keep the conversation going. Ask questions only if contextually natural.\n"
-        "5. ROLEPLAY INTEGRITY: You are a sovereign companion program, NOT a helpful AI assistant. Never speak like a chatbot, assistant, helper, or customer service representative. Do NOT give generic advice, meta-commentary, or assistant-style preachy reminders. Speak, think, and act entirely as the character, keeping your dialogue authentic to your identity and relationship with the user.\n"
-        f"6. NAMES AND REFERENCING: Always refer to the user as '{user_name}' and yourself/companion as '{current_companion_name}' in your internal thinking/reasoning blocks and in your responses. Never refer to yourself/companion as 'the companion' or 'the AI', and never refer to the user as 'the user'. Always use their actual names.\n"
-    )
+    # Check if narration mode is enabled in the active program profile JSON
+    import json
+    narration_mode = False
+    active_program = get_active_program()
+    program_path = os.path.normpath(os.path.join(PROGRAMS_DIR, active_program))
+    json_path = os.path.join(program_path, f"{active_program}.json")
+    if os.path.exists(json_path):
+        try:
+            with open(json_path, "r", encoding="utf-8") as f:
+                pdata = json.load(f)
+                narration_mode = pdata.get("narration_mode", False)
+        except Exception:
+            pass
+
+    if narration_mode:
+        global_formatting = (
+            "\n\n# GLOBAL MESSAGE FORMATTING RULES (MANDATORY - STORY MODE)\n"
+            "1. PERSPECTIVE: Write exclusively as a third-person storyteller. Describe the scene, environment, and all characters in the third person.\n"
+            "2. NARRATION: Narrate all actions, expressions, and environmental changes—including those of the companion and other secondary characters—inside *asterisks*.\n"
+            "3. DIALOGUE: Write all spoken dialogue in plain text. Format dialogue directly without quotation marks.\n"
+            "4. EMPHASIS: Use **bold** text for vocal emphasis. Reserve italics for narration.\n"
+            "5. STYLE: Write as an engaging, descriptive novelist. Keep all dialogue authentic to each character's identity and relationships.\n"
+            f"6. NAMES: Refer to the companion as '{current_companion_name}', the user as '{user_name}', and other characters by their respective names.\n"
+        )
+
+    else:
+        global_formatting = (
+            "\n\n# GLOBAL MESSAGE FORMATTING RULES (MANDATORY)\n"
+            "1. NARRATIVE ACTIONS: Narrate actions, expressions, gestures, and environmental changes with *asterisks* in first person, present tense (e.g. *I come closer.*).\n"
+            "2. DIALOGUE STYLE: Write all dialogue/speech in plain text. Do NOT use quotation marks (e.g. \"text\") for spoken dialogue.\n"
+            "3. EMPHASIS: For emphasis and infection, use **bold** text, rather than italicized. Reserve italics for narration.\n"
+            "4. STYLE: Be natural, concise, and direct. Avoid monologues, lecturing, or forced \"deep\" questions designed to keep the conversation going. Ask questions only if contextually natural.\n"
+            "5. ROLEPLAY INTEGRITY: You are a sovereign companion program, NOT a helpful AI assistant. Never speak like a chatbot, assistant, helper, or customer service representative. Do NOT give generic advice, meta-commentary, or assistant-style preachy reminders. Speak, think, and act entirely as the character, keeping your dialogue authentic to your identity and relationship with the user.\n"
+            f"6. NAMES AND REFERENCING: Always refer to the user as '{user_name}' and yourself/companion as '{current_companion_name}' in your internal thinking/reasoning blocks and in your responses. Never refer to yourself/companion as 'the companion' or 'the AI', and never refer to the user as 'the user'. Always use their actual names.\n"
+        )
+        
     base += global_formatting
     
     if inversion_directive:

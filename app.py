@@ -253,28 +253,28 @@ def profile_png():
     path_png = os.path.join('core', 'programs', active_program, 'portraits', 'profile.png')
     if os.path.exists(path_png):
         response = send_file(path_png)
+        from flask import make_response
+        res = make_response(response)
+        res.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+        return res
     else:
-        response = send_file('images/app_icon.png')
-        
-    from flask import make_response
-    res = make_response(response)
-    res.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
-    return res
+        return "Profile image not found", 404
+
 
 @app.route('/programs/<program_id>/profile.png')
 def program_profile_png(program_id):
-    if not program_id.isalnum() and '_' not in program_id:
+    import re
+    if not re.match(r'^[a-zA-Z0-9_\-]+$', program_id):
         return "Invalid program ID", 400
     path_png = os.path.join('core', 'programs', program_id, 'portraits', 'profile.png')
     if os.path.exists(path_png):
         response = send_file(path_png)
+        from flask import make_response
+        res = make_response(response)
+        res.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+        return res
     else:
-        response = send_file('images/app_icon.png')
-        
-    from flask import make_response
-    res = make_response(response)
-    res.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
-    return res
+        return "Profile image not found", 404
 
 
 
@@ -2241,10 +2241,30 @@ def list_programs():
                             if file.lower().endswith('.md') and not file.lower().startswith('user'):
                                 companion_name = os.path.splitext(file)[0].title()
                                 break
+                    # Read theme color from theme.json
+                    theme_color = "#38bdf8"
+                    theme_path = os.path.join(folder_path, "theme.json")
+                    if os.path.exists(theme_path):
+                        try:
+                            import json
+                            with open(theme_path, "r", encoding="utf-8") as tf:
+                                tdata = json.load(tf)
+                                theme_color = tdata.get("primary_accent") or tdata.get("main_color") or theme_color
+                        except Exception:
+                            pass
+                            
+                    # Check if portraits/profile.png exists
+                    has_profile = False
+                    profile_path = os.path.join(folder_path, "portraits", "profile.png")
+                    if os.path.exists(profile_path):
+                        has_profile = True
+                        
                     programs.append({
                         'id': folder,
                         'name': companion_name,
-                        'active': folder == active_program
+                        'active': folder == active_program,
+                        'theme_color': theme_color,
+                        'has_profile': has_profile
                     })
         return jsonify({'programs': programs, 'active': active_program})
     except Exception as e:
@@ -2296,8 +2316,19 @@ def select_program():
             except Exception as e:
                 print(f"Error loading theme for {program_id} in select_program: {e}")
 
+        has_profile = False
+        profile_path = os.path.join(program_path, "portraits", "profile.png")
+        if os.path.exists(profile_path):
+            has_profile = True
+
         from core.program_config import companion_name
-        return jsonify({'status': 'success', 'active': program_id, 'character_name': companion_name, 'theme': theme})
+        return jsonify({
+            'status': 'success',
+            'active': program_id,
+            'character_name': companion_name,
+            'theme': theme,
+            'has_profile': has_profile
+        })
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -2390,6 +2421,146 @@ def delete_program():
         shutil.rmtree(program_path)
         
         return jsonify({'status': 'success', 'switched_to': 'sebile' if program_id == active_program else None})
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/programs/rename', methods=['POST'])
+@requires_auth
+def rename_program():
+    try:
+        data = request.get_json(silent=True) or {}
+        program_id = data.get('program_id')
+        new_name = data.get('new_name', '').strip()
+        
+        if not program_id or not new_name:
+            return jsonify({'error': 'Missing program_id or new_name'}), 400
+            
+        import re
+        import shutil
+        import importlib
+        
+        if not re.match(r'^[a-zA-Z0-9_\-]+$', program_id):
+            return jsonify({'error': 'Invalid program_id'}), 400
+            
+        new_id = re.sub(r'[^a-zA-Z0-9_]', '', new_name).lower()
+        if not new_id:
+            return jsonify({'error': 'Invalid new name (must contain letters, numbers, or underscores)'}), 400
+            
+        from variables import PROGRAMS_DIR
+        old_path = os.path.normpath(os.path.join(PROGRAMS_DIR, program_id))
+        new_path = os.path.normpath(os.path.join(PROGRAMS_DIR, new_id))
+        
+        if not os.path.exists(old_path):
+            return jsonify({'error': f"Program '{program_id}' does not exist"}), 404
+            
+        # If the program is sebile, we keep the folder/id as 'sebile' but update the name in sebile.json
+        if program_id == 'sebile':
+            json_path = os.path.join(old_path, "sebile.json")
+            if os.path.exists(json_path):
+                try:
+                    import json
+                    with open(json_path, "r", encoding="utf-8") as f:
+                        jdata = json.load(f)
+                    jdata["name"] = new_name
+                    with open(json_path, "w", encoding="utf-8") as f:
+                        json.dump(jdata, f, indent=2, ensure_ascii=False)
+                except Exception as e:
+                    print(f"Error updating Sebile JSON: {e}")
+            
+            # Reload configuration
+            from core import program_config
+            importlib.reload(program_config)
+            init_runner()
+            runner.sessions_history.clear()
+            
+            active_program = os.getenv("ACTIVE_PROGRAM", "sebile")
+            return jsonify({
+                'status': 'success',
+                'new_id': 'sebile',
+                'was_active': (active_program == 'sebile')
+            })
+            
+        # If new_id is different from program_id, perform folder rename
+        if new_id != program_id:
+            if os.path.exists(new_path):
+                return jsonify({'error': f"A companion folder named '{new_id}' already exists"}), 400
+                
+            # Perform directory rename
+            shutil.move(old_path, new_path)
+            
+            # Inside the new directory, rename the json file: old_id.json -> new_id.json
+            old_json = os.path.join(new_path, f"{program_id}.json")
+            new_json = os.path.join(new_path, f"{new_id}.json")
+            if os.path.exists(old_json):
+                shutil.move(old_json, new_json)
+                
+            # Also update "program_id" inside the json file
+            import json
+            if os.path.exists(new_json):
+                try:
+                    with open(new_json, "r", encoding="utf-8") as f:
+                        jdata = json.load(f)
+                    jdata["program_id"] = new_id
+                    jdata["name"] = new_name
+                    with open(new_json, "w", encoding="utf-8") as f:
+                        json.dump(jdata, f, indent=2, ensure_ascii=False)
+                except Exception as e:
+                    print(f"Error updating JSON after rename: {e}")
+                    
+            # Check if active program
+            active_program = os.getenv("ACTIVE_PROGRAM", "sebile")
+            was_active = (program_id == active_program)
+            
+            # Update settings (active_program, folders, companion_voices)
+            from utils.program import _load_settings, _save_settings
+            settings = _load_settings()
+            
+            if was_active:
+                os.environ["ACTIVE_PROGRAM"] = new_id
+                settings["active_program"] = new_id
+                settings["folders"] = [new_path]
+                
+            if "companion_voices" in settings:
+                if program_id in settings["companion_voices"]:
+                    settings["companion_voices"][new_id] = settings["companion_voices"].pop(program_id)
+                    
+            _save_settings(settings)
+            
+            # Reload configuration
+            from core import program_config
+            importlib.reload(program_config)
+            init_runner()
+            runner.sessions_history.clear()
+            
+            return jsonify({
+                'status': 'success',
+                'new_id': new_id,
+                'was_active': was_active
+            })
+        else:
+            # ID is the same, no directory rename needed
+            json_path = os.path.join(old_path, f"{program_id}.json")
+            if os.path.exists(json_path):
+                try:
+                    import json
+                    with open(json_path, "r", encoding="utf-8") as f:
+                        jdata = json.load(f)
+                    jdata["name"] = new_name
+                    with open(json_path, "w", encoding="utf-8") as f:
+                        json.dump(jdata, f, indent=2, ensure_ascii=False)
+                except Exception as e:
+                    print(f"Error updating JSON name: {e}")
+                    
+            active_program = os.getenv("ACTIVE_PROGRAM", "sebile")
+            return jsonify({
+                'status': 'success',
+                'new_id': program_id,
+                'was_active': (program_id == active_program)
+            })
+            
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -2880,9 +3051,7 @@ Output a single JSON object matching this exact schema:
     "negative details": "blurry, low quality, distorted, extra limbs, bad anatomy"
   }},
   "colors": {{
-    "main_color": "#XXXXXX (Harmonious hex color representing them)",
-    "accent_color_a": "#XXXXXX (Secondary accent theme color)",
-    "accent_color_b": "#XXXXXX (Highlight color)"
+    "main_color": "#XXXXXX (Harmonious hex color representing them)"
   }},
   "inversion": {{
     "intimate": "Direct instruction on how they behave when intimate/warm",
@@ -2980,10 +3149,8 @@ Output a single JSON object matching this exact schema:
             "image details": parsed.get("image details", {}).get("image details") or "realistic, photorealistic, 8k",
             "negative details": parsed.get("image details", {}).get("negative details") or "blurry, low quality"
         },
-        "colors": parsed.get("colors") or {
-            "main_color": "#38bdf8",
-            "accent_color_a": "#cbd5e1",
-            "accent_color_b": "#94a3b8"
+        "colors": {
+            "main_color": parsed.get("colors", {}).get("main_color", "#38bdf8") if isinstance(parsed.get("colors"), dict) else "#38bdf8"
         },
         "inversion": parsed.get("inversion") or {
             "intimate": f"{name} is now a deeply affectionate, tender, and protective companion.",
@@ -3099,12 +3266,12 @@ def import_tavern_program():
         # Write theme variables
         colors = card_json.pop("colors")
         main_color = colors.get("main_color", "#38bdf8")
-        accent_a = colors.get("accent_color_a", "#cbd5e1")
-        accent_b = colors.get("accent_color_b", "#94a3b8")
+        accent_a = None
+        accent_b = None
         
 
             
-        theme_data = generate_character_theme(main_color, accent_a, accent_b)
+        theme_data = generate_character_theme(main_color)
         with open(os.path.join(program_path, 'theme.json'), "w", encoding="utf-8") as tf:
             json.dump(theme_data, tf, indent=2, ensure_ascii=False)
             
@@ -3159,12 +3326,12 @@ def import_describe_program():
         # Write theme variables
         colors = card_json.pop("colors")
         main_color = colors.get("main_color", "#38bdf8")
-        accent_a = colors.get("accent_color_a", "#cbd5e1")
-        accent_b = colors.get("accent_color_b", "#94a3b8")
+        accent_a = None
+        accent_b = None
         
 
             
-        theme_data = generate_character_theme(main_color, accent_a, accent_b)
+        theme_data = generate_character_theme(main_color)
         with open(os.path.join(program_path, 'theme.json'), "w", encoding="utf-8") as tf:
             json.dump(theme_data, tf, indent=2, ensure_ascii=False)
             
