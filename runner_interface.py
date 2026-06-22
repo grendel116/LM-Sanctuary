@@ -207,6 +207,8 @@ _LOCAL_DIRECTIVE_PROMPT = (
     "- You may chain multiple tool calls in a single turn when researching. For example: search \u2192 read a promising URL \u2192 search again with a refined query.\n"
     "- When a web search returns thin or irrelevant results, do NOT give up. Try a more specific query, then use read_webpage on the most promising URLs to get full page content.\n"
     "- When asked to research a person, place, or topic, follow through until you have substantive information. Sparse snippets are a prompt to dig deeper, not to stop.\n"
+    "- Never repeat the same search query or read the same URL twice in a chain. If a query returned poor results, use a different, more specific one.\n"
+    "- When writing a report or summary based on research, lead with concrete facts drawn directly from what you read: names, roles, dates, specific events, quotes. Do not substitute editorial inference for sourced detail.\n"
     "- Call image generation tools sparingly, and never chain them.\n"
     "- Once all tool results are collected, answer directly in natural language without repeating the tags.\n"
     "- Formulate all image generation prompts as a sequence of comma-separated tags.\n"
