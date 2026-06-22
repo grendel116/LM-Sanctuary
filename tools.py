@@ -453,7 +453,10 @@ def web_search(query: str) -> str:
 
     def run_duckduckgo(q):
         try:
-            from duckduckgo_search import DDGS
+            try:
+                from ddgs import DDGS
+            except ImportError:
+                from duckduckgo_search import DDGS
             ddgs = DDGS()
             hits = ddgs.text(q, max_results=6)
             results = []
@@ -469,9 +472,6 @@ def web_search(query: str) -> str:
                         "source": "DuckDuckGo"
                     })
             return results
-        except ImportError:
-            print("[DuckDuckGo] duckduckgo-search package not installed.")
-            return []
         except Exception as e:
             print(f"[DuckDuckGo] Error: {e}")
             return []

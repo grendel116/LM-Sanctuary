@@ -12,4 +12,4 @@ pyopenssl
 psutil
 markdownify
 pypdf
-duckduckgo-search
+ddgs
