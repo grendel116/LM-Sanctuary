@@ -1234,15 +1234,8 @@ def generate_local_image(prompt: str) -> str:
             "%appearance%": appearance_val,
             "%negative_prompt%": final_negative,
             "%seed%": seed_val,
-            "%steps%": 25,
-            "%scale%": 7.0,
-            "%sampler%": "euler",
-            "%scheduler%": "normal",
             "%model%": selected_checkpoint,
-            "%vae%": selected_vae,
-            "%width%": 832,
-            "%height%": 1216,
-            "%denoise%": 0.55
+            "%vae%": selected_vae
         }
 
         timestamp = int(time.time())

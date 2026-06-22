@@ -204,7 +204,7 @@ def is_real_user_msg(msg: dict) -> bool:
     if msg_id:
         if msg_id.startswith('tool_') or msg_id.startswith('port_') or msg_id.startswith('quest_') or msg_id.startswith('sys_'):
             return False
-        if msg_id.startswith('usr_'):
+        if msg_id.startswith('usr_') or msg_id.startswith('img_'):
             return True
     text = msg.get('text', '')
     if text.startswith('[Tool Response') or text.startswith('[SYSTEM:') or "Send me a portrait of yourself" in text:
@@ -539,8 +539,10 @@ class OsHistoryAdapter(LocalHistoryAdapter):
             return history[-1]
             
         import uuid
+        is_img_msg = text and text.strip().startswith("![") and text.strip().endswith(")")
+        prefix = "img_" if is_img_msg else "prgm_"
         bot_msg = {
-            'id': f"prgm_{uuid.uuid4().hex}",
+            'id': f"{prefix}{uuid.uuid4().hex}",
             'role': 'companion',
             'text': text,
             'tool_calls': tool_calls_data,
@@ -1645,6 +1647,8 @@ class OpenSourceRunner(BaseProgramRunner):
                 prefix = "port_"
             elif new_message_text.startswith("[Tool Response from"):
                 prefix = "tool_"
+            elif (media_path or image_data) and (not new_message_text or not new_message_text.strip()):
+                prefix = "img_"
             else:
                 prefix = "usr_"
             user_msg_id = f"{prefix}{uuid.uuid4().hex}"
@@ -1966,11 +1970,18 @@ class OpenSourceRunner(BaseProgramRunner):
                     has_image = True
                     import re
                     pattern = r'!\[[^\]]*\]\(' + re.escape(image_url) + r'\)'
-                    msg['text'] = re.sub(pattern, '[Portrait Deleted]', msg['text'])
+                    remaining_text = re.sub(pattern, '', msg['text']).strip()
+                    clean_remaining = re.sub(r'^[:\s\-\*]+|[:\s\-\*]+$', '', remaining_text)
+                    if not clean_remaining:
+                        indices_to_delete.append(i)
+                    else:
+                        msg['text'] = remaining_text
                     modified = True
                 if msg.get('image_url') == image_url:
                     has_image = True
                     msg['image_url'] = None
+                    if not msg.get('text') or not msg['text'].strip():
+                        indices_to_delete.append(i)
                     modified = True
                 if msg.get('tool_calls'):
                     for tc in msg['tool_calls']:
@@ -1978,8 +1989,18 @@ class OpenSourceRunner(BaseProgramRunner):
                             has_image = True
                             import re
                             pattern = r'!\[[^\]]*\]\(' + re.escape(image_url) + r'\)'
-                            tc['response'] = re.sub(pattern, '[Portrait Deleted]', tc['response'])
+                            tc['response'] = re.sub(pattern, '', tc['response']).strip()
                             modified = True
+                    
+                    # If all tool responses in this message are empty, and there is no text, delete the message
+                    all_calls_empty = True
+                    for tc in msg['tool_calls']:
+                        if tc.get('type') == 'response' and tc.get('response') and tc['response'].strip():
+                            all_calls_empty = False
+                            break
+                    if all_calls_empty:
+                        if not msg.get('text') or not msg['text'].strip():
+                            indices_to_delete.append(i)
                             
                 # If this companion message contains the deleted image, check the preceding user message
                 if has_image and i > 0:
@@ -1987,10 +2008,11 @@ class OpenSourceRunner(BaseProgramRunner):
                     if prev_msg.get('role') == 'user' and prev_msg.get('text') and "Send me a portrait of yourself" in prev_msg['text']:
                         indices_to_delete.append(i-1)
                         
-            # Delete marked indices in reverse order
-            for idx in sorted(indices_to_delete, reverse=True):
-                del history[idx]
-                modified = True
+            # Delete marked indices in reverse order (deduplicated)
+            for idx in sorted(list(set(indices_to_delete)), reverse=True):
+                if 0 <= idx < len(history):
+                    del history[idx]
+                    modified = True
                     
             # Clean up the actual image file from the server's local disk
             file_deleted = self._delete_local_image(image_url)
@@ -2087,6 +2109,11 @@ class OpenSourceRunner(BaseProgramRunner):
                     prefix = "port_"
                 elif text.startswith("[Tool Response from"):
                     prefix = "tool_"
+                elif text.strip().startswith("![") and text.strip().endswith(")"):
+                    prefix = "img_"
+            else:
+                if text.strip().startswith("![") and text.strip().endswith(")"):
+                    prefix = "img_"
             history = self.sessions_history[session_id]
             new_msg = {
                 'id': f"{prefix}{uuid.uuid4().hex}",
