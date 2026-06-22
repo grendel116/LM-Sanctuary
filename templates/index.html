@@ -9262,6 +9262,9 @@ function triggerFileInput() {
             chatContainer.scrollTop = chatContainer.scrollHeight;
 
             startToolPolling();
+            if (chatAbortController) {
+                chatAbortController.abort();
+            }
             chatAbortController = new AbortController();
             try {
                 const response = await fetch('/chat', {
@@ -9304,6 +9307,7 @@ function triggerFileInput() {
                 inversionActive = data.inversion_active || "";
                 handleSuccessReload(data);
             } catch (error) {
+                if (error.name === 'AbortError' && isGenerating) return;
                 if (chatContainer.contains(typingIndicatorRow)) {
                     chatContainer.removeChild(typingIndicatorRow);
                 }
@@ -9314,6 +9318,7 @@ function triggerFileInput() {
                 }
                 handleToolReloadOrRecovery();
             } finally {
+                if (isGenerating) return;
                 setGenerating(false);
                 userInput.disabled = false;
                 userInput.placeholder = "Ask " + (activeCompanionName || "Companion");
@@ -9651,6 +9656,9 @@ function truncateChatAfter(row) {
             userInput.placeholder = "";
             
             startToolPolling();
+            if (chatAbortController) {
+                chatAbortController.abort();
+            }
             chatAbortController = new AbortController();
             try {
                 const response = await fetch('/edit', {
@@ -9688,6 +9696,7 @@ function truncateChatAfter(row) {
                 inversionActive = data.inversion_active || "";
                 handleSuccessReload(data);
             } catch (error) {
+                if (error.name === 'AbortError' && isGenerating) return;
                 if (chatContainer.contains(typingIndicatorRow)) {
                     chatContainer.removeChild(typingIndicatorRow);
                 }
@@ -9698,6 +9707,7 @@ function truncateChatAfter(row) {
                 }
                 handleToolReloadOrRecovery();
             } finally {
+                if (isGenerating) return;
                 stopToolPolling();
                 setGenerating(false);
                 userInput.disabled = false;
@@ -9762,6 +9772,9 @@ function truncateChatAfter(row) {
  
             setGenerating(true);
             startToolPolling();
+            if (chatAbortController) {
+                chatAbortController.abort();
+            }
             chatAbortController = new AbortController();
             try {
                 const response = await fetch('/edit', {
@@ -9800,6 +9813,7 @@ function truncateChatAfter(row) {
                 inversionActive = data.inversion_active || "";
                 handleSuccessReload(data);
             } catch (error) {
+                if (error.name === 'AbortError' && isGenerating) return;
                 if (chatContainer.contains(typingIndicatorRow)) {
                     chatContainer.removeChild(typingIndicatorRow);
                 }
@@ -9810,6 +9824,7 @@ function truncateChatAfter(row) {
                 }
                 handleToolReloadOrRecovery();
             } finally {
+                if (isGenerating) return;
                 stopToolPolling();
                 setGenerating(false);
                 userInput.disabled = false;
