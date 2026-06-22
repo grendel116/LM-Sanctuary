@@ -2230,6 +2230,11 @@
             color: #86efac;
             border: 1px solid rgba(34, 197, 94, 0.25);
         }
+        .status-starting {
+            background: rgba(251, 146, 60, 0.12);
+            color: #fb923c;
+            border: 1px solid rgba(251, 146, 60, 0.25);
+        }
         .status-online {
             background: rgba(34, 197, 94, 0.12);
             color: #86efac;
@@ -4799,7 +4804,7 @@ function showOnboardingCard() {
                     <div class="onboarding-option-box local-box">
                         <div class="option-header">
                             <h3>Local LLM</h3>
-                            <span id="onboarding-local-status" class="status-badge ${connectionStatus.local_online === 'starting' ? 'status-configured' : (connectionStatus.local_online ? 'status-online' : 'status-offline')}">
+                            <span id="onboarding-local-status" class="status-badge ${connectionStatus.local_online === 'starting' ? 'status-starting' : (connectionStatus.local_online ? 'status-online' : 'status-offline')}">
                                 ${connectionStatus.local_online === 'starting' ? 'Starting...' : (connectionStatus.local_online ? 'Online' : 'Offline')}
                             </span>
                         </div>
@@ -5799,7 +5804,7 @@ function updateConnectionStatus(status) {
                     badge.className = "status-badge status-online";
                 } else if (status.local_online === 'starting') {
                     badge.textContent = "Starting...";
-                    badge.className = "status-badge status-configured";
+                    badge.className = "status-badge status-starting";
                 } else {
                     badge.textContent = "Offline";
                     badge.className = "status-badge status-offline";
@@ -5900,7 +5905,7 @@ async function updateComfyModalStatus() {
                             statusBadge.className = "status-badge status-online";
                         } else if (comfyStatus.running === 'starting') {
                             statusBadge.textContent = "Starting...";
-                            statusBadge.className = "status-badge status-configured";
+                            statusBadge.className = "status-badge status-starting";
                         } else if (comfyStatus.installed) {
                             statusBadge.textContent = "Offline";
                             statusBadge.className = "status-badge status-offline";
@@ -5956,7 +5961,7 @@ async function updateComfyModalStatus() {
                                     badge.className = "status-badge status-online";
                                 } else if (comfyStatus.running === 'starting') {
                                     badge.textContent = "Starting...";
-                                    badge.className = "status-badge status-configured";
+                                    badge.className = "status-badge status-starting";
                                 } else {
                                     badge.textContent = "Offline";
                                     badge.className = "status-badge status-offline";
@@ -6008,7 +6013,7 @@ async function updateComfyModalStatus() {
                             comfyBox.innerHTML = `
                                  <div class="option-header">
                                      <h4 style="margin: 0; font-size: 1.05rem; font-weight: 600;">ComfyUI (Portraits)</h4>
-                                     <span id="modal-comfy-status" class="status-badge ${comfyStatus.running === 'starting' ? 'status-configured' : (comfyStatus.running ? 'status-online' : 'status-offline')}">
+                                     <span id="modal-comfy-status" class="status-badge ${comfyStatus.running === 'starting' ? 'status-starting' : (comfyStatus.running ? 'status-online' : 'status-offline')}">
                                          ${comfyStatus.running === 'starting' ? 'Starting...' : (comfyStatus.running ? 'Running' : 'Offline')}
                                      </span>
                                  </div>
