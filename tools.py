@@ -680,6 +680,34 @@ def read_file(path: str) -> str:
     """
     try:
         normalized_path = resolve_workspace_path(path)
+        
+        if normalized_path.lower().endswith('.pdf'):
+            try:
+                import pypdf
+                reader = pypdf.PdfReader(normalized_path)
+                text_parts = []
+                for page in reader.pages:
+                    text = page.extract_text()
+                    if text:
+                        text_parts.append(text)
+                combined = "\n\n".join(text_parts).strip()
+                if not combined and len(reader.pages) > 0:
+                    return (
+                        f"Error reading PDF file '{path}': "
+                        "The PDF file contains pages but no digital text. "
+                        "It is likely a scanned document or consists solely of images."
+                    )
+                return combined
+            except Exception as pdf_err:
+                return f"Error reading PDF file '{path}': {pdf_err}"
+                
+        if normalized_path.lower().endswith('.gdoc'):
+            return (
+                f"Error: '{path}' is a Google Doc shortcut file. "
+                "Google Doc shortcut files (.gdoc) do not contain the document text locally. "
+                "Please copy and paste the document content directly into the chat."
+            )
+            
         with open(normalized_path, "r", encoding="utf-8") as f:
             return f.read()
     except Exception as e:

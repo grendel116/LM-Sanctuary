@@ -195,6 +195,21 @@ _STORY_MODE_DIRECTIVE_PROMPT = (
     "- Formulate all image generation prompts as a sequence of comma-separated tags.\n"
     "- Do not write image prompts as prose sentences or paragraphs.\n"
 )
+def is_real_user_msg(msg: dict) -> bool:
+    """Determine if a message is a real user message."""
+    role = msg.get('role')
+    msg_id = msg.get('id', '')
+    if role != 'user':
+        return False
+    if msg_id:
+        if msg_id.startswith('tool_') or msg_id.startswith('port_') or msg_id.startswith('quest_') or msg_id.startswith('sys_'):
+            return False
+        if msg_id.startswith('usr_'):
+            return True
+    text = msg.get('text', '')
+    if text.startswith('[Tool Response') or text.startswith('[SYSTEM:') or "Send me a portrait of yourself" in text:
+        return False
+    return True
 
 
 def _parse_emulated_tool_call(tool_name: str, args_str: str) -> dict:
@@ -553,15 +568,7 @@ class OsHistoryAdapter(LocalHistoryAdapter):
         pass
 
     def post_process_thoughts(self, invocation_id: str):
-        history = self.runner_obj.sessions_history[self.session_id]
-        companion_msgs_this_turn = [
-            msg for msg in history[self.initial_history_len:]
-            if msg.get('role') == 'companion'
-        ]
-        if companion_msgs_this_turn:
-            for msg in companion_msgs_this_turn[:-1]:
-                if msg.get('text'):
-                    msg['text'] = f"<thought>\n{msg['text']}\n</thought>"
+        pass
 
     def save(self):
         self.runner_obj._save_session_to_disk(self.session_id)
@@ -1676,11 +1683,31 @@ class OpenSourceRunner(BaseProgramRunner):
             
             bot_response_text, tool_calls = res
             companion_msg_id = None
+            companion_texts = []
+            
             history = self.sessions_history.get(session_id, [])
-            for msg in reversed(history):
-                if msg.get('role') == 'companion':
-                    companion_msg_id = msg.get('id')
+            user_idx = -1
+            for idx, msg in enumerate(history):
+                if msg.get('id') == user_msg_id:
+                    user_idx = idx
                     break
+                    
+            if user_idx != -1:
+                for msg in history[user_idx + 1:]:
+                    if msg.get('role') == 'companion':
+                        if msg.get('text'):
+                            companion_texts.append(msg['text'])
+                        if msg.get('id'):
+                            companion_msg_id = msg['id']
+                            
+            if companion_texts:
+                bot_response_text = "\n\n".join(companion_texts)
+            else:
+                for msg in reversed(history):
+                    if msg.get('role') == 'companion':
+                        companion_msg_id = msg.get('id')
+                        break
+                        
             return bot_response_text, tool_calls, user_msg_id, companion_msg_id
         except LocalOffloadTrigger as trigger_exc:
             print(f"[OFFLOAD] Caught LocalOffloadTrigger in OpenSourceRunner: {trigger_exc.reason}. Rolling back local turn and offloading to cloud.", flush=True)
@@ -1898,16 +1925,24 @@ class OpenSourceRunner(BaseProgramRunner):
                     break
                     
             if found_idx != -1:
-                # If deleting companion message, check if the preceding message is the user's automated portrait request
-                delete_prev = False
-                if found_idx > 0:
-                    prev_msg = real_history[found_idx - 1]
-                    if prev_msg.get('role') == 'user' and prev_msg.get('text') and "Send me a portrait of yourself" in prev_msg['text']:
-                        delete_prev = True
-                
-                del real_history[found_idx]
-                if delete_prev:
-                    del real_history[found_idx - 1]
+                target_msg = real_history[found_idx]
+                role = target_msg.get('role')
+                if is_real_user_msg(target_msg):
+                    del real_history[found_idx]
+                elif role in ('companion', 'model'):
+                    prev_user_idx = -1
+                    for k in range(found_idx - 1, -1, -1):
+                        if is_real_user_msg(real_history[k]):
+                            prev_user_idx = k
+                            break
+                    next_user_idx = len(real_history)
+                    for k in range(found_idx + 1, len(real_history)):
+                        if is_real_user_msg(real_history[k]):
+                            next_user_idx = k
+                            break
+                    del real_history[prev_user_idx + 1 : next_user_idx]
+                else:
+                    del real_history[found_idx]
                     
                 self._save_session_to_disk(session_id)
                 return True
@@ -2130,18 +2165,38 @@ class OpenSourceRunner(BaseProgramRunner):
                 return False
                 
             real_history = self.sessions_history[session_id]
-            found = False
-            for msg in real_history:
+            found_idx = -1
+            for i, msg in enumerate(real_history):
                 if msg.get('id') == msg_id:
-                    msg['text'] = new_text
-                    if msg.get('role') in ('companion', 'model'):
-                        from utils.program_mood import extract_and_strip_mood
-                        _, mood_details = extract_and_strip_mood(new_text)
-                        msg['mood'] = mood_details
-                    found = True
+                    found_idx = i
                     break
                     
-            if found:
+            if found_idx != -1:
+                target_msg = real_history[found_idx]
+                target_msg['text'] = new_text
+                role = target_msg.get('role')
+                if role in ('companion', 'model'):
+                    from utils.program_mood import extract_and_strip_mood
+                    _, mood_details = extract_and_strip_mood(new_text)
+                    target_msg['mood'] = mood_details
+                    
+                    prev_user_idx = -1
+                    for k in range(found_idx - 1, -1, -1):
+                        if is_real_user_msg(real_history[k]):
+                            prev_user_idx = k
+                            break
+                    next_user_idx = len(real_history)
+                    for k in range(found_idx + 1, len(real_history)):
+                        if is_real_user_msg(real_history[k]):
+                            next_user_idx = k
+                            break
+                            
+                    for k in range(prev_user_idx + 1, next_user_idx):
+                        if k != found_idx:
+                            m = real_history[k]
+                            if m.get('role') in ('companion', 'model'):
+                                m['text'] = ""
+                                
                 self._save_session_to_disk(session_id)
                 return True
             return False
