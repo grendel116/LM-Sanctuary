@@ -2483,7 +2483,8 @@ def get_program_profile():
                     "example_message": "",
                     "ontology": "",
                     "scenario": "",
-                    "personality": ""
+                    "personality": "",
+                    "post_history_instructions": ""
                 },
                 "description": {
                     "voice": "casual",
@@ -2501,6 +2502,12 @@ def get_program_profile():
                     "negative details": ""
                 }
             }
+        else:
+            if "operation" not in profile_data:
+                profile_data["operation"] = {}
+            if "post_history_instructions" not in profile_data["operation"]:
+                profile_data["operation"]["post_history_instructions"] = ""
+
         # Get the companion-specific voice from project settings
         from utils.program import _load_settings
         settings = _load_settings()
