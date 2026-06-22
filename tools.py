@@ -8,7 +8,7 @@ import concurrent.futures
 
 from variables import COMFYUI_SERVER_URL, COMFYUI_CHECKPOINT, COMFYUI_VAE, DEFAULT_REMOTE_MODEL, VARIABLES_DIR
 
-_search_executor = concurrent.futures.ThreadPoolExecutor(max_workers=8)
+_search_executor = concurrent.futures.ThreadPoolExecutor(max_workers=10)
 import functools
 import threading
 import contextvars
@@ -291,7 +291,7 @@ def query_searxng(query: str, base_url: str = None, engines: str = "baidu,yandex
 @track_tool_activity
 def web_search(query: str) -> str:
     """Searches the web and returns raw hits containing titles, links, and snippets.
-    Supports routing via prefix queries (e.g. 'github: query', 'arxiv: query', 'hn: query')
+    Supports routing via prefix queries (e.g. 'github: query', 'arxiv: query', 'hn: query', 'wikipedia: query')
     or concurrent hybrid web blending for standard queries.
 
     Args:
@@ -305,7 +305,7 @@ def web_search(query: str) -> str:
     import requests
     import concurrent.futures
     import time
-    
+
     # Read project settings
     search_engine = "web_crawling"
     searxng_url = ""
@@ -330,7 +330,7 @@ def web_search(query: str) -> str:
         try:
             from google import genai
             from google.genai import types
-            
+
             client = genai.Client(api_key=remote_api_key)
             grounding_tool = types.Tool(
                 google_search=types.GoogleSearch()
@@ -339,15 +339,15 @@ def web_search(query: str) -> str:
                 tools=[grounding_tool],
                 temperature=0.0
             )
-            
+
             response = client.models.generate_content(
                 model=DEFAULT_REMOTE_MODEL,
                 contents=f"Perform a search for: {q}. Output only a list of search hits with their titles, URLs, and very brief snippets.",
                 config=config
             )
-            
+
             g_results = []
-            
+
             # Parse text response first for clean, original URLs and rich snippets
             if response.text:
                 import re
@@ -381,7 +381,7 @@ def web_search(query: str) -> str:
                             })
                             i = j - 1
                     i += 1
-                    
+
             # Fall back to metadata chunks if text parsing was empty
             if not g_results:
                 metadata = response.candidates[0].grounding_metadata if (response.candidates and response.candidates[0]) else None
@@ -405,18 +405,16 @@ def web_search(query: str) -> str:
                             headers = {
                                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
                             }
-                            # Attempt HEAD request first
                             r = requests.head(url, headers=headers, allow_redirects=True, timeout=2.0)
                             if r.status_code < 400 and r.url:
                                 item["url"] = r.url
                                 return
-                            # Fallback to GET stream
                             r = requests.get(url, headers=headers, allow_redirects=True, stream=True, timeout=2.0)
                             if r.url:
                                 item["url"] = r.url
                         except Exception:
                             pass
-                
+
                 with concurrent.futures.ThreadPoolExecutor(max_workers=len(g_results)) as executor:
                     executor.map(resolve_url, g_results)
 
@@ -451,6 +449,101 @@ def web_search(query: str) -> str:
             } for h in hits]
         except Exception as e:
             print(f"[Baidu SearXNG] Error: {e}")
+            return []
+
+    def run_duckduckgo(q):
+        try:
+            from duckduckgo_search import DDGS
+            ddgs = DDGS()
+            hits = ddgs.text(q, max_results=6)
+            results = []
+            for h in (hits or []):
+                title = h.get("title", "")
+                url = h.get("href", "")
+                snippet = h.get("body", "")
+                if url:
+                    results.append({
+                        "title": title,
+                        "url": url,
+                        "content": snippet,
+                        "source": "DuckDuckGo"
+                    })
+            return results
+        except ImportError:
+            print("[DuckDuckGo] duckduckgo-search package not installed.")
+            return []
+        except Exception as e:
+            print(f"[DuckDuckGo] Error: {e}")
+            return []
+
+    def run_brave(q):
+        api_key = os.getenv("BRAVE_SEARCH_API_KEY", "").strip()
+        if not api_key:
+            return []
+        try:
+            url = "https://api.search.brave.com/res/v1/web/search"
+            headers = {
+                "Accept": "application/json",
+                "Accept-Encoding": "gzip",
+                "X-Subscription-Token": api_key
+            }
+            params = {"q": q, "count": 8, "search_lang": "en"}
+            res = requests.get(url, headers=headers, params=params, timeout=6)
+            if res.status_code == 200:
+                web_results = res.json().get("web", {}).get("results", [])
+                results = []
+                for r in web_results:
+                    title = r.get("title", "")
+                    link = r.get("url", "")
+                    snippet = r.get("description", "")
+                    if link:
+                        results.append({
+                            "title": title,
+                            "url": link,
+                            "content": snippet,
+                            "source": "Brave"
+                        })
+                return results
+            else:
+                print(f"[Brave Search] HTTP {res.status_code}")
+                return []
+        except Exception as e:
+            print(f"[Brave Search] Error: {e}")
+            return []
+
+    def run_tavily(q):
+        api_key = os.getenv("TAVILY_API_KEY", "").strip()
+        if not api_key:
+            return []
+        try:
+            url = "https://api.tavily.com/search"
+            payload = {
+                "api_key": api_key,
+                "query": q,
+                "max_results": 8,
+                "include_answer": False
+            }
+            res = requests.post(url, json=payload, timeout=8)
+            if res.status_code == 200:
+                hits = res.json().get("results", [])
+                results = []
+                for r in hits:
+                    title = r.get("title", "")
+                    link = r.get("url", "")
+                    content = r.get("content", "")
+                    if link:
+                        results.append({
+                            "title": title,
+                            "url": link,
+                            "content": content,
+                            "source": "Tavily"
+                        })
+                return results
+            else:
+                print(f"[Tavily] HTTP {res.status_code}")
+                return []
+        except Exception as e:
+            print(f"[Tavily] Error: {e}")
             return []
 
     def run_wikipedia(q):
@@ -587,11 +680,43 @@ def web_search(query: str) -> str:
             print(f"[Hacker News] Error: {e}")
         return []
 
+    def enrich_thin_results(result_list, thin_threshold=150, max_enrich=3, per_page_limit=2000):
+        """Concurrently fetch page bodies for results with thin snippets."""
+        from bs4 import BeautifulSoup
+        import urllib3
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+        thin = [r for r in result_list if len(r.get("content", "")) < thin_threshold][:max_enrich]
+        if not thin:
+            return
+
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
+        }
+
+        def fetch_one(item):
+            try:
+                res = requests.get(item["url"], headers=headers, timeout=5, verify=False)
+                if res.status_code != 200:
+                    return
+                soup = BeautifulSoup(res.content, "html.parser")
+                for tag in soup(["script", "style", "nav", "header", "footer", "aside", "form"]):
+                    tag.decompose()
+                area = soup.find("main") or soup.find("article") or soup.find("body") or soup
+                text = " ".join(area.get_text(" ", strip=True).split())
+                if text:
+                    item["content"] = text[:per_page_limit]
+            except Exception as e:
+                print(f"[Enrich] Failed to fetch {item['url']}: {e}")
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_enrich) as ex:
+            ex.map(fetch_one, thin)
+
     results_pool = []
-    
+
     # Parse prefixes for explicit single-source routing
     query_lower = query.lower().strip()
-    
+
     if query_lower.startswith("github:"):
         raw_query = query[len("github:"):].strip()
         results_pool = run_github(raw_query)
@@ -602,6 +727,9 @@ def web_search(query: str) -> str:
         prefix_len = len("hn:") if query_lower.startswith("hn:") else len("hackernews:")
         raw_query = query[prefix_len:].strip()
         results_pool = run_hackernews(raw_query)
+    elif query_lower.startswith("wikipedia:"):
+        raw_query = query[len("wikipedia:"):].strip()
+        results_pool = run_wikipedia(raw_query)
     else:
         # Standard hybrid concurrent search blending
         if search_engine == "web_crawling":
@@ -609,11 +737,13 @@ def web_search(query: str) -> str:
                 _search_executor.submit(run_google, query): "Google",
                 _search_executor.submit(run_searxng, query): "SearXNG",
                 _search_executor.submit(run_baidu, query): "Baidu",
-                _search_executor.submit(run_wikipedia, query): "Wikipedia"
+                _search_executor.submit(run_duckduckgo, query): "DuckDuckGo",
+                _search_executor.submit(run_brave, query): "Brave",
+                _search_executor.submit(run_tavily, query): "Tavily",
             }
 
             done, not_done = concurrent.futures.wait(futures.keys(), timeout=15.0)
-            
+
             for future in done:
                 source_name = futures[future]
                 try:
@@ -622,12 +752,12 @@ def web_search(query: str) -> str:
                         results_pool.extend(data_hits)
                 except Exception as e:
                     print(f"[{source_name}] Thread error: {e}")
-                    
+
             for future in not_done:
                 source_name = futures[future]
                 print(f"[{source_name}] Thread timed out (exceeded 15.0s timeout limit).")
-                        
-            # Deduplicate results by URL (collapsing mobile/desktop variations)
+
+            # Deduplicate by URL, collapsing mobile/desktop variations
             seen_urls = set()
             unique_results = []
             for r in results_pool:
@@ -636,10 +766,10 @@ def web_search(query: str) -> str:
                 if compare_url not in seen_urls:
                     seen_urls.add(compare_url)
                     unique_results.append(r)
-                    
-            # Fallback to Wikipedia if other sources failed or returned empty list
+
+            # Fallback to Wikipedia only if everything else came back empty
             if not unique_results:
-                print("[Web Crawling] All primary sources empty or failed. Using Wikipedia.")
+                print("[Web Crawling] All primary sources empty or failed. Using Wikipedia fallback.")
                 wiki_results = run_wikipedia(query)
                 for r in wiki_results:
                     url_clean = r["url"].lower().strip().rstrip('/')
@@ -647,19 +777,23 @@ def web_search(query: str) -> str:
                     if compare_url not in seen_urls:
                         seen_urls.add(compare_url)
                         unique_results.append(r)
-                        
+
             results_pool = unique_results
-            
+
+            # Enrich results that came back with thin snippets
+            enrich_thin_results(results_pool)
+
         elif search_engine == "wikipedia":
             results_pool = run_wikipedia(query)
 
     formatted = []
-    for r in results_pool[:8]:
+    for r in results_pool[:10]:
         formatted.append(f"Title: {r['title']}\nURL: {r['url']}\nSource: {r['source']}\nSnippet: {r['content']}")
     if formatted:
         return "\n\n".join(formatted)
 
     return "No search results found."
+
 
 
 @track_tool_activity
