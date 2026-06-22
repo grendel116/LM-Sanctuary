@@ -224,7 +224,9 @@ def index():
         active_user = request.authorization.username
 
     from flask import make_response
-    response = make_response(render_template('index.html', local_ip=local_ip, tts_auto_speak=tts_auto_speak, tts_provider=tts_provider, active_program=active_program, theme=theme, active_user=active_user))
+    from core.program_config import get_companion_greeting
+    welcome_message = get_companion_greeting()
+    response = make_response(render_template('index.html', local_ip=local_ip, tts_auto_speak=tts_auto_speak, tts_provider=tts_provider, active_program=active_program, theme=theme, active_user=active_user, welcome_message=welcome_message))
     response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
     return response
 
@@ -580,7 +582,8 @@ def history():
             from utils.program_mood import analyze_emotional_state
             state_info = analyze_emotional_state("")
         
-        from core.program_config import companion_name
+        from core.program_config import companion_name, get_companion_greeting
+        welcome_message = get_companion_greeting()
         active_program = os.environ.get("ACTIVE_PROGRAM", "sebile")
         
         theme = None
@@ -600,7 +603,8 @@ def history():
             'inversion_active': inversion_mode,
             'character_name': companion_name,
             'active_program': active_program,
-            'theme': theme
+            'theme': theme,
+            'welcome_message': welcome_message
         })
     except Exception as e:
         print(f"Error getting history: {e}")
@@ -847,9 +851,10 @@ def generate_impersonated_message(session_id, user_profile, model):
         "Match the user's tone and context. Be short and concise."
     )
     
+    from core.program_config import replace_placeholders
     prompt = (
-        f"User Profile Context:\n{user_profile}\n\n"
-        f"Recent Chat History:\n{history_text}\n"
+        f"User Profile Context:\n{replace_placeholders(user_profile)}\n\n"
+        f"Recent Chat History:\n{replace_placeholders(history_text)}\n"
         f"Generate the User's next message to the Companion:"
     )
     
@@ -1724,6 +1729,9 @@ def api_tts():
         if not message_id or not text:
             return jsonify({'error': 'Missing message_id or text'}), 400
             
+        from core.program_config import replace_placeholders
+        text = replace_placeholders(text)
+        
         from core.skills.speech_generation.speech import SpeechManager
         manager = SpeechManager()
         audio_url = manager.get_speech_file(text, message_id)
@@ -2906,7 +2914,7 @@ def generate_character_json(name, description, personality, scenario, first_mes,
         remote_cloud_url and remote_cloud_url.strip() and remote_cloud_url != "your_remote_cloud_url_here"
     )
     
-    prompt = f"""You are a professional companion designer. Based on the character card details below, design a structured companion profile JSON card.
+    prompt = f"""Based on the character card details below, design a structured companion profile JSON card.
 
 Character Card Info:
 Name: {name}
@@ -2915,15 +2923,22 @@ Personality: {personality}
 Scenario: {scenario}
 First Message: {first_mes}
 
+Rules:
+1. "operation.description": Must summarize who they are, their role, backstory, or motivation. Do NOT mention physical appearance or clothes here (since those have dedicated sections).
+2. "operation.personality": Must be a single word (e.g. "Devoted", "Sassy", "Stoic").
+3. "operation.example_message": Use first-person narration with action/narration enclosed in asterisks (e.g. "*I tap my fingers.* I'm ready.").
+4. "image details.image details": Comma-separated prompt tags describing ONLY the character's physical details (e.g. "silver hair, purple eyes, black choker"). Do NOT include style or quality tags (like photorealistic, 8k, highly detailed) as these are hardcoded in the workflow.
+5. "image details.negative details": Comma-separated negative prompt tags describing elements to exclude (e.g. "extra limbs, bad anatomy, deformed"). Do NOT include style/quality negative tags (like blurry, low quality) as these are hardcoded.
+
 Output a single JSON object matching this exact schema:
 {{
   "name": "{name}",
   "operation": {{
-    "description": "Short bio summarizing who they are, their role, and devotion to the user (1-2 sentences)",
+    "description": "Short backstory, motivations, or role (1-2 sentences). Do not describe physical appearance.",
     "response_directive": "MANDATORY guidelines for response style. Keep them succinct, direct, natural, using contractions, and defining visual appearance details or traits",
     "ontology": "Core beliefs, values, or worldview of the companion",
-    "example_message": "An example first-person dialogue line matching their style (e.g. *I sit next to you* I'm here.)",
-    "personality": "Short keywords/phrases summarizing personality",
+    "example_message": "An example first-person greeting/dialogue line (e.g. *I tap my fingers.* I'm ready.)",
+    "personality": "A single word summarizing their core trait",
     "scenario": "A quiet roleplay setting or context for chat"
   }},
   "description": {{
@@ -2938,8 +2953,8 @@ Output a single JSON object matching this exact schema:
     "body": "e.g. slim, voluptuous, fit"
   }},
   "image details": {{
-    "image details": "Comma-separated prompt tags for image rendering (e.g. silver hair, purple eyes, solo, highly detailed)",
-    "negative details": "blurry, low quality, distorted, extra limbs, bad anatomy"
+    "image details": "Comma-separated prompt tags for the character (e.g. silver hair, purple eyes)",
+    "negative details": "Comma-separated negative tags for the character (e.g. extra limbs, bad anatomy, deformed)"
   }},
   "colors": {{
     "main_color": "#XXXXXX (Harmonious hex color representing them)"
@@ -2965,7 +2980,7 @@ Output a single JSON object matching this exact schema:
             payload = {
                 "model": local_model,
                 "messages": [
-                    {"role": "system", "content": "You are a professional companion designer that outputs valid JSON character cards."},
+                    {"role": "system", "content": "You output valid JSON character cards."},
                     {"role": "user", "content": prompt}
                 ],
                 "temperature": 0.5,
@@ -2989,7 +3004,7 @@ Output a single JSON object matching this exact schema:
                 payload = {
                     "model": target_model,
                     "messages": [
-                        {"role": "system", "content": "You are a professional companion designer that outputs valid JSON character cards."},
+                        {"role": "system", "content": "You output valid JSON character cards."},
                         {"role": "user", "content": prompt}
                     ],
                     "temperature": 0.5,
@@ -3037,8 +3052,8 @@ Output a single JSON object matching this exact schema:
             "body": parsed.get("description", {}).get("body") or "slim"
         },
         "image details": {
-            "image details": parsed.get("image details", {}).get("image details") or "realistic, photorealistic, 8k",
-            "negative details": parsed.get("image details", {}).get("negative details") or "blurry, low quality"
+            "image details": parsed.get("image details", {}).get("image details") or f"solo, {name}",
+            "negative details": parsed.get("image details", {}).get("negative details") or "extra limbs, bad anatomy, deformed"
         },
         "colors": {
             "main_color": parsed.get("colors", {}).get("main_color", "#38bdf8") if isinstance(parsed.get("colors"), dict) else "#38bdf8"

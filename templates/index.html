@@ -3082,7 +3082,7 @@
                 </div>
                 <div class="message companion">
                     <div class="message-text">
-                        <p>Hello, {{ active_user.replace('_', ' ').title() }}.</p>
+                        <p>{{ welcome_message }}</p>
                     </div>
                 </div>
             </div>
@@ -4036,6 +4036,15 @@
         const localIp = "{{ local_ip }}";
         const chatContainer = document.getElementById('chat-container');
         const userInput = document.getElementById('user-input');
+        let companionWelcomeMessage = null;
+
+        function replacePlaceholders(text) {
+            if (!text) return text;
+            const displayUser = getUserDisplayName();
+            const displayChar = activeCompanionName || "Companion";
+            return text.replace(new RegExp("{" + "{" + "user" + "}" + "}", "gi"), displayUser)
+                       .replace(new RegExp("{" + "{" + "char" + "}" + "}", "gi"), displayChar);
+        }
 
         let isAtBottom = true;
         if (chatContainer) {
@@ -4152,6 +4161,12 @@
                     loadServerImages()
                 ]);
                 const data = await historyRes.json();
+                
+                if (data.welcome_message) {
+                    companionWelcomeMessage = data.welcome_message;
+                } else {
+                    companionWelcomeMessage = null;
+                }
                 
                 if (data.active_program) {
                     applyTheme(data.active_program, data.theme);
@@ -7692,8 +7707,20 @@ function showWelcomeMessage() {
 
             let welcome = document.getElementById('welcome-message');
             const displayUser = getUserDisplayName();
-            const greetingText = `Hello, ${displayUser}.`;
+            const greetingText = companionWelcomeMessage || ("Hello, " + "{" + "{" + "user" + "}" + "}.");
+            const resolvedGreeting = replacePlaceholders(greetingText);
             
+            let parsedText = resolvedGreeting;
+            if (typeof marked !== 'undefined' && marked.parse) {
+                try {
+                    parsedText = marked.parse(resolvedGreeting);
+                } catch (e) {
+                    console.error("Error parsing welcome markdown:", e);
+                }
+            } else {
+                parsedText = `<p>${resolvedGreeting}</p>`;
+            }
+
             if (!welcome) {
                 welcome = document.createElement('div');
                 welcome.className = 'message-row companion-row';
@@ -7705,15 +7732,15 @@ function showWelcomeMessage() {
                     </div>
                     <div class="message companion">
                         <div class="message-text">
-                            <p>${greetingText}</p>
+                            ${parsedText}
                         </div>
                     </div>
                 `;
                 chatContainer.appendChild(welcome);
             } else {
-                const p = welcome.querySelector('.message-text p');
-                if (p) {
-                    p.textContent = greetingText;
+                const textDiv = welcome.querySelector('.message-text');
+                if (textDiv) {
+                    textDiv.innerHTML = parsedText;
                 }
             }
         }
@@ -7753,6 +7780,11 @@ async function loadHistory() {
                     loadServerImages()
                 ]);
                 const data = await historyRes.json();
+                if (data.welcome_message) {
+                    companionWelcomeMessage = data.welcome_message;
+                } else {
+                    companionWelcomeMessage = null;
+                }
                 if (data.active_program) {
                     applyTheme(data.active_program, data.theme);
                 }
@@ -8368,6 +8400,7 @@ async function speakMessage(btn) {
         // --- appendMessage ---
         function appendMessage(role, text, imageUrl = null, toolCalls = null, isLive = false, timestamp = null, duration = null, isTransient = false, msgId = null) {
             if (role === 'system-memory' || role === 'system') return;
+            text = replacePlaceholders(text);
             if (text && text.startsWith('[System Memory of older conversation turns]:')) return;
             
             if (role === 'voice-call') {

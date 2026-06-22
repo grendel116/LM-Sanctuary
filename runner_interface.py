@@ -447,7 +447,8 @@ class OsHistoryAdapter(LocalHistoryAdapter):
                 
         for idx, msg in enumerate(filtered_history):
             role = "assistant" if msg['role'] == 'companion' else "user"
-            content_text = msg.get('text', '') or ''
+            from core.program_config import replace_placeholders
+            content_text = replace_placeholders(msg.get('text', '') or '')
             if msg.get('tool_calls'):
                 for tc in msg['tool_calls']:
                     if tc.get('type') == 'call':

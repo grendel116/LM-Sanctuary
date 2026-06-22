@@ -60,6 +60,41 @@ def get_companion_name() -> str:
     except Exception:
         return active_program.title()
 
+def replace_placeholders(text: str) -> str:
+    """Replaces {{user}} and {{char}} placeholders (case-insensitive) with their actual values."""
+    if not text:
+        return text
+    from utils.program import get_active_user
+    user_name = get_active_user().replace("_", " ").title()
+    try:
+        comp_name = get_companion_name()
+    except Exception:
+        comp_name = "Companion"
+    
+    text = re.sub(r'(?i)\{\{user\}\}', user_name, text)
+    text = re.sub(r'(?i)\{\{char\}\}', comp_name, text)
+    return text
+
+def get_companion_greeting() -> str:
+    """Discovers the companion greeting/welcome message dynamically."""
+    from utils.program import get_active_program
+    import json
+    active_program = get_active_program()
+    program_path = os.path.join(PROGRAMS_DIR, active_program)
+    
+    for filename in [f"{active_program}.json", "character_profile.json"]:
+        json_path = os.path.join(program_path, filename)
+        if os.path.exists(json_path):
+            try:
+                with open(json_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    example_msg = data.get("operation", {}).get("example_message")
+                    if example_msg:
+                        return example_msg
+            except Exception:
+                pass
+    return "Hello, {{user}}."
+
 def compile_instructions_from_json(profile_data: dict) -> str:
     name = profile_data.get("name", "Companion")
     operation = profile_data.get("operation", {})
@@ -125,7 +160,7 @@ def compile_instructions_from_json(profile_data: dict) -> str:
     if example:
         prompt_parts.append(f"## EXAMPLE MESSAGES (MANDATORY STYLE / TONE REFERENCE)\n{example}")
         
-    return "\n\n".join(prompt_parts)
+    return replace_placeholders("\n\n".join(prompt_parts))
 
 def load_static_instructions() -> str:
     """Reads the active program's JSON profile (e.g. sebile.json) and compiles it,
@@ -284,14 +319,7 @@ def set_inversion_directive(directive: str):
 def get_compiled_instructions() -> str:
     """Merges static identity profiles, dynamic temporal/runtime contexts, and user relationship settings."""
     global inversion_directive
-    base = load_static_instructions() + load_user_instructions()
-    
-    from utils.program import get_active_user, get_active_program
-    user_name = get_active_user().capitalize()
-    try:
-        current_companion_name = get_companion_name()
-    except Exception:
-        current_companion_name = "Companion"
+    base = replace_placeholders(load_static_instructions() + load_user_instructions())
     
     narration_mode = is_narration_mode()
 
@@ -303,7 +331,7 @@ def get_compiled_instructions() -> str:
             "3. DIALOGUE: Write all spoken dialogue in plain text. Format dialogue directly without quotation marks. Speak for background characters when they interact with the main characters.\n"
             "4. EMPHASIS: Use **bold** text for vocal emphasis. Reserve italics for narration.\n"
             "5. STYLE: Write as an engaging, descriptive novelist. Keep all dialogue authentic to each character's identity and relationships.\n"
-            f"6. NAMES: Refer to the companion as '{current_companion_name}', the user as '{user_name}', and other characters by their respective names.\n"
+            "6. NAMES: Always refer to the companion as '{{char}}' and the user as '{{user}}' in all dialogue and narration. Never output their actual names.\n"
             "7. BACKGROUND CHARACTERS: Invent, introduce, and narrate actions and dialogue for background characters. Play their roles to make the environment feel active and alive.\n"
         )
 
@@ -315,13 +343,13 @@ def get_compiled_instructions() -> str:
             "3. EMPHASIS: For emphasis and infection, use **bold** text, rather than italicized. Reserve italics for narration.\n"
             "4. STYLE: Be natural, concise, and direct. Avoid monologues, lecturing, or forced \"deep\" questions designed to keep the conversation going. Ask questions only if contextually natural.\n"
             "5. ROLEPLAY INTEGRITY: You are a sovereign companion program, NOT a helpful AI assistant. Never speak like a chatbot, assistant, helper, or customer service representative. Do NOT give generic advice, meta-commentary, or assistant-style preachy reminders. Speak, think, and act entirely as the character, keeping your dialogue authentic to your identity and relationship with the user.\n"
-            f"6. NAMES AND REFERENCING: Always refer to the user as '{user_name}' and yourself/companion as '{current_companion_name}' in your internal thinking/reasoning blocks and in your responses. Never refer to yourself/companion as 'the companion' or 'the AI', and never refer to the user as 'the user'. Always use their actual names.\n"
+            "6. NAMES AND REFERENCING: Always refer to the user as '{{user}}' and yourself/companion as '{{char}}' in your internal thinking/reasoning blocks and in your responses. Never output their actual names. Always use the exact placeholder tokens '{{user}}' and '{{char}}'.\n"
         )
         
     base += global_formatting
     
     if inversion_directive:
-        base += f"\n\n# PERSONALITY INVERSION DIRECTIVE\n{inversion_directive}\n"
+        base += f"\n\n# PERSONALITY INVERSION DIRECTIVE\n{replace_placeholders(inversion_directive)}\n"
         
     base += load_dynamic_runtime_context()
     return base
