@@ -9318,7 +9318,6 @@ function triggerFileInput() {
                 }
                 handleToolReloadOrRecovery();
             } finally {
-                if (isGenerating) return;
                 setGenerating(false);
                 userInput.disabled = false;
                 userInput.placeholder = "Ask " + (activeCompanionName || "Companion");
@@ -9707,7 +9706,6 @@ function truncateChatAfter(row) {
                 }
                 handleToolReloadOrRecovery();
             } finally {
-                if (isGenerating) return;
                 stopToolPolling();
                 setGenerating(false);
                 userInput.disabled = false;
@@ -9824,7 +9822,6 @@ function truncateChatAfter(row) {
                 }
                 handleToolReloadOrRecovery();
             } finally {
-                if (isGenerating) return;
                 stopToolPolling();
                 setGenerating(false);
                 userInput.disabled = false;
