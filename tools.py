@@ -786,13 +786,58 @@ def web_search(query: str) -> str:
         elif search_engine == "wikipedia":
             results_pool = run_wikipedia(query)
 
-    formatted = []
-    for r in results_pool[:10]:
-        formatted.append(f"Title: {r['title']}\nURL: {r['url']}\nSource: {r['source']}\nSnippet: {r['content']}")
-    if formatted:
-        return "\n\n".join(formatted)
+    if not results_pool:
+        return "No search results found."
 
-    return "No search results found."
+    def synthesize_results(query: str, results: list) -> str:
+        """Calls a fast model to synthesize raw results into a clean research report."""
+        remote_api_key = os.getenv("REMOTE_API_KEY", "").strip()
+        if not remote_api_key or remote_api_key == "your_remote_api_key_here":
+            # No API key — fall back to raw formatted snippets
+            lines = []
+            for r in results[:10]:
+                lines.append(f"Title: {r['title']}\nURL: {r['url']}\nSource: {r['source']}\nSnippet: {r['content']}")
+            return "\n\n".join(lines)
+
+        data_blob = "\n\n".join([
+            f"[{r['source']}] {r['title']}\nURL: {r['url']}\n{r['content']}"
+            for r in results[:10]
+        ])
+        source_urls = "\n".join(f"- {r['url']}" for r in results[:10])
+
+        prompt = (
+            f"You are a research synthesizer. Based solely on the following search results, "
+            f"write a factual 4-6 sentence report about: \"{query}\"\n"
+            f"Include specific names, roles, dates, events, and direct details from the sources. "
+            f"Do not editorialize or infer beyond what the sources state.\n\n"
+            f"SEARCH DATA:\n{data_blob}\n\n"
+            f"REPORT:"
+        )
+
+        try:
+            from google import genai
+            from google.genai import types
+
+            client = genai.Client(api_key=remote_api_key)
+            response = client.models.generate_content(
+                model="gemini-2.0-flash-lite",
+                contents=prompt,
+                config=types.GenerateContentConfig(temperature=0.0)
+            )
+            report = (response.text or "").strip()
+            if report:
+                return f"{report}\n\nSources:\n{source_urls}"
+        except Exception as e:
+            print(f"[Research Synthesis] Error: {e}")
+
+        # Fallback to raw snippets if synthesis fails
+        lines = []
+        for r in results[:10]:
+            lines.append(f"Title: {r['title']}\nURL: {r['url']}\nSource: {r['source']}\nSnippet: {r['content']}")
+        return "\n\n".join(lines)
+
+    return synthesize_results(query, results_pool)
+
 
 
 
