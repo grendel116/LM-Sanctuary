@@ -3031,7 +3031,7 @@ Output a single JSON object matching this exact schema:
             print(f"Failed to parse companion JSON card: {e}. Raw: {raw_response}")
 
     final_card = {
-        "name": parsed.get("name") or name or "Companion",
+        "name": name or parsed.get("name") or "Companion",
         "operation": {
             "description": parsed.get("operation", {}).get("description") or description or f"{name} is a new companion.",
             "response_directive": parsed.get("operation", {}).get("response_directive") or "Speak naturally and directly.",

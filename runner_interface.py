@@ -42,6 +42,37 @@ def _get_safe_local_path(image_url: str) -> str:
     return os.path.normpath(os.path.join("core", "programs", active_program, *safe_parts))
 
 
+def fallback_system_to_user_messages(messages: list) -> list:
+    """Helper to convert and merge 'system' messages to 'user' messages
+    if the local model server's chat template doesn't support the system role.
+    """
+    if not messages:
+        return messages
+    mapped_messages = []
+    for msg in messages:
+        role = msg.get("role")
+        content = msg.get("content")
+        if role == "system":
+            mapped_messages.append({"role": "user", "content": f"[System Directive]\n{content}"})
+        else:
+            mapped_messages.append({"role": role, "content": content})
+            
+    merged_messages = []
+    for msg in mapped_messages:
+        if merged_messages and merged_messages[-1]["role"] == msg["role"]:
+            prev_content = merged_messages[-1]["content"]
+            curr_content = msg["content"]
+            if isinstance(prev_content, str) and isinstance(curr_content, str):
+                merged_messages[-1]["content"] += "\n\n" + curr_content
+            else:
+                prev_list = prev_content if isinstance(prev_content, list) else [{"type": "text", "text": prev_content}]
+                curr_list = curr_content if isinstance(curr_content, list) else [{"type": "text", "text": curr_content}]
+                merged_messages[-1]["content"] = prev_list + curr_list
+        else:
+            merged_messages.append(msg)
+    return merged_messages
+
+
 def _get_rag_context(query_text: str) -> str:
     """Helper to query the DataBank index for matching context (excluding chat history)."""
     if not query_text:
@@ -825,6 +856,16 @@ class BaseProgramRunner:
                             if response.status_code == 200:
                                 res_json = response.json()
                                 bot_response_text = res_json['choices'][0]['message']['content']
+                            elif response.status_code == 500 and ("got system" in response.text or "Jinja Exception" in response.text or "only user" in response.text.lower()):
+                                print("[COMPACTION + LOCAL SERVER FALLBACK] Detected system role Jinja Exception after compaction. Retrying with fallback...", flush=True)
+                                fallback_messages = fallback_system_to_user_messages(openai_messages)
+                                payload["messages"] = fallback_messages
+                                response = await client.post(url, json=payload, headers=headers, timeout=120.0)
+                                if response.status_code == 200:
+                                    res_json = response.json()
+                                    bot_response_text = res_json['choices'][0]['message']['content']
+                                else:
+                                    bot_response_text = f"Error: Local model server returned status code {response.status_code} after emergency compaction & system role fallback - {response.text}"
                             else:
                                 bot_response_text = f"Error: Local model server returned status code {response.status_code} after emergency compaction - {response.text}"
                                 break
@@ -832,7 +873,18 @@ class BaseProgramRunner:
                             bot_response_text = f"Error: Local model server returned status code {response.status_code} - {response.text}"
                             break
                     else:
-                        bot_response_text = f"Error: Local model server returned status code {response.status_code} - {response.text}"
+                        if response.status_code == 500 and ("got system" in response.text or "Jinja Exception" in response.text or "only user" in response.text.lower()):
+                            print("[LOCAL SERVER FALLBACK] Detected system role Jinja Exception. Retrying with fallback...", flush=True)
+                            fallback_messages = fallback_system_to_user_messages(openai_messages)
+                            payload["messages"] = fallback_messages
+                            response = await client.post(url, json=payload, headers=headers, timeout=120.0)
+                            if response.status_code == 200:
+                                res_json = response.json()
+                                bot_response_text = res_json['choices'][0]['message']['content']
+                            else:
+                                bot_response_text = f"Error: Local model server returned status code {response.status_code} after system role fallback - {response.text}"
+                        else:
+                            bot_response_text = f"Error: Local model server returned status code {response.status_code} - {response.text}"
                         break
             except Exception as e:
                 if is_cloud:
@@ -1482,6 +1534,16 @@ class OpenSourceRunner(BaseProgramRunner):
                 if r.status_code == 200:
                     res_json = r.json()
                     return res_json['choices'][0]['message']['content'].strip()
+                elif not is_cloud and r.status_code == 500 and ("got system" in r.text or "Jinja Exception" in r.text or "only user" in r.text.lower()):
+                    print("[LOCAL IMPERSONATION FALLBACK] Detected system role Jinja Exception. Retrying with fallback...", flush=True)
+                    fallback_messages = fallback_system_to_user_messages(payload["messages"])
+                    payload["messages"] = fallback_messages
+                    r = await client.post(url, json=payload, headers=headers, timeout=60.0)
+                    if r.status_code == 200:
+                        res_json = r.json()
+                        return res_json['choices'][0]['message']['content'].strip()
+                    else:
+                        raise Exception(f"HTTP Server returned status code {r.status_code} after system role fallback: {r.text}")
                 else:
                     raise Exception(f"HTTP Server returned status code {r.status_code}: {r.text}")
         except Exception as e:
