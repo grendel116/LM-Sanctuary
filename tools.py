@@ -820,7 +820,7 @@ def web_search(query: str) -> str:
 
             client = genai.Client(api_key=remote_api_key)
             response = client.models.generate_content(
-                model="gemini-2.0-flash-lite",
+                model=DEFAULT_REMOTE_MODEL,
                 contents=prompt,
                 config=types.GenerateContentConfig(temperature=0.0)
             )
