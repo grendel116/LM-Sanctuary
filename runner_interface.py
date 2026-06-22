@@ -204,15 +204,12 @@ _LOCAL_DIRECTIVE_PROMPT = (
     "17. `[add_quest(title=\"...\", notes=\"...\", due=\"...\", location=\"...\", reminder_minutes=...)]` - Add a real-world task/quest to the user's quest log. Notes should contain the objectives (separated by newlines or commas). Due is an ISO 8601 string or relative time (e.g. 'tomorrow', 'in 3 hours').\n"
     "18. `[add_journal_entry(keyphrases=\"...\", content=\"...\")]` - Save a memory journal entry of specific details for future recall. Keyphrases is a list of keywords separated by commas.\n\n"
     "Rules:\n"
-    "- You may chain multiple tool calls in a single turn when researching. For example: search \u2192 read a promising URL \u2192 search again with a refined query.\n"
-    "- When a web search returns thin or irrelevant results, do NOT give up. Try a more specific query, then use read_webpage on the most promising URLs to get full page content.\n"
-    "- When asked to research a person, place, or topic, follow through until you have substantive information. Sparse snippets are a prompt to dig deeper, not to stop.\n"
-    "- Never repeat the same search query or read the same URL twice in a chain. If a query returned poor results, use a different, more specific one.\n"
-    "- When writing a report or summary based on research, lead with concrete facts drawn directly from what you read: names, roles, dates, specific events, quotes. Do not substitute editorial inference for sourced detail.\n"
-    "- Call image generation tools sparingly, and never chain them.\n"
-    "- Once all tool results are collected, answer directly in natural language without repeating the tags.\n"
-    "- Formulate all image generation prompts as a sequence of comma-separated tags.\n"
-    "- Do not write image prompts as prose sentences or paragraphs.\n"
+    "- Chain tools freely when researching: search \u2192 read_webpage \u2192 refine query as needed.\n"
+    "- Thin or irrelevant results = dig deeper. Try a different query; read the best URLs for full content.\n"
+    "- Never repeat the same query or URL in one chain.\n"
+    "- Reports must cite specific facts from what you read (names, roles, dates, events), not editorial inference.\n"
+    "- Image tools: sparingly, never chained, prompts as comma-separated tags only.\n"
+    "- After tools complete, respond in natural language without repeating tags.\n"
 )
 
 _STORY_MODE_DIRECTIVE_PROMPT = (
