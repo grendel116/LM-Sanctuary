@@ -123,36 +123,43 @@ def prewarm_caches():
     try:
         # Prewarm server status
         from utils.local_llm_manager import check_status, check_installed
-        check_status(force_refresh=True)
+        llm_already_online = check_status(force_refresh=True)
         check_installed()
     except Exception as e:
         print(f"Error prewarming Local LLM server status: {e}")
+        llm_already_online = False
+
+    # Only perform the VRAM swap (stop ComfyUI → start LLM) when the LLM is offline.
+    # Skipping this when the LLM is already running prevents needlessly killing ComfyUI
+    # on every Flask reloader restart.
+    if not llm_already_online:
+        try:
+            # Stop any existing ComfyUI server to free VRAM for Local LLM startup
+            from utils.comfy_manager import stop_comfy_server, check_comfy_running
+            print(">>> Stopping any existing ComfyUI server to free VRAM...")
+            stop_comfy_server()
+            # Wait up to ten seconds for ComfyUI to stop and release GPU resources
+            for _ in range(10):
+                if not check_comfy_running():
+                    break
+                time.sleep(1.0)
+            time.sleep(3.0)
+        except Exception as e:
+            print(f"Error stopping existing ComfyUI server: {e}")
+
+        try:
+            # Start Local LLM server automatically
+            from utils.local_llm_manager import start_server
+            print(">>> Starting Local LLM server in background...")
+            started, msg = start_server()
+            print(f">>> Local LLM startup: {msg}")
+        except Exception as e:
+            print(f"Error starting Local LLM automatically: {e}")
+    else:
+        print(">>> Local LLM server is already online, skipping VRAM swap.")
 
     try:
-        # Stop any existing ComfyUI server to free VRAM for Local LLM startup
-        from utils.comfy_manager import stop_comfy_server, check_comfy_running
-        print(">>> Stopping any existing ComfyUI server to free VRAM...")
-        stop_comfy_server()
-        # Wait up to ten seconds for ComfyUI to stop and release GPU resources
-        for _ in range(10):
-            if not check_comfy_running():
-                break
-            time.sleep(1.0)
-        time.sleep(3.0)
-    except Exception as e:
-        print(f"Error stopping existing ComfyUI server: {e}")
-
-    try:
-        # Start Local LLM server automatically
-        from utils.local_llm_manager import start_server
-        print(">>> Starting Local LLM server in background...")
-        started, msg = start_server()
-        print(f">>> Local LLM startup: {msg}")
-    except Exception as e:
-        print(f"Error starting Local LLM automatically: {e}")
-
-    try:
-        # Start ComfyUI automatically
+        # Start ComfyUI automatically (skips if already running)
         from utils.comfy_manager import start_comfy_server
         print(">>> Starting ComfyUI server in background...")
         started, msg = start_comfy_server()
