@@ -22,7 +22,7 @@
     "body": "voluptuous"
   },
   "image details": {
-    "image details": "translucent fairy wings, realistic skin texture, simple forms, (gorgeous:0.7), (plump:0.7), straight hair, big lips, saggy breasts, slim legs, dark background",
-    "negative details": "colored lips, dark skin, hair up, old, wrinkles, muscular, washed out, sepia, muted, logo, signature, watermark, pov, selfie, text, bangs, overexposure, saturated"
+    "image details": "translucent fairy wings, realistic skin texture, simple forms, (gorgeous:0.7), (plump:0.7), (incase:0.3), straight hair, big lips, saggy breasts, dark background",
+    "negative details": "anime, sketch, colored lips, dark skin, hair up, old, wrinkles, muscular, washed out, sepia, muted, logo, signature, watermark, selfie, text, bangs, overexposure"
   }
 }
