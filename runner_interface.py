@@ -2048,7 +2048,8 @@ class OpenSourceRunner(BaseProgramRunner):
 
     async def delete_message_at(self, session_id: str, msg_id: str) -> bool:
         with self._lock:
-            self._load_session_from_disk(session_id)
+            if session_id not in self.sessions_history:
+                self._load_session_from_disk(session_id)
             if session_id not in self.sessions_history:
                 return False
 
@@ -2295,7 +2296,8 @@ class OpenSourceRunner(BaseProgramRunner):
 
     async def update_message_text(self, session_id: str, msg_id: str, new_text: str) -> bool:
         with self._lock:
-            self._load_session_from_disk(session_id)
+            if session_id not in self.sessions_history:
+                self._load_session_from_disk(session_id)
             if session_id not in self.sessions_history:
                 return False
                 

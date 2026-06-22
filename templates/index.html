@@ -4151,7 +4151,8 @@
                         if (msg.tool_calls && msg.tool_calls.length > 0) {
                             currentCompanion.tool_calls = (currentCompanion.tool_calls || []).concat(msg.tool_calls);
                         }
-                        currentCompanion.id = msg.id;
+                        // Keep the first segment's id as the canonical row identifier.
+                        // Only advance the display timestamp to the latest segment.
                         currentCompanion.timestamp = msg.timestamp;
                         if (msg.mood) {
                             currentCompanion.mood = msg.mood;
