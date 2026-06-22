@@ -243,6 +243,8 @@ def is_real_user_msg(msg: dict) -> bool:
     return True
 
 
+
+
 def _parse_emulated_tool_call(tool_name: str, args_str: str) -> dict:
     """Parses arguments from an emulated tool call string.
     Supports both key=value style and simple positional string style.
@@ -1013,7 +1015,13 @@ class BaseProgramRunner:
                         adapter.append_assistant_message(bot_response_text, [], invocation_id)
                         new_markdown = func(*parsed_args["args"], **parsed_args["kwargs"])
                         original_tag = m.group(0)
-                        bot_response_text = bot_response_text.replace(original_tag, new_markdown)
+                        image_succeeded = new_markdown.startswith("![") and new_markdown.endswith(")")
+                        if image_succeeded:
+                            bot_response_text = bot_response_text.replace(original_tag, new_markdown)
+                        else:
+                            # Generation failed — strip the call tag cleanly so the companion
+                            # message body stays readable. The error surfaces in tool_calls.
+                            bot_response_text = bot_response_text.replace(original_tag, "").strip()
                         
                         call_id = f"call_{int(time.time())}"
                         t_calls = [
@@ -1034,7 +1042,7 @@ class BaseProgramRunner:
                         
                         adapter.append_image_tool_events(tool_name, t_calls[0]['args'], new_markdown, call_id, invocation_id)
                         
-                        final_embedded_text = self._ensure_images_are_embedded(bot_response_text)
+                        final_embedded_text = self._ensure_images_are_embedded(bot_response_text) if image_succeeded else bot_response_text
                         adapter.append_assistant_message(final_embedded_text, t_calls, invocation_id)
                         break
                 else:
@@ -2043,36 +2051,13 @@ class OpenSourceRunner(BaseProgramRunner):
             self._load_session_from_disk(session_id)
             if session_id not in self.sessions_history:
                 return False
-                
+
             real_history = self.sessions_history[session_id]
-            found_idx = -1
             for i, msg in enumerate(real_history):
                 if msg.get('id') == msg_id:
-                    found_idx = i
-                    break
-                    
-            if found_idx != -1:
-                target_msg = real_history[found_idx]
-                role = target_msg.get('role')
-                if is_real_user_msg(target_msg):
-                    del real_history[found_idx]
-                elif role in ('companion', 'model'):
-                    prev_user_idx = -1
-                    for k in range(found_idx - 1, -1, -1):
-                        if is_real_user_msg(real_history[k]):
-                            prev_user_idx = k
-                            break
-                    next_user_idx = len(real_history)
-                    for k in range(found_idx + 1, len(real_history)):
-                        if is_real_user_msg(real_history[k]):
-                            next_user_idx = k
-                            break
-                    del real_history[prev_user_idx + 1 : next_user_idx]
-                else:
-                    del real_history[found_idx]
-                    
-                self._save_session_to_disk(session_id)
-                return True
+                    del real_history[i]
+                    self._save_session_to_disk(session_id)
+                    return True
             return False
 
     async def delete_image_from_session(self, session_id: str, image_url: str) -> bool:
