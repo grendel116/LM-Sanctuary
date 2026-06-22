@@ -777,6 +777,7 @@ class BaseProgramRunner:
         
         bot_response_text = ""
         tool_calls = []
+        seen_tool_calls = set()  # tracks (tool_name, key_arg) to block duplicates
         
         for iteration in range(10):
             if session_id in cancelled_sessions:
@@ -1112,6 +1113,14 @@ class BaseProgramRunner:
                         t_name = m_tool.group(1)
                         a_str = m_tool.group(2)
                         parsed_args = _parse_emulated_tool_call(t_name, a_str)
+                        # Deduplicate: skip if same tool+key arg was already called this turn
+                        key_arg = str(list(parsed_args["kwargs"].values())[0]) if parsed_args["kwargs"] else (str(parsed_args["args"][0]) if parsed_args["args"] else "")
+                        dedup_key = (t_name, key_arg)
+                        if dedup_key in seen_tool_calls:
+                            output = f"[Skipped: '{t_name}' with this input was already called. Use a different query or URL.]"
+                            results.append((t_name, parsed_args["kwargs"], output))
+                            continue
+                        seen_tool_calls.add(dedup_key)
                         import tools
                         f = getattr(tools, t_name, None)
                         if not f:
