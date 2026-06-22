@@ -3841,6 +3841,10 @@
                             </div>
                         </div>
                     </label>
+                    <div class="input-group" style="margin-top: 10px;">
+                        <label for="comp-post-history-instructions">Post-History Instructions (Injected at prompt end)</label>
+                        <textarea id="comp-post-history-instructions" class="onboarding-input" style="height: 60px; resize: vertical;" placeholder="e.g. Append and update this tracking block to your response: Outfit: casual | Location: home"></textarea>
+                    </div>
                 </div>
             </div>
 
@@ -7046,6 +7050,7 @@ async function deleteAssistant(assistantId, name) {
             document.getElementById('comp-narration-mode').checked = false;
             document.getElementById('comp-backstory').value = '';
             document.getElementById('comp-directives').value = '';
+            document.getElementById('comp-post-history-instructions').value = '';
             document.getElementById('comp-ontology').value = '';
             document.getElementById('comp-example-msg').value = '';
             document.getElementById('comp-personality-type').value = '';
@@ -7080,6 +7085,7 @@ async function deleteAssistant(assistantId, name) {
                 const operation = data.operation || {};
                 document.getElementById('comp-backstory').value = operation.description || '';
                 document.getElementById('comp-directives').value = operation.response_directive || '';
+                document.getElementById('comp-post-history-instructions').value = operation.post_history_instructions || '';
                 document.getElementById('comp-ontology').value = operation.ontology || '';
                 document.getElementById('comp-example-msg').value = operation.example_message || '';
                 document.getElementById('comp-personality-type').value = operation.personality || '';
@@ -7382,6 +7388,7 @@ async function deleteAssistant(assistantId, name) {
                 operation: {
                     description: document.getElementById('comp-backstory').value.trim(),
                     response_directive: document.getElementById('comp-directives').value.trim(),
+                    post_history_instructions: document.getElementById('comp-post-history-instructions').value.trim(),
                     ontology: document.getElementById('comp-ontology').value.trim(),
                     example_message: document.getElementById('comp-example-msg').value.trim(),
                     personality: document.getElementById('comp-personality-type').value.trim(),

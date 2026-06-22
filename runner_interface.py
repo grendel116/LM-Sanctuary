@@ -518,6 +518,25 @@ class OsHistoryAdapter(LocalHistoryAdapter):
                     openai_messages[-1]["content"] = prev_list + curr_list
             else:
                 openai_messages.append(msg)
+
+        # Check for companion-specific post-history instructions and append them at the end of messages
+        try:
+            from utils.program import get_active_program
+            from variables import PROGRAMS_DIR
+            import json
+            import os
+            
+            active_prog = get_active_program()
+            json_path = os.path.normpath(os.path.join(PROGRAMS_DIR, active_prog, f"{active_prog}.json"))
+            if os.path.exists(json_path):
+                with open(json_path, "r", encoding="utf-8") as f:
+                    profile_data = json.load(f)
+                    post_history_inst = profile_data.get("operation", {}).get("post_history_instructions", "").strip()
+                    if post_history_inst:
+                        openai_messages.append({"role": "system", "content": post_history_inst})
+        except Exception as e:
+            print(f"Error loading post-history instructions: {e}", flush=True)
+
         return openai_messages
 
     def append_assistant_message(self, text: str, tool_calls_data: list, invocation_id: str):
