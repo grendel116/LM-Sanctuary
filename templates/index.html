@@ -1881,12 +1881,10 @@
         }
 
         /* Edit inline textarea and buttons */
-        .message-bubbles-container:has(.message.editing) {
-            max-width: 90%;
-        }
         .message.editing {
             width: 100%;
             max-width: 100%;
+            box-sizing: border-box;
         }
         .edit-textarea {
             width: 100%;
@@ -2038,9 +2036,19 @@
             }
             #chat-container {
                 padding: 15px;
+                overflow-x: hidden;
             }
             .message {
                 max-width: 85%;
+            }
+            .message-bubbles-container {
+                max-width: 85%;
+            }
+            .message-row.companion-row .avatar-container {
+                order: 1;
+            }
+            .message-row.companion-row .message-bubbles-container {
+                max-width: calc(100% - 60px);
             }
             #input-area {
                 padding: 12px 16px;
@@ -4124,6 +4132,9 @@
                 );
                 
                 if ((msg.role === 'companion' || msg.role === 'model') && !isHidden) {
+                    // Skip blank companion entries (residuals from edit/compaction)
+                    const hasContent = (msg.text && msg.text.trim()) || (msg.tool_calls && msg.tool_calls.length > 0);
+                    if (!hasContent) continue;
                     if (currentCompanion) {
                         if (msg.text) {
                             if (currentCompanion.text) {
