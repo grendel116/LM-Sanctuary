@@ -199,12 +199,21 @@ def load_static_instructions() -> str:
             instruction_content = f"# NAME: {active_program.title()}\n"
             
     # Append modular skill instructions if available
+    narration_active = is_narration_mode()
+    story_mode_allowed_skills = {
+        "portrait_generation",
+        "memory_journaling",
+        "vectorized_databank",
+    }
     skills_dir = os.path.join(base_dir, "skills")
     if os.path.exists(skills_dir):
         skills_blocks = []
         for root, dirs, files in os.walk(skills_dir):
             for file in files:
                 if file.lower() == "skill.md":
+                    skill_name = os.path.basename(root)
+                    if narration_active and skill_name not in story_mode_allowed_skills:
+                        continue
                     skill_path = os.path.join(root, file)
                     try:
                         with open(skill_path, "r", encoding="utf-8") as sf:
@@ -216,7 +225,6 @@ def load_static_instructions() -> str:
                             if len(parts) >= 3:
                                 skill_text = parts[2].strip()
                                 
-                        skill_name = os.path.basename(root)
                         skills_blocks.append(f"## Skill Instruction: {skill_name}\n\n{skill_text}")
                     except Exception as e:
                         print(f"Error loading skill file {skill_path}: {e}")

@@ -945,6 +945,20 @@ class BaseProgramRunner:
             # Find all tool calls
             matches = list(re.finditer(r'\[(\w+)\((.*?)\)\]', bot_response_text))
             
+            # Enforce story mode tool allowlist
+            from core.program_config import is_narration_mode
+            if matches and is_narration_mode():
+                story_allowed = {
+                    "generate_local_image", "generate_companion_portrait",
+                    "generate_imagen", "generate_general_image",
+                    "apply_comfy_workflow", "add_journal_entry",
+                }
+                disallowed = [m for m in matches if m.group(1) not in story_allowed]
+                for m in disallowed:
+                    bot_response_text = bot_response_text.replace(m.group(0), "")
+                bot_response_text = re.sub(r'\n{3,}', '\n\n', bot_response_text).strip()
+                matches = [m for m in matches if m.group(1) in story_allowed]
+
             # Check for dynamic offloading triggers at execution-time
             remote_key = os.getenv("REMOTE_API_KEY")
             is_remote_configured = bool(
@@ -1688,6 +1702,10 @@ class OpenSourceRunner(BaseProgramRunner):
                 
             chat_history = []
             for msg in raw_history:
+                if msg.get('compacted'):
+                    continue
+                if msg.get('role') == 'system-memory':
+                    continue
                 chat_history.append(msg.copy())
             return chat_history
 
