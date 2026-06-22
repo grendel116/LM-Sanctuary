@@ -1219,7 +1219,8 @@ def generate_local_image(prompt: str) -> str:
             appearance_val = f"character named {active_program}"
 
         # Combine prompt and image details
-        final_prompt = prompt
+        from core.program_config import replace_placeholders
+        final_prompt = replace_placeholders(prompt)
         if img_details_val:
             if final_prompt and not final_prompt.endswith(","):
                 final_prompt += ", "
@@ -1290,10 +1291,12 @@ def generate_imagen(prompt: str, aspect_ratio: str = '1:1') -> str:
         client = genai.Client(api_key=api_key)
         model_name = os.getenv("IMAGEN_MODEL", "imagen-4.0-generate-001")
 
-        print(f"[IMAGEN] Generating image with model {model_name} and prompt: {prompt}")
+        from core.program_config import replace_placeholders
+        resolved_prompt = replace_placeholders(prompt)
+        print(f"[IMAGEN] Generating image with model {model_name} and prompt: {resolved_prompt}")
         response = client.models.generate_images(
             model=model_name,
-            prompt=prompt,
+            prompt=resolved_prompt,
             config=types.GenerateImagesConfig(
                 number_of_images=1,
                 output_mime_type='image/png',
