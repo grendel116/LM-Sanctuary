@@ -1133,7 +1133,15 @@ def generate_local_image(prompt: str) -> str:
     
     def get_install_instructions(reason: str) -> str:
         from utils.comfy_manager import check_comfy_running
-        if check_comfy_running():
+        status = check_comfy_running()
+        if status == "starting" or "ConnectionRefusedError" in reason or "10061" in reason:
+            return (
+                "### ⏳ ComfyUI is starting up...\n\n"
+                "The image generation engine was recently launched and is currently starting in the background.\n\n"
+                f"> *(Details: {reason})*\n\n"
+                "Please wait 10-15 seconds for the server to finish loading and bind to port 8188, then try again!"
+            )
+        if status is True:
             return (
                 "### ⚠️ Image Generation Failed (ComfyUI Execution Error)\n\n"
                 "ComfyUI is online, but the image generation workflow encountered an error:\n"

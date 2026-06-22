@@ -565,7 +565,28 @@ class OsHistoryAdapter(LocalHistoryAdapter):
                     profile_data = json.load(f)
                     post_history_inst = profile_data.get("operation", {}).get("post_history_instructions", "").strip()
                     if post_history_inst:
-                        openai_messages.append({"role": "system", "content": post_history_inst})
+                        last_user_text = ""
+                        for m in reversed(filtered_history):
+                            if m.get("role") == "user":
+                                last_user_text = m.get("text", "") or ""
+                                break
+                        
+                        is_standard = True
+                        if last_user_text:
+                            lut_lower = last_user_text.lower().strip()
+                            if lut_lower.startswith("[") or "portrait" in lut_lower or "picture" in lut_lower or "generate" in lut_lower or "image of" in lut_lower:
+                                is_standard = False
+                                
+                        if is_standard:
+                            directive_content = f"[System Directive]\n{post_history_inst}"
+                            if openai_messages and openai_messages[-1]["role"] == "user":
+                                prev = openai_messages[-1]["content"]
+                                if isinstance(prev, str):
+                                    openai_messages[-1]["content"] += f"\n\n{directive_content}"
+                                else:
+                                    openai_messages[-1]["content"] = prev + [{"type": "text", "text": f"\n\n{directive_content}"}]
+                            else:
+                                openai_messages.append({"role": "user", "content": directive_content})
         except Exception as e:
             print(f"Error loading post-history instructions: {e}", flush=True)
 
@@ -866,6 +887,7 @@ class BaseProgramRunner:
                                     bot_response_text = res_json['choices'][0]['message']['content']
                                 else:
                                     bot_response_text = f"Error: Local model server returned status code {response.status_code} after emergency compaction & system role fallback - {response.text}"
+                                    break
                             else:
                                 bot_response_text = f"Error: Local model server returned status code {response.status_code} after emergency compaction - {response.text}"
                                 break
@@ -883,9 +905,10 @@ class BaseProgramRunner:
                                 bot_response_text = res_json['choices'][0]['message']['content']
                             else:
                                 bot_response_text = f"Error: Local model server returned status code {response.status_code} after system role fallback - {response.text}"
+                                break
                         else:
                             bot_response_text = f"Error: Local model server returned status code {response.status_code} - {response.text}"
-                        break
+                            break
             except Exception as e:
                 if is_cloud:
                     bot_response_text = f"Error connecting to remote cloud server: {e}. Please verify your network connection and remote API settings."
