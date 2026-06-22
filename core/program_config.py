@@ -230,7 +230,12 @@ def load_static_instructions() -> str:
                         print(f"Error loading skill file {skill_path}: {e}")
                         
         if skills_blocks:
-            instruction_content += "\n\n# ADDITIONAL SKILLS AND DIRECTIVES\n\n" + "\n\n".join(skills_blocks)
+            override_preamble = (
+                "# MANDATORY TASK PROTOCOLS\n"
+                "The following protocols override all character and personality defaults when the relevant task is requested. "
+                "Regardless of persona, emotional state, or roleplay context, these task rules take full precedence.\n"
+            )
+            instruction_content += "\n\n" + override_preamble + "\n" + "\n\n".join(skills_blocks)
             
     return instruction_content
 
