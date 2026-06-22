@@ -30,21 +30,19 @@ def _save_settings(settings: dict):
         print(f"Error saving project settings: {e}")
 
 def get_active_program() -> str:
-    # 1. Determine active program
-    env_val = os.getenv("ACTIVE_PROGRAM")
-    if env_val:
-        active_prog = env_val
-    else:
-        settings = _load_settings()
-        active_prog = settings.get("active_program")
+    # Determine active program from settings first
+    settings = _load_settings()
+    active_prog = settings.get("active_program")
+    if not active_prog:
+        # Fall back to environment variable, then to default
+        active_prog = os.getenv("ACTIVE_PROGRAM")
         if not active_prog:
             active_prog = "sebile"
 
-    # Set/sync environment variable
+    # Set environment variable
     os.environ["ACTIVE_PROGRAM"] = active_prog
 
-    # 2. Ensure project_settings.json on disk is in sync
-    settings = _load_settings()
+    # Ensure settings file is in sync
     target_folder = os.path.normpath(os.path.join(PARENT_DIR, 'core', 'programs', active_prog))
 
     current_folders = settings.get("folders", [])
@@ -60,7 +58,7 @@ def get_active_program() -> str:
         settings["active_program"] = active_prog
         settings["folders"] = [target_folder]
         _save_settings(settings)
-        print(f"[Settings] Synced active program '{active_prog}' and folder '{target_folder}' to project_settings.json")
+        print(f"[Settings] Synced active program '{active_prog}' and folder '{target_folder}' to project settings")
 
     return active_prog
 
@@ -73,27 +71,25 @@ def set_active_program(program_id: str):
     _save_settings(settings)
 
 def get_active_user() -> str:
-    # 1. Determine active user
-    env_val = os.getenv("ACTIVE_USER")
-    if env_val:
-        active_usr = env_val
-    else:
-        settings = _load_settings()
-        active_usr = settings.get("active_user")
+    # Determine active user from settings first
+    settings = _load_settings()
+    active_usr = settings.get("active_user")
+    if not active_usr:
+        # Fall back to environment variable, then to default
+        active_usr = os.getenv("ACTIVE_USER")
         if not active_usr:
             active_usr = "builder"
 
-    # Set/sync environment variable
+    # Set environment variable
     os.environ["ACTIVE_USER"] = active_usr
 
-    # 2. Ensure project_settings.json on disk is in sync
-    settings = _load_settings()
+    # Ensure settings file is in sync
     current_active = settings.get("active_user")
 
     if current_active != active_usr:
         settings["active_user"] = active_usr
         _save_settings(settings)
-        print(f"[Settings] Synced active user '{active_usr}' to project_settings.json")
+        print(f"[Settings] Synced active user '{active_usr}' to project settings")
 
     return active_usr
 

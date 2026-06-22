@@ -23,6 +23,7 @@
     <script src="{{ url_for('static', filename='js/cropper.min.js') }}"></script>
     <style>
         :root {
+            color-scheme: dark;
             --bg-color: #121214;
             --panel-bg: rgba(22, 22, 26, 0.85);
             --border-color: rgba(255, 255, 255, 0.08);
@@ -108,7 +109,7 @@
             position: relative;
             width: 36px;
             height: 20px;
-            background: rgba(255, 255, 255, 0.15);
+            background: rgba(255, 255, 255, 0.32);
             border-radius: 10px;
             transition: background-color 0.25s cubic-bezier(0.4, 0, 0.2, 1);
             flex-shrink: 0;
@@ -116,6 +117,10 @@
         
         /* Hidden Checkbox */
         .switch-input {
+            -webkit-appearance: none;
+            appearance: none;
+            background: transparent !important;
+            border: none !important;
             opacity: 0;
             width: 0;
             height: 0;
@@ -141,6 +146,10 @@
         
         .switch-input:checked + .switch-track .switch-thumb {
             transform: translateX(16px);
+        }
+
+        .switch-container:hover .switch-input:not(:checked) + .switch-track {
+            background: rgba(255, 255, 255, 0.45);
         }
 
         html, body {
@@ -2074,35 +2083,61 @@
         }
         .sanctuary-range {
             -webkit-appearance: none;
+            appearance: none;
             width: 100%;
-            height: 4px;
-            background: rgba(255, 255, 255, 0.15);
-            border-radius: 2px;
+            height: 32px;
+            background: transparent !important;
+            border: none;
+            padding: 0;
+            margin: 0;
             outline: none;
-            margin: 12px 0;
+            cursor: pointer;
+        }
+        .sanctuary-range::-webkit-slider-runnable-track {
+            width: 100%;
+            height: 6px;
+            background: rgba(255, 255, 255, 0.35) !important;
+            border-radius: 3px;
+            border: none;
+            transition: background-color 0.1s ease;
+        }
+        .sanctuary-range:hover::-webkit-slider-runnable-track {
+            background: rgba(255, 255, 255, 0.45) !important;
         }
         .sanctuary-range::-webkit-slider-thumb {
             -webkit-appearance: none;
             appearance: none;
-            width: 16px;
-            height: 16px;
+            width: 20px;
+            height: 20px;
             border-radius: 50%;
-            background: #ffffff;
+            background: #ffffff !important;
             cursor: pointer;
-            box-shadow: 0 0 6px rgba(255, 255, 255, 0.5);
+            margin-top: -7px;
+            box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
             transition: transform 0.1s ease;
         }
         .sanctuary-range::-webkit-slider-thumb:hover {
             transform: scale(1.15);
         }
-        .sanctuary-range::-moz-range-thumb {
-            width: 16px;
-            height: 16px;
-            border-radius: 50%;
-            background: #ffffff;
-            cursor: pointer;
-            box-shadow: 0 0 6px rgba(255, 255, 255, 0.5);
+        .sanctuary-range::-moz-range-track {
+            width: 100%;
+            height: 6px;
+            background: rgba(255, 255, 255, 0.35) !important;
+            border-radius: 3px;
             border: none;
+            transition: background-color 0.1s ease;
+        }
+        .sanctuary-range:hover::-moz-range-track {
+            background: rgba(255, 255, 255, 0.45) !important;
+        }
+        .sanctuary-range::-moz-range-thumb {
+            width: 20px;
+            height: 20px;
+            border-radius: 50%;
+            background: #ffffff !important;
+            cursor: pointer;
+            border: none;
+            box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
             transition: transform 0.1s ease;
         }
         .sanctuary-range::-moz-range-thumb:hover {
@@ -4036,6 +4071,49 @@
             }
         }
 
+        function mergeHistoryMessages(messages) {
+            const merged = [];
+            let currentCompanion = null;
+            
+            for (const msg of messages) {
+                const isHidden = msg.id && (
+                    msg.id.startsWith('sys_') ||
+                    msg.id.startsWith('tool_') ||
+                    msg.id.startsWith('port_') ||
+                    msg.id.startsWith('quest_')
+                );
+                
+                if ((msg.role === 'companion' || msg.role === 'model') && !isHidden) {
+                    if (currentCompanion) {
+                        if (msg.text) {
+                            if (currentCompanion.text) {
+                                currentCompanion.text += "\n\n" + msg.text;
+                            } else {
+                                currentCompanion.text = msg.text;
+                            }
+                        }
+                        if (msg.tool_calls && msg.tool_calls.length > 0) {
+                            currentCompanion.tool_calls = (currentCompanion.tool_calls || []).concat(msg.tool_calls);
+                        }
+                        currentCompanion.id = msg.id;
+                        currentCompanion.timestamp = msg.timestamp;
+                        if (msg.mood) {
+                            currentCompanion.mood = msg.mood;
+                        }
+                    } else {
+                        currentCompanion = { ...msg };
+                        merged.push(currentCompanion);
+                    }
+                } else {
+                    if (!isHidden) {
+                        currentCompanion = null;
+                    }
+                    merged.push(msg);
+                }
+            }
+            return merged;
+        }
+
         async function softReloadApp() {
             try {
                 const [historyRes, _] = await Promise.all([
@@ -4068,7 +4146,8 @@
                 updateProfileImages();
                 modelInitPromise = initializeModelSelect();
 
-                const newHistory = (data.history || []).filter(msg => {
+                const mergedHistory = mergeHistoryMessages(data.history || []);
+                const newHistory = mergedHistory.filter(msg => {
                     if (msg.id && msg.id.startsWith('sys_')) return false;
                     return true;
                 });
@@ -4077,6 +4156,18 @@
                 chatContainer.classList.remove('smooth-scroll');
                 
                 let domUpdated = false;
+                
+                // Pre-remove any message rows from the DOM that are no longer in the server history.
+                // This keeps indices perfectly aligned and prevents shifting issues during updates.
+                const newHistoryIds = new Set(newHistory.map(msg => msg.id).filter(Boolean));
+                const currentLiveRows = Array.from(chatContainer.querySelectorAll('.message-row:not(#welcome-message):not(#onboarding-container)'));
+                currentLiveRows.forEach(row => {
+                    const rowId = row.dataset.msgId;
+                    if (rowId && !newHistoryIds.has(rowId)) {
+                        row.remove();
+                        domUpdated = true;
+                    }
+                });
                 
                 newHistory.forEach((msg, idx) => {
                     const msgRole = msg.role;
@@ -4130,15 +4221,6 @@
                         domUpdated = true;
                     }
                 });
-                
-                // Remove extra rows if any were deleted
-                const liveRows = Array.from(chatContainer.querySelectorAll('.message-row:not(#welcome-message):not(#onboarding-container)'));
-                if (liveRows.length > newHistory.length) {
-                    for (let i = newHistory.length; i < liveRows.length; i++) {
-                        liveRows[i].remove();
-                    }
-                    domUpdated = true;
-                }
                 
                 // Clean onboarding or welcome if we now have messages
                 if (newHistory.length > 0) {
@@ -7660,7 +7742,8 @@ async function loadHistory() {
                     if (onboarding) onboarding.remove();
                     
                     // Render history
-                    data.history.forEach(msg => {
+                    const mergedHistory = mergeHistoryMessages(data.history);
+                    mergedHistory.forEach(msg => {
                         appendMessage(msg.role, msg.text, msg.image_url, msg.tool_calls, false, msg.timestamp, null, false, msg.id);
                     });
                 } else {
