@@ -207,6 +207,7 @@ _LOCAL_DIRECTIVE_PROMPT = (
     "- Chain tools freely when researching: search \u2192 read_webpage \u2192 refine query as needed.\n"
     "- Thin or irrelevant results = dig deeper. Try a different query; read the best URLs for full content.\n"
     "- Never repeat the same query or URL in one chain.\n"
+    "- Research output pattern: after each tool result, write a 2-4 sentence summary of what it found. After all searches, synthesize the summaries and reflect on what the data shows.\n"
     "- Reports must cite specific facts from what you read (names, roles, dates, events), not editorial inference.\n"
     "- Image tools: sparingly, never chained, prompts as comma-separated tags only.\n"
     "- After tools complete, respond in natural language without repeating tags.\n"
