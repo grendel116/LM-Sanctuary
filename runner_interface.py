@@ -6,14 +6,125 @@ from variables import PROGRAMS_DIR, REMOTE_SERVER_URL, DEFAULT_LOCAL_MODEL, DEFA
 from utils.models import is_local_model
 import asyncio
 import base64
-import importlib
 import json
 import re
 import time
-# (Google GenAI types import removed)
+import uuid
+import httpx
+import copy
 
 cancelled_sessions = set()
 voice_call_sessions = set()
+
+_DEFAULT_INVERSION_STATE = {
+    "active_inversion": "",
+    "inversion_consecutive_turns": 0,
+    "mood_tally": {
+        "intimate": 0,
+        "excited": 0,
+        "intense": 0,
+        "sad": 0
+    }
+}
+
+
+def _is_remote_configured() -> bool:
+    """Helper to check if remote cloud server is configured."""
+    remote_key = os.getenv("REMOTE_API_KEY")
+    remote_cloud_url = os.getenv("REMOTE_CLOUD_URL")
+    return bool(
+        remote_key and remote_key.strip() and remote_key != "your_remote_api_key_here" and
+        remote_cloud_url and remote_cloud_url.strip() and remote_cloud_url != "your_remote_cloud_url_here"
+    )
+
+
+def _merge_consecutive_messages(messages: list) -> list:
+    """Combines consecutive messages with the same role into a single message
+    by appending their contents.
+    """
+    if not messages:
+        return []
+    merged = []
+    for msg in messages:
+        if merged and merged[-1]["role"] == msg["role"]:
+            prev_content = merged[-1]["content"]
+            curr_content = msg["content"]
+            if isinstance(prev_content, str) and isinstance(curr_content, str):
+                merged[-1]["content"] += "\n\n" + curr_content
+            else:
+                prev_list = prev_content if isinstance(prev_content, list) else [{"type": "text", "text": prev_content}]
+                curr_list = curr_content if isinstance(curr_content, list) else [{"type": "text", "text": curr_content}]
+                merged[-1]["content"] = prev_list + curr_list
+        else:
+            merged.append(msg)
+    return merged
+
+
+def _get_databank_context(query_text: str, is_memory: bool = False) -> str:
+    """Helper to query the DataBank index for context (excluding or including chat history)."""
+    if not query_text:
+        return ""
+    try:
+        from core.skills.vectorized_databank.databank import DataBankManager
+        db = DataBankManager()
+        if is_memory:
+            return db.query(query_text, top_k=3, include_source_type="chat_history")
+        else:
+            return db.query(query_text, exclude_source_type="chat_history")
+    except Exception as e:
+        context_type = "memory" if is_memory else "RAG"
+        print(f"Error querying data bank for {context_type} context: {e}")
+        return ""
+
+
+def _build_tool_calls_pair(tool_name: str, args: dict, output: str, idx: int = None) -> list:
+    """Builds a pair of (call, response) dictionaries for tool calls logging."""
+    if idx is None:
+        call_id = f"call_{int(time.time())}"
+    else:
+        call_id = f"call_{int(time.time())}_{idx}_{uuid.uuid4().hex[:4]}"
+    return [
+        {
+            'type': 'call',
+            'name': tool_name,
+            'args': args,
+            'id': call_id
+        },
+        {
+            'type': 'response',
+            'name': tool_name,
+            'response': str(output),
+            'id': call_id
+        }
+    ]
+
+
+def _normalize_tool_name(tool_name: str) -> str:
+    """Normalizes tool name aliases to their standard forms."""
+    if tool_name == "generate_companion_portrait":
+        return "generate_local_image"
+    if tool_name == "generate_general_image":
+        return "generate_imagen"
+    return tool_name
+
+
+def _execute_emulated_tool(tool_name: str, args_str: str) -> tuple[dict, str]:
+    """Parses and executes an emulated tool call, returning parsed arguments and execution output."""
+    normalized_name = _normalize_tool_name(tool_name)
+    parsed_args = _parse_emulated_tool_call(normalized_name, args_str)
+    
+    import tools
+    func = getattr(tools, normalized_name, None)
+    if not func:
+        return parsed_args, f"Error: Tool '{normalized_name}' not found."
+        
+    try:
+        output = func(*parsed_args["args"], **parsed_args["kwargs"])
+    except Exception as e:
+        output = f"Error executing tool: {e}"
+        
+    return parsed_args, str(output)
+
 
 class LocalOffloadTrigger(Exception):
     def __init__(self, reason, iteration):
@@ -57,48 +168,8 @@ def fallback_system_to_user_messages(messages: list) -> list:
         else:
             mapped_messages.append({"role": role, "content": content})
             
-    merged_messages = []
-    for msg in mapped_messages:
-        if merged_messages and merged_messages[-1]["role"] == msg["role"]:
-            prev_content = merged_messages[-1]["content"]
-            curr_content = msg["content"]
-            if isinstance(prev_content, str) and isinstance(curr_content, str):
-                merged_messages[-1]["content"] += "\n\n" + curr_content
-            else:
-                prev_list = prev_content if isinstance(prev_content, list) else [{"type": "text", "text": prev_content}]
-                curr_list = curr_content if isinstance(curr_content, list) else [{"type": "text", "text": curr_content}]
-                merged_messages[-1]["content"] = prev_list + curr_list
-        else:
-            merged_messages.append(msg)
-    return merged_messages
+    return _merge_consecutive_messages(mapped_messages)
 
-
-def _get_rag_context(query_text: str) -> str:
-    """Helper to query the DataBank index for matching context (excluding chat history)."""
-    if not query_text:
-        return ""
-    try:
-        from core.skills.vectorized_databank.databank import DataBankManager
-        db = DataBankManager()
-        return db.query(query_text, exclude_source_type="chat_history")
-    except Exception as e:
-        print(f"Error querying data bank for RAG context: {e}")
-        return ""
-
-
-def _get_memory_context(query_text: str) -> str:
-    """Helper to query the DataBank index for matching memory context (chat history only)."""
-    if not query_text:
-        return ""
-    try:
-        from core.skills.vectorized_databank.databank import DataBankManager
-        db = DataBankManager()
-        return db.query(query_text, top_k=3, include_source_type="chat_history")
-    except Exception as e:
-        print(f"Error querying data bank for memory context: {e}")
-        return ""
-def _is_local_model(model: str) -> bool:
-    return is_local_model(model)
 
 
 def _format_thinking_and_text(thoughts_list: list, texts_list: list) -> str:
@@ -309,9 +380,7 @@ class LocalHistoryAdapter:
 
 def _get_base64_image_url(image_source) -> str:
     """Resolves image_source (local file path or relative URL) to a base64 data URL."""
-    import base64
     import mimetypes
-    import os
     
     if not image_source:
         return None
@@ -430,7 +499,6 @@ class OsHistoryAdapter(LocalHistoryAdapter):
         # 5. Ingest to vector database
         try:
             from core.skills.vectorized_databank.databank import DataBankManager
-            import time
             db = DataBankManager()
             db.ingest_text(
                 text=summary,
@@ -447,8 +515,6 @@ class OsHistoryAdapter(LocalHistoryAdapter):
             msg['compacted'] = True
             
         # 6. Replace historical turns with single summary event in self.runner_obj.sessions_history
-        import time
-        import uuid
         summary_msg = {
             'id': f"sys_{uuid.uuid4().hex}",
             'role': 'system-memory',
@@ -541,26 +607,12 @@ class OsHistoryAdapter(LocalHistoryAdapter):
         else:
             openai_messages[0]["content"] += _LOCAL_DIRECTIVE_PROMPT
 
-        for msg in raw_messages:
-            if openai_messages and openai_messages[-1]["role"] == msg["role"]:
-                prev_content = openai_messages[-1]["content"]
-                curr_content = msg["content"]
-                
-                if isinstance(prev_content, str) and isinstance(curr_content, str):
-                    openai_messages[-1]["content"] += "\n\n" + curr_content
-                else:
-                    prev_list = prev_content if isinstance(prev_content, list) else [{"type": "text", "text": prev_content}]
-                    curr_list = curr_content if isinstance(curr_content, list) else [{"type": "text", "text": curr_content}]
-                    openai_messages[-1]["content"] = prev_list + curr_list
-            else:
-                openai_messages.append(msg)
+        openai_messages = _merge_consecutive_messages(openai_messages + raw_messages)
 
         # Check for companion-specific post-history instructions and append them at the end of messages
         try:
             from utils.program import get_active_program
             from variables import PROGRAMS_DIR
-            import json
-            import os
             
             active_prog = get_active_program()
             json_path = os.path.normpath(os.path.join(PROGRAMS_DIR, active_prog, f"{active_prog}.json"))
@@ -597,7 +649,6 @@ class OsHistoryAdapter(LocalHistoryAdapter):
         return openai_messages
 
     def append_assistant_message(self, text: str, tool_calls_data: list, invocation_id: str):
-        import time
         from utils.program_mood import extract_and_strip_mood
         _, mood_details = extract_and_strip_mood(text)
         winning_mode = self.runner_obj._winning_mode_cache.get(self.session_id, "")
@@ -614,7 +665,6 @@ class OsHistoryAdapter(LocalHistoryAdapter):
             history[-1]['mood'] = mood_details
             return history[-1]
             
-        import uuid
         is_img_msg = text and text.strip().startswith("![") and text.strip().endswith(")")
         prefix = "img_" if is_img_msg else "prgm_"
         bot_msg = {
@@ -630,8 +680,6 @@ class OsHistoryAdapter(LocalHistoryAdapter):
         return bot_msg
 
     def append_tool_events(self, results: list, invocation_id: str):
-        import time
-        import uuid
         for idx, (t_name, t_args, t_output) in enumerate(results):
             tool_resp_msg = {
                 'id': f"tool_{uuid.uuid4().hex}",
@@ -655,11 +703,7 @@ class OsHistoryAdapter(LocalHistoryAdapter):
 def _is_cloud_model_check(model: str) -> bool:
     if not model:
         return False
-    remote_cloud_url = os.getenv("REMOTE_CLOUD_URL", "").strip()
-    remote_key = os.getenv("REMOTE_API_KEY", "").strip()
-    if not remote_cloud_url or remote_cloud_url == "your_remote_cloud_url_here":
-        return False
-    if not remote_key or remote_key == "your_remote_api_key_here":
+    if not _is_remote_configured():
         return False
         
     m_norm = model.replace('\\', '/').strip().lower()
@@ -676,17 +720,40 @@ class BaseProgramRunner:
         self.app_name = app_name
         self._winning_mode_cache = {}
 
+    async def _post_llm_request(
+        self,
+        url: str,
+        payload: dict,
+        headers: dict,
+        timeout: float = 60.0
+    ) -> httpx.Response:
+        """Sends a POST request to the LLM server, automatically falling back
+        to system-to-user messages if a Jinja/system-role error is encountered.
+        """
+        async with httpx.AsyncClient() as client:
+            response = await client.post(url, json=payload, headers=headers, timeout=timeout)
+            
+            # If the request fails due to system role issues, retry with mapped user messages
+            is_system_role_error = (
+                response.status_code == 500 and (
+                    "got system" in response.text or
+                    "Jinja Exception" in response.text or
+                    "only user" in response.text.lower()
+                )
+            )
+            if is_system_role_error:
+                print("[LLM FALLBACK] Detected system role Jinja Exception. Retrying with fallback...", flush=True)
+                payload_copy = copy.deepcopy(payload)
+                payload_copy["messages"] = fallback_system_to_user_messages(payload_copy.get("messages", []))
+                response = await client.post(url, json=payload_copy, headers=headers, timeout=timeout)
+                
+            return response
+
     async def _generate_local_summary(self, text_to_summarize: str, active_model: str, prior_memories: list = None) -> str:
-        import os
-        import httpx
-        
         # Check if remote model is configured to offload summary generation
+        is_remote_configured = _is_remote_configured()
         remote_key = os.getenv("REMOTE_API_KEY")
         remote_cloud_url = os.getenv("REMOTE_CLOUD_URL")
-        is_remote_configured = bool(
-            remote_key and remote_key.strip() and remote_key != "your_remote_api_key_here" and
-            remote_cloud_url and remote_cloud_url.strip() and remote_cloud_url != "your_remote_cloud_url_here"
-        )
         
         from utils.program import get_active_user
         from core.program_config import get_companion_name
@@ -730,13 +797,12 @@ class BaseProgramRunner:
                     "max_tokens": 1024
                 }
                 print(f"[COMPACTION] Offloading summary generation to remote cloud model: {target_model}", flush=True)
-                async with httpx.AsyncClient() as client:
-                    response = await client.post(remote_cloud_url, json=payload, headers=headers, timeout=60.0)
-                    if response.status_code == 200:
-                        res_json = response.json()
-                        return res_json['choices'][0]['message']['content'].strip()
-                    else:
-                        print(f"[COMPACTION] Remote cloud query failed with status {response.status_code}: {response.text}", flush=True)
+                response = await self._post_llm_request(remote_cloud_url, payload, headers, timeout=60.0)
+                if response.status_code == 200:
+                    res_json = response.json()
+                    return res_json['choices'][0]['message']['content'].strip()
+                else:
+                    print(f"[COMPACTION] Remote cloud query failed with status {response.status_code}: {response.text}", flush=True)
             except Exception as e:
                 print(f"[COMPACTION] Error generating remote summary: {e}. Falling back to local/default.", flush=True)
                 
@@ -751,13 +817,12 @@ class BaseProgramRunner:
             payload["model"] = target_model
             
         try:
-            async with httpx.AsyncClient() as client:
-                response = await client.post(REMOTE_SERVER_URL, json=payload, headers=get_remote_server_headers(), timeout=60.0)
-                if response.status_code == 200:
-                    res_json = response.json()
-                    return res_json['choices'][0]['message']['content'].strip()
-                else:
-                    print(f"Local server returned error for summary: {response.status_code} - {response.text}", flush=True)
+            response = await self._post_llm_request(REMOTE_SERVER_URL, payload, get_remote_server_headers(), timeout=60.0)
+            if response.status_code == 200:
+                res_json = response.json()
+                return res_json['choices'][0]['message']['content'].strip()
+            else:
+                print(f"Local server returned error for summary: {response.status_code} - {response.text}", flush=True)
         except Exception as e:
             print(f"Error generating local summary: {e}", flush=True)
         return "Memory compaction summary generation failed due to connection error."
@@ -773,41 +838,37 @@ class BaseProgramRunner:
         new_message_text: str,
         invocation_id: str
     ) -> tuple:
-        import httpx
-        import uuid
-        
         bot_response_text = ""
         tool_calls = []
         seen_tool_calls = set()  # tracks (tool_name, key_arg) to block duplicates
         
+        # Check if remote cloud server is configured for offloading
+        remote_cloud_url = os.getenv("REMOTE_CLOUD_URL")
+        is_cloud = _is_cloud_model_check(model)
+        
+        # Check for dynamic offloading triggers at execution-time
+        is_remote_configured = _is_remote_configured()
+        remote_key = os.getenv("REMOTE_API_KEY")
+        
+        # Check if an image is attached to the user's message
+        has_image = bool(getattr(adapter, 'file_path_resolved', None) or getattr(adapter, 'image_data', None))
+        
+        # Check for keyword triggers in the user message
+        has_offload_keyword = False
+        if new_message_text:
+            msg_lower = new_message_text.lower()
+            if "/cloud" in msg_lower or "/offload" in msg_lower:
+                has_offload_keyword = True
+                
         for iteration in range(10):
             if session_id in cancelled_sessions:
                 cancelled_sessions.discard(session_id)
                 raise asyncio.CancelledError("Session cancelled by user request.")
                 
-            # Check if remote cloud server is configured for offloading
-            remote_cloud_url = os.getenv("REMOTE_CLOUD_URL")
-            is_cloud = _is_cloud_model_check(model)
-            
-            # Check for dynamic offloading triggers at execution-time
-            remote_key = os.getenv("REMOTE_API_KEY")
-            is_remote_configured = bool(
-                remote_key and remote_key.strip() and remote_key != "your_remote_api_key_here" and
-                remote_cloud_url and remote_cloud_url.strip() and remote_cloud_url != "your_remote_cloud_url_here"
-            )
-            
-            # Auto-offload to cloud if an image is attached to the user's message OR local server is offline
+            # Auto-offload to cloud if local server is offline or image/keyword triggers detected
             from utils.local_llm_manager import check_status
             is_offline = not check_status()
-            has_image = bool(getattr(adapter, 'file_path_resolved', None) or getattr(adapter, 'image_data', None))
             
-            # Check for keyword triggers in the user message
-            has_offload_keyword = False
-            if new_message_text:
-                msg_lower = new_message_text.lower()
-                if "/cloud" in msg_lower or "/offload" in msg_lower:
-                    has_offload_keyword = True
-                    
             if (has_image or is_offline or has_offload_keyword) and not is_cloud and is_remote_configured:
                 reason = (
                     "Local server is offline" if is_offline else (
@@ -863,68 +924,38 @@ class BaseProgramRunner:
                 payload["model"] = target_model
                 
             try:
-                async with httpx.AsyncClient() as client:
-                    response = await client.post(url, json=payload, headers=headers, timeout=120.0)
-                    if response.status_code == 200:
-                        res_json = response.json()
-                        bot_response_text = res_json['choices'][0]['message']['content']
-                    elif response.status_code == 400 or "exceeded" in response.text.lower() or "context" in response.text.lower():
-                        print("[COMPACTION] Local model server returned context size exceeded error. Attempting emergency history compaction...", flush=True)
-                        if hasattr(adapter, 'compact_history'):
-                            await adapter.compact_history(target_model, force=True)
-                            # Re-get the messages with the newly compacted history
-                            openai_messages = adapter.get_openai_messages(sys_inst, rag_context, memory_context)
-                            payload["messages"] = openai_messages
-                            
-                            # Retry the request
-                            print("[COMPACTION] Retrying request with compacted history...", flush=True)
-                            response = await client.post(url, json=payload, headers=headers, timeout=120.0)
-                            if response.status_code == 200:
-                                res_json = response.json()
-                                bot_response_text = res_json['choices'][0]['message']['content']
-                            elif response.status_code == 500 and ("got system" in response.text or "Jinja Exception" in response.text or "only user" in response.text.lower()):
-                                print("[COMPACTION + LOCAL SERVER FALLBACK] Detected system role Jinja Exception after compaction. Retrying with fallback...", flush=True)
-                                fallback_messages = fallback_system_to_user_messages(openai_messages)
-                                payload["messages"] = fallback_messages
-                                response = await client.post(url, json=payload, headers=headers, timeout=120.0)
-                                if response.status_code == 200:
-                                    res_json = response.json()
-                                    bot_response_text = res_json['choices'][0]['message']['content']
-                                else:
-                                    bot_response_text = f"Error: Local model server returned status code {response.status_code} after emergency compaction & system role fallback - {response.text}"
-                                    break
-                            else:
-                                bot_response_text = f"Error: Local model server returned status code {response.status_code} after emergency compaction - {response.text}"
-                                break
+                response = await self._post_llm_request(url, payload, headers, timeout=120.0)
+                if response.status_code == 200:
+                    res_json = response.json()
+                    bot_response_text = res_json['choices'][0]['message']['content']
+                elif response.status_code == 400 or "exceeded" in response.text.lower() or "context" in response.text.lower():
+                    print("[COMPACTION] Local model server returned context size exceeded error. Attempting emergency history compaction...", flush=True)
+                    if hasattr(adapter, 'compact_history'):
+                        await adapter.compact_history(target_model, force=True)
+                        # Re-get the messages with the newly compacted history
+                        openai_messages = adapter.get_openai_messages(sys_inst, rag_context, memory_context)
+                        payload["messages"] = openai_messages
+                        
+                        # Retry the request
+                        print("[COMPACTION] Retrying request with compacted history...", flush=True)
+                        response = await self._post_llm_request(url, payload, headers, timeout=120.0)
+                        if response.status_code == 200:
+                            res_json = response.json()
+                            bot_response_text = res_json['choices'][0]['message']['content']
                         else:
-                            bot_response_text = f"Error: Local model server returned status code {response.status_code} - {response.text}"
+                            bot_response_text = f"Error: Local model server returned status code {response.status_code} after emergency compaction - {response.text}"
                             break
                     else:
-                        if response.status_code == 500 and ("got system" in response.text or "Jinja Exception" in response.text or "only user" in response.text.lower()):
-                            print("[LOCAL SERVER FALLBACK] Detected system role Jinja Exception. Retrying with fallback...", flush=True)
-                            fallback_messages = fallback_system_to_user_messages(openai_messages)
-                            payload["messages"] = fallback_messages
-                            response = await client.post(url, json=payload, headers=headers, timeout=120.0)
-                            if response.status_code == 200:
-                                res_json = response.json()
-                                bot_response_text = res_json['choices'][0]['message']['content']
-                            else:
-                                bot_response_text = f"Error: Local model server returned status code {response.status_code} after system role fallback - {response.text}"
-                                break
-                        else:
-                            bot_response_text = f"Error: Local model server returned status code {response.status_code} - {response.text}"
-                            break
+                        bot_response_text = f"Error: Local model server returned status code {response.status_code} - {response.text}"
+                        break
+                else:
+                    bot_response_text = f"Error: Local model server returned status code {response.status_code} - {response.text}"
+                    break
             except Exception as e:
                 if is_cloud:
                     bot_response_text = f"Error connecting to remote cloud server: {e}. Please verify your network connection and remote API settings."
                     break
                 else:
-                    # Check if remote cloud server is configured for fallback
-                    remote_key = os.getenv("REMOTE_API_KEY")
-                    is_remote_configured = bool(
-                        remote_key and remote_key.strip() and remote_key != "your_remote_api_key_here" and
-                        remote_cloud_url and remote_cloud_url.strip() and remote_cloud_url != "your_remote_cloud_url_here"
-                    )
                     if is_remote_configured:
                         print(f"[VRAM GUARD ROUTING] Local server offline/busy ({e}). Seamlessly routing request to remote cloud model.", flush=True)
                         try:
@@ -932,14 +963,15 @@ class BaseProgramRunner:
                             fallback_headers = {"Content-Type": "application/json"}
                             if remote_key:
                                 fallback_headers["Authorization"] = f"Bearer {remote_key}"
-                            payload["model"] = DEFAULT_REMOTE_MODEL
-                            async with httpx.AsyncClient() as client:
-                                response = await client.post(remote_cloud_url, json=payload, headers=fallback_headers, timeout=120.0)
-                                if response.status_code == 200:
-                                    res_json = response.json()
-                                    bot_response_text = res_json['choices'][0]['message']['content']
-                                else:
-                                    bot_response_text = f"Error: Local server offline, and remote server returned status {response.status_code} - {response.text}"
+                            payload_fallback = copy.deepcopy(payload)
+                            payload_fallback["model"] = DEFAULT_REMOTE_MODEL
+                            
+                            response = await self._post_llm_request(remote_cloud_url, payload_fallback, fallback_headers, timeout=120.0)
+                            if response.status_code == 200:
+                                res_json = response.json()
+                                bot_response_text = res_json['choices'][0]['message']['content']
+                            else:
+                                bot_response_text = f"Error: Local server offline, and remote server returned status {response.status_code} - {response.text}"
                         except Exception as cloud_err:
                             bot_response_text = f"Error: Local server offline ({e}), and fallback to remote cloud server failed: {cloud_err}"
                         break
@@ -966,10 +998,7 @@ class BaseProgramRunner:
 
             # Check for dynamic offloading triggers at execution-time
             remote_key = os.getenv("REMOTE_API_KEY")
-            is_remote_configured = bool(
-                remote_key and remote_key.strip() and remote_key != "your_remote_api_key_here" and
-                remote_cloud_url and remote_cloud_url.strip() and remote_cloud_url != "your_remote_cloud_url_here"
-            )
+            is_remote_configured = _is_remote_configured()
             
             if is_remote_configured and matches and not is_cloud:
                 # 1. Check for complex tools
@@ -994,60 +1023,38 @@ class BaseProgramRunner:
                 has_image_gen = False
                 for m in matches:
                     tool_name = m.group(1)
-                    if tool_name == "generate_companion_portrait":
-                        tool_name = "generate_local_image"
-                    elif tool_name == "generate_general_image":
-                        tool_name = "generate_imagen"
-                    if tool_name in ("generate_local_image", "generate_imagen", "generate_companion_portrait", "generate_general_image"):
+                    if _normalize_tool_name(tool_name) in ("generate_local_image", "generate_imagen"):
                         has_image_gen = True
                         break
                         
                 if has_image_gen:
                     m = matches[0]
                     tool_name = m.group(1)
-                    if tool_name == "generate_companion_portrait":
-                        tool_name = "generate_local_image"
-                    elif tool_name == "generate_general_image":
-                        tool_name = "generate_imagen"
                     args_str = m.group(2)
+                    
+                    adapter.append_assistant_message(bot_response_text, [], invocation_id)
+                    parsed_args, new_markdown = _execute_emulated_tool(tool_name, args_str)
+                    normalized_name = _normalize_tool_name(tool_name)
+                    
+                    original_tag = m.group(0)
+                    image_succeeded = new_markdown.startswith("![") and new_markdown.endswith(")")
+                    if image_succeeded:
+                        bot_response_text = bot_response_text.replace(original_tag, new_markdown)
+                    else:
+                        # Generation failed — strip the call tag cleanly so the companion
+                        # message body stays readable. The error surfaces in tool_calls.
+                        bot_response_text = bot_response_text.replace(original_tag, "").strip()
                         
-                    parsed_args = _parse_emulated_tool_call(tool_name, args_str)
-                    import tools
-                    func = getattr(tools, tool_name, None)
-                    if func:
-                        adapter.append_assistant_message(bot_response_text, [], invocation_id)
-                        new_markdown = func(*parsed_args["args"], **parsed_args["kwargs"])
-                        original_tag = m.group(0)
-                        image_succeeded = new_markdown.startswith("![") and new_markdown.endswith(")")
-                        if image_succeeded:
-                            bot_response_text = bot_response_text.replace(original_tag, new_markdown)
-                        else:
-                            # Generation failed — strip the call tag cleanly so the companion
-                            # message body stays readable. The error surfaces in tool_calls.
-                            bot_response_text = bot_response_text.replace(original_tag, "").strip()
-                        
-                        call_id = f"call_{int(time.time())}"
-                        t_calls = [
-                            {
-                                'type': 'call',
-                                'name': tool_name,
-                                'args': parsed_args["kwargs"] if parsed_args["kwargs"] else {"prompt": parsed_args["args"][0] if parsed_args["args"] else ""},
-                                'id': call_id
-                            },
-                            {
-                                'type': 'response',
-                                'name': tool_name,
-                                'response': new_markdown,
-                                'id': call_id
-                            }
-                        ]
-                        tool_calls.extend(t_calls)
-                        
-                        adapter.append_image_tool_events(tool_name, t_calls[0]['args'], new_markdown, call_id, invocation_id)
-                        
-                        final_embedded_text = self._ensure_images_are_embedded(bot_response_text) if image_succeeded else bot_response_text
-                        adapter.append_assistant_message(final_embedded_text, t_calls, invocation_id)
-                        break
+                    resolved_args = parsed_args["kwargs"] if parsed_args["kwargs"] else {"prompt": parsed_args["args"][0] if parsed_args["args"] else ""}
+                    t_calls = _build_tool_calls_pair(normalized_name, resolved_args, new_markdown)
+                    tool_calls.extend(t_calls)
+                    call_id = t_calls[0]['id']
+                    
+                    adapter.append_image_tool_events(normalized_name, t_calls[0]['args'], new_markdown, call_id, invocation_id)
+                    
+                    final_embedded_text = self._ensure_images_are_embedded(bot_response_text) if image_succeeded else bot_response_text
+                    adapter.append_assistant_message(final_embedded_text, t_calls, invocation_id)
+                    break
                 else:
                     # Sequential execution for non-image tools
                     is_all_non_blocking = all(m.group(1) in {"add_quest", "add_journal_entry"} for m in matches)
@@ -1065,35 +1072,12 @@ class BaseProgramRunner:
                                 raise asyncio.CancelledError("Session cancelled by user request.")
                             t_name = m_tool.group(1)
                             a_str = m_tool.group(2)
-                            parsed_args = _parse_emulated_tool_call(t_name, a_str)
-                            import tools
-                            f = getattr(tools, t_name, None)
-                            if not f:
-                                output = f"Error: Tool '{t_name}' not found."
-                            else:
-                                try:
-                                    output = f(*parsed_args["args"], **parsed_args["kwargs"])
-                                except Exception as ex:
-                                    output = f"Error executing tool: {ex}"
-                            results.append((t_name, parsed_args["kwargs"], output))
+                            parsed_args, output = _execute_emulated_tool(t_name, a_str)
+                            results.append((_normalize_tool_name(t_name), parsed_args["kwargs"], output))
                             
                         t_calls = []
                         for idx, (t_name, t_args, t_output) in enumerate(results):
-                            call_id = f"call_{int(time.time())}_{idx}_{uuid.uuid4().hex[:4]}"
-                            t_calls.extend([
-                                {
-                                    'type': 'call',
-                                    'name': t_name,
-                                    'args': t_args,
-                                    'id': call_id
-                                },
-                                {
-                                    'type': 'response',
-                                    'name': t_name,
-                                    'response': str(t_output),
-                                    'id': call_id
-                                }
-                            ])
+                            t_calls.extend(_build_tool_calls_pair(t_name, t_args, t_output, idx))
                         tool_calls.extend(t_calls)
                         
                         adapter.append_assistant_message(clean_response, t_calls, invocation_id)
@@ -1113,44 +1097,24 @@ class BaseProgramRunner:
                             raise asyncio.CancelledError("Session cancelled by user request.")
                         t_name = m_tool.group(1)
                         a_str = m_tool.group(2)
-                        parsed_args = _parse_emulated_tool_call(t_name, a_str)
-                        # Deduplicate: skip if same tool+key arg was already called this turn
+                        
+                        normalized_name = _normalize_tool_name(t_name)
+                        parsed_args = _parse_emulated_tool_call(normalized_name, a_str)
                         key_arg = str(list(parsed_args["kwargs"].values())[0]) if parsed_args["kwargs"] else (str(parsed_args["args"][0]) if parsed_args["args"] else "")
-                        dedup_key = (t_name, key_arg)
+                        dedup_key = (normalized_name, key_arg)
+                        
                         if dedup_key in seen_tool_calls:
-                            output = f"[Skipped: '{t_name}' with this input was already called. Use a different query or URL.]"
-                            results.append((t_name, parsed_args["kwargs"], output))
+                            output = f"[Skipped: '{normalized_name}' with this input was already called. Use a different query or URL.]"
+                            results.append((normalized_name, parsed_args["kwargs"], output))
                             continue
                         seen_tool_calls.add(dedup_key)
-                        import tools
-                        f = getattr(tools, t_name, None)
-                        if not f:
-                            output = f"Error: Tool '{t_name}' not found."
-                        else:
-                            try:
-                                output = f(*parsed_args["args"], **parsed_args["kwargs"])
-                            except Exception as ex:
-                                output = f"Error executing tool: {ex}"
-                        results.append((t_name, parsed_args["kwargs"], output))
+                        
+                        parsed_args, output = _execute_emulated_tool(t_name, a_str)
+                        results.append((normalized_name, parsed_args["kwargs"], output))
                         
                     t_calls = []
                     for idx, (t_name, t_args, t_output) in enumerate(results):
-                        call_id = f"call_{int(time.time())}_{idx}_{uuid.uuid4().hex[:4]}"
-                        t_calls.extend([
-                            {
-                                'type': 'call',
-                                'name': t_name,
-                                'args': t_args,
-                                'id': call_id
-                            },
-                            {
-                                'type': 'response',
-                                'name': t_name,
-                                'response': str(t_output),
-                                'id': call_id
-                            }
-                        ])
-                        
+                        t_calls.extend(_build_tool_calls_pair(t_name, t_args, t_output, idx))
                     tool_calls.extend(t_calls)
                     
                     adapter.append_assistant_message(text_before if text_before else "", t_calls, invocation_id)
@@ -1238,16 +1202,7 @@ class BaseProgramRunner:
         raise NotImplementedError()
 
     def update_inversion_state_with_mood(self, session_id: str, mood_name: str):
-        state = self.sessions_inversion_state.setdefault(session_id, {
-            "active_inversion": "",
-            "inversion_consecutive_turns": 0,
-            "mood_tally": {
-                "intimate": 0,
-                "excited": 0,
-                "intense": 0,
-                "sad": 0
-            }
-        })
+        state = self.sessions_inversion_state.setdefault(session_id, copy.deepcopy(_DEFAULT_INVERSION_STATE))
         
         # If there is an active inversion, it remains active for a consecutive count of turns.
         if state.get("active_inversion"):
@@ -1259,12 +1214,7 @@ class BaseProgramRunner:
             return
             
         # If no active inversion, count the mood
-        tally = state.setdefault("mood_tally", {
-            "intimate": 0,
-            "excited": 0,
-            "intense": 0,
-            "sad": 0
-        })
+        tally = state.setdefault("mood_tally", copy.deepcopy(_DEFAULT_INVERSION_STATE["mood_tally"]))
         if mood_name in tally:
             tally[mood_name] += 1
             if tally[mood_name] >= 5:
@@ -1272,24 +1222,10 @@ class BaseProgramRunner:
                 state["active_inversion"] = mood_name
                 state["inversion_consecutive_turns"] = 0
                 # Reset tally
-                state["mood_tally"] = {
-                    "intimate": 0,
-                    "excited": 0,
-                    "intense": 0,
-                    "sad": 0
-                }
+                state["mood_tally"] = copy.deepcopy(_DEFAULT_INVERSION_STATE["mood_tally"])
 
     async def _get_inversion_mode(self, session_id: str, history: list = None) -> str:
-        state = self.sessions_inversion_state.setdefault(session_id, {
-            "active_inversion": "",
-            "inversion_consecutive_turns": 0,
-            "mood_tally": {
-                "intimate": 0,
-                "excited": 0,
-                "intense": 0,
-                "sad": 0
-            }
-        })
+        state = self.sessions_inversion_state.setdefault(session_id, copy.deepcopy(_DEFAULT_INVERSION_STATE))
         return state.get("active_inversion", "")
 
     async def _get_inversion_directive(self, session_id: str) -> str:
@@ -1341,110 +1277,169 @@ class BaseProgramRunner:
         text = re.sub(raw_path_pattern, r'![Portrait](\1)', text)
         return text
 
+    def _build_voice_prompt(self, session_id: str, companion_name: str) -> str:
+        """Compiles the voice prompt by overriding settings and formatting recent history turns."""
+        from utils.program import get_active_program
+        from core.program_config import compile_instructions_from_json
+        from variables import PROGRAMS_DIR
+        
+        active_prog = get_active_program()
+        json_path = os.path.join(PROGRAMS_DIR, active_prog, f"{active_prog}.json")
+        
+        profile_data = {}
+        if os.path.exists(json_path):
+            try:
+                with open(json_path, "r", encoding="utf-8") as f:
+                    profile_data = json.load(f)
+            except Exception:
+                pass
+        
+        if profile_data:
+            if "operation" not in profile_data:
+                profile_data["operation"] = {}
+            profile_data["operation"]["response_directive"] = "Super short and succinct messages. Conversational. No narration."
+            profile_data["operation"]["example_message"] = ""
+            profile_data["operation"]["scenario"] = f"{companion_name} is on a live voice call with the user. They are speaking to each other over the phone in real-time."
+            instructions = compile_instructions_from_json(profile_data)
+        else:
+            instructions = f"# IDENTITY: {companion_name}\n\n## SCENARIO / CONTEXT\n{companion_name} is on a live voice call with the user. They are speaking to each other over the phone in real-time.\n\n## RESPONSE DIRECTIVES (MANDATORY GUIDELINES)\nSuper short and succinct messages. Conversational. No narration."
+        
+        src_session_id = session_id[:-6]
+        recent_turns = []
+        
+        # Retrieve history from memory/disk based on runner type
+        if hasattr(self, 'sessions_history'):  # OpenSourceRunner
+            history = self.sessions_history.get(src_session_id, [])
+            if not history:
+                safe_id = "".join(c for c in src_session_id if c.isalnum() or c in "-_")
+                path = os.path.join(self.sessions_dir, f"{safe_id}.json")
+                if os.path.exists(path):
+                    try:
+                        with open(path, "r", encoding="utf-8") as f:
+                            data = json.load(f)
+                        if isinstance(data, dict) and "messages" in data:
+                            history = data["messages"]
+                        else:
+                            history = data
+                    except Exception:
+                        pass
+            for msg in history:
+                if msg.get('role') != 'voice-call':
+                    role = "User" if msg.get('role') == 'user' else companion_name
+                    text = msg.get('text', '')
+                    if text.strip():
+                        recent_turns.append((role, text.strip()))
+        else:  # GoogleAdkRunner
+            session_dict = self.runner.session_service.sessions if hasattr(self, 'runner') else None
+            adk_session = None
+            if session_dict and self.app_name in session_dict and 'user' in session_dict[self.app_name]:
+                adk_session = session_dict[self.app_name]['user'].get(src_session_id)
+            
+            if not adk_session:
+                safe_id = "".join(c for c in src_session_id if c.isalnum() or c in "-_")
+                path = os.path.join(self.sessions_dir, f"{safe_id}.json")
+                if os.path.exists(path):
+                    try:
+                        with open(path, "r", encoding="utf-8") as f:
+                            data = json.load(f)
+                            for ev_data in data:
+                                if ev_data.get('author', '').lower() != 'voice-call':
+                                    role = "User" if ev_data.get('author', '').lower() == 'user' else companion_name
+                                    parts = ev_data.get('content', {}).get('parts', [])
+                                    text = "".join(part.get('text', '') for part in parts if part.get('text'))
+                                    if text.strip():
+                                        recent_turns.append((role, text.strip()))
+                    except Exception:
+                        pass
+            else:
+                for ev in adk_session.events:
+                    if ev.author.lower() != 'voice-call':
+                        role = "User" if ev.author.lower() == 'user' else companion_name
+                        text = ""
+                        if ev.content and ev.content.parts:
+                            text = "".join(p.text for p in ev.content.parts if p.text)
+                        if text.strip():
+                            recent_turns.append((role, text.strip()))
+        
+        limit = 6
+        seed_turns = recent_turns[-limit:] if len(recent_turns) > limit else recent_turns
+        
+        journal_lines = []
+        for role, text in seed_turns:
+            clean_text = re.sub(r'(?:<think>|\[think\])[\s\S]*?(?:</think>|\[/think\]|<\/\s*think>|\[\s*/\s*think\s*\]|$)', '', text, flags=re.IGNORECASE)
+            clean_text = re.sub(r'\*.*?\*', '', clean_text)
+            clean_text = re.sub(r' +', ' ', clean_text).strip()
+            if clean_text:
+                journal_lines.append(f"  {role}: {clean_text}")
+                
+        if journal_lines:
+            instructions += "\n\n# RECALLED JOURNALS / MEMORIES\n- Recent conversation context:\n" + "\n".join(journal_lines)
+            
+        return instructions
+
+    def _inject_journals(self, instructions: str, user_message: str) -> str:
+        """Injects matched journal entries into instructions."""
+        if not user_message:
+            return instructions
+        try:
+            from utils.journals import match_journals
+            from utils.program import get_active_program
+            active_prog = get_active_program()
+            matched_entries = match_journals(user_message, active_prog)
+            if matched_entries:
+                if "\n\n# RECALLED JOURNALS / MEMORIES\n" not in instructions:
+                    instructions += "\n\n# RECALLED JOURNALS / MEMORIES\n"
+                for entry in matched_entries:
+                    instructions += f"- {entry['content']}\n"
+        except Exception as je:
+            print(f"Error matching journals: {je}")
+        return instructions
+
+    def _inject_system_memories(self, instructions: str, session_id: str) -> str:
+        """Fetches and injects system-memory summaries into instructions."""
+        system_memories = []
+        if hasattr(self, 'sessions_history'): # OpenSourceRunner
+            history = self.sessions_history.get(session_id, [])
+            for msg in history:
+                if msg.get('role') == 'system-memory' and not msg.get('compacted'):
+                    text = msg.get('text', '').strip()
+                    if text:
+                        clean_text = text.replace("[System Memory of older conversation turns]:", "").strip()
+                        system_memories.append(clean_text)
+        else: # GoogleAdkRunner
+            session_dict = self.runner.session_service.sessions if hasattr(self, 'runner') else None
+            adk_session = None
+            if session_dict and self.app_name in session_dict and 'user' in session_dict[self.app_name]:
+                adk_session = session_dict[self.app_name]['user'].get(session_id)
+                if not adk_session and isinstance(session_id, str) and session_id.endswith('_voice'):
+                    adk_session = session_dict[self.app_name]['user'].get(session_id[:-6])
+            if adk_session and adk_session.events:
+                for ev in adk_session.events:
+                    if not getattr(ev, 'compacted', False) and (ev.author == 'system-memory' or (ev.content and ev.content.role == 'system-memory')):
+                        text = ""
+                        if ev.content and ev.content.parts:
+                            text = "".join(part.text for part in ev.content.parts if part.text)
+                        if text.strip():
+                            clean_text = text.replace("[System Memory of older conversation turns]:", "").strip()
+                            system_memories.append(clean_text)
+                            
+        if system_memories:
+            instructions += f"\n\n# CONVERSATION MEMORY ARCHIVE\nThe following is a summary of older conversation turns from earlier in this chat session:\n" + "\n---\n".join(system_memories) + "\n"
+            
+        return instructions
+
     def _get_system_instructions(self, session_id, inversion_directive=None, user_message=None) -> str:
         """Pulls the system prompt directly from the program's JSON profile and appends matched journals."""
         is_voice = isinstance(session_id, str) and session_id.endswith('_voice')
+        from core.program_config import get_companion_name
         
-        if is_voice:
-            from utils.program import get_active_program
-            from core.program_config import compile_instructions_from_json, get_companion_name
-            from variables import PROGRAMS_DIR
-            
+        try:
             companion_name = get_companion_name()
-            active_prog = get_active_program()
-            json_path = os.path.join(PROGRAMS_DIR, active_prog, f"{active_prog}.json")
+        except Exception:
+            companion_name = "Companion"
             
-            profile_data = {}
-            if os.path.exists(json_path):
-                try:
-                    with open(json_path, "r", encoding="utf-8") as f:
-                        profile_data = json.load(f)
-                except Exception:
-                    pass
-            
-            if profile_data:
-                # Override response directives, scenario, and hide example messages
-                if "operation" not in profile_data:
-                    profile_data["operation"] = {}
-                profile_data["operation"]["response_directive"] = "Super short and succinct messages. Conversational. No narration."
-                profile_data["operation"]["example_message"] = ""
-                profile_data["operation"]["scenario"] = f"{companion_name} is on a live voice call with the user. They are speaking to each other over the phone in real-time."
-                instructions = compile_instructions_from_json(profile_data)
-            else:
-                instructions = f"# IDENTITY: {companion_name}\n\n## SCENARIO / CONTEXT\n{companion_name} is on a live voice call with the user. They are speaking to each other over the phone in real-time.\n\n## RESPONSE DIRECTIVES (MANDATORY GUIDELINES)\nSuper short and succinct messages. Conversational. No narration."
-            
-            src_session_id = session_id[:-6]
-            recent_turns = []
-            
-            # Retrieve history from memory/disk based on runner type
-            if hasattr(self, 'sessions_history'):  # OpenSourceRunner
-                history = self.sessions_history.get(src_session_id, [])
-                if not history:
-                    safe_id = "".join(c for c in src_session_id if c.isalnum() or c in "-_")
-                    path = os.path.join(self.sessions_dir, f"{safe_id}.json")
-                    if os.path.exists(path):
-                        try:
-                            with open(path, "r", encoding="utf-8") as f:
-                                data = json.load(f)
-                            if isinstance(data, dict) and "messages" in data:
-                                history = data["messages"]
-                            else:
-                                history = data
-                        except Exception:
-                            pass
-                for msg in history:
-                    if msg.get('role') != 'voice-call':
-                        role = "User" if msg.get('role') == 'user' else companion_name
-                        text = msg.get('text', '')
-                        if text.strip():
-                            recent_turns.append((role, text.strip()))
-            else:  # GoogleAdkRunner
-                session_dict = self.runner.session_service.sessions if hasattr(self, 'runner') else None
-                adk_session = None
-                if session_dict and self.app_name in session_dict and 'user' in session_dict[self.app_name]:
-                    adk_session = session_dict[self.app_name]['user'].get(src_session_id)
-                
-                if not adk_session:
-                    safe_id = "".join(c for c in src_session_id if c.isalnum() or c in "-_")
-                    path = os.path.join(self.sessions_dir, f"{safe_id}.json")
-                    if os.path.exists(path):
-                        try:
-                            with open(path, "r", encoding="utf-8") as f:
-                                data = json.load(f)
-                                for ev_data in data:
-                                    if ev_data.get('author', '').lower() != 'voice-call':
-                                        role = "User" if ev_data.get('author', '').lower() == 'user' else companion_name
-                                        parts = ev_data.get('content', {}).get('parts', [])
-                                        text = "".join(part.get('text', '') for part in parts if part.get('text'))
-                                        if text.strip():
-                                            recent_turns.append((role, text.strip()))
-                        except Exception:
-                            pass
-                else:
-                    for ev in adk_session.events:
-                        if ev.author.lower() != 'voice-call':
-                            role = "User" if ev.author.lower() == 'user' else companion_name
-                            text = ""
-                            if ev.content and ev.content.parts:
-                                text = "".join(p.text for p in ev.content.parts if p.text)
-                            if text.strip():
-                                recent_turns.append((role, text.strip()))
-            
-            # Format and clean the last 6 turns as a journal memory block
-            limit = 6
-            seed_turns = recent_turns[-limit:] if len(recent_turns) > limit else recent_turns
-            
-            journal_lines = []
-            for role, text in seed_turns:
-                clean_text = re.sub(r'(?:<think>|\[think\])[\s\S]*?(?:</think>|\[/think\]|<\/\s*think>|\[\s*/\s*think\s*\]|$)', '', text, flags=re.IGNORECASE)
-                clean_text = re.sub(r'\*.*?\*', '', clean_text)
-                clean_text = re.sub(r' +', ' ', clean_text).strip()
-                if clean_text:
-                    journal_lines.append(f"  {role}: {clean_text}")
-                    
-            if journal_lines:
-                instructions += "\n\n# RECALLED JOURNALS / MEMORIES\n- Recent conversation context:\n" + "\n".join(journal_lines)
-
+        if is_voice:
+            instructions = self._build_voice_prompt(session_id, companion_name)
         else:
             # Non-voice (standard) prompt construction
             from core import program_config
@@ -1460,22 +1455,8 @@ class BaseProgramRunner:
                 instructions += conciseness_directive
                 
         # --- Shared Post-Processing ---
+        instructions = self._inject_journals(instructions, user_message)
         
-        # Inject matched journal entries
-        if user_message:
-            try:
-                from utils.journals import match_journals
-                from utils.program import get_active_program
-                active_prog = get_active_program()
-                matched_entries = match_journals(user_message, active_prog)
-                if matched_entries:
-                    if "\n\n# RECALLED JOURNALS / MEMORIES\n" not in instructions:
-                        instructions += "\n\n# RECALLED JOURNALS / MEMORIES\n"
-                    for entry in matched_entries:
-                        instructions += f"- {entry['content']}\n"
-            except Exception as je:
-                print(f"Error matching journals: {je}")
-                
         # NSFW allowance is always appended
         nsfw_directive = (
             "\n\n# CONTENT\n"
@@ -1506,39 +1487,11 @@ class BaseProgramRunner:
                     "Do NOT answer blindly or ask the user where they are—proactively look into the project folders first using your tools.\n"
                 )
                 
-        # Fetch and inject system-memory summaries
-        system_memories = []
-        if hasattr(self, 'sessions_history'): # OpenSourceRunner
-            history = self.sessions_history.get(session_id, [])
-            for msg in history:
-                if msg.get('role') == 'system-memory' and not msg.get('compacted'):
-                    text = msg.get('text', '').strip()
-                    if text:
-                        clean_text = text.replace("[System Memory of older conversation turns]:", "").strip()
-                        system_memories.append(clean_text)
-        else: # GoogleAdkRunner
-            session_dict = self.runner.session_service.sessions if hasattr(self, 'runner') else None
-            adk_session = None
-            if session_dict and self.app_name in session_dict and 'user' in session_dict[self.app_name]:
-                adk_session = session_dict[self.app_name]['user'].get(session_id)
-                if not adk_session and isinstance(session_id, str) and session_id.endswith('_voice'):
-                    adk_session = session_dict[self.app_name]['user'].get(session_id[:-6])
-            if adk_session and adk_session.events:
-                for ev in adk_session.events:
-                    if not getattr(ev, 'compacted', False) and (ev.author == 'system-memory' or (ev.content and ev.content.role == 'system-memory')):
-                        text = ""
-                        if ev.content and ev.content.parts:
-                            text = "".join(part.text for part in ev.content.parts if part.text)
-                        if text.strip():
-                            clean_text = text.replace("[System Memory of older conversation turns]:", "").strip()
-                            system_memories.append(clean_text)
-                            
-        if system_memories:
-            instructions += f"\n\n# CONVERSATION MEMORY ARCHIVE\nThe following is a summary of older conversation turns from earlier in this chat session:\n" + "\n---\n".join(system_memories) + "\n"
-
+        instructions = self._inject_system_memories(instructions, session_id)
+        
         if is_voice:
             print(f"\n[VOICE CALL DEBUG] Active Voice Prompt:\n{instructions}\n[VOICE CALL DEBUG] END PROMPT\n", flush=True)
-
+            
         return instructions
 
 
@@ -1557,7 +1510,6 @@ class OpenSourceRunner(BaseProgramRunner):
 
     async def generate_impersonation(self, prompt: str, system_instruction: str, model: str = None, temperature: float = 0.7) -> str:
         """Generates an impersonated message from the companion using the active remote or local model."""
-        import httpx
         # Check if we should use the cloud remote endpoint
         remote_cloud_url = os.getenv("REMOTE_CLOUD_URL")
         remote_key = os.getenv("REMOTE_API_KEY")
@@ -1585,32 +1537,18 @@ class OpenSourceRunner(BaseProgramRunner):
             payload["model"] = target_model
 
         try:
-            async with httpx.AsyncClient() as client:
-                r = await client.post(url, json=payload, headers=headers, timeout=60.0)
-                if r.status_code == 200:
-                    res_json = r.json()
-                    return res_json['choices'][0]['message']['content'].strip()
-                elif not is_cloud and r.status_code == 500 and ("got system" in r.text or "Jinja Exception" in r.text or "only user" in r.text.lower()):
-                    print("[LOCAL IMPERSONATION FALLBACK] Detected system role Jinja Exception. Retrying with fallback...", flush=True)
-                    fallback_messages = fallback_system_to_user_messages(payload["messages"])
-                    payload["messages"] = fallback_messages
-                    r = await client.post(url, json=payload, headers=headers, timeout=60.0)
-                    if r.status_code == 200:
-                        res_json = r.json()
-                        return res_json['choices'][0]['message']['content'].strip()
-                    else:
-                        raise Exception(f"HTTP Server returned status code {r.status_code} after system role fallback: {r.text}")
-                else:
-                    raise Exception(f"HTTP Server returned status code {r.status_code}: {r.text}")
+            r = await self._post_llm_request(url, payload, headers, timeout=60.0)
+            if r.status_code == 200:
+                res_json = r.json()
+                return res_json['choices'][0]['message']['content'].strip()
+            else:
+                raise Exception(f"HTTP Server returned status code {r.status_code}: {r.text}")
         except Exception as e:
             if is_cloud:
                 raise e
             else:
                 # Check if remote cloud server is configured for fallback
-                is_remote_configured = bool(
-                    remote_key and remote_key.strip() and remote_key != "your_remote_api_key_here" and
-                    remote_cloud_url and remote_cloud_url.strip() and remote_cloud_url != "your_remote_cloud_url_here"
-                )
+                is_remote_configured = _is_remote_configured()
                 if is_remote_configured:
                     print(f"[VRAM GUARD ROUTING] Local server offline/busy ({e}) during impersonation. Seamlessly routing request to remote cloud model.", flush=True)
                     try:
@@ -1618,14 +1556,15 @@ class OpenSourceRunner(BaseProgramRunner):
                         fallback_headers = {"Content-Type": "application/json"}
                         if remote_key:
                             fallback_headers["Authorization"] = f"Bearer {remote_key}"
-                        payload["model"] = DEFAULT_REMOTE_MODEL
-                        async with httpx.AsyncClient() as client:
-                            r_fallback = await client.post(remote_cloud_url, json=payload, headers=fallback_headers, timeout=60.0)
-                            if r_fallback.status_code == 200:
-                                res_json = r_fallback.json()
-                                return res_json['choices'][0]['message']['content'].strip()
-                            else:
-                                raise Exception(f"Fallback HTTP Server returned status code {r_fallback.status_code}: {r_fallback.text}")
+                        payload_fallback = copy.deepcopy(payload)
+                        payload_fallback["model"] = DEFAULT_REMOTE_MODEL
+                        
+                        r_fallback = await self._post_llm_request(remote_cloud_url, payload_fallback, fallback_headers, timeout=60.0)
+                        if r_fallback.status_code == 200:
+                            res_json = r_fallback.json()
+                            return res_json['choices'][0]['message']['content'].strip()
+                        else:
+                            raise Exception(f"Fallback HTTP Server returned status code {r_fallback.status_code}: {r_fallback.text}")
                     except Exception as cloud_err:
                         raise Exception(f"Local server offline ({e}), and fallback to remote cloud server failed: {cloud_err}")
                 else:
@@ -1640,16 +1579,7 @@ class OpenSourceRunner(BaseProgramRunner):
         with self._lock:
             try:
                 history = self.sessions_history.get(session_id, [])
-                inversion_state = self.sessions_inversion_state.get(session_id, {
-                    "active_inversion": "",
-                    "inversion_consecutive_turns": 0,
-                    "mood_tally": {
-                        "intimate": 0,
-                        "excited": 0,
-                        "intense": 0,
-                        "sad": 0
-                    }
-                })
+                inversion_state = self.sessions_inversion_state.get(session_id, copy.deepcopy(_DEFAULT_INVERSION_STATE))
                 data = {
                     "messages": history,
                     "inversion_state": inversion_state
@@ -1669,16 +1599,7 @@ class OpenSourceRunner(BaseProgramRunner):
                     data = json.load(f)
                 
                 self.sessions_history[session_id] = data["messages"]
-                self.sessions_inversion_state[session_id] = data.get("inversion_state", {
-                    "active_inversion": "",
-                    "inversion_consecutive_turns": 0,
-                    "mood_tally": {
-                        "intimate": 0,
-                        "excited": 0,
-                        "intense": 0,
-                        "sad": 0
-                    }
-                })
+                self.sessions_inversion_state[session_id] = data.get("inversion_state", copy.deepcopy(_DEFAULT_INVERSION_STATE))
                 return True
             except Exception as e:
                 print(f"Error loading OS session {session_id} from disk: {e}")
@@ -1753,7 +1674,6 @@ class OpenSourceRunner(BaseProgramRunner):
         # Clean up keyword triggers if routing to the cloud model
         is_cloud = _is_cloud_model_check(model)
         if is_cloud and new_message_text:
-            import re
             new_message_text = re.sub(r'(?i)/cloud|/offload', '', new_message_text).strip()
 
 
@@ -1781,7 +1701,6 @@ class OpenSourceRunner(BaseProgramRunner):
                 print(f"Error handling media_path in OpenSourceRunner: {e}")
 
         # Log User input
-        import uuid
         if not msg_id:
             if new_message_text.startswith("[SYSTEM: User has completed"):
                 prefix = "quest_"
@@ -1807,8 +1726,8 @@ class OpenSourceRunner(BaseProgramRunner):
         self._save_session_to_disk(session_id)
         
         # Get RAG and memory contexts
-        rag_context = _get_rag_context(new_message_text)
-        memory_context = _get_memory_context(new_message_text)
+        rag_context = _get_databank_context(new_message_text, is_memory=False)
+        memory_context = _get_databank_context(new_message_text, is_memory=True)
         
         # Determine the personality inversion before getting system instructions
         inversion_directive = await self._get_inversion_directive(session_id)
@@ -2088,7 +2007,6 @@ class OpenSourceRunner(BaseProgramRunner):
                 has_image = False
                 if msg.get('text') and image_url in msg['text']:
                     has_image = True
-                    import re
                     pattern = r'!\[[^\]]*\]\(' + re.escape(image_url) + r'\)'
                     remaining_text = re.sub(pattern, '', msg['text']).strip()
                     clean_remaining = re.sub(r'^[:\s\-\*]+|[:\s\-\*]+$', '', remaining_text)
@@ -2107,7 +2025,6 @@ class OpenSourceRunner(BaseProgramRunner):
                     for tc in msg['tool_calls']:
                         if tc.get('type') == 'response' and tc.get('response') and image_url in tc['response']:
                             has_image = True
-                            import re
                             pattern = r'!\[[^\]]*\]\(' + re.escape(image_url) + r'\)'
                             tc['response'] = re.sub(pattern, '', tc['response']).strip()
                             modified = True
@@ -2220,7 +2137,6 @@ class OpenSourceRunner(BaseProgramRunner):
             if session_id not in self.sessions_history:
                 self.sessions_history[session_id] = []
                 
-            import uuid
             prefix = 'usr_' if role == 'user' else 'prgm_'
             if role == 'user':
                 if text.startswith("[SYSTEM: User has completed"):
@@ -2262,7 +2178,6 @@ class OpenSourceRunner(BaseProgramRunner):
             if session_id not in self.sessions_history:
                 self.sessions_history[session_id] = []
                 
-            import time
             if timestamp is None:
                 timestamp = time.time()
                 
@@ -2273,7 +2188,6 @@ class OpenSourceRunner(BaseProgramRunner):
                     if not (msg.get('role') in ('user', 'companion') and msg.get('timestamp', 0) >= start_time)
                 ]
                 
-            import uuid
             new_msg = {
                 'id': f"vc_{uuid.uuid4().hex}",
                 'role': 'voice-call',

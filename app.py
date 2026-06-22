@@ -2,6 +2,11 @@ import os
 import time
 import shutil
 import json
+import re
+import importlib
+import traceback
+import threading
+import uuid
 
 # Automate copying of default .env configuration if it doesn't exist
 base_dir = os.path.dirname(os.path.abspath(__file__))
@@ -34,7 +39,6 @@ def init_runner():
     runner = OpenSourceRunner(app_name="Sanctuary")
     print(">>> Starting Sanctuary using decoupled OPEN-SOURCE Runner backend!")
 
-import threading
 _prewarm_started = False
 _prewarm_lock = threading.Lock()
 
@@ -80,14 +84,7 @@ def check_program_change():
             _cached_active_user = current_user
             
         try:
-            from core import program_config
-            import importlib
-            importlib.reload(program_config)
-            
-            # Re-initialize the runner backend with the new consciousness/program/user config
-            init_runner()
-            
-            runner.sessions_history.clear()
+            reload_program_state()
             print(f">>> Dynamic check loaded new program consciousness (Program: '{current_program}', User Profile: '{current_user}')")
         except Exception as e:
             print(f"Error dynamically reloading program/user: {e}")
@@ -140,6 +137,82 @@ def prewarm_caches():
 init_runner()
 
 
+def reload_program_state():
+    """Reload program config, reinitialize the runner, and clear session caches."""
+    from core import program_config
+    importlib.reload(program_config)
+    init_runner()
+    runner.sessions_history.clear()
+
+
+def load_theme(program_id):
+    """Load theme.json for a program, returning the parsed dict or None."""
+    theme_path = os.path.join(base_dir, "core", "programs", program_id, "theme.json")
+    if os.path.exists(theme_path):
+        try:
+            with open(theme_path, "r", encoding="utf-8") as tf:
+                return json.load(tf)
+        except Exception as e:
+            print(f"Error loading theme for {program_id}: {e}")
+    return None
+
+
+def load_temperature():
+    """Read temperature from project settings, defaulting to 0.95."""
+    from variables import VARIABLES_DIR
+    settings_path = os.path.join(VARIABLES_DIR, "project_settings.json")
+    if os.path.exists(settings_path):
+        try:
+            with open(settings_path, "r", encoding="utf-8") as f:
+                return json.load(f).get("temperature", 0.95)
+        except Exception:
+            pass
+    return 0.95
+
+
+def find_image_sidecar_json(image_filename, active_program):
+    """Locate the sidecar .json for an image, scanning active then all programs."""
+    png_path = os.path.normpath(
+        os.path.join(base_dir, 'core', 'programs', active_program, 'portraits', image_filename)
+    )
+    json_path = png_path.rsplit('.', 1)[0] + '.json'
+    if os.path.exists(json_path):
+        return json_path
+    from variables import PROGRAMS_DIR
+    if os.path.exists(PROGRAMS_DIR):
+        for prog in os.listdir(PROGRAMS_DIR):
+            candidate = os.path.normpath(
+                os.path.join(PROGRAMS_DIR, prog, 'portraits', image_filename)
+            )
+            candidate_json = candidate.rsplit('.', 1)[0] + '.json'
+            if os.path.exists(candidate_json):
+                return candidate_json
+    return None
+
+
+def sanitize_response(response_text, session_id, companion_msg_id):
+    """Apply banned words filter and update persisted message if sanitized."""
+    from utils.banned_words import sanitize_text
+    sanitized = sanitize_text(response_text)
+    if sanitized != response_text:
+        print(f"[BANNED WORDS] Sanitized response in session {session_id}")
+        if companion_msg_id:
+            asyncio.run(runner.update_message_text(session_id, companion_msg_id, sanitized))
+    return sanitized
+
+
+def extract_mood(chat_history):
+    """Extract mood from the latest companion message, with neutral fallback."""
+    for msg in reversed(chat_history):
+        if msg.get('role') == 'companion':
+            mood = msg.get('mood')
+            if mood:
+                return mood
+            break
+    from utils.program_mood import analyze_emotional_state
+    return analyze_emotional_state("")
+
+
 # --- SECURE OPTIONAL AUTHENTICATION DECORATOR ---
 def check_auth(username, password):
     return username == os.getenv("AUTH_USER") and password == os.getenv("AUTH_PASS")
@@ -181,15 +254,7 @@ def index():
     tts_auto_speak = os.getenv("TTS_AUTO_SPEAK", "false").lower() == "true"
     tts_provider = os.getenv("TTS_PROVIDER", "local").lower()
     active_program = os.getenv("ACTIVE_PROGRAM", "sebile")
-    import json
-    theme = None
-    theme_path = os.path.join(base_dir, "core", "programs", active_program, "theme.json")
-    if os.path.exists(theme_path):
-        try:
-            with open(theme_path, "r", encoding="utf-8") as tf:
-                theme = json.load(tf)
-        except Exception as e:
-            print(f"Error loading theme for {active_program}: {e}")
+    theme = load_theme(active_program)
 
     from utils.program import get_active_user
     active_user = get_active_user()
@@ -337,22 +402,9 @@ def get_image_prompt():
             
         # Security: keep filename only to prevent directory traversal
         img_subpath = os.path.basename(img_subpath)
-        png_path = os.path.normpath(os.path.join(base_dir, 'core', 'programs', active_program, 'portraits', img_subpath))
-        
-        json_path = png_path.rsplit('.', 1)[0] + '.json'
-        
-        # Fallback: scan all programs' portraits directories for the filename
-        if not os.path.exists(json_path):
-            from variables import PROGRAMS_DIR
-            if os.path.exists(PROGRAMS_DIR):
-                for prog in os.listdir(PROGRAMS_DIR):
-                    candidate_path = os.path.normpath(os.path.join(PROGRAMS_DIR, prog, 'portraits', img_subpath))
-                    candidate_json = candidate_path.rsplit('.', 1)[0] + '.json'
-                    if os.path.exists(candidate_json):
-                        json_path = candidate_json
-                        break
+        json_path = find_image_sidecar_json(img_subpath, active_program)
 
-        if os.path.exists(json_path):
+        if json_path and os.path.exists(json_path):
             with open(json_path, 'r', encoding='utf-8') as f:
                 meta = json.load(f)
                 prompt = meta.get('prompt', '')
@@ -546,30 +598,13 @@ def history():
 
         chat_history, inversion_mode = asyncio.run(fetch_history_data())
         
-        # Retrieve parsed mood metadata directly from history payload
-        state_info = None
-        for msg in reversed(chat_history):
-            if msg.get('role') == 'companion':
-                state_info = msg.get('mood')
-                break
-        if not state_info:
-            from utils.program_mood import analyze_emotional_state
-            state_info = analyze_emotional_state("")
+        state_info = extract_mood(chat_history)
         
         from core.program_config import companion_name, get_companion_greeting
         welcome_message = get_companion_greeting()
         active_program = os.environ.get("ACTIVE_PROGRAM", "sebile")
         
-        theme = None
-        base_dir = os.path.dirname(os.path.abspath(__file__))
-        theme_path = os.path.join(base_dir, "core", "programs", active_program, "theme.json")
-        if os.path.exists(theme_path):
-            try:
-                import json
-                with open(theme_path, "r", encoding="utf-8") as tf:
-                    theme = json.load(tf)
-            except Exception as e:
-                print(f"Error loading theme for {active_program} in history: {e}")
+        theme = load_theme(active_program)
 
         return jsonify({
             'history': chat_history,
@@ -664,23 +699,10 @@ def chat():
         duration = round(time.time() - start_time, 1)
         
         # Apply banned words filter to output response
-        from utils.banned_words import sanitize_text
-        sanitized_response = sanitize_text(response_text)
-        if sanitized_response != response_text:
-            print(f"[BANNED WORDS] Sanitizing response: '{response_text}' -> '{sanitized_response}'")
-            if companion_msg_id:
-                asyncio.run(runner.update_message_text(session_id, companion_msg_id, sanitized_response))
-            response_text = sanitized_response
+        response_text = sanitize_response(response_text, session_id, companion_msg_id)
 
         chat_history = asyncio.run(runner.get_history(session_id))
-        state_info = None
-        for msg in reversed(chat_history):
-            if msg.get('role') == 'companion':
-                state_info = msg.get('mood')
-                break
-        if not state_info:
-            from utils.program_mood import analyze_emotional_state
-            state_info = analyze_emotional_state("")
+        state_info = extract_mood(chat_history)
         inversion_mode = asyncio.run(runner._get_inversion_mode(session_id, history=chat_history))
         
 
@@ -697,6 +719,7 @@ def chat():
         })
     except asyncio.CancelledError:
         print(f"[CANCEL] Chat generation cancelled for session {session_id}")
+        asyncio.run(runner.append_message_to_session(session_id, 'companion', '*(Generation cancelled)*'))
         return jsonify({
             'cancelled': True,
             'response': '*(Generation cancelled)*',
@@ -749,23 +772,10 @@ def edit():
         duration = round(time.time() - start_time, 1)
         
         # Apply banned words filter to output response
-        from utils.banned_words import sanitize_text
-        sanitized_response = sanitize_text(response_text)
-        if sanitized_response != response_text:
-            print(f"[BANNED WORDS] Sanitizing edited response: '{response_text}' -> '{sanitized_response}'")
-            if companion_msg_id:
-                asyncio.run(runner.update_message_text(session_id, companion_msg_id, sanitized_response))
-            response_text = sanitized_response
+        response_text = sanitize_response(response_text, session_id, companion_msg_id)
 
         chat_history = asyncio.run(runner.get_history(session_id))
-        state_info = None
-        for msg in reversed(chat_history):
-            if msg.get('role') == 'companion':
-                state_info = msg.get('mood')
-                break
-        if not state_info:
-            from utils.program_mood import analyze_emotional_state
-            state_info = analyze_emotional_state("")
+        state_info = extract_mood(chat_history)
         inversion_mode = asyncio.run(runner._get_inversion_mode(session_id, history=chat_history))
         return jsonify({
             'response': response_text,
@@ -779,6 +789,7 @@ def edit():
         })
     except asyncio.CancelledError:
         print(f"[CANCEL] Edit generation cancelled for session {session_id}")
+        asyncio.run(runner.append_message_to_session(session_id, 'companion', '*(Generation cancelled)*'))
         return jsonify({
             'cancelled': True,
             'response': '*(Generation cancelled)*',
@@ -799,18 +810,7 @@ def generate_impersonated_message(session_id, user_profile, model):
     # Retrieve history
     chat_history = asyncio.run(runner.get_history(session_id))
     
-    # Load dynamism (temperature) from project settings
-    from variables import VARIABLES_DIR
-    import json
-    settings_path = os.path.join(VARIABLES_DIR, "project_settings.json")
-    temperature = 0.95
-    if os.path.exists(settings_path):
-        try:
-            with open(settings_path, "r", encoding="utf-8") as f:
-                settings = json.load(f)
-                temperature = settings.get("temperature", 0.95)
-        except Exception:
-            pass
+    temperature = load_temperature()
             
     # Format only the most recent history turns to keep token count low and prevent context overflow
     recent_history = chat_history[-6:] if len(chat_history) > 6 else chat_history
@@ -1067,6 +1067,7 @@ def continue_generation():
             
     except asyncio.CancelledError:
         print(f"[CANCEL] Continuation cancelled for session {session_id}")
+        asyncio.run(runner.append_message_to_session(session_id, 'companion', '*(Generation cancelled)*'))
         return jsonify({
             'cancelled': True,
             'response': '*(Generation cancelled)*',
@@ -1133,30 +1134,12 @@ def regenerate_image():
         filename = os.path.basename(old_image_url)
         # 1. Try to find the prompt in the companion sidecar JSON file (most reliable and clean)
         try:
-            base_dir = os.path.dirname(os.path.abspath(__file__))
             from utils.program import get_active_program
             active_program = get_active_program()
-            if old_image_url.startswith('/images/'):
-                img_subpath = old_image_url[8:]
-            else:
-                img_subpath = os.path.basename(old_image_url)
-            png_path = os.path.normpath(os.path.join(base_dir, 'core', 'programs', active_program, img_subpath))
-            
-            json_path = png_path.rsplit('.', 1)[0] + '.json'
-            
-            # Fallback: scan all programs
-            if not os.path.exists(json_path):
-                from variables import PROGRAMS_DIR
-                filename_only = os.path.basename(img_subpath)
-                for prog in os.listdir(PROGRAMS_DIR):
-                    candidate_path = os.path.normpath(os.path.join(PROGRAMS_DIR, prog, 'portraits', filename_only))
-                    candidate_json = candidate_path.rsplit('.', 1)[0] + '.json'
-                    if os.path.exists(candidate_json):
-                        json_path = candidate_json
-                        break
+            filename_only = os.path.basename(old_image_url)
+            json_path = find_image_sidecar_json(filename_only, active_program)
 
-            if os.path.exists(json_path):
-                import json
+            if json_path and os.path.exists(json_path):
                 with open(json_path, 'r', encoding='utf-8') as f:
                     meta = json.load(f)
                     prompt = meta.get('prompt')
@@ -1431,18 +1414,7 @@ def get_models():
     if models and models[0]["value"] != "local-llm":
         default_model = models[0]["value"]
         
-    # Load settings to get temperature
-    from variables import VARIABLES_DIR
-    import json
-    settings_path = os.path.join(VARIABLES_DIR, "project_settings.json")
-    temperature = 0.95
-    if os.path.exists(settings_path):
-        try:
-            with open(settings_path, "r", encoding="utf-8") as f:
-                settings = json.load(f)
-                temperature = settings.get("temperature", 0.95)
-        except Exception as e:
-            print(f"Error reading project settings in get_models: {e}")
+    temperature = load_temperature()
         
     return jsonify({
         "models": models,
@@ -1578,7 +1550,6 @@ def project_settings():
 def save_generation_params():
     try:
         from variables import VARIABLES_DIR
-        import json
         settings_path = os.path.join(VARIABLES_DIR, "project_settings.json")
         
         data = request.get_json() or {}
@@ -1628,7 +1599,6 @@ def save_config():
         if not target_key:
             return jsonify({'error': 'Remote API Key must be provided.'}), 400
             
-        base_dir = os.path.dirname(os.path.abspath(__file__))
         env_path = os.path.join(base_dir, '.env')
         
         # Read env lines
@@ -1867,7 +1837,6 @@ def get_program_memories():
         from utils.program import get_active_program
         program_id = request.args.get('program_id') or get_active_program()
         
-        base_dir = os.path.dirname(os.path.abspath(__file__))
         db_dir = os.path.join(base_dir, "core", "programs", program_id)
         
         manager = DataBankManager(db_dir=db_dir)
@@ -2051,7 +2020,6 @@ END:VCALENDAR"""
 def list_sessions():
     try:
         active_program = os.environ.get("ACTIVE_PROGRAM", "sebile")
-        base_dir = os.path.dirname(os.path.abspath(__file__))
         sessions_dir = os.path.join(base_dir, "core", "programs", active_program, "sessions")
         
         sessions = []
@@ -2095,7 +2063,6 @@ def list_programs():
                     json_path = os.path.join(folder_path, f"{folder}.json")
                     if os.path.exists(json_path):
                         try:
-                            import json
                             with open(json_path, "r", encoding="utf-8") as jf:
                                 jdata = json.load(jf)
                                 if jdata.get("name"):
@@ -2109,15 +2076,9 @@ def list_programs():
                                 break
                     # Read theme color from theme.json
                     theme_color = "#38bdf8"
-                    theme_path = os.path.join(folder_path, "theme.json")
-                    if os.path.exists(theme_path):
-                        try:
-                            import json
-                            with open(theme_path, "r", encoding="utf-8") as tf:
-                                tdata = json.load(tf)
-                                theme_color = tdata.get("primary_accent") or tdata.get("main_color") or theme_color
-                        except Exception:
-                            pass
+                    tdata = load_theme(folder)
+                    if tdata:
+                        theme_color = tdata.get("primary_accent") or tdata.get("main_color") or theme_color
                             
                     # Check if portraits/profile.png exists
                     has_profile = False
@@ -2145,7 +2106,6 @@ def select_program():
         if not program_id:
             return jsonify({'error': 'Missing program_id'}), 400
             
-        base_dir = os.path.dirname(os.path.abspath(__file__))
         program_path = os.path.join(base_dir, 'core', 'programs', program_id)
         if not os.path.exists(program_path):
             return jsonify({'error': f"Program '{program_id}' does not exist"}), 404
@@ -2161,26 +2121,9 @@ def select_program():
             print(f"Error persisting ACTIVE_PROGRAM: {e}")
         
 
-        # Reload program config module to pick up new identity
-        from core import program_config
-        import importlib
-        importlib.reload(program_config)
-        
-        # Re-initialize the runner backend with the new consciousness/program config
-        init_runner()
-        
-        # Clear sessions memory in the runner so they reload from the new assistant's folders
-        runner.sessions_history.clear()
+        reload_program_state()
             
-        theme = None
-        theme_path = os.path.join(program_path, "theme.json")
-        if os.path.exists(theme_path):
-            try:
-                import json
-                with open(theme_path, "r", encoding="utf-8") as tf:
-                    theme = json.load(tf)
-            except Exception as e:
-                print(f"Error loading theme for {program_id} in select_program: {e}")
+        theme = load_theme(program_id)
 
         has_profile = False
         profile_path = os.path.join(program_path, "portraits", "profile.png")
@@ -2210,7 +2153,6 @@ def select_program():
 @requires_auth
 def update_program_palette():
     try:
-        import json
         data = request.get_json(silent=True) or {}
         program_id = data.get('program_id')
         color = data.get('color')
@@ -2221,11 +2163,9 @@ def update_program_palette():
             return jsonify({'error': 'Missing color'}), 400
             
         # Validate hex color
-        import re
         if not re.match(r'^#[0-9a-fA-F]{6}$', color):
             return jsonify({'error': 'Invalid hex color format. Must be #RRGGBB'}), 400
             
-        base_dir = os.path.dirname(os.path.abspath(__file__))
         program_path = os.path.join(base_dir, 'core', 'programs', program_id)
         if not os.path.exists(program_path):
             return jsonify({'error': f"Program '{program_id}' does not exist"}), 404
@@ -2260,7 +2200,6 @@ def delete_program():
         if program_id == 'sebile':
             return jsonify({'error': 'Cannot delete default companion Sebile'}), 400
             
-        base_dir = os.path.dirname(os.path.abspath(__file__))
         program_path = os.path.join(base_dir, 'core', 'programs', program_id)
         if not os.path.exists(program_path):
             return jsonify({'error': f"Program '{program_id}' does not exist"}), 404
@@ -2276,19 +2215,13 @@ def delete_program():
                 print(f"Error resetting active program to sebile: {e}")
                 
             # Reload program config and re-initialize the runner
-            from core import program_config
-            import importlib
-            importlib.reload(program_config)
-            init_runner()
-            runner.sessions_history.clear()
-                
+            reload_program_state()
+                 
         # Delete the program folder recursively
-        import shutil
         shutil.rmtree(program_path)
         
         return jsonify({'status': 'success', 'switched_to': 'sebile' if program_id == active_program else None})
     except Exception as e:
-        import traceback
         traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
@@ -2304,10 +2237,6 @@ def rename_program():
         if not program_id or not new_name:
             return jsonify({'error': 'Missing program_id or new_name'}), 400
             
-        import re
-        import shutil
-        import importlib
-        
         if not re.match(r'^[a-zA-Z0-9_\-]+$', program_id):
             return jsonify({'error': 'Invalid program_id'}), 400
             
@@ -2327,7 +2256,6 @@ def rename_program():
             json_path = os.path.join(old_path, "sebile.json")
             if os.path.exists(json_path):
                 try:
-                    import json
                     with open(json_path, "r", encoding="utf-8") as f:
                         jdata = json.load(f)
                     jdata["name"] = new_name
@@ -2337,10 +2265,7 @@ def rename_program():
                     print(f"Error updating Sebile JSON: {e}")
             
             # Reload configuration
-            from core import program_config
-            importlib.reload(program_config)
-            init_runner()
-            runner.sessions_history.clear()
+            reload_program_state()
             
             active_program = os.getenv("ACTIVE_PROGRAM", "sebile")
             return jsonify({
@@ -2364,7 +2289,6 @@ def rename_program():
                 shutil.move(old_json, new_json)
                 
             # Also update "program_id" inside the json file
-            import json
             if os.path.exists(new_json):
                 try:
                     with open(new_json, "r", encoding="utf-8") as f:
@@ -2396,10 +2320,7 @@ def rename_program():
             _save_settings(settings)
             
             # Reload configuration
-            from core import program_config
-            importlib.reload(program_config)
-            init_runner()
-            runner.sessions_history.clear()
+            reload_program_state()
             
             return jsonify({
                 'status': 'success',
@@ -2411,7 +2332,6 @@ def rename_program():
             json_path = os.path.join(old_path, f"{program_id}.json")
             if os.path.exists(json_path):
                 try:
-                    import json
                     with open(json_path, "r", encoding="utf-8") as f:
                         jdata = json.load(f)
                     jdata["name"] = new_name
@@ -2428,7 +2348,6 @@ def rename_program():
             })
             
     except Exception as e:
-        import traceback
         traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
@@ -2540,16 +2459,10 @@ def save_program_profile():
                 pass
                 
         # Reload program configuration modules dynamically
-        from core import program_config
-        importlib.reload(program_config)
-        init_runner()
-        
-        # Clear sessions memory in the runner to refresh instructions
-        runner.sessions_history.clear()
+        reload_program_state()
             
         return jsonify({'status': 'success'})
     except Exception as e:
-        import traceback
         traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
@@ -2687,15 +2600,8 @@ def select_user_profile():
         # Update active user profile settings
         set_active_user(profile_id)
         
-        # Re-initialize the program config module
-        from core import program_config
-        import importlib
-        importlib.reload(program_config)
-        
-        # Re-initialize the runner
-        init_runner()
-        
-        runner.sessions_history.clear()
+        # Re-initialize the program config module and runner
+        reload_program_state()
             
         return jsonify({"status": "success", "active": profile_id})
     except Exception as e:
@@ -2715,7 +2621,6 @@ def save_user_profile():
             return jsonify({"error": "Missing content"}), 400
         
         # Sanitize profile_id
-        import re
         profile_id = re.sub(r'[^a-zA-Z0-9_\-]', '', profile_id).lower()
         if not profile_id:
             return jsonify({"error": "Invalid profile name"}), 400
@@ -2734,12 +2639,7 @@ def save_user_profile():
         
         # If we edited the active profile, trigger hot reload immediately
         if profile_id == active_user:
-            from core import program_config
-            import importlib
-            importlib.reload(program_config)
-            
-            init_runner()
-            runner.sessions_history.clear()
+            reload_program_state()
                 
         return jsonify({"status": "success", "profile_id": profile_id})
     except Exception as e:
@@ -2772,12 +2672,7 @@ def delete_user_profile():
                 
         if profile_id == active_user:
             set_active_user("builder")
-                
-            from core import program_config
-            import importlib
-            importlib.reload(program_config)
-            init_runner()
-            runner.sessions_history.clear()
+            reload_program_state()
                 
         return jsonify({"status": "success", "deleted": profile_id})
     except Exception as e:
@@ -2798,7 +2693,6 @@ def rename_user_profile():
         if old_profile_id == "builder":
             return jsonify({"error": "Cannot rename the default 'builder' profile"}), 400
             
-        import re
         new_profile_id = re.sub(r'[^a-zA-Z0-9_\-]', '', new_name).strip().replace(' ', '_').lower()
         new_profile_id = re.sub(r'_+', '_', new_profile_id)
         
@@ -2831,12 +2725,7 @@ def rename_user_profile():
         # If the renamed profile was active, update and reload
         if old_profile_id == active_user:
             set_active_user(new_profile_id)
-                
-            from core import program_config
-            import importlib
-            importlib.reload(program_config)
-            init_runner()
-            runner.sessions_history.clear()
+            reload_program_state()
                 
         return jsonify({"status": "success", "profile_id": new_profile_id})
     except Exception as e:
@@ -2845,7 +2734,6 @@ def rename_user_profile():
 
 
 def generate_character_theme(main_color, accent_color_a=None, accent_color_b=None):
-    import re
     hex_clean = main_color.lstrip('#')
     r = int(hex_clean[0:2], 16)
     g = int(hex_clean[2:4], 16)
@@ -3041,6 +2929,23 @@ Output a single JSON object matching this exact schema:
     }
     return final_card
 
+
+def finalize_imported_program(program_path, program_id, card_json):
+    """Write inversion, theme, portraits dir, and profile JSON for a new program."""
+    with open(os.path.join(program_path, 'inversion.json'), "w", encoding="utf-8") as f:
+        json.dump(card_json.pop("inversion"), f, indent=2, ensure_ascii=False)
+    colors = card_json.pop("colors")
+    main_color = colors.get("main_color", "#38bdf8")
+    theme_data = generate_character_theme(main_color)
+    with open(os.path.join(program_path, 'theme.json'), "w", encoding="utf-8") as tf:
+        json.dump(theme_data, tf, indent=2, ensure_ascii=False)
+    portraits_dir = os.path.join(program_path, 'portraits')
+    os.makedirs(portraits_dir, exist_ok=True)
+    card_json["program_id"] = program_id
+    with open(os.path.join(program_path, f"{program_id}.json"), "w", encoding="utf-8") as f:
+        json.dump(card_json, f, indent=2, ensure_ascii=False)
+
+
 @app.route('/api/programs/import/tavern', methods=['POST'])
 @requires_auth
 def import_tavern_program():
@@ -3139,34 +3044,11 @@ def import_tavern_program():
         # Call consolidated JSON generator
         card_json = generate_character_json(name, description, personality, scenario, first_mes, model)
         
-        # Write inversion directives
-        with open(os.path.join(program_path, 'inversion.json'), "w", encoding="utf-8") as f:
-            json.dump(card_json.pop("inversion"), f, indent=2, ensure_ascii=False)
-            
-        # Write theme variables
-        colors = card_json.pop("colors")
-        main_color = colors.get("main_color", "#38bdf8")
-        accent_a = None
-        accent_b = None
-        
-
-            
-        theme_data = generate_character_theme(main_color)
-        with open(os.path.join(program_path, 'theme.json'), "w", encoding="utf-8") as tf:
-            json.dump(theme_data, tf, indent=2, ensure_ascii=False)
-            
-        # Setup portraits folder
-        portraits_dir = os.path.join(program_path, 'portraits')
-        os.makedirs(portraits_dir, exist_ok=True)
-        
-        # Write the JSON character card profile
-        card_json["program_id"] = program_id
-        with open(os.path.join(program_path, f"{program_id}.json"), "w", encoding="utf-8") as f:
-            json.dump(card_json, f, indent=2, ensure_ascii=False)
+        # Finalize program files (inversion, theme, portraits, and JSON profile)
+        finalize_imported_program(program_path, program_id, card_json)
             
         return jsonify({'status': 'success', 'program_id': program_id, 'name': name})
     except Exception as e:
-        import traceback
         traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
@@ -3182,10 +3064,6 @@ def import_describe_program():
         if not name or not description:
             return jsonify({'error': 'Name and description are required'}), 400
             
-        import re
-        import json
-        import time
-        
         program_id = re.sub(r'[^a-zA-Z0-9_\-]', '', name).lower()
         if not program_id:
             program_id = "companion_" + str(int(time.time()))
@@ -3199,34 +3077,11 @@ def import_describe_program():
         # Call consolidated JSON generator
         card_json = generate_character_json(name, description, "", "", "", model)
         
-        # Write inversion directives
-        with open(os.path.join(program_path, 'inversion.json'), "w", encoding="utf-8") as f:
-            json.dump(card_json.pop("inversion"), f, indent=2, ensure_ascii=False)
-            
-        # Write theme variables
-        colors = card_json.pop("colors")
-        main_color = colors.get("main_color", "#38bdf8")
-        accent_a = None
-        accent_b = None
-        
-
-            
-        theme_data = generate_character_theme(main_color)
-        with open(os.path.join(program_path, 'theme.json'), "w", encoding="utf-8") as tf:
-            json.dump(theme_data, tf, indent=2, ensure_ascii=False)
-            
-        # Setup portraits folder
-        portraits_dir = os.path.join(program_path, 'portraits')
-        os.makedirs(portraits_dir, exist_ok=True)
-        
-        # Write the JSON character card profile
-        card_json["program_id"] = program_id
-        with open(os.path.join(program_path, f"{program_id}.json"), "w", encoding="utf-8") as f:
-            json.dump(card_json, f, indent=2, ensure_ascii=False)
+        # Finalize program files (inversion, theme, portraits, and JSON profile)
+        finalize_imported_program(program_path, program_id, card_json)
             
         return jsonify({'status': 'success', 'program_id': program_id, 'name': name})
     except Exception as e:
-        import traceback
         traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
@@ -3362,7 +3217,6 @@ def comfy_stop():
 @app.route('/api/comfy/resolve_workflow', methods=['POST'])
 @requires_auth
 def comfy_resolve_workflow():
-    import json
     workflow_json = request.json.get("workflow_json")
     if not workflow_json:
         try:
@@ -3377,7 +3231,6 @@ def comfy_resolve_workflow():
                 PROGRAMS_DIR, active_program, "portraits", "ImageWorkflow.json"
             ))
             if not os.path.exists(image_path):
-                base_dir = os.path.dirname(os.path.abspath(__file__))
                 image_path = os.path.normpath(os.path.join(
                     base_dir, "core", "skills", "portrait_generation", "ImageWorkflow.json"
                 ))
@@ -3399,7 +3252,6 @@ def comfy_resolve_workflow():
                 PROGRAMS_DIR, active_program, "portraits", "VideoWorkflow.json"
             ))
             if not os.path.exists(video_path):
-                base_dir = os.path.dirname(os.path.abspath(__file__))
                 video_path = os.path.normpath(os.path.join(
                     base_dir, "core", "skills", "portrait_generation", "VideoWorkflow.json"
                 ))
@@ -3452,7 +3304,6 @@ def comfy_select_checkpoint():
         os.environ["COMFYUI_CHECKPOINT"] = checkpoint
         
         # Persist to .env
-        base_dir = os.path.dirname(os.path.abspath(__file__))
         env_path = os.path.join(base_dir, '.env')
         if os.path.exists(env_path):
             with open(env_path, 'r', encoding='utf-8') as f:
