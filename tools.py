@@ -1010,13 +1010,14 @@ def format_comfy_validation_error(error_json: dict) -> str:
 
 
 @track_tool_activity
-def apply_comfy_workflow(workflow_path: str, parameters: dict, save_path: str) -> str:
+def apply_comfy_workflow(workflow_path: str, parameters: dict, save_path: str, session_id: str = None) -> str:
     """Executes a specified ComfyUI workflow JSON template with custom parameter mappings and saves the output.
 
     Args:
         workflow_path: Path to the workflow JSON file.
         parameters: Dictionary of placeholder keys and their replacement values.
         save_path: Path where the generated image should be saved.
+        session_id: Optional session identifier used to honour cancellation requests.
 
     Returns:
         The filesystem path of the saved image, or an error message.
@@ -1058,6 +1059,17 @@ def apply_comfy_workflow(workflow_path: str, parameters: dict, save_path: str) -
     populated_workflow = replace_placeholders(workflow)
     comfy_url = COMFYUI_SERVER_URL
 
+    def _cancel_comfy_job(pid: str):
+        """Tell ComfyUI to interrupt the running job and remove it from the queue."""
+        try:
+            requests.post(f"{comfy_url}/interrupt", timeout=3)
+        except Exception:
+            pass
+        try:
+            requests.post(f"{comfy_url}/queue", json={"delete": [pid]}, timeout=3)
+        except Exception:
+            pass
+
     try:
         res = requests.post(f"{comfy_url}/prompt", json={"prompt": populated_workflow}, timeout=5.0)
         if res.status_code != 200:
@@ -1076,7 +1088,13 @@ def apply_comfy_workflow(workflow_path: str, parameters: dict, save_path: str) -
             raise Exception("Did not receive a prompt ID from ComfyUI")
 
         # Poll history endpoint for output
+        from runner_interface import cancelled_sessions
         for _ in range(300):
+            # Honour session cancellation — stop polling and kill the ComfyUI job
+            if session_id and session_id in cancelled_sessions:
+                _cancel_comfy_job(prompt_id)
+                return "Error: Image generation cancelled by user."
+
             history_res = requests.get(f"{comfy_url}/history/{prompt_id}", timeout=10)
             if history_res.status_code == 200:
                 history_data = history_res.json()
@@ -1252,7 +1270,7 @@ def generate_local_image(prompt: str) -> str:
         portraits_dir = os.path.normpath(os.path.join(base_dir, "core", "programs", active_program, "portraits"))
         local_path = os.path.join(portraits_dir, local_filename)
 
-        result_path = apply_comfy_workflow(workflow_path, replacements, local_path)
+        result_path = apply_comfy_workflow(workflow_path, replacements, local_path, session_id=current_session_id.get())
         if result_path.startswith("Error"):
             raise Exception(result_path)
 
