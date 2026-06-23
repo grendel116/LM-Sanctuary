@@ -4,11 +4,15 @@ import zipfile
 import subprocess
 import requests
 import atexit
+import threading
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LLAMA_BIN_DIR = os.path.join(BASE_DIR, "utils", "llama-bin")
 SERVER_EXE = os.path.join(LLAMA_BIN_DIR, "llama-server.exe") if os.name == 'nt' else os.path.join(LLAMA_BIN_DIR, "llama-server")
 _proc = None
+_starting = False
+_start_lock = threading.Lock()
+_on_status_change = None  # Callback set by app.py to broadcast SSE events
 
 def detect_gpu_type() -> str:
     """Detects if the system has an AMD, Nvidia, or Vulkan compatible GPU on Windows.
@@ -101,7 +105,12 @@ def resolve_model_path(model_key):
 _current_model = None
 
 def start_local_server(model_key):
-    global _proc, _current_model
+    global _proc, _current_model, _starting
+    
+    with _start_lock:
+        if _starting:
+            return True, "Already starting"
+    
     is_online = check_local_server_status()
     
     model_path = resolve_model_path(model_key)
@@ -187,14 +196,34 @@ def start_local_server(model_key):
             else:
                 _proc = subprocess.Popen(cmd, stdout=log_fd, stderr=log_fd, shell=False)
         
-        for _ in range(60):
-            time.sleep(1.0)
-            if check_local_server_status():
-                _current_model = model_key
-                return True, "Online"
-            if _proc and _proc.poll() is not None: break
-        return False, "Failed to start"
+        # Set starting flag and launch background wait thread
+        with _start_lock:
+            _starting = True
+        
+        if _on_status_change:
+            _on_status_change()
+        
+        def _wait_for_server():
+            global _current_model, _starting
+            try:
+                for _ in range(60):
+                    time.sleep(1.0)
+                    if check_local_server_status() is True:
+                        _current_model = model_key
+                        break
+                    if _proc and _proc.poll() is not None:
+                        break
+            finally:
+                with _start_lock:
+                    _starting = False
+                if _on_status_change:
+                    _on_status_change()
+        
+        threading.Thread(target=_wait_for_server, daemon=True).start()
+        return True, "Starting"
     except Exception as e:
+        with _start_lock:
+            _starting = False
         return False, str(e)
 
 def stop_local_server():

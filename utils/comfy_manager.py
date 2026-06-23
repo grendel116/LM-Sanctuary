@@ -43,6 +43,10 @@ resolution_status = {
     "errors": []
 }
 
+_starting = False
+_start_lock = threading.Lock()
+_on_status_change = None  # Callback set by app.py to broadcast SSE events
+
 def check_comfy_installed():
     """Checks if ComfyUI is installed at the designated path."""
     resolve_comfy_dir()
@@ -318,6 +322,12 @@ def is_amd_gpu():
 
 def start_comfy_server():
     """Starts the headless ComfyUI server in the background."""
+    global _starting
+    
+    with _start_lock:
+        if _starting:
+            return True, "ComfyUI is already starting."
+    
     if check_comfy_running():
         return True, "ComfyUI is already running."
         
@@ -389,14 +399,31 @@ def start_comfy_server():
         with open(log_file, "a", encoding="utf-8") as log_fd:
             subprocess.Popen(cmd, stdout=log_fd, stderr=log_fd, shell=False)
         
-        # Poll to confirm it starts (up to 60 seconds to accommodate initial database upgrades)
-        for _ in range(30):
-            time.sleep(2.0)
-            if check_comfy_running():
-                return True, "ComfyUI server started successfully."
-                
-        return False, "ComfyUI server did not start in time."
+        # Set starting flag and launch background wait thread
+        with _start_lock:
+            _starting = True
+        
+        if _on_status_change:
+            _on_status_change()
+        
+        def _wait_for_comfy():
+            global _starting
+            try:
+                for _ in range(30):
+                    time.sleep(2.0)
+                    if check_comfy_running(force_refresh=True):
+                        break
+            finally:
+                with _start_lock:
+                    _starting = False
+                if _on_status_change:
+                    _on_status_change()
+        
+        threading.Thread(target=_wait_for_comfy, daemon=True).start()
+        return True, "ComfyUI server is starting."
     except Exception as e:
+        with _start_lock:
+            _starting = False
         return False, f"Failed to start ComfyUI server: {e}"
 
 # Custom Node Database
