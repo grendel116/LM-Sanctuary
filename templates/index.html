@@ -9207,7 +9207,10 @@ function triggerFileInput() {
                 prefix = 'tool_';
             }
             const userMsgId = prefix + Math.random().toString(36).substr(2, 9) + Date.now().toString(36);
-            appendMessage('user', text, userImageUrl, null, false, Date.now() / 1000, null, false, userMsgId);
+            const _hiddenPrefixes = ['port_', 'quest_', 'tool_'];
+            if (!_hiddenPrefixes.some(p => userMsgId.startsWith(p))) {
+                appendMessage('user', text, userImageUrl, null, false, Date.now() / 1000, null, false, userMsgId);
+            }
 
             // Trigger heart jiggle on high user interaction or when Companion is generating/responding
             const heartElement = document.querySelector('.heart-pulse');
