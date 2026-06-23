@@ -46,7 +46,7 @@ These are the things your companion can do on your computer. By default, before 
 * **Add Quest** (`add_quest`): Create and append a structured task or chore to the user's local quest log with objectives, target date/time, coordinates/address, and alarm offsets.
 
 ### Network Grounding & Research (Online)
-* **Hybrid Web Search** (`web_search`): A unified search client that queries Google Grounding Search, SearXNG, and Wikipedia. SearXNG is now used as a centralized proxy for routing platform-specific queries (e.g., Baidu, Yandex). It aggregates and deduplicates URLs, and supports explicit query prefix routing (e.g. `github: query`, `arxiv: query`, `hn: query`).
+* **Hybrid Web Search** (`web_search`): A unified search client that queries Google Grounding Search, SearXNG (for Baidu/Yandex/Bing), DuckDuckGo, Brave, and Tavily concurrently. It aggregates and deduplicates URLs, supports concurrent page content enrichment for thin search results, and provides explicit query prefix routing (e.g. `github: query`, `arxiv: query`, `hn: query`, `wikipedia: query`).
 * **Read URL** (`read_webpage`): Fetch and extract text content from any webpage.
 
 ### Generative Media (Local & Cloud)

@@ -101,8 +101,8 @@ def trigger_download(model_name, quantization=None):
     filename = quantization
     tracking_name = f"{repo_id}@{filename}"
     
-    user_profile = os.environ.get("USERPROFILE") or os.path.expanduser("~")
-    dest_dir = os.path.join(user_profile, ".lmstudio", "models", repo_id)
+    base_models_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "models")
+    dest_dir = os.path.join(base_models_dir, repo_id)
     os.makedirs(dest_dir, exist_ok=True)
     dest_path = os.path.join(dest_dir, filename)
     
