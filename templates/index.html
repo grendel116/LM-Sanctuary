@@ -9846,15 +9846,17 @@ function truncateChatAfter(row) {
                 
                 if (!bubble && !voiceCallRow) return;
                 
-                if (bubble && bubble.dataset.isTransient === "true") {
+                const msgId = bubble ? bubble.dataset.msgId : (voiceCallRow ? voiceCallRow.dataset.msgId : null);
+
+                // Truly ephemeral messages have no real server ID — remove from DOM only.
+                if (bubble && bubble.dataset.isTransient === "true" && !msgId) {
                     const row = bubble.closest('.message-row');
                     if (row) {
                         row.remove();
                     }
                     return;
                 }
-                
-                const msgId = bubble ? bubble.dataset.msgId : (voiceCallRow ? voiceCallRow.dataset.msgId : null);
+
                 if (!msgId) {
                     showCustomAlert("Error", "Could not find message ID.");
                     return;
