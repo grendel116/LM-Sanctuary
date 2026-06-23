@@ -7526,7 +7526,11 @@ async function deleteAssistant(assistantId, name) {
                             
                             const text = document.createElement('div');
                             text.className = 'list-entry-content';
-                            text.textContent = e.content || '';
+                            let displayContent = e.content || '';
+                            const userDisplayName = getUserDisplayName();
+                            const companionDisplayName = activeCompanionName || 'Companion';
+                            displayContent = displayContent.replace(/\{\{user\}\}/gi, userDisplayName).replace(/\{\{char\}\}/gi, companionDisplayName);
+                            text.textContent = displayContent;
                             row.appendChild(text);
                             
                             journalsContainer.appendChild(row);
@@ -7598,7 +7602,11 @@ async function deleteAssistant(assistantId, name) {
                             
                             const text = document.createElement('div');
                             text.className = 'list-entry-content italic';
-                            text.textContent = cleanText;
+                            let displayMem = cleanText;
+                            const userDisplayName = getUserDisplayName();
+                            const companionDisplayName = activeCompanionName || 'Companion';
+                            displayMem = displayMem.replace(/\{\{user\}\}/gi, userDisplayName).replace(/\{\{char\}\}/gi, companionDisplayName);
+                            text.textContent = displayMem;
                             row.appendChild(text);
                             
                             memoriesContainer.appendChild(row);

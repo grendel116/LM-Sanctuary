@@ -334,7 +334,7 @@ def start_comfy_server():
             portable_python = os.path.join(os.path.dirname(os.path.normpath(COMFYUI_DIR)), "python_embeded", "python.exe")
             
         # 3. Fallback to the main shared virtual environment
-        shared_venv = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".venv311", "Scripts", "python.exe")
+        shared_venv = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".venv", "Scripts", "python.exe")
         
         if os.path.exists(local_venv):
             venv_python = local_venv
@@ -347,23 +347,13 @@ def start_comfy_server():
             
         main_py = os.path.join(COMFYUI_DIR, "main.py")
         
-        # Check if CUDA is supported by the installed torch in the virtual environment
+        # Check if CUDA/ROCm is supported by the installed torch in the virtual environment
         cuda_supported = False
         try:
             check_cmd = [venv_python, "-c", "import torch; print(torch.cuda.is_available())"]
             res = subprocess.run(check_cmd, capture_output=True, text=True, timeout=30.0)
             if "True" in res.stdout:
                 cuda_supported = True
-        except Exception:
-            pass
-            
-        # Check if DirectML is supported by torch in this environment
-        dml_supported = False
-        try:
-            check_cmd = [venv_python, "-c", "import torch_directml; print(torch_directml.is_available())"]
-            res = subprocess.run(check_cmd, capture_output=True, text=True, timeout=30.0)
-            if "True" in res.stdout:
-                dml_supported = True
         except Exception:
             pass
             
@@ -379,8 +369,6 @@ def start_comfy_server():
         
         if cuda_supported:
             pass
-        elif dml_supported:
-            cmd.append("--directml")
         else:
             cmd.append("--cpu")
 
