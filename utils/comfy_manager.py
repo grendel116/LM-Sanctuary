@@ -84,7 +84,7 @@ def check_comfy_running(force_refresh=False):
         try:
             cmdline = proc.info.get('cmdline') or []
             cmdline_str = " ".join(cmdline).lower()
-            if "python" in proc.info.get('name', '').lower() and "main.py" in cmdline_str and "8188" in cmdline_str:
+            if "python" in proc.info.get('name', '').lower() and "main.py" in cmdline_str:
                 _comfy_running_cached = "starting"
                 _comfy_running_cache_time = now
                 return "starting"
@@ -325,16 +325,24 @@ def start_comfy_server():
         return False, "ComfyUI is not installed. Please trigger installation first."
         
     try:
-        venv_python = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".venv", "Scripts", "python.exe")
+        # 1. Try to find virtual environment inside the ComfyUI installation directory
+        local_venv = os.path.join(COMFYUI_DIR, "venv", "Scripts", "python.exe")
         
-        # Check if there is an embedded python in the ComfyUI folder or parent directory (portable standalone builds)
+        # 2. Try to find embedded python (for portable standalone builds)
         portable_python = os.path.join(COMFYUI_DIR, "python_embeded", "python.exe")
         if not os.path.exists(portable_python):
             portable_python = os.path.join(os.path.dirname(os.path.normpath(COMFYUI_DIR)), "python_embeded", "python.exe")
             
-        if os.path.exists(portable_python):
+        # 3. Fallback to the main shared virtual environment
+        shared_venv = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".venv311", "Scripts", "python.exe")
+        
+        if os.path.exists(local_venv):
+            venv_python = local_venv
+        elif os.path.exists(portable_python):
             venv_python = portable_python
-        elif not os.path.exists(venv_python):
+        elif os.path.exists(shared_venv):
+            venv_python = shared_venv
+        else:
             venv_python = "python"
             
         main_py = os.path.join(COMFYUI_DIR, "main.py")
@@ -382,6 +390,11 @@ def start_comfy_server():
         if comfy_args:
             import shlex
             cmd.extend(shlex.split(comfy_args))
+            
+        if "--cpu" in cmd:
+            # Filter out GPU-specific arguments if running on CPU to prevent argument conflicts
+            gpu_args = {"--lowvram", "--highvram", "--novram", "--gpu-only"}
+            cmd = [arg for arg in cmd if arg not in gpu_args]
             
         # Start ComfyUI headlessly (shell=False handles spaces in venv path automatically)
         log_file = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "comfy_server.log")
