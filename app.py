@@ -3477,7 +3477,9 @@ if __name__ == '__main__':
             print("[!] pyOpenSSL is not installed. To run with ad-hoc SSL, please run: pip install pyopenssl")
             print("[!] Falling back to HTTP...")
             
-    if os.environ.get('WERKZEUG_RUN_MAIN') == 'true':
+    # Open the browser only on the initial startup.
+    # The parent process runs exactly once on startup, whereas the child worker process restarts on file changes.
+    if os.environ.get('OPEN_BROWSER', '').lower() == 'true' and os.environ.get('WERKZEUG_RUN_MAIN') != 'true':
         browser_host = host if host != '0.0.0.0' else '127.0.0.1'
         protocol = 'https' if ssl_context else 'http'
         url = f"{protocol}://{browser_host}:{port}"
