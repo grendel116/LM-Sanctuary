@@ -7,14 +7,14 @@ if (!(Get-Command python -ErrorAction SilentlyContinue)) {
 }
 
 # 2. Create Virtual Environment
-if (!(Test-Path .venv)) {
+if (!(Test-Path .venv311)) {
     Write-Host "--- Creating Virtual Environment ---"
-    python -m venv .venv
+    py -3.11 -m venv .venv311
 }
 
 # 3. Install Dependencies
 Write-Host "--- Installing Dependencies ---"
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv311\Scripts\python.exe -m pip install -r requirements.txt
 
 # 4. Environment Variables
 # Copy .env.example to .env if missing
@@ -25,4 +25,4 @@ if (!(Test-Path .env)) {
 
 # 5. Start LM Sanctuary
 Write-Host "--- Starting LM Sanctuary ---"
-.\.venv\Scripts\python app.py
+.\.venv311\Scripts\python app.py
