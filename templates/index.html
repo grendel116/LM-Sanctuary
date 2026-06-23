@@ -9307,7 +9307,6 @@ function triggerFileInput() {
                 inversionActive = data.inversion_active || "";
                 handleSuccessReload(data);
             } catch (error) {
-                if (error.name === 'AbortError' && isGenerating) return;
                 if (chatContainer.contains(typingIndicatorRow)) {
                     chatContainer.removeChild(typingIndicatorRow);
                 }
@@ -9695,7 +9694,6 @@ function truncateChatAfter(row) {
                 inversionActive = data.inversion_active || "";
                 handleSuccessReload(data);
             } catch (error) {
-                if (error.name === 'AbortError' && isGenerating) return;
                 if (chatContainer.contains(typingIndicatorRow)) {
                     chatContainer.removeChild(typingIndicatorRow);
                 }
@@ -9811,7 +9809,6 @@ function truncateChatAfter(row) {
                 inversionActive = data.inversion_active || "";
                 handleSuccessReload(data);
             } catch (error) {
-                if (error.name === 'AbortError' && isGenerating) return;
                 if (chatContainer.contains(typingIndicatorRow)) {
                     chatContainer.removeChild(typingIndicatorRow);
                 }

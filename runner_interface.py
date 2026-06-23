@@ -16,6 +16,22 @@ import copy
 cancelled_sessions = set()
 voice_call_sessions = set()
 
+
+def _run_async_in_background_thread(coro):
+    import threading
+    def target():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(coro)
+        except Exception as e:
+            print(f"[BACKGROUND TASK ERROR] {e}", flush=True)
+        finally:
+            loop.close()
+    t = threading.Thread(target=target, daemon=True)
+    t.start()
+
+
 _DEFAULT_INVERSION_STATE = {
     "active_inversion": "",
     "inversion_consecutive_turns": 0,
@@ -510,20 +526,41 @@ class OsHistoryAdapter(LocalHistoryAdapter):
         except Exception as e:
             print(f"[COMPACTION OS ERROR] Failed to ingest: {e}", flush=True)
             
-        # Mark all prior events as compacted
-        for msg in history[:cutoff_idx]:
+        # Mark all prior events as compacted in historical_turns
+        for msg in historical_turns:
             msg['compacted'] = True
             
-        # 6. Replace historical turns with single summary event in self.runner_obj.sessions_history
+        # 6. Replace historical turns with single summary event in live self.runner_obj.sessions_history
         summary_msg = {
             'id': f"sys_{uuid.uuid4().hex}",
             'role': 'system-memory',
             'text': f"[System Memory of older conversation turns]:\n{summary}",
             'timestamp': time.time()
         }
-        self.runner_obj.sessions_history[self.session_id] = history[:cutoff_idx] + [summary_msg] + history[cutoff_idx:]
-        self.runner_obj._save_session_to_disk(self.session_id)
-        print(f"[COMPACTION OS] Flagged {cutoff_idx} turns as compacted and appended system memory summary.", flush=True)
+        
+        with self.runner_obj._lock:
+            live_history = self.runner_obj.sessions_history.get(self.session_id, [])
+            last_compacted_id = historical_turns[-1].get('id') if historical_turns else None
+            last_compacted_idx = -1
+            if last_compacted_id:
+                for idx, msg in enumerate(live_history):
+                    if msg.get('id') == last_compacted_id:
+                        last_compacted_idx = idx
+                        break
+                        
+            if last_compacted_idx != -1:
+                # Mark all messages in live history up to last_compacted_idx as compacted
+                for msg in live_history[:last_compacted_idx + 1]:
+                    msg['compacted'] = True
+                # Insert the summary msg right after last_compacted_idx
+                live_history.insert(last_compacted_idx + 1, summary_msg)
+                print(f"[COMPACTION OS] Flagged {last_compacted_idx + 1} turns as compacted and appended system memory summary in live history.", flush=True)
+            else:
+                # Fallback: prepend summary message to live history
+                live_history.insert(0, summary_msg)
+                print(f"[COMPACTION OS] Fallback: Appended system memory summary to the beginning of live history.", flush=True)
+                
+            self.runner_obj._save_session_to_disk(self.session_id)
 
     def get_openai_messages(self, sys_inst: str, rag_context: str, memory_context: str = None) -> list:
         history = self.runner_obj.sessions_history[self.session_id]
@@ -725,29 +762,97 @@ class BaseProgramRunner:
         url: str,
         payload: dict,
         headers: dict,
-        timeout: float = 60.0
+        timeout: float = 60.0,
+        session_id: str = None
     ) -> httpx.Response:
         """Sends a POST request to the LLM server, automatically falling back
         to system-to-user messages if a Jinja/system-role error is encountered.
+        Supports chunk-by-chunk streaming to allow immediate cancellation.
         """
-        async with httpx.AsyncClient() as client:
-            response = await client.post(url, json=payload, headers=headers, timeout=timeout)
+        from runner_interface import cancelled_sessions
+
+        # If session_id is provided, stream the response to support cancellation mid-generation
+        if session_id:
+            payload_copy = copy.deepcopy(payload)
+            payload_copy["stream"] = True
             
-            # If the request fails due to system role issues, retry with mapped user messages
-            is_system_role_error = (
-                response.status_code == 500 and (
-                    "got system" in response.text or
-                    "Jinja Exception" in response.text or
-                    "only user" in response.text.lower()
-                )
+            headers_copy = copy.deepcopy(headers)
+            headers_copy["Accept-Encoding"] = "identity"
+            
+            async with httpx.AsyncClient() as client:
+                async with client.stream("POST", url, json=payload_copy, headers=headers_copy, timeout=timeout) as r:
+                    if r.status_code != 200:
+                        await r.aread()
+                        response = httpx.Response(
+                            status_code=r.status_code,
+                            headers=r.headers,
+                            content=r.content,
+                            request=r.request
+                        )
+                    else:
+                        content_parts = []
+                        async for line in r.aiter_lines():
+                            if session_id in cancelled_sessions:
+                                cancelled_sessions.discard(session_id)
+                                print(f"[CANCEL] Aborting HTTP request for session {session_id}", flush=True)
+                                raise asyncio.CancelledError("Session cancelled by user request.")
+                            
+                            line = line.strip()
+                            if not line:
+                                continue
+                            if line.startswith("data:"):
+                                data_str = line[5:].strip()
+                                if data_str == "[DONE]":
+                                    break
+                                try:
+                                    chunk_json = json.loads(data_str)
+                                    choices = chunk_json.get("choices", [])
+                                    if choices:
+                                        delta = choices[0].get("delta", {})
+                                        content = delta.get("content", "")
+                                        if content:
+                                            content_parts.append(content)
+                                except Exception:
+                                    pass
+                        
+                        full_text = "".join(content_parts)
+                        mock_choices = [{
+                            "message": {
+                                "role": "assistant",
+                                "content": full_text
+                            }
+                        }]
+                        mock_data = {
+                            "choices": mock_choices,
+                            "model": payload.get("model", "")
+                        }
+                        mock_content = json.dumps(mock_data).encode("utf-8")
+                        response = httpx.Response(
+                            status_code=200,
+                            headers=r.headers,
+                            content=mock_content,
+                            request=r.request
+                        )
+        else:
+            async with httpx.AsyncClient() as client:
+                response = await client.post(url, json=payload, headers=headers, timeout=timeout)
+
+        # If the request fails due to system role issues, retry with mapped user messages
+        is_system_role_error = (
+            response.status_code == 500 and (
+                "got system" in response.text or
+                "Jinja Exception" in response.text or
+                "only user" in response.text.lower()
             )
-            if is_system_role_error:
-                print("[LLM FALLBACK] Detected system role Jinja Exception. Retrying with fallback...", flush=True)
-                payload_copy = copy.deepcopy(payload)
-                payload_copy["messages"] = fallback_system_to_user_messages(payload_copy.get("messages", []))
-                response = await client.post(url, json=payload_copy, headers=headers, timeout=timeout)
-                
-            return response
+        )
+        if is_system_role_error:
+            print("[LLM FALLBACK] Detected system role Jinja Exception. Retrying with fallback...", flush=True)
+            payload_retry = copy.deepcopy(payload)
+            payload_retry["messages"] = fallback_system_to_user_messages(payload_retry.get("messages", []))
+            # Call recursively to preserve streaming behavior and cancellation support
+            response = await self._post_llm_request(url, payload_retry, headers, timeout, session_id)
+            
+        return response
 
     async def _generate_local_summary(self, text_to_summarize: str, active_model: str, prior_memories: list = None) -> str:
         # Check if remote model is configured to offload summary generation
@@ -924,7 +1029,7 @@ class BaseProgramRunner:
                 payload["model"] = target_model
                 
             try:
-                response = await self._post_llm_request(url, payload, headers, timeout=120.0)
+                response = await self._post_llm_request(url, payload, headers, timeout=120.0, session_id=session_id)
                 if response.status_code == 200:
                     res_json = response.json()
                     bot_response_text = res_json['choices'][0]['message']['content']
@@ -938,7 +1043,7 @@ class BaseProgramRunner:
                         
                         # Retry the request
                         print("[COMPACTION] Retrying request with compacted history...", flush=True)
-                        response = await self._post_llm_request(url, payload, headers, timeout=120.0)
+                        response = await self._post_llm_request(url, payload, headers, timeout=120.0, session_id=session_id)
                         if response.status_code == 200:
                             res_json = response.json()
                             bot_response_text = res_json['choices'][0]['message']['content']
@@ -966,7 +1071,7 @@ class BaseProgramRunner:
                             payload_fallback = copy.deepcopy(payload)
                             payload_fallback["model"] = DEFAULT_REMOTE_MODEL
                             
-                            response = await self._post_llm_request(remote_cloud_url, payload_fallback, fallback_headers, timeout=120.0)
+                            response = await self._post_llm_request(remote_cloud_url, payload_fallback, fallback_headers, timeout=120.0, session_id=session_id)
                             if response.status_code == 200:
                                 res_json = response.json()
                                 bot_response_text = res_json['choices'][0]['message']['content']
@@ -1744,7 +1849,7 @@ class OpenSourceRunner(BaseProgramRunner):
                 new_message_text=new_message_text,
                 invocation_id=""
             )
-            asyncio.create_task(adapter.compact_history(model))
+            _run_async_in_background_thread(adapter.compact_history(model))
             
             bot_response_text, tool_calls = res
             companion_msg_id = None
