@@ -1257,7 +1257,7 @@ class BaseProgramRunner:
         """Runs the program with a new turn and returns (response_text, tool_calls, user_msg_id, companion_msg_id)."""
         raise NotImplementedError()
 
-    async def edit_turn(self, session_id: str, msg_id: str = None, user_message_index: int = None, new_text: str = None, model: str = None, force_offload: bool = False) -> tuple:
+    async def edit_turn(self, session_id: str, msg_id: str, new_text: str = None, model: str = None, force_offload: bool = False) -> tuple:
         """Edits an existing user message, truncates downstream history, and re-evaluates."""
         raise NotImplementedError()
 
@@ -1265,7 +1265,7 @@ class BaseProgramRunner:
         """Clears the session data from memory and deletes its file on disk."""
         raise NotImplementedError()
 
-    async def delete_turn(self, session_id: str, msg_id: str = None, user_message_index: int = None) -> bool:
+    async def delete_turn(self, session_id: str, msg_id: str) -> bool:
         """Deletes an existing user message and its subsequent turn events from the history."""
         raise NotImplementedError()
 
@@ -1747,11 +1747,14 @@ class OpenSourceRunner(BaseProgramRunner):
             if updated_any:
                 self._save_session_to_disk(session_id)
                 
+            _hidden_prefixes = ('tool_', 'port_', 'quest_', 'sys_')
             chat_history = []
             for msg in raw_history:
                 if msg.get('compacted'):
                     continue
                 if msg.get('role') == 'system-memory':
+                    continue
+                if msg.get('id', '').startswith(_hidden_prefixes):
                     continue
                 chat_history.append(msg.copy())
             return chat_history
@@ -1900,7 +1903,7 @@ class OpenSourceRunner(BaseProgramRunner):
                 msg_id=msg_id
             )
  
-    async def edit_turn(self, session_id: str, msg_id: str = None, user_message_index: int = None, new_text: str = None, model: str = None, force_offload: bool = False) -> tuple:
+    async def edit_turn(self, session_id: str, msg_id: str, new_text: str = None, model: str = None, force_offload: bool = False) -> tuple:
         if session_id not in self.sessions_history:
             self._load_session_from_disk(session_id)
             
@@ -1909,31 +1912,13 @@ class OpenSourceRunner(BaseProgramRunner):
         
         history = self.sessions_history[session_id]
         
-        print(f"[DEBUG OS edit_turn] session_id={session_id}, msg_id={msg_id}, user_message_index={user_message_index}, history_count={len(history)}, force_offload={force_offload}")
         user_idx = -1
-        if msg_id:
-            for i, ev in enumerate(history):
-                if ev.get('id') == msg_id:
-                    user_idx = i
-                    break
-            if user_idx == -1:
-                print(f"[DEBUG OS edit_turn ERROR] msg_id={msg_id} not found!")
-                raise ValueError("Message not found")
-        elif user_message_index is not None:
-            # Fallback to index-based lookup
-            user_count = 0
-            for i, ev in enumerate(history):
-                is_user = ev.get('role') == 'user'
-                if is_user:
-                    if user_count == user_message_index:
-                        user_idx = i
-                        break
-                    user_count += 1
-            if user_idx == -1:
-                print(f"[DEBUG OS edit_turn ERROR] user_message_index={user_message_index} not found!")
-                raise ValueError("User message out of bounds")
-        else:
-            raise ValueError("Either msg_id or user_message_index must be specified")
+        for i, ev in enumerate(history):
+            if ev.get('id') == msg_id:
+                user_idx = i
+                break
+        if user_idx == -1:
+            raise ValueError("Message not found")
             
         orig_msg = history[user_idx]
         
@@ -2039,7 +2024,7 @@ class OpenSourceRunner(BaseProgramRunner):
                     
             return marked_compacted or deleted_from_db
 
-    async def delete_turn(self, session_id: str, msg_id: str = None, user_message_index: int = None) -> bool:
+    async def delete_turn(self, session_id: str, msg_id: str) -> bool:
         with self._lock:
             if session_id not in self.sessions_history:
                 self._load_session_from_disk(session_id)
@@ -2050,19 +2035,10 @@ class OpenSourceRunner(BaseProgramRunner):
             history = self.sessions_history[session_id]
             
             user_idx = -1
-            if msg_id:
-                for i, ev in enumerate(history):
-                    if ev.get('id') == msg_id:
-                        user_idx = i
-                        break
-            elif user_message_index is not None:
-                user_count = 0
-                for i, ev in enumerate(history):
-                    if ev['role'] == 'user':
-                        if user_count == user_message_index:
-                            user_idx = i
-                            break
-                        user_count += 1
+            for i, ev in enumerate(history):
+                if ev.get('id') == msg_id:
+                    user_idx = i
+                    break
                         
             if user_idx == -1:
                 raise ValueError("User message not found")

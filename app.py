@@ -744,7 +744,6 @@ def chat():
 def edit():
     session_id = request.json.get('session_id', 'default')
     msg_id = request.json.get('msg_id')
-    user_message_index = request.json.get('user_message_index') # 0-based index of user messages
     new_text = request.json.get('new_text') # None means reroll (use original text)
     selected_model = request.json.get('model')
     force_offload = request.json.get('force_offload', new_text is None)
@@ -763,7 +762,6 @@ def edit():
             runner.edit_turn(
                 session_id=session_id,
                 msg_id=msg_id,
-                user_message_index=user_message_index,
                 new_text=new_text,
                 model=selected_model,
                 force_offload=force_offload
@@ -876,101 +874,37 @@ def update_message():
     msg_id = request.json.get('msg_id')
     new_text = request.json.get('new_text')
     
-    if msg_id and new_text is not None:
-        try:
-            success = asyncio.run(runner.update_message_text(session_id, msg_id, new_text))
-            if success:
-                return jsonify({'status': 'success'})
-            else:
-                return jsonify({'error': 'Message not found'}), 404
-        except Exception as e:
-            print(f"Error updating message text: {e}")
-            return jsonify({'error': str(e)}), 500
-            
-    # Fallback to index-based update for backwards compatibility
-    role = request.json.get('role')
-    index = request.json.get('index')
-    if role in ['user', 'companion'] and index is not None and new_text is not None:
-        try:
-            chat_history = asyncio.run(runner.get_history(session_id))
-            filtered_history = [msg for msg in chat_history if msg.get('role') not in ('system-memory', 'system')]
-            target_role = 'user' if role == 'user' else 'companion'
-            same_role_msgs = [msg for msg in filtered_history if msg.get('role') == target_role]
-            if int(index) < len(same_role_msgs):
-                target_msg_id = same_role_msgs[int(index)].get('id')
-                if target_msg_id:
-                    success = asyncio.run(runner.update_message_text(session_id, target_msg_id, new_text))
-                    if success:
-                        return jsonify({'status': 'success'})
+    if not msg_id or new_text is None:
+        return jsonify({'error': 'msg_id and new_text are required'}), 400
+
+    try:
+        success = asyncio.run(runner.update_message_text(session_id, msg_id, new_text))
+        if success:
+            return jsonify({'status': 'success'})
+        else:
             return jsonify({'error': 'Message not found'}), 404
-        except Exception as e:
-            print(f"Error updating message text (fallback): {e}")
-            return jsonify({'error': str(e)}), 500
-            
-    return jsonify({'error': 'Invalid arguments'}), 400
+    except Exception as e:
+        print(f"Error updating message text: {e}")
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/delete', methods=['POST'])
 @requires_auth
 def delete_message():
     session_id = request.json.get('session_id', 'default')
     msg_id = request.json.get('msg_id')
-    
-    if msg_id:
-        try:
-            success = asyncio.run(runner.delete_message_at(session_id, msg_id))
-            if success:
-                return jsonify({'status': 'success'})
-            else:
-                return jsonify({'error': 'Message not found'}), 404
-        except Exception as e:
-            print(f"Error deleting message {msg_id}: {e}")
-            return jsonify({'error': str(e)}), 500
-            
-    # Fallback to role/index
-    role = request.json.get('role')
-    index = request.json.get('index')
-    if role is not None and index is not None:
-        try:
-            chat_history = asyncio.run(runner.get_history(session_id))
-            if role == 'voice-call':
-                voice_msgs = [msg for msg in chat_history if msg.get('role') == 'voice-call']
-                if int(index) < len(voice_msgs):
-                    target_id = voice_msgs[int(index)].get('id')
-                    if target_id:
-                        success = asyncio.run(runner.delete_message_at(session_id, target_id))
-                        if success:
-                            return jsonify({'status': 'success'})
-            else:
-                filtered_history = [msg for msg in chat_history if msg.get('role') not in ('system-memory', 'system')]
-                target_role = 'user' if role == 'user' else 'companion'
-                same_role_msgs = [msg for msg in filtered_history if msg.get('role') == target_role]
-                if int(index) < len(same_role_msgs):
-                    target_id = same_role_msgs[int(index)].get('id')
-                    if target_id:
-                        success = asyncio.run(runner.delete_message_at(session_id, target_id))
-                        if success:
-                            return jsonify({'status': 'success'})
+
+    if not msg_id:
+        return jsonify({'error': 'msg_id is required'}), 400
+
+    try:
+        success = asyncio.run(runner.delete_message_at(session_id, msg_id))
+        if success:
+            return jsonify({'status': 'success'})
+        else:
             return jsonify({'error': 'Message not found'}), 404
-        except Exception as e:
-            print(f"Error deleting message (fallback) index {index} with role {role}: {e}")
-            return jsonify({'error': str(e)}), 500
-            
-    user_message_index = request.json.get('user_message_index')
-    if user_message_index is not None:
-        try:
-            chat_history = asyncio.run(runner.get_history(session_id))
-            user_msgs = [msg for msg in chat_history if msg.get('role') == 'user']
-            if int(user_message_index) < len(user_msgs):
-                user_msg_id = user_msgs[int(user_message_index)].get('id')
-                if user_msg_id:
-                    asyncio.run(runner.delete_turn(session_id, msg_id=user_msg_id))
-                    return jsonify({'status': 'success'})
-            return jsonify({'error': 'Message not found'}), 404
-        except Exception as e:
-            print(f"Error deleting turn in session {session_id}: {e}")
-            return jsonify({'error': str(e)}), 500
-            
-    return jsonify({'error': 'Missing msg_id, role/index, or user_message_index parameters'}), 400
+    except Exception as e:
+        print(f"Error deleting message {msg_id}: {e}")
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/continue', methods=['POST'])
 @requires_auth

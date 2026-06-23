@@ -4132,21 +4132,17 @@
             let newTurnPending = false;
 
             for (const msg of messages) {
-                const isHidden = msg.id && (
-                    msg.id.startsWith('sys_') ||
-                    msg.id.startsWith('tool_') ||
-                    msg.id.startsWith('port_') ||
-                    msg.id.startsWith('quest_')
-                );
-
-                if ((msg.role === 'companion' || msg.role === 'model') && !isHidden) {
+                if (msg.role === 'companion' || msg.role === 'model') {
                     // Skip blank companion entries (residuals from edit/compaction)
                     const hasContent = (msg.text && msg.text.trim()) || (msg.tool_calls && msg.tool_calls.length > 0);
                     if (!hasContent) continue;
 
                     // Extend the existing bubble only when no user message has appeared
-                    // between this entry and the previous companion group (same response turn).
-                    if (currentCompanion && !newTurnPending) {
+                    // between this entry and the previous companion group (same response turn),
+                    // and the previous companion step did not produce tool_calls (which would
+                    // mean this entry is the follow-up after a tool result, not a merge candidate).
+                    const prevHadToolCalls = currentCompanion && currentCompanion.tool_calls && currentCompanion.tool_calls.length > 0;
+                    if (currentCompanion && !newTurnPending && !prevHadToolCalls) {
                         if (msg.text) {
                             if (currentCompanion.text) {
                                 currentCompanion.text += "\n\n" + msg.text;
@@ -4170,15 +4166,10 @@
                         newTurnPending = false;
                     }
                 } else {
-                    if (!isHidden) {
-                        // A visible non-companion message (user, voice-call, etc.) breaks the
-                        // companion group so the next companion entry starts a new bubble.
-                        currentCompanion = null;
-                        newTurnPending = false;
-                    } else if (msg.role === 'user') {
-                        // A hidden user message also signals a turn boundary.
-                        newTurnPending = true;
-                    }
+                    // A visible non-companion message (user, voice-call, etc.) breaks the
+                    // companion group so the next companion entry starts a new bubble.
+                    currentCompanion = null;
+                    newTurnPending = false;
                     merged.push(msg);
                 }
             }
@@ -8589,17 +8580,6 @@ async function speakMessage(btn) {
             row.dataset.timestamp = timestamp || '';
             row.dataset.duration = duration || '';
             row.dataset.msgId = msgId || generateMessageId(text, role);
-
-            // Hide system, tool, portrait request, and quest completion messages
-            const isHidden = row.dataset.msgId && (
-                row.dataset.msgId.startsWith('sys_') ||
-                row.dataset.msgId.startsWith('tool_') ||
-                row.dataset.msgId.startsWith('port_') ||
-                row.dataset.msgId.startsWith('quest_')
-            );
-            if (isHidden) {
-                row.style.display = 'none';
-            }
 
             if (role === 'companion') {
                 const avatarContainer = document.createElement('div');
