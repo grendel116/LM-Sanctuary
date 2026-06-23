@@ -31,7 +31,8 @@ core/programs/*
 
 # Ignore user-generated dynamic program sessions, databases, custom generated portraits, and memories
 core/programs/*/sessions/
-core/programs/*/portraits/
+core/programs/*/portraits/*
+!core/programs/sebile/portraits/profile.png
 core/programs/*/media/
 core/programs/*/uploads/
 core/programs/*/databank.db

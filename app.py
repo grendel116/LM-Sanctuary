@@ -3086,8 +3086,107 @@ def import_describe_program():
         return jsonify({'error': str(e)}), 500
 
 
+# --- Server-Sent Events (SSE) for Live Connection Status ---
+import queue as _queue
+
+_sse_clients = []
+_sse_clients_lock = threading.Lock()
+_last_broadcast_state = {}
+
+def _get_current_status():
+    """Build the combined connection status payload."""
+    from utils import local_llm_manager, comfy_manager
+    remote_key = os.getenv("REMOTE_API_KEY")
+    remote_cloud_url = os.getenv("REMOTE_CLOUD_URL")
+    is_remote_configured = bool(
+        remote_key and remote_key.strip() and remote_key != "your_remote_api_key_here" and
+        remote_cloud_url and remote_cloud_url.strip() and remote_cloud_url != "your_remote_cloud_url_here"
+    )
+    return {
+        "remote_configured": is_remote_configured,
+        "remote_model": os.getenv("REMOTE_MODEL", "gemini-3.1-flash-lite"),
+        "remote_url": remote_cloud_url,
+        "local_online": local_llm_manager.check_status(),
+        "local_installed": local_llm_manager.check_installed(),
+        "comfy_installed": comfy_manager.check_comfy_installed(),
+        "comfy_running": comfy_manager.check_comfy_running(force_refresh=True),
+    }
+
+def broadcast_status():
+    """Push current status to all connected SSE clients (only if state changed)."""
+    global _last_broadcast_state
+    status = _get_current_status()
+    # Deduplicate: only broadcast when state actually changed
+    if status == _last_broadcast_state:
+        return
+    _last_broadcast_state = status.copy()
+    data = json.dumps({"type": "connection_status", "status": status})
+    msg = f"event: connection_status\ndata: {data}\n\n"
+    with _sse_clients_lock:
+        dead = []
+        for q in _sse_clients:
+            try:
+                q.put_nowait(msg)
+            except _queue.Full:
+                dead.append(q)
+        for q in dead:
+            _sse_clients.remove(q)
+
+def _status_monitor():
+    """Background thread that detects external state changes (crashes, manual stops)."""
+    while True:
+        time.sleep(5)
+        try:
+            broadcast_status()
+        except Exception:
+            pass
+
+_monitor_thread = threading.Thread(target=_status_monitor, daemon=True)
+_monitor_thread.start()
+
+@app.route('/api/events/status')
+@requires_auth
+def sse_status_stream():
+    """SSE endpoint for live connection status updates."""
+    q = _queue.Queue(maxsize=50)
+    with _sse_clients_lock:
+        _sse_clients.append(q)
+
+    def stream():
+        try:
+            # Send initial status immediately
+            status = _get_current_status()
+            data = json.dumps({"type": "connection_status", "status": status})
+            yield f"event: connection_status\ndata: {data}\n\n"
+            while True:
+                try:
+                    msg = q.get(timeout=15)
+                    yield msg
+                except _queue.Empty:
+                    # Keepalive comment to prevent proxy/browser timeout
+                    yield ":\n\n"
+        except GeneratorExit:
+            pass
+        finally:
+            with _sse_clients_lock:
+                if q in _sse_clients:
+                    _sse_clients.remove(q)
+
+    return Response(stream(), mimetype='text/event-stream', headers={
+        'Cache-Control': 'no-cache',
+        'X-Accel-Buffering': 'no',
+        'Connection': 'keep-alive',
+    })
+
+
 # --- Headless Local LLM & Hugging Face Integration API ---
 from utils import local_llm_manager
+from utils import comfy_manager
+
+# Wire SSE broadcast callbacks into both managers
+from utils import local_runner
+local_runner._on_status_change = broadcast_status
+comfy_manager._on_status_change = broadcast_status
 
 @app.route('/api/local_llm/status', methods=['GET'])
 @requires_auth
@@ -3173,17 +3272,18 @@ def local_llm_delete():
 @requires_auth
 def local_llm_start():
     success, message = local_llm_manager.start_server()
+    broadcast_status()
     return jsonify({"success": success, "message": message})
 
 @app.route('/api/local_llm/stop', methods=['POST'])
 @requires_auth
 def local_llm_stop():
     success, message = local_llm_manager.stop_server()
+    broadcast_status()
     return jsonify({"success": success, "message": message})
 
 
 # --- Headless ComfyUI & Dependency Resolver API ---
-from utils import comfy_manager
 
 @app.route('/api/comfy/status', methods=['GET'])
 @requires_auth
@@ -3206,12 +3306,14 @@ def comfy_install():
 @requires_auth
 def comfy_start():
     success, message = comfy_manager.start_comfy_server()
+    broadcast_status()
     return jsonify({"success": success, "message": message})
 
 @app.route('/api/comfy/stop', methods=['POST'])
 @requires_auth
 def comfy_stop():
     success, message = comfy_manager.stop_comfy_server()
+    broadcast_status()
     return jsonify({"success": success, "message": message})
 
 @app.route('/api/comfy/resolve_workflow', methods=['POST'])
@@ -3374,6 +3476,18 @@ if __name__ == '__main__':
         except ImportError:
             print("[!] pyOpenSSL is not installed. To run with ad-hoc SSL, please run: pip install pyopenssl")
             print("[!] Falling back to HTTP...")
+            
+    if os.environ.get('WERKZEUG_RUN_MAIN') == 'true':
+        browser_host = host if host != '0.0.0.0' else '127.0.0.1'
+        protocol = 'https' if ssl_context else 'http'
+        url = f"{protocol}://{browser_host}:{port}"
+        
+        def open_browser():
+            import webbrowser
+            print(f"[*] Automatically opening browser to: {url}")
+            webbrowser.open(url)
+            
+        threading.Timer(1.5, open_browser).start()
             
     app.run(
         host=host,

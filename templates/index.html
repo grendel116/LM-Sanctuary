@@ -3655,7 +3655,6 @@
                     <div style="display: flex; flex-direction: column; gap: 8px; margin-bottom: 15px;">
                         <button id="modal-local-start-btn" onclick="startLocalLLM(this)" class="onboarding-btn connect-cloud-btn" style="width: 100%; font-size: 0.85rem; padding: 10px;">Start Server</button>
                         <button id="modal-local-stop-btn" onclick="stopLocalLLM(this)" class="onboarding-btn" style="width: 100%; font-size: 0.85rem; padding: 10px; display: none;">Stop Server</button>
-                        <button onclick="checkModalStatus()" class="onboarding-btn" style="width: 100%; font-size: 0.85rem; padding: 10px;">Refresh Connection</button>
                     </div>
 
                     <div id="modal-local-models-list" style="margin-bottom: 15px;"></div>
@@ -4754,7 +4753,7 @@ function showOnboardingCard() {
                             <span>Engine online. Choose a model in the header selector to start conversing.</span>
                         </div>
                     </div>
-                    <button onclick="checkOnboardingStatus()" class="onboarding-btn" style="width: 100%; font-size: 0.85rem; padding: 10px; margin-bottom: 15px;">Refresh Connection</button>
+
                     
                     <div style="border-top: 1px solid var(--border-color); padding-top: 15px;">
                         <label style="font-size: 0.72rem; color: var(--text-muted); font-weight: 500;">Search Hugging Face (GGUF)</label>
@@ -4989,47 +4988,25 @@ function pollInstallStatus(btn) {
 
         // --- startLocalLLM ---
 async function startLocalLLM(btn) {
-            if (btn) {
-                btn.disabled = true;
-                btn.innerHTML = `<span class="animate-spin" style="display: inline-block; width: 14px; height: 14px; border: 2px solid currentColor; border-top-color: transparent; border-radius: 50%; margin-right: 8px; vertical-align: middle;"></span>Starting server...`;
+            // Optimistic UI: immediately mark as starting and disable all start buttons
+            connectionStatus.local_online = 'starting';
+            updateConnectionModalStatus();
+            if (document.getElementById('onboarding-container')) {
+                showOnboardingCard();
             }
             try {
                 const res = await fetch('/api/local_llm/start', { method: 'POST' });
-                await res.json();
-                
-                // Now poll /api/local_llm/status until online is true
-                let attempts = 0;
-                const maxAttempts = 15;
-                const pollInterval = setInterval(async () => {
-                    attempts++;
-                    try {
-                        const statusRes = await fetch('/api/local_llm/status');
-                        const statusData = await statusRes.json();
-                        if (statusData.online) {
-                            clearInterval(pollInterval);
-                            await initializeModelSelect();
-                            if (document.getElementById('onboarding-container')) {
-                                showOnboardingCard();
-                            }
-                            updateConnectionModalStatus();
-                        } else if (attempts >= maxAttempts) {
-                            clearInterval(pollInterval);
-                            showCustomAlert("Timeout starting server", "Local LLM engine is taking longer than usual to start. Try refreshing manually in a few moments.");
-                            if (btn) {
-                                btn.disabled = false;
-                                  btn.textContent = "Start Local Server";
-                            }
-                        }
-                    } catch (err) {
-                        console.error("Error polling server status:", err);
-                    }
-                }, 3000);
-            } catch (e) {
-                showCustomAlert("Error", "Failed to initiate server start.");
-                if (btn) {
-                    btn.disabled = false;
-                    btn.textContent = "Start Local Server";
+                const data = await res.json();
+                if (!data.success) {
+                    connectionStatus.local_online = false;
+                    updateConnectionModalStatus();
+                    showCustomAlert("Failed to Start", data.message);
                 }
+                // SSE will deliver the final online/offline state
+            } catch (e) {
+                connectionStatus.local_online = false;
+                updateConnectionModalStatus();
+                showCustomAlert("Error", "Failed to initiate server start.");
             }
         }
 
@@ -5541,22 +5518,25 @@ async function installComfyUI(btn) {
 
         // --- startComfyUI ---
 async function startComfyUI(btn) {
-            btn.disabled = true;
-            btn.innerHTML = `<span class="animate-spin" style="display: inline-block; width: 14px; height: 14px; border: 2px solid currentColor; border-top-color: transparent; border-radius: 50%; margin-right: 8px; vertical-align: middle;"></span>Starting ComfyUI...`;
+            // Optimistic UI: immediately mark as starting and disable all start buttons
+            comfyStatus.running = 'starting';
+            updateComfyModalStatus();
+            if (document.getElementById('onboarding-container')) {
+                showOnboardingCard();
+            }
             try {
                 const res = await fetch('/api/comfy/start', { method: 'POST' });
                 const data = await res.json();
-                if (data.success) {
+                if (!data.success) {
+                    comfyStatus.running = false;
                     updateComfyModalStatus();
-                } else {
                     showCustomAlert("Failed to Start", data.message);
-                    btn.disabled = false;
-                    btn.textContent = "Start ComfyUI";
                 }
+                // SSE will deliver the final running/offline state
             } catch (e) {
+                comfyStatus.running = false;
+                updateComfyModalStatus();
                 showCustomAlert("Error", "Failed to start ComfyUI.");
-                btn.disabled = false;
-                btn.textContent = "Start ComfyUI";
             }
         }
 
@@ -12045,6 +12025,47 @@ let userProfiles = [];
 
 // Initialize model selection on script load
         modelInitPromise = initializeModelSelect();
+
+// --- SSE Live Connection Status Stream ---
+(function initSSE() {
+    let evtSource = null;
+    function connect() {
+        evtSource = new EventSource('/api/events/status');
+        evtSource.addEventListener('connection_status', (e) => {
+            try {
+                const payload = JSON.parse(e.data);
+                const status = payload.status;
+                // Update LLM connection status
+                updateConnectionStatus({
+                    remote_configured: status.remote_configured,
+                    remote_model: status.remote_model,
+                    remote_url: status.remote_url,
+                    local_online: status.local_online,
+                    local_installed: status.local_installed,
+                    temperature: connectionStatus.temperature
+                });
+                // Update ComfyUI status
+                comfyStatus.installed = status.comfy_installed;
+                comfyStatus.running = status.comfy_running;
+                // Refresh modal UI if the settings modal is open
+                const modal = document.getElementById('connection-modal');
+                if (modal && modal.style.display !== 'none') {
+                    updateConnectionModalStatus();
+                }
+                // Refresh model dropdown to reflect online/offline changes
+                initializeModelSelect();
+            } catch (err) {
+                console.error('SSE parse error:', err);
+            }
+        });
+        evtSource.onerror = () => {
+            evtSource.close();
+            // Reconnect after 3 seconds
+            setTimeout(connect, 3000);
+        };
+    }
+    connect();
+})();
 
 let serverImages = [];
 
