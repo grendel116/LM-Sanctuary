@@ -1494,8 +1494,10 @@ class BaseProgramRunner:
             if matched_entries:
                 if "\n\n# RECALLED JOURNALS / MEMORIES\n" not in instructions:
                     instructions += "\n\n# RECALLED JOURNALS / MEMORIES\n"
+                from core.program_config import replace_placeholders
                 for entry in matched_entries:
-                    instructions += f"- {entry['content']}\n"
+                    content_resolved = replace_placeholders(entry['content'])
+                    instructions += f"- {content_resolved}\n"
         except Exception as je:
             print(f"Error matching journals: {je}")
         return instructions

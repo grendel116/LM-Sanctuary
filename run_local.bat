@@ -10,14 +10,14 @@ if %errorlevel% neq 0 (
 )
 
 REM 2. Create Virtual Environment
-if not exist .venv311 (
+if not exist .venv (
     echo --- Creating Virtual Environment ---
-    py -3.11 -m venv .venv311
+    py -3.12 -m venv .venv
 )
 
 REM 3. Install Dependencies
 echo --- Installing Dependencies ---
-call .venv311\Scripts\python.exe -m pip install -r requirements.txt
+call .venv\Scripts\python.exe -m pip install -r requirements.txt
 
 REM 4. Environment Variables
 REM Copy .env.example to .env if missing
@@ -28,5 +28,5 @@ if not exist .env (
 
 REM 5. Start LM Sanctuary
 echo --- Starting LM Sanctuary ---
-.venv311\Scripts\python app.py
+.venv\Scripts\python app.py
 pause
