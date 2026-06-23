@@ -28,5 +28,6 @@ if not exist .env (
 
 REM 5. Start LM Sanctuary
 echo --- Starting LM Sanctuary ---
+set OPEN_BROWSER=true
 .venv\Scripts\python app.py
 pause

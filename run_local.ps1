@@ -25,4 +25,5 @@ if (!(Test-Path .env)) {
 
 # 5. Start LM Sanctuary
 Write-Host "--- Starting LM Sanctuary ---"
+$env:OPEN_BROWSER="true"
 .\.venv\Scripts\python app.py
