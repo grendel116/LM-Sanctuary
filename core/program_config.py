@@ -77,22 +77,6 @@ def replace_placeholders(text: str) -> str:
 
 def get_companion_greeting() -> str:
     """Discovers the companion greeting/welcome message dynamically."""
-    from utils.program import get_active_program
-    import json
-    active_program = get_active_program()
-    program_path = os.path.join(PROGRAMS_DIR, active_program)
-    
-    for filename in [f"{active_program}.json", "character_profile.json"]:
-        json_path = os.path.join(program_path, filename)
-        if os.path.exists(json_path):
-            try:
-                with open(json_path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    example_msg = data.get("operation", {}).get("example_message")
-                    if example_msg:
-                        return example_msg
-            except Exception:
-                pass
     return "Hello, {{user}}."
 
 def compile_instructions_from_json(profile_data: dict) -> str:
