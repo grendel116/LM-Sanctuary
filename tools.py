@@ -1296,15 +1296,16 @@ def apply_comfy_workflow(workflow_path: str, parameters: dict, save_path: str, s
                                     with open(save_path, "wb") as img_file:
                                         img_file.write(view_res.content)
                                     
-                                    # Delete temp file from ComfyUI's temp folder to avoid accumulation
+                                    # Delete the file from ComfyUI's folder to avoid accumulation
                                     try:
                                         from utils.comfy_manager import COMFYUI_DIR
-                                        comfy_temp_file = os.path.normpath(os.path.join(COMFYUI_DIR, "temp", img.get("subfolder", ""), filename))
-                                        if os.path.exists(comfy_temp_file):
-                                            os.remove(comfy_temp_file)
-                                            print(f"[COMFY IMAGE] Cleaned up temp output image: {comfy_temp_file}")
+                                        img_type = img.get("type", "temp")
+                                        comfy_file = os.path.normpath(os.path.join(COMFYUI_DIR, img_type, img.get("subfolder", ""), filename))
+                                        if os.path.exists(comfy_file):
+                                            os.remove(comfy_file)
+                                            print(f"[COMFY IMAGE] Cleaned up {img_type} output image: {comfy_file}")
                                     except Exception as e_clean:
-                                        print(f"[COMFY IMAGE] Warning: Failed to clean up temp file: {e_clean}")
+                                        print(f"[COMFY IMAGE] Warning: Failed to clean up file: {e_clean}")
                                         
                                     return save_path
                                 else:
