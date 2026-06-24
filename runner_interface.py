@@ -454,15 +454,17 @@ class OsHistoryAdapter(LocalHistoryAdapter):
         local_context = os.getenv("LOCAL_CONTEXT")
         if local_context:
             try:
-                # 1 token is approx 4 characters. Trigger threshold at 75% of context window.
-                MAX_LOCAL_CONTEXT_CHARS = int(int(local_context) * 0.75 * 4)
+                # 1 token is approx 4 characters.
+                # Trigger at 30% of the context window so compaction runs
+                # as a rolling summary, not as a last-resort overflow handler.
+                MAX_LOCAL_CONTEXT_CHARS = int(int(local_context) * 0.30 * 4)
             except Exception:
-                MAX_LOCAL_CONTEXT_CHARS = 16000
+                MAX_LOCAL_CONTEXT_CHARS = 6000
         else:
             try:
-                MAX_LOCAL_CONTEXT_CHARS = int(os.getenv("LOCAL_CONTEXT_THRESHOLD_CHARS", "16000"))
+                MAX_LOCAL_CONTEXT_CHARS = int(os.getenv("LOCAL_CONTEXT_THRESHOLD_CHARS", "6000"))
             except Exception:
-                MAX_LOCAL_CONTEXT_CHARS = 16000
+                MAX_LOCAL_CONTEXT_CHARS = 6000
                 
         if not force and len(history_text) <= MAX_LOCAL_CONTEXT_CHARS:
             return
@@ -472,7 +474,7 @@ class OsHistoryAdapter(LocalHistoryAdapter):
         # 2. Find user messages to identify turns
         user_msg_indices = [idx for idx, msg in enumerate(history) if msg.get('role') == 'user' and not msg.get('compacted')]
         
-        keep_turns = 1 if force else 3
+        keep_turns = 1 if force else 2
         if len(user_msg_indices) <= keep_turns:
             return
             
@@ -1503,8 +1505,12 @@ class BaseProgramRunner:
         return instructions
 
     def _inject_system_memories(self, instructions: str, session_id: str) -> str:
-        """Fetches and injects system-memory summaries into instructions."""
-        system_memories = []
+        """Fetches and injects system-memory summaries into instructions.
+        Only the most recent compaction block is injected — each summary is generated
+        with prior context, so the latest one is a coherent rolling snapshot of the
+        full conversation history.
+        """
+        latest_memory = None
         if hasattr(self, 'sessions_history'): # OpenSourceRunner
             history = self.sessions_history.get(session_id, [])
             for msg in history:
@@ -1512,7 +1518,7 @@ class BaseProgramRunner:
                     text = msg.get('text', '').strip()
                     if text:
                         clean_text = text.replace("[System Memory of older conversation turns]:", "").strip()
-                        system_memories.append(clean_text)
+                        latest_memory = clean_text  # keep iterating — last one wins
         else: # GoogleAdkRunner
             session_dict = self.runner.session_service.sessions if hasattr(self, 'runner') else None
             adk_session = None
@@ -1528,10 +1534,10 @@ class BaseProgramRunner:
                             text = "".join(part.text for part in ev.content.parts if part.text)
                         if text.strip():
                             clean_text = text.replace("[System Memory of older conversation turns]:", "").strip()
-                            system_memories.append(clean_text)
+                            latest_memory = clean_text  # keep iterating — last one wins
                             
-        if system_memories:
-            instructions += f"\n\n# CONVERSATION MEMORY ARCHIVE\nThe following is a summary of older conversation turns from earlier in this chat session:\n" + "\n---\n".join(system_memories) + "\n"
+        if latest_memory:
+            instructions += f"\n\n# CONVERSATION MEMORY ARCHIVE\nThe following is a summary of older conversation turns from earlier in this chat session:\n{latest_memory}\n"
             
         return instructions
 
@@ -1750,8 +1756,6 @@ class OpenSourceRunner(BaseProgramRunner):
             _hidden_prefixes = ('tool_', 'port_', 'quest_', 'sys_')
             chat_history = []
             for msg in raw_history:
-                if msg.get('compacted'):
-                    continue
                 if msg.get('role') == 'system-memory':
                     continue
                 if msg.get('id', '').startswith(_hidden_prefixes):
