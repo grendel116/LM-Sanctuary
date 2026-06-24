@@ -8416,6 +8416,8 @@ async function speakMessage(btn) {
         // --- appendMessage ---
         function appendMessage(role, text, imageUrl = null, toolCalls = null, isLive = false, timestamp = null, duration = null, isTransient = false, msgId = null) {
             if (role === 'system-memory' || role === 'system') return;
+            const _hiddenPrefixes = ['port_', 'quest_', 'tool_'];
+            if (msgId && _hiddenPrefixes.some(p => msgId.startsWith(p))) return;
             text = replacePlaceholders(text);
             if (text && text.startsWith('[System Memory of older conversation turns]:')) return;
             
@@ -9207,10 +9209,7 @@ function triggerFileInput() {
                 prefix = 'tool_';
             }
             const userMsgId = prefix + Math.random().toString(36).substr(2, 9) + Date.now().toString(36);
-            const _hiddenPrefixes = ['port_', 'quest_', 'tool_'];
-            if (!_hiddenPrefixes.some(p => userMsgId.startsWith(p))) {
-                appendMessage('user', text, userImageUrl, null, false, Date.now() / 1000, null, false, userMsgId);
-            }
+            appendMessage('user', text, userImageUrl, null, false, Date.now() / 1000, null, false, userMsgId);
 
             // Trigger heart jiggle on high user interaction or when Companion is generating/responding
             const heartElement = document.querySelector('.heart-pulse');
