@@ -12015,6 +12015,7 @@ function purgeDataBank() {
         let selectedModel = localStorage.getItem('companion_selected_model') || 'local-llm';
         let lastInteractionTime = Date.now();
         let hasTriggeredProactive = false;
+        let proactiveAbortController = null;
         let activeCompanionName = "";
         let availableModels = [];
         let connectionStatus = { remote_configured: false, gemini_configured: false, local_online: false };
@@ -12112,6 +12113,12 @@ let galleryImages = [];
         function resetIdleTimer() {
             lastInteractionTime = Date.now();
             hasTriggeredProactive = false;
+            // Cancel any in-flight proactive request so stale responses never render
+            if (proactiveAbortController) {
+                proactiveAbortController.abort();
+                proactiveAbortController = null;
+            }
+            hideThoughtBubbleOverlay();
         }
 
         window.addEventListener('mousemove', resetIdleTimer);
@@ -12120,6 +12127,9 @@ let galleryImages = [];
         window.addEventListener('touchstart', resetIdleTimer);
 
         async function triggerProactiveAction() {
+            // Create an abort controller for this request so user activity can cancel it
+            proactiveAbortController = new AbortController();
+            const signal = proactiveAbortController.signal;
             try {
                 const response = await fetch('/api/proactive_action', {
                     method: 'POST',
@@ -12127,9 +12137,13 @@ let galleryImages = [];
                     body: JSON.stringify({
                         session_id: sessionId,
                         model: selectedModel
-                    })
+                    }),
+                    signal
                 });
+                // After the await, verify the request was not aborted during the LLM call
+                if (signal.aborted) return;
                 const data = await response.json();
+                if (signal.aborted) return;
                 if (data.status === 'success') {
                     if (data.type === 'thought') {
                         showThoughtBubbleOverlay(data.content);
@@ -12138,7 +12152,10 @@ let galleryImages = [];
                     }
                 }
             } catch (err) {
+                if (err.name === 'AbortError') return;
                 console.error("Proactive action error:", err);
+            } finally {
+                proactiveAbortController = null;
             }
         }
 
