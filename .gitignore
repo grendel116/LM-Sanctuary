@@ -43,10 +43,8 @@ core/embeddings.pkl
 temp_uploads/
 
 
-# Local model weights and structure tracking
-models/**/*
-!models/**/
-!models/**/.gitkeep
+# Local model weights
+models/
 
 # TTS Speech Model weights and synthesized audio cache
 core/skills/speech_generation/speech_model/*.onnx
