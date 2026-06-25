@@ -289,13 +289,7 @@ def serve_service_worker():
 
 @app.route('/app_icon.png')
 def app_icon():
-    active_program = os.getenv("ACTIVE_PROGRAM", "sebile")
-    path_png = os.path.join('core', 'programs', active_program, 'portraits', 'profile.png')
-    if os.path.exists(path_png):
-        response = send_file(path_png)
-    else:
-        response = send_file('images/app_icon.png')
-            
+    response = send_file('images/app_icon.png')
     from flask import make_response
     res = make_response(response)
     res.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
