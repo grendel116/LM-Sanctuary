@@ -60,3 +60,6 @@ comfy_server.log
 # Workflow Configs
 ImageWorkflow.json
 VideoWorkflow.json
+
+# Local Binaries
+utils/llama-bin/
