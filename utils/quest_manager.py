@@ -5,9 +5,12 @@ import json
 import argparse
 from datetime import datetime, timezone
 
-# Ensure variables directory exists
-VARIABLES_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "variables")
-QUEST_LOG_PATH = os.path.join(VARIABLES_DIR, "quest_log.json")
+# Resolve quest log path under the active program directory
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, PROJECT_ROOT)
+from utils.program import get_active_program
+active_program = get_active_program()
+QUEST_LOG_PATH = os.path.join(PROJECT_ROOT, "core", "programs", active_program, "quest_log.json")
 
 def main():
     parser = argparse.ArgumentParser(description="Sanctuary Local Quest Manager")
@@ -51,7 +54,7 @@ def main():
     quests.append(quest)
 
     # Save back to quest_log.json
-    os.makedirs(VARIABLES_DIR, exist_ok=True)
+    os.makedirs(os.path.dirname(QUEST_LOG_PATH), exist_ok=True)
     with open(QUEST_LOG_PATH, 'w', encoding='utf-8') as f:
         json.dump(quests, f, indent=2, ensure_ascii=False)
 

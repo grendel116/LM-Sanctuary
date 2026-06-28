@@ -39,6 +39,7 @@ core/programs/*/databank.db
 core/programs/*/databank.json
 core/programs/*/journals.json
 core/programs/*/memories.json
+core/programs/*/quest_log.json
 core/embeddings.pkl
 temp_uploads/
 
