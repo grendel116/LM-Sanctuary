@@ -2129,10 +2129,12 @@ def add_quest(title: str, notes: str, due: str = None, location: str = "", remin
         import json
         import re
         
-        # Resolve variables directory and quest path
+        # Resolve quest log path under the active program directory
         base_dir = os.path.dirname(os.path.abspath(__file__))
-        VARIABLES_DIR = os.path.normpath(os.path.join(base_dir, "variables"))
-        QUEST_LOG_PATH = os.path.join(VARIABLES_DIR, "quest_log.json")
+        from utils.program import get_active_program
+        active_program = get_active_program()
+        program_dir = os.path.normpath(os.path.join(base_dir, "core", "programs", active_program))
+        QUEST_LOG_PATH = os.path.join(program_dir, "quest_log.json")
         
         # Load existing quests
         quests = []
@@ -2203,7 +2205,7 @@ def add_quest(title: str, notes: str, due: str = None, location: str = "", remin
 
         quests.append(quest)
 
-        os.makedirs(VARIABLES_DIR, exist_ok=True)
+        os.makedirs(program_dir, exist_ok=True)
         with open(QUEST_LOG_PATH, 'w', encoding='utf-8') as f:
             json.dump(quests, f, indent=2, ensure_ascii=False)
 

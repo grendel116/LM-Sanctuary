@@ -1797,8 +1797,9 @@ def delete_memory():
 @requires_auth
 def list_quests():
     try:
-        from variables import VARIABLES_DIR
-        quests_path = os.path.join(VARIABLES_DIR, 'quest_log.json')
+        from utils.program import get_active_program
+        active_program = get_active_program()
+        quests_path = os.path.join('core', 'programs', active_program, 'quest_log.json')
         
         quests = []
         if os.path.exists(quests_path):
@@ -1816,8 +1817,9 @@ def list_quests():
 @requires_auth
 def delete_quest(quest_id):
     try:
-        from variables import VARIABLES_DIR
-        quests_path = os.path.join(VARIABLES_DIR, 'quest_log.json')
+        from utils.program import get_active_program
+        active_program = get_active_program()
+        quests_path = os.path.join('core', 'programs', active_program, 'quest_log.json')
         
         if os.path.exists(quests_path):
             with open(quests_path, 'r', encoding='utf-8') as f:
@@ -1835,8 +1837,9 @@ def delete_quest(quest_id):
 @requires_auth
 def complete_quest(quest_id):
     try:
-        from variables import VARIABLES_DIR
-        quests_path = os.path.join(VARIABLES_DIR, 'quest_log.json')
+        from utils.program import get_active_program
+        active_program = get_active_program()
+        quests_path = os.path.join('core', 'programs', active_program, 'quest_log.json')
         quest_data = None
         
         if os.path.exists(quests_path):
@@ -1875,8 +1878,9 @@ def complete_quest(quest_id):
 @requires_auth
 def download_quest(quest_id):
     try:
-        from variables import VARIABLES_DIR
-        quests_path = os.path.join(VARIABLES_DIR, 'quest_log.json')
+        from utils.program import get_active_program
+        active_program = get_active_program()
+        quests_path = os.path.join('core', 'programs', active_program, 'quest_log.json')
         if not os.path.exists(quests_path):
             return jsonify({"error": "No quests found"}), 404
         with open(quests_path, 'r', encoding='utf-8') as f:
