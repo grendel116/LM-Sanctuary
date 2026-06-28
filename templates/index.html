@@ -9857,8 +9857,8 @@ function truncateChatAfter(row) {
                     });
                     const data = await response.json();
                     if (data.status === 'success') {
-                        // Soft reload to display updated messages
-                        await softReloadApp();
+                        const row = (bubble || voiceCallRow).closest('.message-row') || voiceCallRow;
+                        if (row) row.remove();
                     } else if (data.error) {
                         showCustomAlert("Delete Failed", data.error);
                     }
@@ -11294,7 +11294,6 @@ function showToolConfirmModal(callId, toolName, details) {
 
         // --- completeQuest ---
         async function completeQuest(questId) {
-            closeQuestLog();
             
             try {
                 const response = await fetch(`/api/quests/${questId}/complete`, {
