@@ -4125,53 +4125,13 @@
 
         function mergeHistoryMessages(messages) {
             const merged = [];
-            let currentCompanion = null;
-            // Track whether a real user message appeared since the last companion group started.
-            // When true, the next companion entry begins a fresh bubble instead of extending
-            // the current one — preserving separately-stored responses as distinct deletable items.
-            let newTurnPending = false;
 
             for (const msg of messages) {
                 if (msg.role === 'companion' || msg.role === 'model') {
-                    // Skip blank companion entries (residuals from edit/compaction)
                     const hasContent = (msg.text && msg.text.trim()) || (msg.tool_calls && msg.tool_calls.length > 0);
                     if (!hasContent) continue;
-
-                    // Extend the existing bubble only when no user message has appeared
-                    // between this entry and the previous companion group (same response turn),
-                    // and the previous companion step did not produce tool_calls (which would
-                    // mean this entry is the follow-up after a tool result, not a merge candidate).
-                    const prevHadToolCalls = currentCompanion && currentCompanion.tool_calls && currentCompanion.tool_calls.length > 0;
-                    if (currentCompanion && !newTurnPending && !prevHadToolCalls) {
-                        if (msg.text) {
-                            if (currentCompanion.text) {
-                                currentCompanion.text += "\n\n" + msg.text;
-                            } else {
-                                currentCompanion.text = msg.text;
-                            }
-                        }
-                        if (msg.tool_calls && msg.tool_calls.length > 0) {
-                            currentCompanion.tool_calls = (currentCompanion.tool_calls || []).concat(msg.tool_calls);
-                        }
-                        // Keep the first segment's id as the canonical row identifier.
-                        // Only advance the display timestamp to the latest segment.
-                        currentCompanion.timestamp = msg.timestamp;
-                        if (msg.mood) {
-                            currentCompanion.mood = msg.mood;
-                        }
-                    } else {
-                        // Start a fresh companion bubble.
-                        currentCompanion = { ...msg };
-                        merged.push(currentCompanion);
-                        newTurnPending = false;
-                    }
-                } else {
-                    // A visible non-companion message (user, voice-call, etc.) breaks the
-                    // companion group so the next companion entry starts a new bubble.
-                    currentCompanion = null;
-                    newTurnPending = false;
-                    merged.push(msg);
                 }
+                merged.push({ ...msg });
             }
             return merged;
         }
@@ -5051,6 +5011,8 @@ async function stopLocalLLM(btn) {
 
         // --- stopComfyUI ---
 async function stopComfyUI(btn) {
+            if (_comfyStopping) return;
+            _comfyStopping = true;
             if (btn) {
                 btn.disabled = true;
                 btn.innerHTML = `<span class="animate-spin" style="display: inline-block; width: 14px; height: 14px; border: 2px solid currentColor; border-top-color: transparent; border-radius: 50%; margin-right: 8px; vertical-align: middle;"></span>Stopping ComfyUI...`;
@@ -5059,7 +5021,8 @@ async function stopComfyUI(btn) {
                 const res = await fetch('/api/comfy/stop', { method: 'POST' });
                 const data = await res.json();
                 if (data.success) {
-                    updateComfyModalStatus();
+                    comfyStatus.running = false;
+                    updateComfyModalStatus(true);
                 } else {
                     showCustomAlert("Failed to Stop", data.message);
                     if (btn) {
@@ -5073,6 +5036,8 @@ async function stopComfyUI(btn) {
                     btn.disabled = false;
                     btn.textContent = "Stop ComfyUI";
                 }
+            } finally {
+                _comfyStopping = false;
             }
         }
 
@@ -5529,9 +5494,11 @@ async function installComfyUI(btn) {
 
         // --- startComfyUI ---
 async function startComfyUI(btn) {
+            if (_comfyStarting) return;
+            _comfyStarting = true;
             // Optimistic UI: immediately mark as starting and disable all start buttons
             comfyStatus.running = 'starting';
-            updateComfyModalStatus();
+            updateComfyModalStatus(true);
             if (document.getElementById('onboarding-container')) {
                 showOnboardingCard();
             }
@@ -5540,19 +5507,23 @@ async function startComfyUI(btn) {
                 const data = await res.json();
                 if (!data.success) {
                     comfyStatus.running = false;
-                    updateComfyModalStatus();
+                    updateComfyModalStatus(true);
                     showCustomAlert("Failed to Start", data.message);
                 }
                 // SSE will deliver the final running/offline state
             } catch (e) {
                 comfyStatus.running = false;
-                updateComfyModalStatus();
+                updateComfyModalStatus(true);
                 showCustomAlert("Error", "Failed to start ComfyUI.");
+            } finally {
+                _comfyStarting = false;
             }
         }
 
         // --- resolveWorkflowDependencies ---
 async function resolveWorkflowDependencies(btn) {
+            if (_comfyResolving) return;
+            _comfyResolving = true;
             btn.disabled = true;
             btn.innerHTML = `<span class="animate-spin" style="display: inline-block; width: 14px; height: 14px; border: 2px solid currentColor; border-top-color: transparent; border-radius: 50%; margin-right: 8px; vertical-align: middle;"></span>Analyzing Workflow...`;
             try {
@@ -5573,6 +5544,8 @@ async function resolveWorkflowDependencies(btn) {
                 showCustomAlert("Error", "Failed to trigger dependency resolution.");
                 btn.disabled = false;
                 btn.textContent = "Resolve Workflow Dependencies";
+            } finally {
+                _comfyResolving = false;
             }
         }
 
@@ -5879,14 +5852,28 @@ function updateConnectionStatus(status) {
                 }
                 fetchAndRenderLocalModels();
             }
-            updateComfyModalStatus();
         }
 
         // --- updateComfyModalStatus ---
-async function updateComfyModalStatus() {
+        // skipFetch: when true, use in-memory comfyStatus (already populated by SSE or button handlers)
+async function updateComfyModalStatus(skipFetch = false) {
+            // Debounce: coalesce rapid consecutive calls into a single update
+            if (_comfyUpdateRunning) {
+                if (!_comfyUpdateTimer) {
+                    _comfyUpdateTimer = setTimeout(() => {
+                        _comfyUpdateTimer = null;
+                        updateComfyModalStatus(skipFetch);
+                    }, 200);
+                }
+                return;
+            }
+            _comfyUpdateRunning = true;
+
             try {
-                const res = await fetch('/api/comfy/status');
-                comfyStatus = await res.json();
+                if (!skipFetch) {
+                    const res = await fetch('/api/comfy/status');
+                    comfyStatus = await res.json();
+                }
                 
                 const comfyBox = document.getElementById('modal-comfy-box-container');
                 if (comfyBox) {
@@ -5908,6 +5895,7 @@ async function updateComfyModalStatus() {
                     }
                     
                     if (!comfyStatus.installed) {
+                        _comfyCheckpointsInitialized = false;
                         if (comfyStatus.resolution_status && comfyStatus.resolution_status.status === "resolving") {
                             let percentWidth = "0%";
                             const text = comfyStatus.resolution_status.progress;
@@ -5930,7 +5918,7 @@ async function updateComfyModalStatus() {
                                     </div>
                                 </div>
                             `;
-                            setTimeout(updateComfyModalStatus, 2000);
+                            setTimeout(() => updateComfyModalStatus(false), 2000);
                         } else {
                             comfyBox.innerHTML = `
                                 <div class="option-header">
@@ -5960,9 +5948,13 @@ async function updateComfyModalStatus() {
                                 }
                             }
                             
-                            // Update the controls container (Start/Stop button etc.)
+                            // Defer controls update when user is interacting with the search input
+                            const activeEl = document.activeElement;
+                            const isUserTyping = activeEl && (activeEl.id === 'comfy-hf-search-input');
+                            
+                            // Update the controls container (Start/Stop button etc.) only when not mid-operation
                             const controls = document.getElementById('comfy-engine-controls');
-                            if (controls) {
+                            if (controls && !_comfyStopping && !_comfyStarting && !_comfyResolving) {
                                 if (comfyStatus.running === true || comfyStatus.running === 'online') {
                                     controls.innerHTML = `
                                         <button onclick="stopComfyUI(this)" class="onboarding-btn" style="width: 100%; font-size: 0.85rem; padding: 10px; margin-top: 5px;">Stop ComfyUI</button>
@@ -5994,7 +5986,7 @@ async function updateComfyModalStatus() {
                                         ${errorHtml}
                                     `;
                                     if (r.status === "resolving") {
-                                        setTimeout(updateComfyModalStatus, 2000);
+                                        setTimeout(() => updateComfyModalStatus(false), 2000);
                                     }
                                 } else {
                                     progressDiv.innerHTML = '';
@@ -6046,14 +6038,19 @@ async function updateComfyModalStatus() {
                                 </div>
                             `;
                             
-                            // Trigger initial checkpoints loading
-                            fetchComfyCheckpoints();
-                            pollComfyCheckpointDownloads();
+                            // Trigger initial checkpoints loading only once per panel lifecycle
+                            if (!_comfyCheckpointsInitialized) {
+                                _comfyCheckpointsInitialized = true;
+                                fetchComfyCheckpoints();
+                                pollComfyCheckpointDownloads();
+                            }
                         }
                     }
                 }
             } catch (e) {
                 console.error("Error fetching ComfyUI status:", e);
+            } finally {
+                _comfyUpdateRunning = false;
             }
         }
 
@@ -6068,6 +6065,11 @@ function openConnectionModal() {
         // --- closeConnectionModal ---
 function closeConnectionModal() {
             document.getElementById('connection-modal').style.display = 'none';
+            _comfyCheckpointsInitialized = false;
+            if (_comfyUpdateTimer) {
+                clearTimeout(_comfyUpdateTimer);
+                _comfyUpdateTimer = null;
+            }
         }
 
         // --- openUserProfileModal ---
@@ -12023,6 +12025,14 @@ function purgeDataBank() {
 
 let comfyStatus = { installed: false, running: false, resolution_status: { status: "idle", progress: "", errors: [] } };
 
+// Concurrency guards for ComfyUI operations
+let _comfyUpdateRunning = false;
+let _comfyUpdateTimer = null;
+let _comfyStarting = false;
+let _comfyStopping = false;
+let _comfyResolving = false;
+let _comfyCheckpointsInitialized = false;
+
 let comfyDownloadTimer = null;
 
 let userProfiles = [];
@@ -12049,13 +12059,14 @@ let userProfiles = [];
                     local_installed: status.local_installed,
                     temperature: connectionStatus.temperature
                 });
-                // Update ComfyUI status
+                // Update ComfyUI status from SSE payload directly
                 comfyStatus.installed = status.comfy_installed;
                 comfyStatus.running = status.comfy_running;
-                // Refresh modal UI if the settings modal is open
+                // Refresh modal UI if the settings modal is open, using SSE data directly (skipFetch)
                 const modal = document.getElementById('connection-modal');
                 if (modal && modal.style.display !== 'none') {
                     updateConnectionModalStatus();
+                    updateComfyModalStatus(true);
                 }
                 // Refresh model dropdown to reflect online/offline changes
                 initializeModelSelect();
