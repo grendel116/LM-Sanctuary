@@ -20,7 +20,7 @@ def fetch_local_models(force_refresh=False) -> list:
 
     # Try using native REST API GET /api/v1/models to see which ones are loaded
     try:
-        response = requests.get("http://localhost:1234/api/v1/models", timeout=0.2)
+        response = requests.get("http://127.0.0.1:1234/api/v1/models", timeout=0.2)
         if response.status_code == 200:
             local_models = []
             for m in response.json().get("models", []):

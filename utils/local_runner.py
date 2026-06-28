@@ -276,13 +276,14 @@ def check_local_server_status():
     except Exception:
         pass
 
-    import psutil
-    for proc in psutil.process_iter(['name']):
-        try:
-            if "llama-server" in proc.info['name'].lower():
-                return "starting"
-        except Exception:
-            pass
+    if _starting:
+        import psutil
+        for proc in psutil.process_iter(['name']):
+            try:
+                if "llama-server" in proc.info['name'].lower():
+                    return "starting"
+            except Exception:
+                pass
 
     return False
 
