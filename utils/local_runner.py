@@ -180,7 +180,8 @@ def start_local_server(model_key):
         "--host", "127.0.0.1",
         "-ngl", gpu_layers,
         "-np", "1",
-        "--no-warmup"
+        "--no-warmup",
+        "--fit", "off"
     ]
     if flash_attn:
         cmd.extend(["-fa", "on"])
@@ -206,10 +207,13 @@ def start_local_server(model_key):
         def _wait_for_server():
             global _current_model, _starting
             try:
-                for _ in range(60):
+                for _ in range(300):
                     time.sleep(1.0)
-                    if check_local_server_status() is True:
+                    status = check_local_server_status()
+                    if status is True:
                         _current_model = model_key
+                        break
+                    if status is False:
                         break
                     if _proc and _proc.poll() is not None:
                         break
@@ -264,8 +268,11 @@ def stop_local_server():
 
 def check_local_server_status():
     try:
-        if requests.get("http://127.0.0.1:1234/health", timeout=0.2).status_code == 200:
+        resp = requests.get("http://127.0.0.1:1234/health", timeout=2.0)
+        if resp.status_code == 200:
             return True
+        if resp.status_code == 503:
+            return "starting"
     except Exception:
         pass
 
@@ -276,7 +283,7 @@ def check_local_server_status():
                 return "starting"
         except Exception:
             pass
-            
+
     return False
 
 def _atexit_clean():
