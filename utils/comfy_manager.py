@@ -804,8 +804,17 @@ def stop_comfy_server():
                 pass
                 
         if terminated_any:
-            global _comfy_running_cached
+            global _comfy_running_cached, _comfy_running_cache_time
             _comfy_running_cached = False
+            _comfy_running_cache_time = 0.0
+            # Delayed broadcast ensures SSE clients see the updated offline state
+            # after the cache fully expires
+            if _on_status_change:
+                def _delayed_broadcast():
+                    time.sleep(0.5)
+                    if _on_status_change:
+                        _on_status_change()
+                threading.Thread(target=_delayed_broadcast, daemon=True).start()
             return True, "ComfyUI server stopped successfully."
             
         # If it was not running anyway, return success so the frontend updates cleanly
