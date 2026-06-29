@@ -117,7 +117,7 @@ def _build_tool_calls_pair(tool_name: str, args: dict, output: str, idx: int = N
 
 def _normalize_tool_name(tool_name: str) -> str:
     """Normalizes tool name aliases to their standard forms."""
-    if tool_name == "generate_companion_portrait":
+    if tool_name in ("generate_companion_portrait", "dalle.text2im", "dalle:text2im", "text2im"):
         return "generate_local_image"
     if tool_name == "generate_general_image":
         return "generate_imagen"
@@ -361,6 +361,71 @@ def _parse_emulated_tool_call(tool_name: str, args_str: str) -> dict:
         if (val.startswith('"') and val.endswith('"')) or (val.startswith("'") and val.endswith("'")):
             val = val[1:-1]
         return {"args": [val], "kwargs": {}}
+
+
+def _convert_json_tool_calls_to_tags(text: str) -> str:
+    """Detects JSON formatted tool calls from any model
+    and converts them to the standard [tool_name(args)] tag format.
+    """
+    if not text or "action" not in text or "action_input" not in text:
+        return text
+    import re, json, tools
+    i = 0
+    while i < len(text):
+        if text[i] == '{':
+            depth = 1
+            j = i + 1
+            while j < len(text) and depth > 0:
+                if text[j] == '{': depth += 1
+                elif text[j] == '}': depth -= 1
+                j += 1
+            if depth == 0:
+                block = text[i:j]
+                if "action" in block and "action_input" in block:
+                    try:
+                        d = json.loads(block)
+                        act = d.get("action")
+                        inp = d.get("action_input")
+                        if act and isinstance(act, str) and inp is not None:
+                            norm_act = _normalize_tool_name(act)
+                            
+                            # Dynamically verify if this tool is registered or exists
+                            if hasattr(tools, norm_act) or norm_act in ("generate_local_image", "generate_imagen"):
+                                if isinstance(inp, str) and inp.strip().startswith("{"):
+                                    try: inp = json.loads(inp)
+                                    except: pass
+                                    
+                                # Format arguments dynamically
+                                args_list = []
+                                if isinstance(inp, dict):
+                                    for k, v in inp.items():
+                                        if isinstance(v, str):
+                                            escaped_v = v.replace('\\', '\\\\').replace('"', '\\"')
+                                            args_list.append(f'{k}="{escaped_v}"')
+                                        else:
+                                            args_list.append(f'{k}={v}')
+                                elif isinstance(inp, str):
+                                    escaped_v = inp.replace('\\', '\\\\').replace('"', '\\"')
+                                    args_list.append(f'prompt="{escaped_v}"')
+                                    
+                                args_str = ", ".join(args_list)
+                                tag = f"[{norm_act}({args_str})]"
+                                
+                                start, end = i, j
+                                pre = text[max(0, start-15):start]
+                                suf = text[end:min(len(text), end+15)]
+                                m_start = re.search(r'```(?:json)?\s*$', pre, re.IGNORECASE)
+                                m_end = re.match(r'^\s*```', suf, re.IGNORECASE)
+                                if m_start and m_end:
+                                    start -= len(m_start.group(0))
+                                    end += len(m_end.group(0))
+                                    
+                                text = text[:start] + tag + text[end:]
+                                i = -1
+                    except Exception:
+                        pass
+        i += 1
+    return text
 
 
 # (Google ADK _compact_session_history helper removed)
@@ -1182,6 +1247,9 @@ class BaseProgramRunner:
                         bot_response_text = f"Error connecting to local LLM server: {e}. Please ensure a model is loaded and the local server is started (port 1234)."
                         break
                 
+            # Convert JSON tool calls if any
+            bot_response_text = _convert_json_tool_calls_to_tags(bot_response_text)
+
             # Find all tool calls
             matches = list(re.finditer(r'\[(\w+)\((.*?)\)\]', bot_response_text))
             
