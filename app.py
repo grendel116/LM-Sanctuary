@@ -699,14 +699,20 @@ def chat():
         state_info = extract_mood(chat_history)
         inversion_mode = asyncio.run(runner._get_inversion_mode(session_id, history=chat_history))
         
-
+        # Align timestamp with stored companion message
+        companion_timestamp = None
+        if companion_msg_id:
+            for msg in reversed(chat_history):
+                if msg.get('id') == companion_msg_id:
+                    companion_timestamp = msg.get('timestamp')
+                    break
             
         return jsonify({
             'response': response_text,
             'tool_calls': tool_calls,
             'state': state_info,
             'inversion_active': inversion_mode,
-            'timestamp': time.time(),
+            'timestamp': companion_timestamp or time.time(),
             'duration': duration,
             'user_msg_id': user_msg_id,
             'companion_msg_id': companion_msg_id
@@ -769,12 +775,21 @@ def edit():
         chat_history = asyncio.run(runner.get_history(session_id))
         state_info = extract_mood(chat_history)
         inversion_mode = asyncio.run(runner._get_inversion_mode(session_id, history=chat_history))
+
+        # Align timestamp with stored companion message
+        companion_timestamp = None
+        if companion_msg_id:
+            for msg in reversed(chat_history):
+                if msg.get('id') == companion_msg_id:
+                    companion_timestamp = msg.get('timestamp')
+                    break
+
         return jsonify({
             'response': response_text,
             'tool_calls': tool_calls,
             'state': state_info,
             'inversion_active': inversion_mode,
-            'timestamp': time.time(),
+            'timestamp': companion_timestamp or time.time(),
             'duration': duration,
             'user_msg_id': user_msg_id,
             'companion_msg_id': companion_msg_id
