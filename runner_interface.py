@@ -754,16 +754,10 @@ class OsHistoryAdapter(LocalHistoryAdapter):
         if memory_context:
             context_parts.append(f"## ARCHIVED CONVERSATION MEMORY\n{memory_context}")
             
-        # Insert injected system context message at depth=4
+        # Append injected context update to the initial prompt
         if context_parts:
-            context_content = "[System Context Update]\n" + "\n\n".join(context_parts)
-            injected_msg = {"role": "system", "content": context_content}
-            
-            depth = 4
-            if len(raw_messages) <= depth:
-                raw_messages.insert(0, injected_msg)
-            else:
-                raw_messages.insert(len(raw_messages) - depth, injected_msg)
+            context_content = "\n\n# SYSTEM CONTEXT UPDATE\n" + "\n\n".join(context_parts)
+            openai_messages[0]["content"] += context_content
 
         openai_messages = _merge_consecutive_messages(openai_messages + raw_messages)
 
