@@ -84,9 +84,9 @@ def _get_databank_context(query_text: str, is_memory: bool = False) -> str:
         from core.skills.vectorized_databank.databank import DataBankManager
         db = DataBankManager()
         if is_memory:
-            return db.query(query_text, top_k=3, include_source_type="chat_history")
+            return db.query(query_text, top_k=3, score_threshold=0.40, include_source_type="chat_history")
         else:
-            return db.query(query_text, exclude_source_type="chat_history")
+            return db.query(query_text, score_threshold=0.35, exclude_source_type="chat_history")
     except Exception as e:
         context_type = "memory" if is_memory else "RAG"
         print(f"Error querying data bank for {context_type} context: {e}")
@@ -636,15 +636,69 @@ class OsHistoryAdapter(LocalHistoryAdapter):
                     raw_messages.append({"role": role, "content": content_text})
                     
         openai_messages = [{"role": "system", "content": sys_inst}]
-        if rag_context:
-            openai_messages[0]["content"] += f"\n\n# KNOWLEDGE BASE CONTEXT\nUse the following verified context from your Data Bank to help answer questions if relevant:\n{rag_context}\n"
-        if memory_context:
-            openai_messages[0]["content"] += f"\n\n# ARCHIVED CONVERSATION MEMORY\nThe following is a chronological sequence of messages from earlier in this conversation:\n{memory_context}\n"
         from core.program_config import is_narration_mode
         if is_narration_mode():
             openai_messages[0]["content"] += _STORY_MODE_DIRECTIVE_PROMPT
         else:
             openai_messages[0]["content"] += _LOCAL_DIRECTIVE_PROMPT
+
+        # Build dynamic context block (SillyTavern style)
+        context_parts = []
+        
+        # 1. Fetch system memory summary
+        latest_memory = None
+        for msg in history:
+            if msg.get('role') == 'system-memory' and not msg.get('compacted'):
+                text = msg.get('text', '').strip()
+                if text:
+                    clean_text = text.replace("[System Memory of older conversation turns]:", "").strip()
+                    latest_memory = clean_text  # last one wins
+        if latest_memory:
+            context_parts.append(f"## CONVERSATION MEMORY ARCHIVE\n(Summary of older conversation turns):\n{latest_memory}")
+            
+        # 2. Recalled journals
+        recalled_journals = []
+        last_user_message = ""
+        for msg in reversed(filtered_history):
+            if msg.get('role') == 'user':
+                if not msg.get('id', '').startswith('tool_') and not msg.get('text', '').startswith('[Tool Response from'):
+                    last_user_message = msg.get('text', '') or ""
+                    break
+        if last_user_message:
+            try:
+                from utils.journals import match_journals
+                from utils.program import get_active_program
+                active_prog = get_active_program()
+                matched_entries = match_journals(last_user_message, active_prog)
+                if matched_entries:
+                    from core.program_config import replace_placeholders
+                    for entry in matched_entries:
+                        content_resolved = replace_placeholders(entry['content'])
+                        recalled_journals.append(f"- {content_resolved}")
+            except Exception as je:
+                print(f"Error matching journals in get_openai_messages: {je}")
+        if recalled_journals:
+            journals_text = "\n".join(recalled_journals)
+            context_parts.append(f"## RECALLED JOURNALS / MEMORIES\n{journals_text}")
+            
+        # 3. RAG context
+        if rag_context:
+            context_parts.append(f"## KNOWLEDGE BASE CONTEXT\n{rag_context}")
+            
+        # 4. Memory context
+        if memory_context:
+            context_parts.append(f"## ARCHIVED CONVERSATION MEMORY\n{memory_context}")
+            
+        # Insert injected system context message at depth=4
+        if context_parts:
+            context_content = "[System Context Update]\n" + "\n\n".join(context_parts)
+            injected_msg = {"role": "system", "content": context_content}
+            
+            depth = 4
+            if len(raw_messages) <= depth:
+                raw_messages.insert(0, injected_msg)
+            else:
+                raw_messages.insert(len(raw_messages) - depth, injected_msg)
 
         openai_messages = _merge_consecutive_messages(openai_messages + raw_messages)
 
@@ -777,72 +831,109 @@ class BaseProgramRunner:
         Supports chunk-by-chunk streaming to allow immediate cancellation.
         """
         from runner_interface import cancelled_sessions
+        import asyncio
+        import time
 
-        # If session_id is provided, stream the response to support cancellation mid-generation
-        if session_id:
-            payload_copy = copy.deepcopy(payload)
-            payload_copy["stream"] = True
-            
-            headers_copy = copy.deepcopy(headers)
-            headers_copy["Accept-Encoding"] = "identity"
-            
-            async with httpx.AsyncClient() as client:
-                async with client.stream("POST", url, json=payload_copy, headers=headers_copy, timeout=timeout) as r:
-                    if r.status_code != 200:
-                        await r.aread()
-                        response = httpx.Response(
-                            status_code=r.status_code,
-                            headers=r.headers,
-                            content=r.content,
-                            request=r.request
-                        )
-                    else:
-                        content_parts = []
-                        async for line in r.aiter_lines():
-                            if session_id in cancelled_sessions:
-                                cancelled_sessions.discard(session_id)
-                                print(f"[CANCEL] Aborting HTTP request for session {session_id}", flush=True)
-                                raise asyncio.CancelledError("Session cancelled by user request.")
+        is_local = "127.0.0.1:1234" in url or "localhost:1234" in url
+        start_time = time.time()
+        max_retry_time = 180.0
+        retry_interval = 2.0
+
+        while True:
+            if session_id and session_id in cancelled_sessions:
+                cancelled_sessions.discard(session_id)
+                print(f"[CANCEL] Aborting HTTP request for session {session_id}", flush=True)
+                raise asyncio.CancelledError("Session cancelled by user request.")
+
+            try:
+                # If session_id is provided, stream the response to support cancellation mid-generation
+                if session_id:
+                    payload_copy = copy.deepcopy(payload)
+                    payload_copy["stream"] = True
+                    
+                    headers_copy = copy.deepcopy(headers)
+                    headers_copy["Accept-Encoding"] = "identity"
+                    
+                    async with httpx.AsyncClient() as client:
+                        async with client.stream("POST", url, json=payload_copy, headers=headers_copy, timeout=timeout) as r:
+                            if r.status_code == 503 and is_local:
+                                await r.aread()
+                                if time.time() - start_time < max_retry_time:
+                                    print(f"[Local LLM] Local server is loading model (503). Retrying in {retry_interval}s...", flush=True)
+                                    await asyncio.sleep(retry_interval)
+                                    continue
                             
-                            line = line.strip()
-                            if not line:
+                            if r.status_code != 200:
+                                await r.aread()
+                                response = httpx.Response(
+                                    status_code=r.status_code,
+                                    headers=r.headers,
+                                    content=r.content,
+                                    request=r.request
+                                )
+                            else:
+                                content_parts = []
+                                async for line in r.aiter_lines():
+                                    if session_id in cancelled_sessions:
+                                        cancelled_sessions.discard(session_id)
+                                        print(f"[CANCEL] Aborting HTTP request for session {session_id}", flush=True)
+                                        raise asyncio.CancelledError("Session cancelled by user request.")
+                                    
+                                    line = line.strip()
+                                    if not line:
+                                        continue
+                                    if line.startswith("data:"):
+                                        data_str = line[5:].strip()
+                                        if data_str == "[DONE]":
+                                            break
+                                        try:
+                                            chunk_json = json.loads(data_str)
+                                            choices = chunk_json.get("choices", [])
+                                            if choices:
+                                                delta = choices[0].get("delta", {})
+                                                content = delta.get("content", "")
+                                                if content:
+                                                    content_parts.append(content)
+                                        except Exception:
+                                            pass
+                                
+                                full_text = "".join(content_parts)
+                                mock_choices = [{
+                                    "message": {
+                                        "role": "assistant",
+                                        "content": full_text
+                                    }
+                                }]
+                                mock_data = {
+                                    "choices": mock_choices,
+                                    "model": payload.get("model", "")
+                                }
+                                mock_content = json.dumps(mock_data).encode("utf-8")
+                                response = httpx.Response(
+                                    status_code=200,
+                                    headers=r.headers,
+                                    content=mock_content,
+                                    request=r.request
+                                )
+                else:
+                    async with httpx.AsyncClient() as client:
+                        response = await client.post(url, json=payload, headers=headers, timeout=timeout)
+                        if response.status_code == 503 and is_local:
+                            if time.time() - start_time < max_retry_time:
+                                print(f"[Local LLM] Local server is loading model (503). Retrying in {retry_interval}s...", flush=True)
+                                await asyncio.sleep(retry_interval)
                                 continue
-                            if line.startswith("data:"):
-                                data_str = line[5:].strip()
-                                if data_str == "[DONE]":
-                                    break
-                                try:
-                                    chunk_json = json.loads(data_str)
-                                    choices = chunk_json.get("choices", [])
-                                    if choices:
-                                        delta = choices[0].get("delta", {})
-                                        content = delta.get("content", "")
-                                        if content:
-                                            content_parts.append(content)
-                                except Exception:
-                                    pass
-                        
-                        full_text = "".join(content_parts)
-                        mock_choices = [{
-                            "message": {
-                                "role": "assistant",
-                                "content": full_text
-                            }
-                        }]
-                        mock_data = {
-                            "choices": mock_choices,
-                            "model": payload.get("model", "")
-                        }
-                        mock_content = json.dumps(mock_data).encode("utf-8")
-                        response = httpx.Response(
-                            status_code=200,
-                            headers=r.headers,
-                            content=mock_content,
-                            request=r.request
-                        )
-        else:
-            async with httpx.AsyncClient() as client:
-                response = await client.post(url, json=payload, headers=headers, timeout=timeout)
+
+                break
+
+            except (httpx.ConnectError, httpx.ConnectTimeout) as e:
+                from utils import local_runner
+                if is_local and local_runner.check_local_server_status() == "starting" and (time.time() - start_time < max_retry_time):
+                    print(f"[Local LLM] Local server connection failed but server is starting. Retrying in {retry_interval}s...", flush=True)
+                    await asyncio.sleep(retry_interval)
+                    continue
+                else:
+                    raise e
 
         # If the request fails due to system role issues, retry with mapped user messages
         is_system_role_error = (
@@ -1570,7 +1661,8 @@ class BaseProgramRunner:
                 instructions += conciseness_directive
                 
         # --- Shared Post-Processing ---
-        instructions = self._inject_journals(instructions, user_message)
+        # Injections no longer append journals directly into system prompt
+        # instructions = self._inject_journals(instructions, user_message)
         
         # NSFW allowance is always appended
         nsfw_directive = (
@@ -1602,7 +1694,8 @@ class BaseProgramRunner:
                     "Do NOT answer blindly or ask the user where they are—proactively look into the project folders first using your tools.\n"
                 )
                 
-        instructions = self._inject_system_memories(instructions, session_id)
+        # System memory is no longer injected into system instructions
+        # instructions = self._inject_system_memories(instructions, session_id)
         
         if is_voice:
             print(f"\n[VOICE CALL DEBUG] Active Voice Prompt:\n{instructions}\n[VOICE CALL DEBUG] END PROMPT\n", flush=True)

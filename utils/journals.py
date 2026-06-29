@@ -114,8 +114,18 @@ async def trigger_auto_journal(history: list, program_id: str, model: str):
         prog_name = program_id.capitalize()
         
     for msg in segment:
-        role = user_name if msg.get("role") == "user" else prog_name
-        text = msg.get("text", "")
+        role_type = msg.get("role")
+        # Only analyze actual user and companion dialogue messages
+        if role_type not in ("user", "companion"):
+            continue
+            
+        text = msg.get("text", "") or ""
+        msg_id = msg.get("id", "") or ""
+        # Exclude tool responses from dialogue logs
+        if role_type == "user" and (msg_id.startswith("tool_") or text.startswith("[Tool Response from")):
+            continue
+            
+        role = user_name if role_type == "user" else prog_name
         text = re.sub(r'(?:<think>|\[think\])[\s\S]*?(?:</think>|\[/think\]|<\/\s*think>|\[\s*/\s*think\s*\]|$)', '', text, flags=re.IGNORECASE).strip()
         formatted_chat.append(f"{role}: {text}")
         

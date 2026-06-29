@@ -3049,6 +3049,23 @@ def _get_current_status():
         remote_key and remote_key.strip() and remote_key != "your_remote_api_key_here" and
         remote_cloud_url and remote_cloud_url.strip() and remote_cloud_url != "your_remote_cloud_url_here"
     )
+    
+    # Load temperature dynamically
+    temperature = 0.95
+    try:
+        from variables import VARIABLES_DIR
+        settings_path = os.path.join(VARIABLES_DIR, "project_settings.json")
+        if os.path.exists(settings_path):
+            with open(settings_path, "r", encoding="utf-8") as f:
+                settings = json.load(f)
+                temperature = settings.get("temperature", 0.95)
+    except Exception:
+        pass
+        
+    comfy_running_state = comfy_manager.check_comfy_running(force_refresh=True)
+    if not comfy_running_state and getattr(comfy_manager, '_starting', False):
+        comfy_running_state = "starting"
+        
     return {
         "remote_configured": is_remote_configured,
         "remote_model": os.getenv("REMOTE_MODEL", "gemini-3.1-flash-lite"),
@@ -3056,7 +3073,9 @@ def _get_current_status():
         "local_online": local_llm_manager.check_status(),
         "local_installed": local_llm_manager.check_installed(),
         "comfy_installed": comfy_manager.check_comfy_installed(),
-        "comfy_running": comfy_manager.check_comfy_running(force_refresh=True),
+        "comfy_running": comfy_running_state,
+        "temperature": temperature,
+        "env_path": os.path.abspath(os.path.join(base_dir, '.env')),
     }
 
 def broadcast_status():
@@ -3141,7 +3160,7 @@ def local_llm_status():
     installed = local_llm_manager.check_installed()
     online = local_llm_manager.check_status()
     loaded_models = []
-    if online:
+    if online is True:
         from utils.models import fetch_local_models
         loaded_models = [m["value"] for m in fetch_local_models()]
     

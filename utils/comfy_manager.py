@@ -83,18 +83,6 @@ def check_comfy_running(force_refresh=False):
     except Exception:
         pass
 
-    import psutil
-    for proc in psutil.process_iter(['name', 'cmdline']):
-        try:
-            cmdline = proc.info.get('cmdline') or []
-            cmdline_str = " ".join(cmdline).lower()
-            if "python" in proc.info.get('name', '').lower() and "main.py" in cmdline_str:
-                _comfy_running_cached = "starting"
-                _comfy_running_cache_time = now
-                return "starting"
-        except Exception:
-            pass
-        
     _comfy_running_cached = False
     _comfy_running_cache_time = now
     return False
@@ -769,46 +757,44 @@ def stop_comfy_server():
                             pid = int(parts[-1])
                             try:
                                 proc = psutil.Process(pid)
-                                proc.terminate()
-                                proc.wait(timeout=2.0)
+                                proc.kill()  # Force kill immediately without blocking wait loops
                                 terminated_any = True
                             except Exception:
                                 pass
             except Exception as netstat_err:
                 print(f"[DEBUG] netstat termination failed: {netstat_err}", flush=True)
 
-        # 2. Search by command line contents (less restrictive)
-        for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
-            try:
-                cmdline = proc.info.get('cmdline') or []
-                cmdline_str = " ".join(cmdline).lower()
-                if "python" in proc.info.get('name', '').lower() and "main.py" in cmdline_str:
-                    if "comfy" in cmdline_str or str(COMFYUI_PORT) in cmdline_str:
-                        proc.terminate()
-                        proc.wait(timeout=2.0)
+        # 2. Combined fallback scanner (only run if netstat did not find anything)
+        if not terminated_any:
+            for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
+                try:
+                    cmdline = proc.info.get('cmdline') or []
+                    cmdline_str = " ".join(cmdline).lower()
+                    
+                    # Check command line contents
+                    is_comfy = False
+                    if "python" in proc.info.get('name', '').lower() and "main.py" in cmdline_str:
+                        if "comfy" in cmdline_str or str(COMFYUI_PORT) in cmdline_str:
+                            is_comfy = True
+                            
+                    # Check connections
+                    if not is_comfy:
+                        conns = proc.connections() if hasattr(proc, 'connections') else []
+                        for conn in conns:
+                            if conn.laddr and conn.laddr.port == COMFYUI_PORT:
+                                is_comfy = True
+                                break
+                                
+                    if is_comfy:
+                        proc.kill()  # Force kill immediately without blocking wait loops
                         terminated_any = True
-            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.TimeoutExpired):
-                pass
-                
-        # 3. Search by connections (fallback)
-        for proc in psutil.process_iter(['pid', 'name']):
-            try:
-                conns = proc.connections() if hasattr(proc, 'connections') else []
-                for conn in conns:
-                    if conn.laddr and conn.laddr.port == COMFYUI_PORT:
-                        proc.terminate()
-                        proc.wait(timeout=2.0)
-                        terminated_any = True
-                        break
-            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.TimeoutExpired):
-                pass
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    pass
                 
         if terminated_any:
             global _comfy_running_cached, _comfy_running_cache_time
             _comfy_running_cached = False
             _comfy_running_cache_time = 0.0
-            # Delayed broadcast ensures SSE clients see the updated offline state
-            # after the cache fully expires
             if _on_status_change:
                 def _delayed_broadcast():
                     time.sleep(0.5)
