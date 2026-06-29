@@ -5783,9 +5783,7 @@ function updateConnectionStatus(status) {
                     }
                 }
             }
-            if (typeof checkAndStartStartingStatusPolling === 'function') {
-                checkAndStartStartingStatusPolling();
-            }
+
         }
 
         // --- updateConnectionModalStatus ---
@@ -6078,70 +6076,11 @@ async function updateComfyModalStatus(skipFetch = false) {
                 console.error("Error fetching ComfyUI status:", e);
             } finally {
                 _comfyUpdateRunning = false;
-                if (typeof checkAndStartStartingStatusPolling === 'function') {
-                    checkAndStartStartingStatusPolling();
-                }
+
             }
         }
 
-        // --- checkAndStartStartingStatusPolling ---
-        let _statusPollingInterval = null;
-        function checkAndStartStartingStatusPolling() {
-            const localStarting = (connectionStatus.local_online === 'starting' || _localStarting);
-            const comfyStarting = (comfyStatus.running === 'starting' || _comfyStarting || comfyStatus.running === 'stopping' || _comfyStopping);
-            
-            if (localStarting || comfyStarting) {
-                if (!_statusPollingInterval) {
-                    _statusPollingInterval = setInterval(async () => {
-                        let stillStarting = false;
-                        
-                        // Poll local LLM status if needed
-                        if (connectionStatus.local_online === 'starting' || _localStarting) {
-                            try {
-                                const res = await fetch('/api/local_llm/status');
-                                const data = await res.json();
-                                if (data.online !== 'starting') {
-                                    connectionStatus.local_online = data.online;
-                                    updateConnectionModalStatus();
-                                    initializeModelSelect();
-                                } else {
-                                    stillStarting = true;
-                                }
-                            } catch (e) {
-                                console.error("Error polling local LLM status:", e);
-                            }
-                        }
-                        
-                        // Poll ComfyUI status if needed
-                        if (comfyStatus.running === 'starting' || _comfyStarting || comfyStatus.running === 'stopping' || _comfyStopping) {
-                            try {
-                                const res = await fetch('/api/comfy/status');
-                                const data = await res.json();
-                                comfyStatus = data;
-                                if (comfyStatus.running !== 'starting' && comfyStatus.running !== 'stopping') {
-                                    updateComfyModalStatus(true); // already updated comfyStatus, skip fetch
-                                } else {
-                                    stillStarting = true;
-                                }
-                            } catch (e) {
-                                console.error("Error polling ComfyUI status:", e);
-                            }
-                        }
-                        
-                        // If neither is starting/stopping anymore, clear the interval
-                        if (!stillStarting) {
-                            clearInterval(_statusPollingInterval);
-                            _statusPollingInterval = null;
-                        }
-                    }, 3000);
-                }
-            } else {
-                if (_statusPollingInterval) {
-                    clearInterval(_statusPollingInterval);
-                    _statusPollingInterval = null;
-                }
-            }
-        }
+
 
         // --- openConnectionModal ---
 function openConnectionModal() {
