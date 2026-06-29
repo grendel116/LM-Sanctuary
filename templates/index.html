@@ -4676,10 +4676,15 @@ function showOnboardingCard() {
 
             // Build local LLM onboarding card section based on engine state
             let localContent = '';
-            if (connectionStatus.local_online === 'starting') {
+            if (connectionStatus.local_online === 'starting' || _localStarting) {
                 localContent = `
                     <p class="option-desc" style="font-size: 0.8rem; margin: 8px 0 15px 0;">Local LLM engine is starting up in the background. Please wait...</p>
                     <button disabled class="onboarding-btn connect-cloud-btn" style="width: 100%; font-size: 0.85rem; padding: 10px; margin-bottom: 15px; opacity: 0.7;">Starting...</button>
+                `;
+            } else if (_localStopping) {
+                localContent = `
+                    <p class="option-desc" style="font-size: 0.8rem; margin: 8px 0 15px 0;">Local LLM engine is stopping. Please wait...</p>
+                    <button disabled class="onboarding-btn connect-cloud-btn" style="width: 100%; font-size: 0.85rem; padding: 10px; margin-bottom: 15px; opacity: 0.7;">Stopping...</button>
                 `;
             } else if (!connectionStatus.local_online) {
                 localContent = `
@@ -4939,6 +4944,12 @@ function pollInstallStatus(btn) {
 
         // --- startLocalLLM ---
 async function startLocalLLM(btn) {
+            if (_localStarting) return;
+            _localStarting = true;
+            if (btn) {
+                btn.disabled = true;
+                btn.innerHTML = `<span class="animate-spin" style="display: inline-block; width: 14px; height: 14px; border: 2px solid currentColor; border-top-color: transparent; border-radius: 50%; margin-right: 8px; vertical-align: middle;"></span>Starting...`;
+            }
             // Optimistic UI: immediately mark as starting and disable all start buttons
             connectionStatus.local_online = 'starting';
             updateConnectionModalStatus();
@@ -4953,16 +4964,20 @@ async function startLocalLLM(btn) {
                     updateConnectionModalStatus();
                     showCustomAlert("Failed to Start", data.message);
                 }
-                // SSE will deliver the final online/offline state
+                // Wait for SSE to deliver the final state
             } catch (e) {
                 connectionStatus.local_online = false;
                 updateConnectionModalStatus();
                 showCustomAlert("Error", "Failed to initiate server start.");
+            } finally {
+                _localStarting = false;
             }
         }
 
         // --- stopLocalLLM ---
 async function stopLocalLLM(btn) {
+            if (_localStopping) return;
+            _localStopping = true;
             if (btn) {
                 btn.disabled = true;
                 btn.innerHTML = `<span class="animate-spin" style="display: inline-block; width: 14px; height: 14px; border: 2px solid currentColor; border-top-color: transparent; border-radius: 50%; margin-right: 8px; vertical-align: middle;"></span>Stopping server...`;
@@ -4986,6 +5001,8 @@ async function stopLocalLLM(btn) {
                     btn.disabled = false;
                     btn.textContent = "Stop Server";
                 }
+            } finally {
+                _localStopping = false;
             }
         }
 
@@ -5809,12 +5826,20 @@ function updateConnectionStatus(status) {
                 const startBtn = document.getElementById('modal-local-start-btn');
                 const stopBtn = document.getElementById('modal-local-stop-btn');
                 
-                if (connectionStatus.local_online === 'starting') {
+                if (connectionStatus.local_online === 'starting' || _localStarting) {
                     if (localDesc) localDesc.textContent = "Local LLM engine is currently starting up in the background. Please wait...";
                     if (startBtn) {
                         startBtn.style.display = 'block';
                         startBtn.disabled = true;
                         startBtn.textContent = "Starting...";
+                    }
+                    if (stopBtn) stopBtn.style.display = 'none';
+                } else if (_localStopping) {
+                    if (localDesc) localDesc.textContent = "Local LLM engine is stopping. Please wait...";
+                    if (startBtn) {
+                        startBtn.style.display = 'block';
+                        startBtn.disabled = true;
+                        startBtn.textContent = "Stopping...";
                     }
                     if (stopBtn) stopBtn.style.display = 'none';
                 } else if (!connectionStatus.local_online) {
@@ -5828,7 +5853,11 @@ function updateConnectionStatus(status) {
                 } else {
                     if (localDesc) localDesc.textContent = "Local LLM server is running. Select active models via the header dropdown.";
                     if (startBtn) startBtn.style.display = 'none';
-                    if (stopBtn) stopBtn.style.display = 'block';
+                    if (stopBtn) {
+                        stopBtn.style.display = 'block';
+                        stopBtn.disabled = false;
+                        stopBtn.textContent = "Stop Server";
+                    }
                 }
                 fetchAndRenderLocalModels();
             }
@@ -12095,6 +12124,8 @@ let _comfyUpdateRunning = false;
 let _comfyUpdateTimer = null;
 let _comfyStarting = false;
 let _comfyStopping = false;
+let _localStarting = false;
+let _localStopping = false;
 let _comfyResolving = false;
 let _comfyCheckpointsInitialized = false;
 

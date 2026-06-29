@@ -110,29 +110,27 @@ def start_local_server(model_key):
     with _start_lock:
         if _starting:
             return True, "Already starting"
-    
+            
     is_online = check_local_server_status()
-    
     model_path = resolve_model_path(model_key)
-    if not model_path: return False, f"Model not found: {model_key}"
-    
-    # Check if a llama-server process is already running with the correct model
-    if is_online:
-        import psutil
-        model_basename = os.path.basename(model_path).lower()
-        for proc in psutil.process_iter(['name', 'cmdline']):
-            try:
-                if "llama-server" in proc.info['name'].lower():
-                    cmdline = proc.info.get('cmdline') or []
-                    cmdline_basenames = [os.path.basename(arg).lower() for arg in cmdline]
-                    if model_basename in cmdline_basenames:
+    if not model_path:
+        return False, f"Model not found: {model_key}"
+        
+    # Check if server is running and has this model loaded
+    if is_online is True:
+        from utils.models import fetch_local_models
+        loaded = fetch_local_models()
+        if loaded:
+            target_base = os.path.basename(model_path).lower()
+            for m in loaded:
+                val = m.get("value", "")
+                if val:
+                    val_base = os.path.basename(val).lower()
+                    if val_base == target_base or val.lower() == model_key.lower():
                         _current_model = model_key
-                        if not _proc:
-                            _proc = proc
                         return True, "Online (already running)"
-            except Exception:
-                pass
-                
+                        
+    # If online but with another model, or booting up, stop first to be clean
     if is_online:
         stop_local_server()
         
@@ -142,7 +140,6 @@ def start_local_server(model_key):
     gpu_type = detect_gpu_type()
     gpu_type_file = os.path.join(LLAMA_BIN_DIR, "installed_gpu_type.txt")
     
-    # Trigger reinstall if missing or different GPU type
     reinstall = False
     if not os.path.exists(SERVER_EXE):
         reinstall = True
@@ -157,21 +154,21 @@ def start_local_server(model_key):
         if installed_type != gpu_type:
             print(f"[llama-runner] Reinstalling llama-server: installed type '{installed_type}' differs from detected GPU type '{gpu_type}'", flush=True)
             reinstall = True
-            # Stop server before reinstalling
             stop_local_server()
             
     if reinstall:
-        if not download_llama_server(): return False, "Failed download"
+        if not download_llama_server():
+            return False, "Failed download"
         try:
             with open(gpu_type_file, "w") as f:
                 f.write(gpu_type)
         except Exception:
             pass
-    
+            
     context_size = os.getenv("LOCAL_CONTEXT", "8192")
     gpu_layers = os.getenv("LOCAL_GPU_LAYERS", "99")
     flash_attn = os.getenv("LOCAL_FLASH_ATTN", "true").lower() == "true"
-
+    
     cmd = [
         SERVER_EXE,
         "-m", model_path,
@@ -185,6 +182,7 @@ def start_local_server(model_key):
     ]
     if flash_attn:
         cmd.extend(["-fa", "on"])
+        
     try:
         log_file = os.path.join(BASE_DIR, "llama_server.log")
         with open(log_file, "a", encoding="utf-8") as log_fd:
@@ -196,14 +194,13 @@ def start_local_server(model_key):
                 _proc = subprocess.Popen(cmd, stdout=log_fd, stderr=log_fd, startupinfo=si, shell=False)
             else:
                 _proc = subprocess.Popen(cmd, stdout=log_fd, stderr=log_fd, shell=False)
-        
-        # Set starting flag and launch background wait thread
+                
         with _start_lock:
             _starting = True
-        
+            
         if _on_status_change:
             _on_status_change()
-        
+            
         def _wait_for_server():
             global _current_model, _starting
             try:
@@ -222,7 +219,7 @@ def start_local_server(model_key):
                     _starting = False
                 if _on_status_change:
                     _on_status_change()
-        
+                    
         threading.Thread(target=_wait_for_server, daemon=True).start()
         return True, "Starting"
     except Exception as e:
@@ -230,61 +227,53 @@ def start_local_server(model_key):
             _starting = False
         return False, str(e)
 
+def _kill_all_llama_processes():
+    if os.name == 'nt':
+        try:
+            subprocess.run(["taskkill", "/F", "/IM", "llama-server.exe"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
+    else:
+        try:
+            subprocess.run(["pkill", "-9", "-f", "llama-server"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
+
 def stop_local_server():
-    global _proc, _current_model
+    global _proc, _current_model, _starting
     _current_model = None
     
-    pids_to_terminate = set()
+    with _start_lock:
+        _starting = False
+        
     if _proc:
-        pids_to_terminate.add(_proc.pid)
+        try:
+            _proc.terminate()
+            _proc.wait(timeout=1.0)
+        except Exception:
+            try:
+                _proc.kill()
+            except Exception:
+                pass
         _proc = None
         
-    import psutil
-    for proc in psutil.process_iter(['name', 'pid']):
-        try:
-            if "llama-server" in proc.info['name'].lower():
-                pids_to_terminate.add(proc.info['pid'])
-        except Exception: pass
-        
-    if pids_to_terminate:
-        processes = []
-        for pid in pids_to_terminate:
-            try:
-                processes.append(psutil.Process(pid))
-            except Exception: pass
-            
-        for p in processes:
-            try: p.terminate()
-            except Exception: pass
-            
-        gone, alive = psutil.wait_procs(processes, timeout=3.0)
-        for p in alive:
-            try: p.kill()
-            except Exception: pass
-            
-        time.sleep(1.5)
-        
+    _kill_all_llama_processes()
+    time.sleep(0.5)
     return True, "Stopped"
 
 def check_local_server_status():
     try:
-        resp = requests.get("http://127.0.0.1:1234/health", timeout=2.0)
+        resp = requests.get("http://127.0.0.1:1234/health", timeout=1.0)
         if resp.status_code == 200:
             return True
         if resp.status_code == 503:
             return "starting"
     except Exception:
         pass
-
-    if _starting:
-        import psutil
-        for proc in psutil.process_iter(['name']):
-            try:
-                if "llama-server" in proc.info['name'].lower():
-                    return "starting"
-            except Exception:
-                pass
-
+        
+    if _proc and _proc.poll() is None:
+        return "starting"
+        
     return False
 
 def _atexit_clean():
