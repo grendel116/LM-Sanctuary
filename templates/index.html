@@ -4123,18 +4123,7 @@
             }
         }
 
-        function mergeHistoryMessages(messages) {
-            const merged = [];
 
-            for (const msg of messages) {
-                if (msg.role === 'companion' || msg.role === 'model') {
-                    const hasContent = (msg.text && msg.text.trim()) || (msg.tool_calls && msg.tool_calls.length > 0);
-                    if (!hasContent) continue;
-                }
-                merged.push({ ...msg });
-            }
-            return merged;
-        }
 
         async function softReloadApp() {
             try {
@@ -4174,8 +4163,7 @@
                 updateProfileImages();
                 modelInitPromise = initializeModelSelect();
 
-                const mergedHistory = mergeHistoryMessages(data.history || []);
-                const newHistory = mergedHistory.filter(msg => {
+                const newHistory = (data.history || []).filter(msg => {
                     if (msg.id && msg.id.startsWith('sys_')) return false;
                     return true;
                 });
@@ -4194,20 +4182,16 @@
                 const currentLiveRows = Array.from(chatContainer.querySelectorAll('.message-row:not(#welcome-message):not(#onboarding-container)'));
                 currentLiveRows.forEach(row => {
                     const rowId = row.dataset.msgId;
-                    if (rowId && !newHistoryIds.has(rowId)) {
+                    const isTransient = row.querySelector('[data-is-transient="true"]') || row.dataset.isTransient === "true";
+                    if (rowId && !newHistoryIds.has(rowId) && !isTransient) {
                         row.remove();
                         domUpdated = true;
                     }
                 });
                 
                 newHistory.forEach((msg, idx) => {
-                    const msgRole = msg.role;
-                    const msgText = msg.text || '';
-                    const msgImg = msg.image_url || '';
-                    const msgTools = JSON.stringify(msg.tool_calls || []);
-                    const msgTimestamp = msg.timestamp || '';
-                    const msgDuration = msg.duration || '';
                     const msgId = msg.id;
+                    const hash = computeContentHash(msg);
                     
                     // Find if a row with this msgId already exists in the DOM
                     let existingRow = null;
@@ -4216,40 +4200,36 @@
                     }
                     
                     if (existingRow) {
-                        const roleMatches = existingRow.dataset.role === msgRole;
-                        const textMatches = existingRow.dataset.rawText === msgText;
-                        const imgMatches = existingRow.dataset.imageUrl === msgImg;
-                        const toolsMatches = existingRow.dataset.toolCalls === msgTools;
-                        const timestampMatches = existingRow.dataset.timestamp === String(msgTimestamp);
-                        
-                        if (!roleMatches || !textMatches || !imgMatches || !toolsMatches || !timestampMatches) {
+                        if (existingRow.dataset.contentHash !== hash) {
                             // Elements changed, replace in-place
-                            const newRow = appendMessage(msgRole, msgText, msg.image_url, msg.tool_calls, false, msgTimestamp, msgDuration, false, msgId);
+                            const newRow = renderMessage(msg);
                             chatContainer.replaceChild(newRow, existingRow);
                             existingRow = newRow;
                             domUpdated = true;
                         }
                     } else {
                         // Element is new, create it
-                        existingRow = appendMessage(msgRole, msgText, msg.image_url, msg.tool_calls, false, msgTimestamp, msgDuration, false, msgId);
+                        existingRow = renderMessage(msg);
                         domUpdated = true;
                     }
                     
-                    // Ensure existingRow is at the correct position (relative to message-rows)
-                    const liveRows = Array.from(chatContainer.querySelectorAll('.message-row:not(#welcome-message):not(#onboarding-container)'));
-                    const currentChildAtIdx = liveRows[idx];
-                    if (currentChildAtIdx !== existingRow) {
-                        if (currentChildAtIdx) {
-                            chatContainer.insertBefore(existingRow, currentChildAtIdx);
-                        } else {
-                            const sentinel = document.getElementById('bottom-sentinel');
-                            if (sentinel) {
-                                chatContainer.insertBefore(existingRow, sentinel);
+                    if (existingRow) {
+                        // Ensure existingRow is at the correct position (relative to message-rows)
+                        const liveRows = Array.from(chatContainer.querySelectorAll('.message-row:not(#welcome-message):not(#onboarding-container)'));
+                        const currentChildAtIdx = liveRows[idx];
+                        if (currentChildAtIdx !== existingRow) {
+                            if (currentChildAtIdx) {
+                                chatContainer.insertBefore(existingRow, currentChildAtIdx);
                             } else {
-                                chatContainer.appendChild(existingRow);
+                                const sentinel = document.getElementById('bottom-sentinel');
+                                if (sentinel) {
+                                    chatContainer.insertBefore(existingRow, sentinel);
+                                } else {
+                                    chatContainer.appendChild(existingRow);
+                                }
                             }
+                            domUpdated = true;
                         }
-                        domUpdated = true;
                     }
                 });
                 
@@ -7830,9 +7810,8 @@ async function loadHistory() {
                     if (onboarding) onboarding.remove();
                     
                     // Render history
-                    const mergedHistory = mergeHistoryMessages(data.history);
-                    mergedHistory.forEach(msg => {
-                        appendMessage(msg.role, msg.text, msg.image_url, msg.tool_calls, false, msg.timestamp, null, false, msg.id);
+                    (data.history || []).forEach(msg => {
+                        renderMessage(msg);
                     });
                 } else {
                     // History is empty! Wait for model initialization and health checks to complete if they haven't yet
@@ -8415,156 +8394,229 @@ async function speakMessage(btn) {
             }
         }
 
-        // --- appendMessage ---
-        function appendMessage(role, text, imageUrl = null, toolCalls = null, isLive = false, timestamp = null, duration = null, isTransient = false, msgId = null) {
-            if (role === 'system-memory' || role === 'system') return;
-            const _hiddenPrefixes = ['port_', 'quest_', 'tool_'];
-            if (msgId && _hiddenPrefixes.some(p => msgId.startsWith(p))) return;
-            text = replacePlaceholders(text);
-            if (text && text.startsWith('[System Memory of older conversation turns]:')) return;
-            
-            if (role === 'voice-call') {
-                const welcome = document.getElementById('welcome-message');
-                if (welcome) welcome.remove();
-                const onboarding = document.getElementById('onboarding-container');
-                if (onboarding) onboarding.remove();
-
-                const row = document.createElement('div');
-                row.className = 'message-row voice-call-row';
-                row.dataset.role = 'voice-call';
-                row.dataset.rawText = text;
-                row.dataset.timestamp = timestamp || '';
-                row.dataset.msgId = msgId || generateMessageId(text, role);
-
-                let transcriptData = { duration: '0s', turns: [] };
-                try {
-                    transcriptData = JSON.parse(text);
-                } catch(e) {
-                    console.error("Error parsing voice call transcript json:", e);
-                }
-
-                const card = document.createElement('div');
-                card.className = 'voice-call-record';
-                
-                const cardHeader = document.createElement('div');
-                cardHeader.className = 'voice-call-record-header';
-                
-                const headerInfo = document.createElement('div');
-                headerInfo.className = 'voice-call-record-info';
-                
-                const iconDiv = document.createElement('div');
-                iconDiv.className = 'voice-call-record-icon';
-                iconDiv.innerHTML = `
-                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-                        <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"></path>
-                    </svg>
-                `;
-                
-                const textDiv = document.createElement('div');
-                const title = document.createElement('h4');
-                title.className = 'voice-call-record-title';
-                title.textContent = `Voice Call with ${activeCompanionName || 'Companion'}`;
-                
-                const meta = document.createElement('p');
-                meta.className = 'voice-call-record-meta';
-                const turnCount = transcriptData.turns ? transcriptData.turns.length : 0;
-                meta.textContent = `Duration: ${transcriptData.duration || '0s'} • ${turnCount} turn${turnCount !== 1 ? 's' : ''}`;
-                
-                textDiv.appendChild(title);
-                textDiv.appendChild(meta);
-                headerInfo.appendChild(iconDiv);
-                headerInfo.appendChild(textDiv);
-                
-                const toggleBtn = document.createElement('button');
-                toggleBtn.className = 'voice-call-record-toggle';
-                toggleBtn.textContent = 'Show Transcript';
-                
-                cardHeader.appendChild(headerInfo);
-                cardHeader.appendChild(toggleBtn);
-                card.appendChild(cardHeader);
-                
-                // Hover delete button matching standard bubbles
-                const hoverActions = document.createElement('div');
-                hoverActions.className = 'voice-call-actions';
-                
-                const deleteBtn = document.createElement('button');
-                deleteBtn.className = 'action-icon-btn';
-                deleteBtn.title = 'Delete Call Record';
-                deleteBtn.innerHTML = `
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-                        <polyline points="3 6 5 6 21 6"></polyline>
-                        <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
-                    </svg>
-                `;
-                deleteBtn.onclick = () => deleteTurnFromMessage(deleteBtn);
-                hoverActions.appendChild(deleteBtn);
-                card.appendChild(hoverActions);
-                
-                const transcriptDiv = document.createElement('div');
-                transcriptDiv.className = 'voice-call-record-transcript';
-                transcriptDiv.style.display = 'none';
-                
-                if (transcriptData.turns && transcriptData.turns.length > 0) {
-                    transcriptData.turns.forEach(turn => {
-                        const turnP = document.createElement('p');
-                        turnP.className = 'voice-call-record-turn';
-                        
-                        const speakerSpan = document.createElement('span');
-                        speakerSpan.className = `turn-speaker ${turn.speaker}`;
-                        speakerSpan.textContent = turn.speaker === 'user' ? `${getUserDisplayName()}:` : `${activeCompanionName || 'Companion'}:`;
-                        
-                        const textSpan = document.createElement('span');
-                        textSpan.textContent = ` ${turn.text}`;
-                        
-                        turnP.appendChild(speakerSpan);
-                        turnP.appendChild(textSpan);
-                        transcriptDiv.appendChild(turnP);
-                    });
-                } else {
-                    const noTurnsP = document.createElement('p');
-                    noTurnsP.className = 'voice-call-record-turn';
-                    noTurnsP.style.fontStyle = 'italic';
-                    noTurnsP.textContent = 'No dialogue recorded.';
-                    transcriptDiv.appendChild(noTurnsP);
-                }
-                
-                card.appendChild(transcriptDiv);
-                row.appendChild(card);
-                
-                toggleBtn.onclick = () => {
-                    if (transcriptDiv.style.display === 'none') {
-                        transcriptDiv.style.display = 'flex';
-                        toggleBtn.textContent = 'Hide Transcript';
-                    } else {
-                        transcriptDiv.style.display = 'none';
-                        toggleBtn.textContent = 'Show Transcript';
-                    }
-                };
-                
-                chatContainer.appendChild(row);
-                chatContainer.scrollTop = chatContainer.scrollHeight;
-                return row;
+        // --- computeContentHash ---
+        function computeContentHash(msg) {
+            const str = JSON.stringify([
+                msg.id,
+                msg.role,
+                msg.text,
+                (msg.media || []).map(m => m.url),
+                (msg.tool_calls || []).map(t => t.id),
+                msg.timestamp
+            ]);
+            let hash = 0;
+            for (let i = 0; i < str.length; i++) {
+                hash = ((hash << 5) - hash) + str.charCodeAt(i);
+                hash = hash & hash;
             }
+            return 'h_' + Math.abs(hash).toString(36);
+        }
+
+        // --- normalizeChatResponse ---
+        function normalizeChatResponse(data) {
+            const text = data.response || '';
+            const media = [];
             
-            // Remove welcome message/onboarding when any real message is appended
+            // Extract markdown images
+            const imgRegex = /!\[([^\]]*)\]\(([^)]+)\)/g;
+            let match;
+            let cleanText = text;
+            while ((match = imgRegex.exec(text)) !== null) {
+                const url = match[2];
+                media.push({
+                    url: url,
+                    type: url.toLowerCase().endsWith('.mp4') ? 'video' : 'image'
+                });
+            }
+            cleanText = text.replace(imgRegex, '').trim();
+
+            // Determine portrait/image prompt from tool calls
+            let imagePrompt = null;
+            const toolCalls = data.tool_calls || [];
+            const imgCall = toolCalls.find(tc => tc.type === 'call' && [
+                'generate_companion_portrait', 'generate_local_image',
+                'generate_imagen', 'generate_general_image'
+            ].includes(tc.name));
+            if (imgCall && imgCall.args && imgCall.args.prompt) {
+                imagePrompt = imgCall.args.prompt;
+            }
+
+            if (imagePrompt) {
+                media.forEach(m => {
+                    m.prompt = imagePrompt;
+                });
+            }
+
+            return {
+                id: data.companion_msg_id,
+                role: 'companion',
+                text: cleanText,
+                media: media,
+                tool_calls: toolCalls,
+                timestamp: data.timestamp,
+                duration: data.duration,
+                mood: data.state,
+                inversion_active: data.inversion_active || '',
+                editable: true,
+                deletable: true
+            };
+        }
+
+        // --- renderVoiceCallRow ---
+        function renderVoiceCallRow(msg) {
             const welcome = document.getElementById('welcome-message');
             if (welcome) welcome.remove();
             const onboarding = document.getElementById('onboarding-container');
             if (onboarding) onboarding.remove();
 
-            text = text || '';
-            const isMsgTransient = isTransient || (role === 'companion' && (
+            const row = document.createElement('div');
+            row.className = 'message-row voice-call-row';
+            row.dataset.role = 'voice-call';
+            row.dataset.rawText = msg.text || '';
+            row.dataset.timestamp = msg.timestamp || '';
+            row.dataset.msgId = msg.id || generateMessageId(msg.text, 'voice-call');
+            row.dataset.contentHash = computeContentHash(msg);
+
+            let transcriptData = { duration: '0s', turns: [] };
+            try {
+                transcriptData = JSON.parse(msg.text);
+            } catch(e) {
+                console.error("Error parsing voice call transcript json:", e);
+            }
+
+            const card = document.createElement('div');
+            card.className = 'voice-call-record';
+            
+            const cardHeader = document.createElement('div');
+            cardHeader.className = 'voice-call-record-header';
+            
+            const headerInfo = document.createElement('div');
+            headerInfo.className = 'voice-call-record-info';
+            
+            const iconDiv = document.createElement('div');
+            iconDiv.className = 'voice-call-record-icon';
+            iconDiv.innerHTML = `
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"></path>
+                </svg>
+            `;
+            
+            const textDiv = document.createElement('div');
+            const title = document.createElement('h4');
+            title.className = 'voice-call-record-title';
+            title.textContent = `Voice Call with ${activeCompanionName || 'Companion'}`;
+            
+            const meta = document.createElement('p');
+            meta.className = 'voice-call-record-meta';
+            const turnCount = transcriptData.turns ? transcriptData.turns.length : 0;
+            meta.textContent = `Duration: ${transcriptData.duration || '0s'} • ${turnCount} turn${turnCount !== 1 ? 's' : ''}`;
+            
+            textDiv.appendChild(title);
+            textDiv.appendChild(meta);
+            headerInfo.appendChild(iconDiv);
+            headerInfo.appendChild(textDiv);
+            
+            const toggleBtn = document.createElement('button');
+            toggleBtn.className = 'voice-call-record-toggle';
+            toggleBtn.textContent = 'Show Transcript';
+            
+            cardHeader.appendChild(headerInfo);
+            cardHeader.appendChild(toggleBtn);
+            card.appendChild(cardHeader);
+            
+            const hoverActions = document.createElement('div');
+            hoverActions.className = 'voice-call-actions';
+            
+            const deleteBtn = document.createElement('button');
+            deleteBtn.className = 'action-icon-btn';
+            deleteBtn.title = 'Delete Call Record';
+            deleteBtn.innerHTML = `
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                    <polyline points="3 6 5 6 21 6"></polyline>
+                    <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+                </svg>
+            `;
+            deleteBtn.onclick = () => deleteTurnFromMessage(deleteBtn);
+            hoverActions.appendChild(deleteBtn);
+            card.appendChild(hoverActions);
+            
+            const transcriptDiv = document.createElement('div');
+            transcriptDiv.className = 'voice-call-record-transcript';
+            transcriptDiv.style.display = 'none';
+            
+            if (transcriptData.turns && transcriptData.turns.length > 0) {
+                transcriptData.turns.forEach(turn => {
+                    const turnP = document.createElement('p');
+                    turnP.className = 'voice-call-record-turn';
+                    
+                    const speakerSpan = document.createElement('span');
+                    speakerSpan.className = `turn-speaker ${turn.speaker}`;
+                    speakerSpan.textContent = turn.speaker === 'user' ? `${getUserDisplayName()}:` : `${activeCompanionName || 'Companion'}:`;
+                    
+                    const textSpan = document.createElement('span');
+                    textSpan.textContent = ` ${turn.text}`;
+                    
+                    turnP.appendChild(speakerSpan);
+                    turnP.appendChild(textSpan);
+                    transcriptDiv.appendChild(turnP);
+                });
+            } else {
+                const noTurnsP = document.createElement('p');
+                noTurnsP.className = 'voice-call-record-turn';
+                noTurnsP.style.fontStyle = 'italic';
+                noTurnsP.textContent = 'No dialogue recorded.';
+                transcriptDiv.appendChild(noTurnsP);
+            }
+            
+            card.appendChild(transcriptDiv);
+            row.appendChild(card);
+            
+            toggleBtn.onclick = () => {
+                if (transcriptDiv.style.display === 'none') {
+                    transcriptDiv.style.display = 'flex';
+                    toggleBtn.textContent = 'Hide Transcript';
+                } else {
+                    transcriptDiv.style.display = 'none';
+                    toggleBtn.textContent = 'Show Transcript';
+                }
+            };
+            
+            chatContainer.appendChild(row);
+            chatContainer.scrollTop = chatContainer.scrollHeight;
+            return row;
+        }
+
+        // --- renderMessage ---
+        function renderMessage(msg, isLive = false) {
+            if (msg.role === 'voice-call') {
+                return renderVoiceCallRow(msg);
+            }
+
+            // Client-side hidden prefix check
+            const _hiddenPrefixes = ['port_', 'quest_', 'tool_'];
+            if (msg.id && _hiddenPrefixes.some(p => msg.id.startsWith(p))) return null;
+
+            const welcome = document.getElementById('welcome-message');
+            if (welcome) welcome.remove();
+            const onboarding = document.getElementById('onboarding-container');
+            if (onboarding) onboarding.remove();
+
+            const role = msg.role;
+            const text = msg.text || '';
+            const msgId = msg.id || generateMessageId(text, role);
+
+            const isMsgTransient = msg.isTransient || (role === 'companion' && (
                 text === '*(Generation stopped)*' || 
                 text === '*(Generation cancelled)*' || 
                 text === 'Error connecting to the Sanctuary.' ||
                 text === 'The Sanctuary is taking a while to restart. Please refresh manually.' ||
-                (!timestamp && !isLive && text.includes('Error'))
+                (!msg.timestamp && !isLive && text.includes('Error'))
             ));
-            
-            // Extract ComfyUI prompt if present in toolCalls
+
+            // Extract portrait prompt
             let portraitPrompt = null;
-            if (toolCalls && toolCalls.length > 0) {
-                const call = toolCalls.find(tc => tc.type === 'call' && (
+            if (msg.tool_calls && msg.tool_calls.length > 0) {
+                const call = msg.tool_calls.find(tc => tc.type === 'call' && (
                     tc.name === 'generate_companion_portrait' ||
                     tc.name === 'generate_local_image' ||
                     tc.name === 'generate_imagen' ||
@@ -8578,12 +8630,15 @@ async function speakMessage(btn) {
             const row = document.createElement('div');
             row.className = `message-row ${role}-row`;
             row.dataset.role = role;
-            row.dataset.rawText = text || '';
-            row.dataset.imageUrl = imageUrl || '';
-            row.dataset.toolCalls = JSON.stringify(toolCalls || []);
-            row.dataset.timestamp = timestamp || '';
-            row.dataset.duration = duration || '';
-            row.dataset.msgId = msgId || generateMessageId(text, role);
+            row.dataset.rawText = text;
+            
+            const firstImg = (msg.media || []).find(m => m.type === 'image');
+            row.dataset.imageUrl = firstImg ? firstImg.url : '';
+            row.dataset.toolCalls = JSON.stringify(msg.tool_calls || []);
+            row.dataset.timestamp = msg.timestamp || '';
+            row.dataset.duration = msg.duration || '';
+            row.dataset.msgId = msgId;
+            row.dataset.contentHash = computeContentHash(msg);
 
             if (role === 'companion') {
                 const avatarContainer = document.createElement('div');
@@ -8599,72 +8654,45 @@ async function speakMessage(btn) {
                 avatarContainer.appendChild(avatar);
                 row.appendChild(avatarContainer);
             }
-            
-            // Split logic for standard roles ('user', 'companion')
-            let images = [];
-            if (imageUrl) {
-                images.push(imageUrl);
-            }
-            
-            let cleanText = text || '';
-            let imageMarkdownUrls = [];
-            if (role === 'user' || role === 'companion') {
-                const imgRegex = /!\[([^\]]*)\]\(([^)]+)\)/g;
-                let match;
-                while ((match = imgRegex.exec(cleanText)) !== null) {
-                    imageMarkdownUrls.push(match[2]);
-                }
-                if (imageMarkdownUrls.length > 0) {
-                    cleanText = cleanText.replace(imgRegex, '').trim();
-                }
-                
-                imageMarkdownUrls.forEach(url => {
-                    if (!images.includes(url)) {
-                        images.push(url);
-                    }
-                });
-            }
 
-            const isTextEmpty = !cleanText.replace(/[:\s]/g, '').trim();
-
-            // Formulate list of bubbles to create
-            const bubblesToCreate = [];
-            if (!isTextEmpty || images.length === 0) {
-                bubblesToCreate.push({ type: 'text', content: cleanText });
-            }
-            images.forEach(imgUrl => {
-                bubblesToCreate.push({ type: 'image', content: imgUrl });
-            });
-
-            // Create bubbles container
             const bubblesContainer = document.createElement('div');
             bubblesContainer.className = 'message-bubbles-container';
 
-            // Loop and create bubbles
+            const bubblesToCreate = [];
+            const isTextEmpty = !text.replace(/[:\s]/g, '').trim();
+
+            if (!isTextEmpty || !msg.media || msg.media.length === 0) {
+                bubblesToCreate.push({ type: 'text', content: text });
+            }
+            if (msg.media) {
+                msg.media.forEach(m => {
+                    bubblesToCreate.push({ type: 'media', content: m });
+                });
+            }
+
             bubblesToCreate.forEach((item, idx) => {
-                const isImageItem = item.type === 'image';
+                const isMediaItem = item.type === 'media';
                 const bubble = document.createElement('div');
-                bubble.className = `message ${role}` + (isImageItem ? ' image-message' : '');
-                bubble.dataset.rawText = text || ''; // Keep full raw text (with images) on all bubbles to support edit/deletion
-                bubble.dataset.msgId = msgId || generateMessageId(text, role);
+                bubble.className = `message ${role}` + (isMediaItem ? ' image-message' : '');
+                bubble.dataset.rawText = text;
+                bubble.dataset.msgId = msgId;
                 if (isMsgTransient) {
                     bubble.dataset.isTransient = "true";
                 }
 
-                // Standard action buttons (timestamp, resend, edit, delete, speak)
-                // Add standard actions only to text bubble, or to the image bubble if there is no text bubble
                 const shouldAddStandardActions = (item.type === 'text') || (bubblesToCreate.length === 1);
                 const actions = document.createElement('div');
                 actions.className = 'message-actions';
 
                 if (shouldAddStandardActions) {
-                    if (!timestamp && isLive) {
-                        timestamp = Date.now() / 1000;
+                    let msgTimestamp = msg.timestamp;
+                    if (!msgTimestamp && isLive) {
+                        msgTimestamp = Date.now() / 1000;
                     }
-                    if (timestamp) {
+                    if (msgTimestamp) {
                         const tsSpan = document.createElement('span');
                         tsSpan.className = 'message-timestamp';
-                        tsSpan.textContent = formatMessageTimestamp(timestamp);
+                        tsSpan.textContent = formatMessageTimestamp(msgTimestamp);
                         actions.appendChild(tsSpan);
                     }
 
@@ -8778,76 +8806,106 @@ async function speakMessage(btn) {
                     bubble.appendChild(actions);
                 }
 
-                // --- THINKING BLOCK LOGIC ---
-                // Only parse and render thoughts in the text bubble
-                let actualResponse = '';
-                if (item.type === 'text' && role === 'companion') {
-                    let thoughts = [];
-                    let tempText = item.content;
-                    while (true) {
-                        const openMatch = tempText.match(/(?:<think>|\[think\])/i);
-                        if (!openMatch) break;
-                        
-                        const openIdx = openMatch.index;
-                        const openTagLength = openMatch[0].length;
-                        const beforeText = tempText.substring(0, openIdx);
-                        const remainingText = tempText.substring(openIdx + openTagLength);
-                        
-                        const closePattern = /(?:<\/think>|\[\/think\]|<\/\s*think>|\[\s*\/think\s*\])/i;
-                        const closeMatch = remainingText.match(closePattern);
-                        
-                        if (closeMatch) {
-                            const closeIdx = closeMatch.index;
-                            const closeTagLength = closeMatch[0].length;
+                if (item.type === 'text') {
+                    let actualResponse = item.content;
+                    if (role === 'companion') {
+                        let thoughts = [];
+                        let tempText = item.content;
+                        while (true) {
+                            const openMatch = tempText.match(/(?:<think>|\[think\])/i);
+                            if (!openMatch) break;
                             
-                            const thought = remainingText.substring(0, closeIdx).trim();
-                            if (thought) thoughts.push(thought);
+                            const openIdx = openMatch.index;
+                            const openTagLength = openMatch[0].length;
+                            const beforeText = tempText.substring(0, openIdx);
+                            const remainingText = tempText.substring(openIdx + openTagLength);
                             
-                            const afterText = remainingText.substring(closeIdx + closeTagLength);
-                            tempText = beforeText + afterText;
-                        } else {
-                            const thought = remainingText.trim();
-                            if (thought) thoughts.push(thought);
-                            tempText = beforeText;
-                            break;
+                            const closePattern = /(?:<\/think>|\[\/think\]|<\/\s*think>|\[\s*\/think\s*\])/i;
+                            const closeMatch = remainingText.match(closePattern);
+                            
+                            if (closeMatch) {
+                                const closeIdx = closeMatch.index;
+                                const closeTagLength = closeMatch[0].length;
+                                
+                                const thought = remainingText.substring(0, closeIdx).trim();
+                                if (thought) thoughts.push(thought);
+                                
+                                const afterText = remainingText.substring(closeIdx + closeTagLength);
+                                tempText = beforeText + afterText;
+                            } else {
+                                const thought = remainingText.trim();
+                                if (thought) thoughts.push(thought);
+                                tempText = beforeText;
+                                break;
+                            }
+                        }
+                        
+                        let thoughtContent = thoughts.join("\n\n").trim();
+                        actualResponse = tempText.trim();
+
+                        if (thoughtContent) {
+                            const thinkingBlockContainer = document.createElement('div');
+                            thinkingBlockContainer.className = 'thinking-block-container';
+                            
+                            const thinkingBlockHeader = document.createElement('div');
+                            thinkingBlockHeader.className = 'thinking-block-header';
+                            thinkingBlockHeader.onclick = function() { toggleThinkingBlock(this); };
+                            thinkingBlockHeader.innerHTML = `
+                                <span>💭 Thought</span>
+                                <span class="thinking-block-chevron">▼</span>
+                            `;
+                            
+                            const thinkingBlockBody = document.createElement('div');
+                            thinkingBlockBody.className = 'thinking-block-body';
+                            const contentDiv = document.createElement('div');
+                            contentDiv.className = 'thinking-block-content';
+                            contentDiv.textContent = thoughtContent;
+                            thinkingBlockBody.appendChild(contentDiv);
+
+                            thinkingBlockContainer.appendChild(thinkingBlockHeader);
+                            thinkingBlockContainer.appendChild(thinkingBlockBody);
+                            bubble.appendChild(thinkingBlockContainer);
                         }
                     }
-                    
-                    let thoughtContent = thoughts.join("\n\n").trim();
-                    actualResponse = tempText.trim();
 
-                    if (thoughtContent) {
-                        const thinkingBlockContainer = document.createElement('div');
-                        thinkingBlockContainer.className = 'thinking-block-container';
-                        
-                        const thinkingBlockHeader = document.createElement('div');
-                        thinkingBlockHeader.className = 'thinking-block-header';
-                        thinkingBlockHeader.onclick = function() { toggleThinkingBlock(this); };
-                        thinkingBlockHeader.innerHTML = `
-                            <span>💭 Thought</span>
-                            <span class="thinking-block-chevron">▼</span>
-                        `;
-                        
-                        const thinkingBlockBody = document.createElement('div');
-                        thinkingBlockBody.className = 'thinking-block-body';
-                        const contentDiv = document.createElement('div');
-                        contentDiv.className = 'thinking-block-content';
-                        contentDiv.textContent = thoughtContent;
-                        thinkingBlockBody.appendChild(contentDiv);
-
-                        thinkingBlockContainer.appendChild(thinkingBlockHeader);
-                        thinkingBlockContainer.appendChild(thinkingBlockBody);
-                        bubble.appendChild(thinkingBlockContainer);
+                    if (actualResponse) {
+                        const textDiv = document.createElement('div');
+                        textDiv.className = 'message-text';
+                        if (role === 'companion' || role === 'user') {
+                            let parsedHtml = actualResponse;
+                            if (typeof marked !== 'undefined' && marked.parse) {
+                                try {
+                                    parsedHtml = marked.parse(actualResponse);
+                                } catch (me) {
+                                    console.error("Marked parsing error:", me);
+                                }
+                            }
+                            textDiv.innerHTML = parsedHtml;
+                            if (typeof hljs !== 'undefined' && hljs.highlightElement) {
+                                textDiv.querySelectorAll('pre code').forEach((block) => {
+                                    try {
+                                        hljs.highlightElement(block);
+                                    } catch (he) {
+                                        console.error("Highlight.js error:", he);
+                                    }
+                                });
+                            }
+                            postProcessMessageHTML(textDiv);
+                        } else {
+                            textDiv.textContent = actualResponse;
+                        }
+                        bubble.appendChild(textDiv);
                     }
-                } else {
-                    actualResponse = item.content;
-                }
 
-                // Render image if image type
-                if (item.type === 'image') {
-                    const imgUrl = item.content;
-                    const isVideo = imgUrl.toLowerCase().endsWith('.mp4') || imgUrl.toLowerCase().includes('video');
-                    
+                    if (msg.tool_calls && msg.tool_calls.length > 0) {
+                        renderCompletedLogs(bubble, msg.tool_calls, msg.duration);
+                    }
+
+                } else if (item.type === 'media') {
+                    const mediaItem = item.content;
+                    const imgUrl = mediaItem.url;
+                    const isVideo = mediaItem.type === 'video';
+
                     if (isVideo) {
                         const videoContainer = document.createElement('div');
                         videoContainer.className = 'message-video-container';
@@ -8887,7 +8945,7 @@ async function speakMessage(btn) {
                             `;
                             editPromptBtn.onclick = async (e) => {
                                 e.stopPropagation();
-                                let activePrompt = portraitPrompt;
+                                let activePrompt = mediaItem.prompt || portraitPrompt;
                                 try {
                                     const response = await fetch(`/api/get_image_prompt?image_url=${encodeURIComponent(img.src)}`);
                                     const data = await response.json();
@@ -8903,7 +8961,7 @@ async function speakMessage(btn) {
                                     activePrompt || "",
                                     (newPrompt) => {
                                         if (newPrompt !== null) {
-                                            portraitPrompt = newPrompt;
+                                            mediaItem.prompt = newPrompt;
                                             regenerateImage(editPromptBtn, img.src, newPrompt);
                                         }
                                     }
@@ -8924,7 +8982,7 @@ async function speakMessage(btn) {
                             recycleBtn.onclick = (e) => {
                                 e.stopPropagation();
                                 try {
-                                    regenerateImage(recycleBtn, img.src, portraitPrompt);
+                                    regenerateImage(recycleBtn, img.src, mediaItem.prompt || portraitPrompt);
                                 } catch (err) {
                                     showCustomAlert("Error", "Click handler error: " + err.message);
                                 }
@@ -8961,42 +9019,10 @@ async function speakMessage(btn) {
                         imgContainer.appendChild(img);
                         bubble.appendChild(imgContainer);
                     }
-                }
 
-                // Render text if text type
-                if (item.type === 'text' && actualResponse) {
-                    const textDiv = document.createElement('div');
-                    textDiv.className = 'message-text';
-                    if (role === 'companion' || role === 'user') {
-                        let parsedHtml = actualResponse;
-                        if (typeof marked !== 'undefined' && marked.parse) {
-                            try {
-                                parsedHtml = marked.parse(actualResponse);
-                            } catch (me) {
-                                console.error("Marked parsing error:", me);
-                            }
-                        }
-                        textDiv.innerHTML = parsedHtml;
-                        if (typeof hljs !== 'undefined' && hljs.highlightElement) {
-                            textDiv.querySelectorAll('pre code').forEach((block) => {
-                                try {
-                                    hljs.highlightElement(block);
-                                } catch (he) {
-                                    console.error("Highlight.js error:", he);
-                                }
-                            });
-                        }
-                        postProcessMessageHTML(textDiv);
-                    } else {
-                        textDiv.textContent = actualResponse;
+                    if (isTextEmpty && idx === bubblesToCreate.length - 1 && msg.tool_calls && msg.tool_calls.length > 0) {
+                        renderCompletedLogs(bubble, msg.tool_calls, msg.duration);
                     }
-                    bubble.appendChild(textDiv);
-                }
-
-                // Render tool logs only on the designated bubble
-                const shouldPassToolCalls = (item.type === 'text' && !isTextEmpty) || (isTextEmpty && idx === bubblesToCreate.length - 1);
-                if (shouldPassToolCalls && toolCalls && toolCalls.length > 0) {
-                    renderCompletedLogs(bubble, toolCalls, duration);
                 }
 
                 bubblesContainer.appendChild(bubble);
@@ -9006,7 +9032,6 @@ async function speakMessage(btn) {
             chatContainer.appendChild(row);
             chatContainer.scrollTop = chatContainer.scrollHeight;
 
-            // Trigger auto speak if live and enabled (companion only, targeting the text bubble or first bubble)
             if (role === 'companion' && isLive && ttsAutoSpeak) {
                 setTimeout(() => {
                     const speakBtn = bubblesContainer.querySelector('.speak-btn');
@@ -9015,6 +9040,47 @@ async function speakMessage(btn) {
             }
 
             return row;
+        }
+
+        // --- appendMessage ---
+        function appendMessage(role, text, imageUrl = null, toolCalls = null, isLive = false, timestamp = null, duration = null, isTransient = false, msgId = null) {
+            const media = [];
+            if (imageUrl) {
+                media.push({
+                    url: imageUrl,
+                    type: imageUrl.toLowerCase().endsWith('.mp4') ? 'video' : 'image'
+                });
+            }
+            let cleanText = text || '';
+            if (role === 'user' || role === 'companion') {
+                const imgRegex = /!\[([^\]]*)\]\(([^)]+)\)/g;
+                let match;
+                while ((match = imgRegex.exec(cleanText)) !== null) {
+                    const url = match[2];
+                    if (!media.some(m => m.url === url)) {
+                        media.push({
+                            url: url,
+                            type: url.toLowerCase().endsWith('.mp4') ? 'video' : 'image'
+                        });
+                    }
+                }
+                cleanText = cleanText.replace(imgRegex, '').trim();
+            }
+
+            const msg = {
+                id: msgId || generateMessageId(text, role),
+                role: role,
+                text: cleanText,
+                media: media,
+                tool_calls: toolCalls,
+                timestamp: timestamp,
+                duration: duration,
+                isTransient: isTransient,
+                mood: null,
+                editable: role === 'user' || role === 'companion',
+                deletable: true
+            };
+            return renderMessage(msg, isLive);
         }
 
         // --- postProcessMessageHTML ---

@@ -1720,7 +1720,81 @@ class OpenSourceRunner(BaseProgramRunner):
                 print(f"Error loading OS session {session_id} from disk: {e}")
                 return False
 
+    def _consolidate_tools(self, tool_calls: list) -> list:
+        """Pairs tool call + response entries by call_id into summaries."""
+        if not tool_calls:
+            return []
+        pairs = {}
+        for tc in tool_calls:
+            cid = tc.get('id', '')
+            if cid not in pairs:
+                pairs[cid] = {'id': cid}
+            if tc.get('type') == 'call':
+                pairs[cid]['name'] = tc.get('name', '')
+                pairs[cid]['args'] = tc.get('args', {})
+            elif tc.get('type') == 'response':
+                pairs[cid]['result'] = tc.get('response', '')
+        return [p for p in pairs.values() if p.get('name')]
 
+    def _normalize_message(self, msg: dict) -> dict:
+        """Transforms a raw stored message into the canonical frontend format."""
+        text = msg.get('text', '') or ''
+        media = []
+
+        # 1. Extract markdown images from text into media[]
+        for match in re.finditer(r'!\[([^\]]*)\]\(([^)]+)\)', text):
+            url = match.group(2)
+            is_video = url.lower().endswith('.mp4')
+            media.append({'url': url, 'type': 'video' if is_video else 'image'})
+        clean_text = re.sub(r'!\[[^\]]*\]\([^)]+\)', '', text).strip()
+        # 2. Extract from image_url field into media[]
+        img_url = msg.get('image_url')
+        if img_url and not img_url.startswith('data:'):
+            url = img_url
+            is_video = url.lower().endswith('.mp4')
+            if url not in [m['url'] for m in media]:
+                media.append({'url': url, 'type': 'video' if is_video else 'image'})
+
+        # 3. Extract from tool call responses into media[]
+        for tc in msg.get('tool_calls', []):
+            if tc.get('type') == 'response':
+                resp = tc.get('response', '') or ''
+                for match in re.finditer(r'!\[([^\]]*)\]\(([^)]+)\)', resp):
+                    url = match.group(2)
+                    is_video = url.lower().endswith('.mp4')
+                    if url not in [m['url'] for m in media]:
+                        media.append({'url': url, 'type': 'video' if is_video else 'image'})
+
+        # 4. Consolidate tool_calls into paired summaries
+        tool_summary = self._consolidate_tools(msg.get('tool_calls'))
+
+        # 4. Detect image prompt from tool calls (for regeneration UI)
+        image_prompt = None
+        _image_tool_names = ('generate_local_image', 'generate_imagen',
+                             'generate_companion_portrait', 'generate_general_image')
+        for ts in tool_summary:
+            if ts.get('name') in _image_tool_names:
+                image_prompt = (ts.get('args') or {}).get('prompt')
+                break
+        if image_prompt:
+            for m in media:
+                if not m.get('prompt'):
+                    m['prompt'] = image_prompt
+
+        role = msg.get('role', 'user')
+        return {
+            'id': msg.get('id', ''),
+            'role': role,
+            'text': clean_text,
+            'media': media,
+            'tool_summary': tool_summary,
+            'tool_calls': msg.get('tool_calls', []),
+            'timestamp': msg.get('timestamp'),
+            'mood': msg.get('mood'),
+            'inversion_active': msg.get('inversion_active', ''),
+            'editable': role in ('user', 'companion'),
+            'deletable': True,
+        }
 
     async def get_history(self, session_id: str) -> list:
         with self._lock:
@@ -1758,11 +1832,20 @@ class OpenSourceRunner(BaseProgramRunner):
             _hidden_prefixes = ('tool_', 'port_', 'quest_', 'sys_', 'itm_')
             chat_history = []
             for msg in raw_history:
+                # Skip system memory and hidden-prefix messages
+                # NOTE: compacted messages are kept visible for the user to read,
+                # even though get_openai_messages excludes them from the LLM context.
                 if msg.get('role') == 'system-memory':
                     continue
                 if msg.get('id', '').startswith(_hidden_prefixes):
                     continue
-                chat_history.append(msg.copy())
+                # Skip empty companion messages
+                if msg.get('role') == 'companion':
+                    text = (msg.get('text') or '').strip()
+                    has_tools = bool(msg.get('tool_calls'))
+                    if not text and not has_tools:
+                        continue
+                chat_history.append(self._normalize_message(msg))
             return chat_history
 
     async def run_async(self, session_id: str, new_message_text: str, image_data: str = None, image_mime: str = None, model: str = None, media_path: str = None, msg_id: str = None) -> tuple:
