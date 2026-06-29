@@ -18,6 +18,10 @@ def detect_gpu_type() -> str:
     """Detects if the system has an AMD, Nvidia, or Vulkan compatible GPU on Windows.
     Returns 'amd', 'nvidia', or 'vulkan'.
     """
+    forced_gpu = os.getenv("LOCAL_GPU_TYPE")
+    if forced_gpu in ("amd", "nvidia", "vulkan"):
+        return forced_gpu
+        
     if os.name != 'nt':
         return 'vulkan'
         
@@ -168,6 +172,7 @@ def start_local_server(model_key):
     context_size = os.getenv("LOCAL_CONTEXT", "8192")
     gpu_layers = os.getenv("LOCAL_GPU_LAYERS", "99")
     flash_attn = os.getenv("LOCAL_FLASH_ATTN", "true").lower() == "true"
+    no_mmap = os.getenv("LOCAL_NO_MMAP", "false").lower() == "true"
     
     cmd = [
         SERVER_EXE,
@@ -182,6 +187,8 @@ def start_local_server(model_key):
     ]
     if flash_attn:
         cmd.extend(["-fa", "on"])
+    if no_mmap:
+        cmd.append("--no-mmap")
         
     try:
         log_file = os.path.join(BASE_DIR, "llama_server.log")
@@ -271,7 +278,8 @@ def check_local_server_status():
     except Exception:
         pass
         
-    if _proc and _proc.poll() is None:
+    global _starting
+    if _starting:
         return "starting"
         
     return False

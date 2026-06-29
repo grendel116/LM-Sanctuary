@@ -4943,14 +4943,14 @@ function pollInstallStatus(btn) {
         }
 
         // --- startLocalLLM ---
-async function startLocalLLM(btn) {
+        async function startLocalLLM(btn) {
             if (_localStarting) return;
             _localStarting = true;
             if (btn) {
                 btn.disabled = true;
                 btn.innerHTML = `<span class="animate-spin" style="display: inline-block; width: 14px; height: 14px; border: 2px solid currentColor; border-top-color: transparent; border-radius: 50%; margin-right: 8px; vertical-align: middle;"></span>Starting...`;
             }
-            // Optimistic UI: immediately mark as starting and disable all start buttons
+            // Optimistic UI state
             connectionStatus.local_online = 'starting';
             updateConnectionModalStatus();
             if (document.getElementById('onboarding-container')) {
@@ -4961,80 +4961,73 @@ async function startLocalLLM(btn) {
                 const data = await res.json();
                 if (!data.success) {
                     connectionStatus.local_online = false;
-                    updateConnectionModalStatus();
                     showCustomAlert("Failed to Start", data.message);
                 }
-                // Wait for SSE to deliver the final state
             } catch (e) {
                 connectionStatus.local_online = false;
-                updateConnectionModalStatus();
                 showCustomAlert("Error", "Failed to initiate server start.");
             } finally {
                 _localStarting = false;
+                updateConnectionModalStatus();
             }
         }
 
         // --- stopLocalLLM ---
-async function stopLocalLLM(btn) {
+        async function stopLocalLLM(btn) {
             if (_localStopping) return;
             _localStopping = true;
             if (btn) {
                 btn.disabled = true;
                 btn.innerHTML = `<span class="animate-spin" style="display: inline-block; width: 14px; height: 14px; border: 2px solid currentColor; border-top-color: transparent; border-radius: 50%; margin-right: 8px; vertical-align: middle;"></span>Stopping server...`;
             }
+            // Optimistic UI state
+            connectionStatus.local_online = 'stopping';
+            updateConnectionModalStatus();
             try {
                 const res = await fetch('/api/local_llm/stop', { method: 'POST' });
                 const data = await res.json();
                 if (data.success) {
+                    connectionStatus.local_online = false;
                     await initializeModelSelect();
-                    updateConnectionModalStatus();
                 } else {
+                    connectionStatus.local_online = true; // Rollback
                     showCustomAlert("Failed to Stop", data.message);
-                    if (btn) {
-                        btn.disabled = false;
-                        btn.textContent = "Stop Server";
-                    }
                 }
             } catch (e) {
+                connectionStatus.local_online = true; // Rollback
                 showCustomAlert("Error", "Failed to communicate with server.");
-                if (btn) {
-                    btn.disabled = false;
-                    btn.textContent = "Stop Server";
-                }
             } finally {
                 _localStopping = false;
+                updateConnectionModalStatus();
             }
         }
 
         // --- stopComfyUI ---
-async function stopComfyUI(btn) {
+        async function stopComfyUI(btn) {
             if (_comfyStopping) return;
             _comfyStopping = true;
             if (btn) {
                 btn.disabled = true;
                 btn.innerHTML = `<span class="animate-spin" style="display: inline-block; width: 14px; height: 14px; border: 2px solid currentColor; border-top-color: transparent; border-radius: 50%; margin-right: 8px; vertical-align: middle;"></span>Stopping ComfyUI...`;
             }
+            // Optimistic UI state
+            comfyStatus.running = 'stopping';
+            updateComfyModalStatus(true);
             try {
                 const res = await fetch('/api/comfy/stop', { method: 'POST' });
                 const data = await res.json();
                 if (data.success) {
                     comfyStatus.running = false;
-                    updateComfyModalStatus(true);
                 } else {
+                    comfyStatus.running = true; // Rollback
                     showCustomAlert("Failed to Stop", data.message);
-                    if (btn) {
-                        btn.disabled = false;
-                        btn.textContent = "Stop ComfyUI";
-                    }
                 }
             } catch (e) {
+                comfyStatus.running = true; // Rollback
                 showCustomAlert("Error", "Failed to stop ComfyUI.");
-                if (btn) {
-                    btn.disabled = false;
-                    btn.textContent = "Stop ComfyUI";
-                }
             } finally {
                 _comfyStopping = false;
+                updateComfyModalStatus(true);
             }
         }
 
@@ -5490,10 +5483,10 @@ async function installComfyUI(btn) {
         }
 
         // --- startComfyUI ---
-async function startComfyUI(btn) {
+        async function startComfyUI(btn) {
             if (_comfyStarting) return;
             _comfyStarting = true;
-            // Optimistic UI: immediately mark as starting and disable all start buttons
+            // Optimistic UI state
             comfyStatus.running = 'starting';
             updateComfyModalStatus(true);
             if (document.getElementById('onboarding-container')) {
@@ -5504,16 +5497,14 @@ async function startComfyUI(btn) {
                 const data = await res.json();
                 if (!data.success) {
                     comfyStatus.running = false;
-                    updateComfyModalStatus(true);
                     showCustomAlert("Failed to Start", data.message);
                 }
-                // SSE will deliver the final running/offline state
             } catch (e) {
                 comfyStatus.running = false;
-                updateComfyModalStatus(true);
                 showCustomAlert("Error", "Failed to start ComfyUI.");
             } finally {
                 _comfyStarting = false;
+                updateComfyModalStatus(true);
             }
         }
 
@@ -5767,6 +5758,9 @@ function updateConnectionStatus(status) {
                 } else if (status.local_online === 'starting') {
                     badge.textContent = "Starting...";
                     badge.className = "status-badge status-starting";
+                } else if (status.local_online === 'stopping') {
+                    badge.textContent = "Stopping...";
+                    badge.className = "status-badge status-starting";
                 } else {
                     badge.textContent = "Offline";
                     badge.className = "status-badge status-offline";
@@ -5815,6 +5809,11 @@ function updateConnectionStatus(status) {
             
             if (modalGeminiModel && !modalGeminiModel.value && connectionStatus.remote_model) {
                 modalGeminiModel.value = connectionStatus.remote_model;
+            }
+            
+            const envPathEl = document.querySelector('.env-path');
+            if (envPathEl && connectionStatus.env_path) {
+                envPathEl.textContent = connectionStatus.env_path;
             }
             
             updateConnectionStatus(connectionStatus);
@@ -5894,6 +5893,9 @@ async function updateComfyModalStatus(skipFetch = false) {
                         } else if (comfyStatus.running === 'starting') {
                             statusBadge.textContent = "Starting...";
                             statusBadge.className = "status-badge status-starting";
+                        } else if (comfyStatus.running === 'stopping') {
+                            statusBadge.textContent = "Stopping...";
+                            statusBadge.className = "status-badge status-starting";
                         } else if (comfyStatus.installed) {
                             statusBadge.textContent = "Offline";
                             statusBadge.className = "status-badge status-offline";
@@ -5951,6 +5953,9 @@ async function updateComfyModalStatus(skipFetch = false) {
                                 } else if (comfyStatus.running === 'starting') {
                                     badge.textContent = "Starting...";
                                     badge.className = "status-badge status-starting";
+                                } else if (comfyStatus.running === 'stopping') {
+                                    badge.textContent = "Stopping...";
+                                    badge.className = "status-badge status-starting";
                                 } else {
                                     badge.textContent = "Offline";
                                     badge.className = "status-badge status-offline";
@@ -5963,15 +5968,23 @@ async function updateComfyModalStatus(skipFetch = false) {
                             
                             // Update the controls container (Start/Stop button etc.) only when not mid-operation
                             const controls = document.getElementById('comfy-engine-controls');
-                            if (controls && !_comfyStopping && !_comfyStarting && !_comfyResolving) {
-                                if (comfyStatus.running === true || comfyStatus.running === 'online') {
+                            if (controls && !_comfyResolving) {
+                                const isRunning = comfyStatus.running === true || comfyStatus.running === 'online';
+                                const isStarting = comfyStatus.running === 'starting' || _comfyStarting;
+                                const isStopping = comfyStatus.running === 'stopping' || _comfyStopping;
+                                
+                                if (isRunning) {
                                     controls.innerHTML = `
                                         <button onclick="stopComfyUI(this)" class="onboarding-btn" style="width: 100%; font-size: 0.85rem; padding: 10px; margin-top: 5px;">Stop ComfyUI</button>
                                         <button onclick="resolveWorkflowDependencies(this)" class="onboarding-btn" style="width: 100%; font-size: 0.85rem; padding: 10px; margin-top: 8px; margin-bottom: 5px;">Resolve Workflow Dependencies</button>
                                     `;
-                                } else if (comfyStatus.running === 'starting') {
+                                } else if (isStarting) {
                                     controls.innerHTML = `
                                         <button disabled class="onboarding-btn" style="width: 100%; font-size: 0.85rem; padding: 10px; margin-top: 5px; opacity: 0.7;">Starting ComfyUI...</button>
+                                    `;
+                                } else if (isStopping) {
+                                    controls.innerHTML = `
+                                        <button disabled class="onboarding-btn" style="width: 100%; font-size: 0.85rem; padding: 10px; margin-top: 5px; opacity: 0.7;">Stopping ComfyUI...</button>
                                     `;
                                 } else {
                                     controls.innerHTML = `
@@ -6006,8 +6019,8 @@ async function updateComfyModalStatus(skipFetch = false) {
                             comfyBox.innerHTML = `
                                  <div class="option-header">
                                      <h4 style="margin: 0; font-size: 1.05rem; font-weight: 600;">ComfyUI (Portraits)</h4>
-                                     <span id="modal-comfy-status" class="status-badge ${comfyStatus.running === 'starting' ? 'status-starting' : (comfyStatus.running ? 'status-online' : 'status-offline')}">
-                                         ${comfyStatus.running === 'starting' ? 'Starting...' : (comfyStatus.running ? 'Running' : 'Offline')}
+                                     <span id="modal-comfy-status" class="status-badge ${comfyStatus.running === 'starting' || comfyStatus.running === 'stopping' ? 'status-starting' : (comfyStatus.running ? 'status-online' : 'status-offline')}">
+                                         ${comfyStatus.running === 'starting' ? 'Starting...' : (comfyStatus.running === 'stopping' ? 'Stopping...' : (comfyStatus.running ? 'Running' : 'Offline'))}
                                      </span>
                                  </div>
                                  <p class="option-desc" style="font-size: 0.8rem; margin: 8px 0 10px 0;">Generate companion portraits locally using ComfyUI.</p>
@@ -6018,9 +6031,11 @@ async function updateComfyModalStatus(skipFetch = false) {
                                          <button onclick="resolveWorkflowDependencies(this)" class="onboarding-btn" style="width: 100%; font-size: 0.85rem; padding: 10px; margin-top: 8px; margin-bottom: 5px;">Resolve Workflow Dependencies</button>
                                      ` : (comfyStatus.running === 'starting' ? `
                                          <button disabled class="onboarding-btn" style="width: 100%; font-size: 0.85rem; padding: 10px; margin-top: 5px; opacity: 0.7;">Starting ComfyUI...</button>
+                                     ` : (comfyStatus.running === 'stopping' ? `
+                                         <button disabled class="onboarding-btn" style="width: 100%; font-size: 0.85rem; padding: 10px; margin-top: 5px; opacity: 0.7;">Stopping ComfyUI...</button>
                                      ` : `
                                          <button onclick="startComfyUI(this)" class="onboarding-btn" style="width: 100%; font-size: 0.85rem; padding: 10px; margin-top: 5px;">Start ComfyUI</button>
-                                     `)}
+                                     `))}
                                  </div>
                                 <div id="comfy-resolution-progress" style="font-size: 0.72rem; color: var(--text-muted); line-height: 1.3;"></div>
                                 
@@ -12146,14 +12161,14 @@ let userProfiles = [];
             try {
                 const payload = JSON.parse(e.data);
                 const status = payload.status;
-                // Update LLM connection status
                 updateConnectionStatus({
                     remote_configured: status.remote_configured,
                     remote_model: status.remote_model,
                     remote_url: status.remote_url,
                     local_online: status.local_online,
                     local_installed: status.local_installed,
-                    temperature: connectionStatus.temperature
+                    temperature: status.temperature !== undefined ? status.temperature : connectionStatus.temperature,
+                    env_path: status.env_path
                 });
                 // Update ComfyUI status from SSE payload directly
                 comfyStatus.installed = status.comfy_installed;
