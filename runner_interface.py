@@ -474,7 +474,7 @@ class OsHistoryAdapter(LocalHistoryAdapter):
         # 2. Find user messages to identify turns
         user_msg_indices = [idx for idx, msg in enumerate(history) if msg.get('role') == 'user' and not msg.get('compacted')]
         
-        keep_turns = 1 if force else 2
+        keep_turns = 1 if force else 5
         if len(user_msg_indices) <= keep_turns:
             return
             
@@ -687,7 +687,7 @@ class OsHistoryAdapter(LocalHistoryAdapter):
 
         return openai_messages
 
-    def append_assistant_message(self, text: str, tool_calls_data: list, invocation_id: str):
+    def append_assistant_message(self, text: str, tool_calls_data: list, invocation_id: str, intermediate: bool = False):
         from utils.program_mood import extract_and_strip_mood
         _, mood_details = extract_and_strip_mood(text)
         winning_mode = self.runner_obj._winning_mode_cache.get(self.session_id, "")
@@ -705,7 +705,12 @@ class OsHistoryAdapter(LocalHistoryAdapter):
             return history[-1]
             
         is_img_msg = text and text.strip().startswith("![") and text.strip().endswith(")")
-        prefix = "img_" if is_img_msg else "prgm_"
+        if intermediate:
+            prefix = "itm_"
+        elif is_img_msg:
+            prefix = "img_"
+        else:
+            prefix = "prgm_"
         bot_msg = {
             'id': f"{prefix}{uuid.uuid4().hex}",
             'role': 'companion',
@@ -1195,9 +1200,6 @@ class BaseProgramRunner:
                     first_match_start = min(m.start() for m in matches)
                     text_before = bot_response_text[:first_match_start].strip()
                     
-                    if text_before:
-                        adapter.append_assistant_message(text_before, [], invocation_id)
-                        
                     results = []
                     for m_tool in matches:
                         if session_id in cancelled_sessions:
@@ -1224,7 +1226,7 @@ class BaseProgramRunner:
                         t_calls.extend(_build_tool_calls_pair(t_name, t_args, t_output, idx))
                     tool_calls.extend(t_calls)
                     
-                    adapter.append_assistant_message(text_before if text_before else "", t_calls, invocation_id)
+                    adapter.append_assistant_message(text_before if text_before else "", t_calls, invocation_id, intermediate=True)
                     adapter.append_tool_events(results, invocation_id)
                     continue
             else:
@@ -1753,7 +1755,7 @@ class OpenSourceRunner(BaseProgramRunner):
             if updated_any:
                 self._save_session_to_disk(session_id)
                 
-            _hidden_prefixes = ('tool_', 'port_', 'quest_', 'sys_')
+            _hidden_prefixes = ('tool_', 'port_', 'quest_', 'sys_', 'itm_')
             chat_history = []
             for msg in raw_history:
                 if msg.get('role') == 'system-memory':

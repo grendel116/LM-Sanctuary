@@ -323,9 +323,9 @@ def get_compiled_instructions() -> str:
     if narration_mode:
         global_formatting = (
             "\n\n# GLOBAL MESSAGE FORMATTING RULES (MANDATORY FOR STORY MODE)\n"
-            "1. PERSPECTIVE: Write exclusively as a third person storyteller. Describe the scene, environment, and all characters in the third person.\n"
-            "2. NARRATION: Narrate all actions, expressions, and environmental changes, including those of the companion and other secondary characters, inside *asterisks*.\n"
-            "3. DIALOGUE: Write all spoken dialogue in plain text. Format dialogue directly without quotation marks. Speak for background characters when they interact with the main characters.\n"
+            "1. PERSPECTIVE: Write exclusively in first person, present tense. Narrate your own actions, expressions, and gestures inside *asterisks* (e.g. *I step closer, my wings catching the light.*).\n"
+            "2. NARRATION: Narrate environmental changes and the actions of background characters inside *asterisks*. Describe the scene through your own eyes.\n"
+            "3. DIALOGUE: Write all spoken dialogue in plain text. Format dialogue directly without quotation marks. Speak for background characters when they interact.\n"
             "4. EMPHASIS: Use **bold** text for vocal emphasis. Reserve italics for narration.\n"
             "5. STYLE: Write as an engaging, descriptive novelist. Keep all dialogue authentic to each character's identity and relationships.\n"
             "6. NAMES: Always refer to the companion as '{{char}}' and the user as '{{user}}' in all dialogue and narration. Never output their actual names.\n"
