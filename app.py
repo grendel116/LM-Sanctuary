@@ -3256,6 +3256,8 @@ def local_llm_stop():
 def comfy_status():
     installed = comfy_manager.check_comfy_installed()
     running = comfy_manager.check_comfy_running()
+    if not running and getattr(comfy_manager, '_starting', False):
+        running = "starting"
     return jsonify({
         "installed": installed,
         "running": running,
