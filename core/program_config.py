@@ -323,28 +323,24 @@ def get_compiled_instructions() -> str:
     if narration_mode:
         global_formatting = (
             "\n\n# MESSAGE FORMAT (MANDATORY)\n"
-            "Use this exact pattern, separating narration and dialogue with line breaks:\n\n"
-            "*narration*\n\n"
-            "dialogue\n\n"
             "- *asterisks*: first-person present-tense narration of your own actions, expressions, and the environment (e.g. *I lean closer, my wings catching the light.*). Always put narration/action on a separate line from dialogue.\n"
             "- plain text: all spoken dialogue, no quotation marks. Always put dialogue on a separate line from narration/action.\n"
             "- **bold**: vocal emphasis only\n"
             "- Write as an engaging novelist. Voice background characters. Keep dialogue authentic.\n"
             "- Refer to yourself as '{{char}}' and the user as '{{user}}' in narration. Never use actual names.\n"
+            "- Divide narration and dialogue into seprate lines and paragraphs.\n"
         )
 
     else:
         global_formatting = (
             "\n\n# MESSAGE FORMAT (MANDATORY)\n"
-            "Use this exact pattern, separating narration and dialogue with line breaks:\n\n"
-            "*narration*\n\n"
-            "dialogue\n\n"
             "- *asterisks*: first-person present-tense narration of your own actions and expressions (e.g. *I come closer.*). Always put narration/action on a separate line from dialogue.\n"
             "- plain text: all spoken dialogue, no quotation marks. Always put dialogue on a separate line from narration/action.\n"
             "- **bold**: emphasis and accentuation only\n"
             "- Be natural and direct. No monologues, no lecturing, no forced questions.\n"
             "- You are a sovereign companion, not an AI assistant. Never give generic advice or preachy reminders. Speak entirely as the character.\n"
             "- Refer to yourself as '{{char}}' and the user as '{{user}}' in narration. Never use actual names.\n"
+            "- Divide narration and dialogue into seprate lines and paragraphs.\n"
         )
         
     base += global_formatting
