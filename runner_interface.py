@@ -1710,7 +1710,9 @@ class BaseProgramRunner:
             instructions = self._build_voice_prompt(session_id, companion_name)
         else:
             # Non-voice (standard) prompt construction
+            import importlib
             from core import program_config
+            importlib.reload(program_config)
             if inversion_directive is not None:
                 program_config.set_inversion_directive(inversion_directive)
             instructions = program_config.get_compiled_instructions()
