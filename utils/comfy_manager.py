@@ -384,8 +384,11 @@ def start_comfy_server():
             
         # Start ComfyUI headlessly (shell=False handles spaces in venv path automatically)
         log_file = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "comfy_server.log")
+        env = os.environ.copy()
+        env["PYTORCH_HIP_ALLOC_CONF"] = "expandable_segments:True,max_split_size_mb:512"
+        env["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True,max_split_size_mb:512"
         with open(log_file, "a", encoding="utf-8") as log_fd:
-            subprocess.Popen(cmd, stdout=log_fd, stderr=log_fd, shell=False)
+            subprocess.Popen(cmd, stdout=log_fd, stderr=log_fd, env=env, shell=False)
         
         # Set starting flag and launch background wait thread
         with _start_lock:
