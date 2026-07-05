@@ -1,9 +1,12 @@
 {
-  "primary_accent": "#C18BFE",
-  "primary_glow": "rgba(193, 139, 254, 0.08)",
+  "primary_accent": "#AF91FF",
+  "main_color": "#AF91FF",
+  "accent_color_a": "#c3acff",
+  "accent_color_b": "#AF91FF",
+  "primary_glow": "rgba(175, 145, 255, 0.08)",
   "companion_bubble": "rgba(31, 29, 38, 0.85)",
-  "send_btn_hover": "rgba(43, 36, 52, 0.75)",
-  "accent_green": "#d0a8fe",
-  "quote_blue": "#C18BFE",
+  "send_btn_hover": "rgba(41, 37, 52, 0.75)",
+  "accent_green": "#c3acff",
+  "quote_blue": "#AF91FF",
   "primary_btn_text": "#121214"
 }
