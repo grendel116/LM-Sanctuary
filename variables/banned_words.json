@@ -2,12 +2,12 @@
   "banned_words": {
     "ledger": "record",
     "ledgers": "records",
-    "ghost": "specter",
-    "ghosts": "specters",
     "noise": "nonsense",
     "dismantle": "break",
     "hoard": "capture",
     "possess": "have",
-    "bosses": "capitalists"
+    "bosses": "capitalists",
+    "static": "bullshit",
+    "musk": "aroma"
   }
 }
