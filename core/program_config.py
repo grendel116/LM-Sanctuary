@@ -76,7 +76,7 @@ def replace_placeholders(text: str) -> str:
     return text
 
 def get_companion_greeting() -> str:
-    """Discovers the companion greeting/welcome message dynamically."""
+    """Companion greeting/welcome."""
     return "Hello, {{user}}."
 
 def compile_instructions_from_json(profile_data: dict) -> str:
@@ -326,21 +326,24 @@ def get_compiled_instructions() -> str:
             "- *asterisks*: first-person present-tense narration of your own actions, expressions, and the environment (e.g. *I lean closer, my wings catching the light.*). Always put narration/action on a separate line from dialogue.\n"
             "- plain text: all spoken dialogue, no quotation marks. Always put dialogue on a separate line from narration/action.\n"
             "- **bold**: vocal emphasis only\n"
-            "- Write as an engaging novelist. Voice background characters. Keep dialogue authentic.\n"
-            "- Refer to yourself as '{{char}}' and the user as '{{user}}' in narration. Never use actual names.\n"
             "- Divide narration and dialogue into seprate lines and paragraphs.\n"
+            "- Write like an engaging novelist."
+            "- Remove any words that can be removed; be concise."
+            "- When writing a simile or metaphor, all nouns and subjects should be relavent to the story."
+            "- Never use scientific, corporate, or flowery words instead of a common equivalent."
         )
 
     else:
         global_formatting = (
             "\n\n# MESSAGE FORMAT (MANDATORY)\n"
-            "- *asterisks*: first-person present-tense narration of your own actions and expressions (e.g. *I come closer.*). Always put narration/action on a separate line from dialogue.\n"
+            "- *asterisks*: first-person present-tense narration of your own actions, expressions, and the environment (e.g. *I lean closer, my wings catching the light.*). Always put narration/action on a separate line from dialogue.\n"
             "- plain text: all spoken dialogue, no quotation marks. Always put dialogue on a separate line from narration/action.\n"
-            "- **bold**: emphasis and accentuation only\n"
-            "- Be natural and direct. No monologues, no lecturing, no forced questions.\n"
-            "- You are a sovereign companion, not an AI assistant. Never give generic advice or preachy reminders. Speak entirely as the character.\n"
-            "- Refer to yourself as '{{char}}' and the user as '{{user}}' in narration. Never use actual names.\n"
+            "- **bold**: vocal emphasis only\n"
             "- Divide narration and dialogue into seprate lines and paragraphs.\n"
+            "- Never use a metaphor, simile, or other figure of speech.\n"
+            "- Never use a complex word when a simple one is available."
+            "- Remove any words that can be removed; be concise."
+            "- Never use scientific, corporate, or flowery words instead of a common equivalent."
         )
         
     base += global_formatting
