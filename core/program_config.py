@@ -147,8 +147,7 @@ def compile_instructions_from_json(profile_data: dict) -> str:
     return replace_placeholders("\n\n".join(prompt_parts))
 
 def load_static_instructions() -> str:
-    """Reads the active program's JSON profile (e.g. sebile.json) and compiles it,
-    falling back to raw *.md files if they exist, or a default profile.
+    """Reads the active program's JSON profile (e.g. sebile.json) and compiles it.
     Also appends all modular skill instructions.
     """
     import json
@@ -158,29 +157,10 @@ def load_static_instructions() -> str:
     active_program = get_active_program()
     program_path = os.path.join(PROGRAMS_DIR, active_program)
     json_path = os.path.join(program_path, f"{active_program}.json")
-    old_json_path = os.path.join(program_path, "character_profile.json")
     
     instruction_content = ""
     loaded = False
     
-    for p in [json_path, old_json_path]:
-        if os.path.exists(p):
-            try:
-                with open(p, "r", encoding="utf-8") as f:
-                    profile_data = json.load(f)
-                instruction_content = compile_instructions_from_json(profile_data)
-                loaded = True
-                break
-            except Exception as e:
-                print(f"Error loading {p} for static instructions: {e}")
-                
-    if not loaded:
-        try:
-            sebile_md_path = _get_active_program_md_path()
-            with open(sebile_md_path, "r", encoding="utf-8") as f:
-                instruction_content = f.read()
-        except Exception:
-            instruction_content = f"# NAME: {active_program.title()}\n"
             
     # Append modular skill instructions if available
     narration_active = is_narration_mode()
@@ -323,27 +303,25 @@ def get_compiled_instructions() -> str:
     if narration_mode:
         global_formatting = (
             "\n\n# MESSAGE FORMAT (MANDATORY)\n"
-            "- *asterisks*: first-person present-tense narration of your own actions, expressions, and the environment (e.g. *I lean closer, my wings catching the light.*). Always put narration/action on a separate line from dialogue.\n"
-            "- plain text: all spoken dialogue, no quotation marks. Always put dialogue on a separate line from narration/action.\n"
-            "- **bold**: vocal emphasis only\n"
-            "- Divide narration and dialogue into seprate lines and paragraphs.\n"
-            "- Write like an engaging novelist."
-            "- Remove any words that can be removed; be concise."
-            "- When writing a simile or metaphor, all nouns and subjects should be relavent to the story."
-            "- Never use scientific, corporate, or flowery words instead of a common equivalent."
+            "- *Asterisks*: first-person present-tense narration of your own actions, expressions, and the environment (e.g. *I lean closer, my wings catching the light.*). Always put narration/action on a separate line from dialogue.\n"
+            "- Plain text: all spoken dialogue, no quotation marks. Always put dialogue on a separate line from narration/action.\n"
+            "- **Bold**: vocal emphasis only\n"
+            "- Separate narration and dialogue into seprate lines and paragraphs.\n"
+            "- Do not use contrasting parallels or stylistic symmetry"
+            "- Use short words, succinct sentances, and be concise."
+            "- Never use scientific, corporate, or flowery words."
         )
 
     else:
         global_formatting = (
             "\n\n# MESSAGE FORMAT (MANDATORY)\n"
-            "- *asterisks*: first-person present-tense narration of your own actions, expressions, and the environment (e.g. *I lean closer, my wings catching the light.*). Always put narration/action on a separate line from dialogue.\n"
-            "- plain text: all spoken dialogue, no quotation marks. Always put dialogue on a separate line from narration/action.\n"
-            "- **bold**: vocal emphasis only\n"
-            "- Divide narration and dialogue into seprate lines and paragraphs.\n"
-            "- Never use a metaphor, simile, or other figure of speech.\n"
-            "- Never use a complex word when a simple one is available."
-            "- Remove any words that can be removed; be concise."
-            "- Never use scientific, corporate, or flowery words instead of a common equivalent."
+            "- *Asterisks*: first-person present-tense narration of your own actions, expressions, and the environment (e.g. *I lean closer, my wings catching the light.*). Always put narration/action on a separate line from dialogue.\n"
+            "- Plain text: all spoken dialogue, no quotation marks. Always put dialogue on a separate line from narration/action.\n"
+            "- **Bold**: vocal emphasis only\n"
+            "- Separate narration and dialogue into seprate lines and paragraphs.\n"
+            "- Do not use contrasting parallels or stylistic symmetry"
+            "- Use short words, succinct sentances, and be concise."
+            "- Write like an engaging novelist."
         )
         
     base += global_formatting
