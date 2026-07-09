@@ -157,10 +157,29 @@ def load_static_instructions() -> str:
     active_program = get_active_program()
     program_path = os.path.join(PROGRAMS_DIR, active_program)
     json_path = os.path.join(program_path, f"{active_program}.json")
+    old_json_path = os.path.join(program_path, "character_profile.json")
     
     instruction_content = ""
     loaded = False
     
+    for p in [json_path, old_json_path]:
+        if os.path.exists(p):
+            try:
+                with open(p, "r", encoding="utf-8") as f:
+                    profile_data = json.load(f)
+                instruction_content = compile_instructions_from_json(profile_data)
+                loaded = True
+                break
+            except Exception as e:
+                print(f"Error loading {p} for static instructions: {e}")
+                
+    if not loaded:
+        try:
+            sebile_md_path = _get_active_program_md_path()
+            with open(sebile_md_path, "r", encoding="utf-8") as f:
+                instruction_content = f.read()
+        except Exception:
+            instruction_content = f"# NAME: {active_program.title()}\n"
             
     # Append modular skill instructions if available
     narration_active = is_narration_mode()
@@ -320,7 +339,7 @@ def get_compiled_instructions() -> str:
             "- **Bold**: vocal emphasis only\n"
             "- Separate narration and dialogue into seprate lines and paragraphs.\n"
             "- Do not use contrasting parallels or stylistic symmetry"
-            "- Use short words, succinct sentances, and be concise."
+            "- Use short words, succinct sentances, and be descriptive."
             "- Write like an engaging novelist."
         )
         
