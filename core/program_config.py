@@ -327,8 +327,8 @@ def get_compiled_instructions() -> str:
             "- **Bold**: vocal emphasis only\n"
             "- Separate narration and dialogue into seprate lines and paragraphs.\n"
             "- Do not use contrasting parallels or stylistic symmetry"
-            "- Use short words, succinct sentances, and be concise."
-            "- Never use scientific, corporate, or flowery words."
+            "- Use short words, succinct sentances, and be descriptive."
+            "- Write like an engaging novelist, with multiple paragraphs."
         )
 
     else:
@@ -339,8 +339,8 @@ def get_compiled_instructions() -> str:
             "- **Bold**: vocal emphasis only\n"
             "- Separate narration and dialogue into seprate lines and paragraphs.\n"
             "- Do not use contrasting parallels or stylistic symmetry"
-            "- Use short words, succinct sentances, and be descriptive."
-            "- Write like an engaging novelist."
+            "- Use short words, succinct sentances, and be concise."
+            "- Never use scientific, corporate, or flowery words."
         )
         
     base += global_formatting
