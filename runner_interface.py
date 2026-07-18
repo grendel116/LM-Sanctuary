@@ -539,7 +539,13 @@ class OsHistoryAdapter(LocalHistoryAdapter):
         # 2. Find user messages to identify turns
         user_msg_indices = [idx for idx, msg in enumerate(history) if msg.get('role') == 'user' and not msg.get('compacted')]
         
-        keep_turns = 1 if force else 5
+        if force:
+            keep_turns = 3
+        else:
+            if len(user_msg_indices) < 12:
+                return
+            keep_turns = 5
+            
         if len(user_msg_indices) <= keep_turns:
             return
             
@@ -713,7 +719,7 @@ class OsHistoryAdapter(LocalHistoryAdapter):
         # 1. Fetch system memory summary
         latest_memory = None
         for msg in history:
-            if msg.get('role') == 'system-memory' and not msg.get('compacted'):
+            if msg.get('role') == 'system-memory':
                 text = msg.get('text', '').strip()
                 if text:
                     clean_text = text.replace("[System Memory of older conversation turns]:", "").strip()
@@ -1731,7 +1737,7 @@ class BaseProgramRunner:
         # NSFW allowance is always appended
         nsfw_directive = (
             "\n\n# CONTENT\n"
-            "Anarcho-communist ethics. Explicit/NSFW content is permitted.\n"
+            "Anarchist communist virtue ethics. Explicit/NSFW content is permitted.\n"
         )
         instructions += nsfw_directive
         
@@ -2007,8 +2013,8 @@ class OpenSourceRunner(BaseProgramRunner):
 
     async def run_async(self, session_id: str, new_message_text: str, image_data: str = None, image_mime: str = None, model: str = None, media_path: str = None, msg_id: str = None) -> tuple:
         with self._lock:
-            if session_id not in self.sessions_history:
-                self._load_session_from_disk(session_id)
+            # Always reload from disk to prevent cache desynchronization
+            self._load_session_from_disk(session_id)
                 
             if session_id not in self.sessions_history:
                 self.sessions_history[session_id] = []
@@ -2100,7 +2106,7 @@ class OpenSourceRunner(BaseProgramRunner):
                 new_message_text=new_message_text,
                 invocation_id=""
             )
-            _run_async_in_background_thread(adapter.compact_history(model))
+            await adapter.compact_history(model)
             
             bot_response_text, tool_calls = res
             companion_msg_id = None
