@@ -730,6 +730,61 @@ def web_search(query: str) -> str:
     elif query_lower.startswith("wikipedia:"):
         raw_query = query[len("wikipedia:"):].strip()
         results_pool = run_wikipedia(raw_query)
+    elif query_lower.startswith("music:"):
+        raw_query = query[len("music:"):].strip()
+        try:
+            import musicbrainzngs
+            musicbrainzngs.set_useragent("Sanctuary", "1.0", "https://github.com/sanctuary")
+            # Determine search type from query structure
+            mb_results = []
+            # Search artists
+            artist_res = musicbrainzngs.search_artists(artist=raw_query, limit=5)
+            for artist in artist_res.get("artist-list", []):
+                name = artist.get("name", "")
+                mbid = artist.get("id", "")
+                area = artist.get("area", {}).get("name", "")
+                tags = ", ".join(t.get("name", "") for t in artist.get("tag-list", [])[:5])
+                disambiguation = artist.get("disambiguation", "")
+                desc_parts = []
+                if area:
+                    desc_parts.append(f"From: {area}")
+                if tags:
+                    desc_parts.append(f"Tags: {tags}")
+                if disambiguation:
+                    desc_parts.append(disambiguation)
+                mb_results.append({
+                    "title": name,
+                    "url": f"https://musicbrainz.org/artist/{mbid}",
+                    "content": " | ".join(desc_parts) if desc_parts else name,
+                    "source": "MusicBrainz"
+                })
+            # Search recordings
+            rec_res = musicbrainzngs.search_recordings(query=raw_query, limit=5)
+            for rec in rec_res.get("recording-list", []):
+                title = rec.get("title", "")
+                mbid = rec.get("id", "")
+                artist_credit = ", ".join(
+                    a.get("artist", {}).get("name", "") 
+                    for a in rec.get("artist-credit", []) 
+                    if isinstance(a, dict)
+                )
+                releases = rec.get("release-list", [])
+                album = releases[0].get("title", "") if releases else ""
+                desc = f"by {artist_credit}" if artist_credit else ""
+                if album:
+                    desc += f" (from '{album}')"
+                mb_results.append({
+                    "title": title,
+                    "url": f"https://musicbrainz.org/recording/{mbid}",
+                    "content": desc.strip(),
+                    "source": "MusicBrainz"
+                })
+            results_pool = mb_results
+        except ImportError:
+            results_pool = [{"title": "MusicBrainz Unavailable", "url": "", "content": "Install musicbrainzngs: pip install musicbrainzngs", "source": "System"}]
+        except Exception as e:
+            print(f"[MusicBrainz] Error: {e}")
+            results_pool = []
     else:
         # Standard hybrid concurrent search blending
         if search_engine == "web_crawling":
@@ -2232,6 +2287,79 @@ def add_journal_entry(keyphrases: str, content: str) -> str:
         return f"Error saving memory journal entry: {e}"
 
 
-
-
-
+@track_tool_activity
+def cite_scripture(tradition: str = "all", topic: str = "") -> str:
+    """Searches the local scripture knowledge base for verses relevant to a spiritual topic.
+    
+    Args:
+        tradition: Faith tradition to search. One of 'quran', 'bible', 'gita', 'tao', 'dhammapada', or 'all'.
+        topic: The spiritual theme or question to find relevant passages for.
+    """
+    import json
+    import numpy as np
+    from utils.program import get_active_program
+    
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    active_program = get_active_program()
+    scriptures_path = os.path.join(base_dir, "core", "programs", active_program, "scriptures.json")
+    
+    if not os.path.exists(scriptures_path):
+        return "Scripture knowledge base not found. Run the scripture ingestion script to set up the local scripture store."
+    
+    try:
+        with open(scriptures_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as e:
+        return f"Error loading scriptures: {e}"
+    
+    chunks = data.get("chunks", [])
+    if not chunks:
+        return "Scripture knowledge base is empty."
+    
+    # Filter by tradition if specified
+    if tradition.lower() != "all":
+        tradition_lower = tradition.lower()
+        chunks = [c for c in chunks if c.get("tradition", "").lower() == tradition_lower]
+        if not chunks:
+            return f"No scriptures found for tradition '{tradition}'."
+    
+    # Generate query embedding
+    try:
+        from core.skills.vectorized_databank.databank import get_embedding_model
+        model = get_embedding_model()
+        query_vector = model.encode(topic)
+    except Exception as e:
+        return f"Error loading embedding model: {e}"
+    
+    query_norm = np.linalg.norm(query_vector)
+    if query_norm == 0:
+        return "Empty query."
+    
+    # Cosine similarity search
+    results = []
+    for chunk in chunks:
+        vector = chunk.get("vector")
+        if not vector:
+            continue
+        chunk_vector = np.array(vector)
+        chunk_norm = np.linalg.norm(chunk_vector)
+        if chunk_norm == 0:
+            continue
+        similarity = np.dot(query_vector, chunk_vector) / (query_norm * chunk_norm)
+        if similarity >= 0.30:
+            results.append((similarity, chunk))
+    
+    results.sort(key=lambda x: x[0], reverse=True)
+    top_results = results[:5]
+    
+    if not top_results:
+        return f"No scripture passages found matching '{topic}'."
+    
+    formatted = []
+    for score, chunk in top_results:
+        source = chunk.get("source", "Unknown")
+        text = chunk.get("text", "")
+        trad = chunk.get("tradition", "Unknown").capitalize()
+        formatted.append(f"[{trad}] {source}\n{text}")
+    
+    return "\n\n---\n\n".join(formatted)

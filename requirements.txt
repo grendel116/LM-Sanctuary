@@ -13,3 +13,4 @@ psutil
 markdownify
 pypdf
 ddgs
+musicbrainzngs
