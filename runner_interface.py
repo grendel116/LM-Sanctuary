@@ -1335,7 +1335,8 @@ class BaseProgramRunner:
                         clean_response = bot_response_text
                         for m in matches:
                             clean_response = clean_response.replace(m.group(0), "")
-                        clean_response = re.sub(r'\s+', ' ', clean_response).strip()
+                        clean_response = re.sub(r'[ \t]+', ' ', clean_response)
+                        clean_response = re.sub(r'\n{3,}', '\n\n', clean_response).strip()
                         
                         results = []
                         for m_tool in matches:
