@@ -381,7 +381,7 @@
         .message {
             max-width: 70%;
             min-width: 0;
-            width: 100%;
+            width: fit-content;
             box-sizing: border-box;
             padding: 16px 20px;
             border-radius: 20px;
@@ -430,13 +430,14 @@
             display: flex;
             flex-direction: column;
             gap: 8px;
-            width: 100%;
+            width: fit-content;
             max-width: 70%;
             min-width: 0;
             box-sizing: border-box;
         }
         .message-bubbles-container .message {
             max-width: 100%;
+            width: fit-content;
         }
         .message-row.user-row .message-bubbles-container {
             align-items: flex-end;
@@ -2065,12 +2066,14 @@
                 box-sizing: border-box;
             }
             .message {
-                max-width: 100%;
+                max-width: 85%;
+                width: fit-content;
                 min-width: 0;
                 box-sizing: border-box;
             }
             .message-bubbles-container {
                 max-width: 85%;
+                width: fit-content;
                 min-width: 0;
                 box-sizing: border-box;
             }
@@ -2079,11 +2082,13 @@
             }
             .message-row.companion-row .message-bubbles-container {
                 max-width: calc(100% - 60px);
+                width: fit-content;
                 min-width: 0;
                 box-sizing: border-box;
             }
             .message-row.user-row .message-bubbles-container {
                 max-width: 85%;
+                width: fit-content;
                 min-width: 0;
                 box-sizing: border-box;
             }
