@@ -358,6 +358,9 @@
         .message-row {
             display: flex;
             width: 100%;
+            max-width: 100%;
+            min-width: 0;
+            box-sizing: border-box;
             animation: fadeIn 0.3s cubic-bezier(0.16, 1, 0.3, 1) forwards;
         }
 
@@ -378,6 +381,8 @@
         .message {
             max-width: 70%;
             min-width: 0;
+            width: 100%;
+            box-sizing: border-box;
             padding: 16px 20px;
             border-radius: 20px;
             font-size: 0.95rem;
@@ -388,6 +393,8 @@
             flex-direction: column;
             gap: 12px;
             position: relative;
+            overflow-wrap: break-word;
+            word-break: break-word;
         }
 
         .message p {
@@ -426,6 +433,7 @@
             width: 100%;
             max-width: 70%;
             min-width: 0;
+            box-sizing: border-box;
         }
         .message-bubbles-container .message {
             max-width: 100%;
@@ -836,8 +844,11 @@
         /* Markdown styling inside message */
         .message-text {
             word-break: break-word;
+            overflow-wrap: break-word;
             min-width: 0;
             width: 100%;
+            max-width: 100%;
+            box-sizing: border-box;
         }
         .message-text em {
             color: var(--accent-green);
@@ -870,6 +881,8 @@
             font-family: 'Courier New', Courier, monospace;
             font-size: 0.9em;
             color: #85b9eb;
+            word-break: break-word;
+            overflow-wrap: break-word;
         }
         .message-text pre {
             margin: 12px 0;
@@ -879,6 +892,7 @@
             width: 100%;
             box-sizing: border-box;
             border: 1px solid var(--border-color);
+            white-space: pre;
         }
         .message-text pre code {
             background: #0d0f12 !important;
@@ -886,10 +900,14 @@
             display: block;
             overflow-x: auto;
             max-width: 100%;
+            width: 100%;
             box-sizing: border-box;
             font-size: 0.85rem;
             line-height: 1.5;
             color: #f3effa;
+            white-space: pre;
+            word-break: normal;
+            overflow-wrap: normal;
         }
         .message-text ul, .message-text ol {
             margin: 0 0 12px 0;
@@ -2037,18 +2055,54 @@
             #chat-container {
                 padding: 15px;
                 overflow-x: hidden;
+                width: 100%;
+                max-width: 100%;
+                box-sizing: border-box;
+            }
+            .message-row {
+                max-width: 100%;
+                min-width: 0;
+                box-sizing: border-box;
             }
             .message {
-                max-width: 85%;
+                max-width: 100%;
+                min-width: 0;
+                box-sizing: border-box;
             }
             .message-bubbles-container {
                 max-width: 85%;
+                min-width: 0;
+                box-sizing: border-box;
             }
             .message-row.companion-row .avatar-container {
                 order: 1;
             }
             .message-row.companion-row .message-bubbles-container {
                 max-width: calc(100% - 60px);
+                min-width: 0;
+                box-sizing: border-box;
+            }
+            .message-row.user-row .message-bubbles-container {
+                max-width: 85%;
+                min-width: 0;
+                box-sizing: border-box;
+            }
+            .message-text {
+                min-width: 0;
+                max-width: 100%;
+                box-sizing: border-box;
+            }
+            .message-text pre {
+                max-width: 100%;
+                width: 100%;
+                box-sizing: border-box;
+            }
+            .message-text pre code {
+                max-width: 100%;
+                width: 100%;
+                box-sizing: border-box;
+                font-size: 0.8rem;
+                padding: 12px;
             }
             #input-area {
                 padding: 12px 16px;
