@@ -1901,13 +1901,20 @@
 
         /* Edit inline textarea and buttons */
         .message-bubbles-container:has(.editing),
-        .message-bubbles-container.editing-container {
-            width: 100%;
+        .message-bubbles-container.editing-container,
+        .message-row.user-row .message-bubbles-container:has(.editing),
+        .message-row.user-row .message-bubbles-container.editing-container,
+        .message-row.companion-row .message-bubbles-container:has(.editing),
+        .message-row.companion-row .message-bubbles-container.editing-container {
+            width: 100% !important;
+            max-width: 100% !important;
+            flex: 1 !important;
         }
 
-        .message.editing {
-            width: 100%;
-            max-width: 100%;
+        .message.editing,
+        .message-bubbles-container .message.editing {
+            width: 100% !important;
+            max-width: 100% !important;
             box-sizing: border-box;
         }
         .edit-textarea {
@@ -2096,6 +2103,21 @@
                 width: fit-content;
                 min-width: 0;
                 box-sizing: border-box;
+            }
+            .message-bubbles-container:has(.editing),
+            .message-bubbles-container.editing-container,
+            .message-row.user-row .message-bubbles-container:has(.editing),
+            .message-row.user-row .message-bubbles-container.editing-container,
+            .message-row.companion-row .message-bubbles-container:has(.editing),
+            .message-row.companion-row .message-bubbles-container.editing-container {
+                width: 100% !important;
+                max-width: 100% !important;
+                flex: 1 !important;
+            }
+            .message.editing,
+            .message-bubbles-container .message.editing {
+                width: 100% !important;
+                max-width: 100% !important;
             }
             .message-text {
                 min-width: 0;
