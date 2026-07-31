@@ -373,9 +373,7 @@ def serve_sparkle_mp3():
 def serve_image(filename):
     active_program = os.getenv("ACTIVE_PROGRAM", "sebile")
     program_dir = os.path.join('core', 'programs', active_program)
-    response = send_from_directory(program_dir, filename)
-    response.headers['Access-Control-Allow-Origin'] = '*'
-    return response
+    return send_from_directory(program_dir, filename)
 
 @app.route('/api/get_image_prompt', methods=['GET'])
 @requires_auth
