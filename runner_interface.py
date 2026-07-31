@@ -307,7 +307,6 @@ _STORY_MODE_DIRECTIVE_PROMPT = (
     "1. `[generate_local_image(prompt=\"...\")]` - Generate a scene of yourself. Formulate the prompt using a comma-separated list of short descriptive tags (e.g. '1girl, dark hair, blue eyes, smiling, sitting in cafe'). (MUST be the ONLY text in your response)\n"
     "2. `[generate_imagen(prompt=\"...\", aspect_ratio=\"...\")]` - Generate landscapes or objects. Formulate the prompt using a comma-separated list of short descriptive tags.\n"
     "3. `[apply_comfy_workflow(workflow_path=\"...\", parameters={...}, save_path=\"...\")]` - Apply custom ComfyUI workflow.\n"
-    "4. `[add_journal_entry(keyphrases=\"...\", content=\"...\")]` - Save a memory journal entry of specific details for future recall. Keyphrases is a list of keywords separated by commas.\n"
     "Rules:\n"
     "- Output exactly one tool call tag per turn when needed.\n"
     "- Call image generation tools sparingly.\n"
