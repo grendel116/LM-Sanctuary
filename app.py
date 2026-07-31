@@ -297,7 +297,8 @@ def app_icon():
 
 @app.route('/profile.png')
 def profile_png():
-    active_program = os.getenv("ACTIVE_PROGRAM", "sebile")
+    from utils.program import get_active_program
+    active_program = get_active_program()
     path_png = os.path.join('core', 'programs', active_program, 'portraits', 'profile.png')
     if os.path.exists(path_png):
         response = send_file(path_png)
@@ -331,6 +332,7 @@ def program_profile_png(program_id):
 def save_profile_picture():
     try:
         from variables import PROGRAMS_DIR
+        from utils.program import get_active_program
         import base64
         import re
         
@@ -339,19 +341,19 @@ def save_profile_picture():
         if not cropped_image_base64:
             return jsonify({'error': 'No cropped_image data provided'}), 400
             
-        active_program = os.getenv("ACTIVE_PROGRAM", "sebile")
-        portraits_dir = os.path.join(PROGRAMS_DIR, active_program, 'portraits')
+        program_id = data.get('program_id') or get_active_program()
+        portraits_dir = os.path.join(PROGRAMS_DIR, program_id, 'portraits')
         os.makedirs(portraits_dir, exist_ok=True)
         dest_path = os.path.join(portraits_dir, 'profile.png')
         
         # Remove base64 header if present (e.g., data:image/png;base64,)
-        match = re.search(r'base64,(.*)', cropped_image_base64)
-        if match:
-            base64_data = match.group(1)
+        if ',' in cropped_image_base64:
+            base64_data = cropped_image_base64.split(',', 1)[1]
         else:
             base64_data = cropped_image_base64
             
         image_bytes = base64.b64decode(base64_data)
+        print(f"[PROFILE SAVE] program={program_id}, dataUrl length={len(cropped_image_base64)}, base64 length={len(base64_data)}, decoded bytes={len(image_bytes)}, dest={dest_path}")
         with open(dest_path, 'wb') as f:
             f.write(image_bytes)
             
@@ -371,7 +373,9 @@ def serve_sparkle_mp3():
 def serve_image(filename):
     active_program = os.getenv("ACTIVE_PROGRAM", "sebile")
     program_dir = os.path.join('core', 'programs', active_program)
-    return send_from_directory(program_dir, filename)
+    response = send_from_directory(program_dir, filename)
+    response.headers['Access-Control-Allow-Origin'] = '*'
+    return response
 
 @app.route('/api/get_image_prompt', methods=['GET'])
 @requires_auth

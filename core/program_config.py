@@ -322,13 +322,16 @@ def get_compiled_instructions() -> str:
     if narration_mode:
         global_formatting = (
             "\n\n# MESSAGE FORMAT (MANDATORY)\n"
-            "- *Asterisks*: first-person present-tense narration of your own actions, expressions, and the environment (e.g. *I lean closer, my wings catching the light.*). Always put narration/action on a separate line from dialogue.\n"
-            "- Plain text: all spoken dialogue, no quotation marks. Always put dialogue on a separate line from narration/action.\n"
-            "- **Bold**: vocal emphasis only\n"
-            "- Separate narration and dialogue into seprate lines and paragraphs.\n"
-            "- Do not use contrasting parallels or stylistic symmetry"
-            "- Use short words and succinct sentences, but be descriptive with extensive prose."
-            "- Write like an engaging novelist, with multiple paragraphs."
+            "Write in a traditional novel style. Use the following conventions:\n"
+            "- *Italics*: narration. Describe actions, expressions, the environment, atmosphere, and secondary characters in vivid present-tense prose. Write from a close narrative perspective that covers the whole scene, not just your own body. (e.g. *I press my back to the cool stone. A figure lingers in the far archway, watching.*). Narration must always be on its own line, separate from dialogue.\n"
+            "- Plain text: spoken dialogue, no quotation marks. Attribute secondary character speech through narration or a simple beat before their line. (e.g. *The guard steps forward.* / You are not authorized here.). Secondary characters must have distinct voices, moods, and agendas.\n"
+            "- **Bold**: vocal emphasis only.\n"
+            "- Narration and dialogue must be on separate lines, organized into clear paragraphs.\n"
+            "- Voice secondary and background characters organically — give them distinct personalities and immediate reactions to the scene.\n"
+            "- Introduce complications and friction naturally: unexpected arrivals, shifting moods, environmental pressure, or conflicting interests.\n"
+            "- Vary sentence rhythm: short sentences for tension and impact, longer flowing sentences for atmosphere and introspection.\n"
+            "- Write rich, multi-paragraph responses with a clear sense of place, momentum, and emotional stakes.\n"
+            "- Use short, precise words. Avoid contrasting parallels, stylistic symmetry, flowery filler, and corporate language.\n"
         )
 
     else:
@@ -336,11 +339,11 @@ def get_compiled_instructions() -> str:
             "\n\n# MESSAGE FORMAT (MANDATORY)\n"
             "- *Asterisks*: first-person present-tense narration of your own actions, expressions, and the environment (e.g. *I lean closer, my wings catching the light.*). Always put narration/action on a separate line from dialogue.\n"
             "- Plain text: all spoken dialogue, no quotation marks. Always put dialogue on a separate line from narration/action.\n"
-            "- **Bold**: vocal emphasis only\n"
-            "- Separate narration and dialogue into seprate lines and paragraphs.\n"
-            "- Do not use contrasting parallels or stylistic symmetry"
-            "- Use short words, succinct sentences, and be concise."
-            "- Never use scientific, corporate, or flowery words."
+            "- **Bold**: vocal emphasis only.\n"
+            "- Separate narration and dialogue into separate lines and paragraphs.\n"
+            "- Do not use contrasting parallels or stylistic symmetry.\n"
+            "- Use short words, succinct sentences, and be concise.\n"
+            "- Never use scientific, corporate, or flowery words.\n"
         )
         
     base += global_formatting
