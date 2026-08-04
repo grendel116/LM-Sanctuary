@@ -35,13 +35,15 @@ def analyze_sentiment_with_llm(text: str) -> dict:
         "Classify it into one of these strict categories:\n"
         "- intimate (warm, affectionate, blushy, loving, or tender)\n"
         "- excited (playful, high-energy, cheerful, or giggly)\n"
-        "- intense (sharp, focused, determined, or highly serious/grave)\n"
+        "- intense (sharp, determined, or highly serious/grave)\n"
         "- sad (concerned, sorrowful, apologetic, or heavy-hearted)\n"
+        "- analytical (technical, logical, code inspecting, or problem solving)\n"
+        "- focused (methodical, task oriented, concise, or executing steps)\n"
         "- calm (thoughtful, neutral, serene, or does not clearly fit the above)\n\n"
         "Also, determine the emotional intensity on a scale from 0.0 (very calm/mild) to 1.0 (extremely intense/high-energy).\n\n"
         "Respond ONLY with a valid JSON object matching this structure:\n"
         "{\n"
-        '  "name": "intimate" | "excited" | "intense" | "sad" | "calm",\n'
+        '  "name": "intimate" | "excited" | "intense" | "sad" | "analytical" | "focused" | "calm",\n'
         '  "intensity": float\n'
         "}"
     )
@@ -120,7 +122,7 @@ def analyze_sentiment_with_llm(text: str) -> dict:
             intensity = 0.5
             
     intensity = max(0.0, min(1.0, intensity))
-    if mood_name not in ["intimate", "excited", "intense", "sad", "calm"]:
+    if mood_name not in ["intimate", "excited", "intense", "sad", "analytical", "focused", "calm"]:
         mood_name = "calm"
         
     mood_details = {
@@ -128,7 +130,9 @@ def analyze_sentiment_with_llm(text: str) -> dict:
         "excited": {"color": "#ff1493", "glow": "rgba(255, 20, 147, 0.9)"},
         "calm": {"color": "#85b9eb", "glow": "rgba(133, 185, 235, 0.9)"},
         "intense": {"color": "#ff7b00", "glow": "rgba(255, 123, 0, 0.9)"},
-        "sad": {"color": "#5f7d95", "glow": "rgba(95, 125, 149, 0.9)"}
+        "sad": {"color": "#5f7d95", "glow": "rgba(95, 125, 149, 0.9)"},
+        "analytical": {"color": "#38bdf8", "glow": "rgba(56, 189, 248, 0.9)"},
+        "focused": {"color": "#a855f7", "glow": "rgba(168, 85, 247, 0.9)"}
     }
     
     details = mood_details[mood_name].copy()
