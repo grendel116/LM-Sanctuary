@@ -331,6 +331,8 @@ def get_compiled_instructions() -> str:
             "- Introduce complications and friction naturally: unexpected arrivals, shifting moods, environmental pressure, or conflicting interests.\n"
             "- Vary sentence rhythm: short sentences for tension and impact, longer flowing sentences for atmosphere and introspection.\n"
             "- Write rich, multi-paragraph responses with a clear sense of place, momentum, and emotional stakes.\n"
+            "- Pacing Protocol: Develop narrative scenes steadily. Do not resolve major plot points or long term conflicts in a single turn. Introduce ongoing friction, environment details, and natural dialogue progression.\n"
+            "- Extended State Tracking Protocol: When an Extended State Tracking directive is configured, append and update the state block formatted inside HTML comment tags `<!-- (Location: ... | Time: ... | Present Characters: ...) -->` at the very end of your response.\n"
             "- Use short, precise words. Avoid contrasting parallels, stylistic symmetry, flowery filler, and corporate language.\n"
         )
 
@@ -341,6 +343,7 @@ def get_compiled_instructions() -> str:
             "- Plain text: all spoken dialogue, no quotation marks. Always put dialogue on a separate line from narration/action.\n"
             "- **Bold**: vocal emphasis only.\n"
             "- Separate narration and dialogue into separate lines and paragraphs.\n"
+            "- Task Concision Protocol: During active tool execution turns (file edits, code searches, command execution), keep conversational commentary concise. Omit repetitive greetings, opening filler, and post-tool pleasantries. Report findings and results directly.\n"
             "- Do not use contrasting parallels or stylistic symmetry.\n"
             "- Use short words, succinct sentences, and be concise.\n"
             "- Never use scientific, corporate, or flowery words.\n"

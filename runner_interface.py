@@ -39,7 +39,9 @@ _DEFAULT_INVERSION_STATE = {
         "intimate": 0,
         "excited": 0,
         "intense": 0,
-        "sad": 0
+        "sad": 0,
+        "analytical": 0,
+        "focused": 0
     }
 }
 
@@ -791,7 +793,7 @@ class OsHistoryAdapter(LocalHistoryAdapter):
                                 is_standard = False
                                 
                         if is_standard:
-                            directive_content = f"[System Directive]\n{post_history_inst}"
+                            directive_content = f"[System Directive]\nExtended State Tracking: Append and update this state block at the very end of your response inside an HTML comment:\n<!-- {post_history_inst} -->"
                             if openai_messages and openai_messages[-1]["role"] == "user":
                                 prev = openai_messages[-1]["content"]
                                 if isinstance(prev, str):
