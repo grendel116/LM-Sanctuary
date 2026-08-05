@@ -58,7 +58,7 @@ def delete_journal_entry(entry_id: str, program_id: str = None) -> bool:
     return False
 
 def match_journals(user_message: str, program_id: str = None) -> list:
-    """Finds top 3 matching journal entries based on keywords in user message."""
+    """Finds top 3 matching journal entries using keyword matching with vector similarity fallback."""
     if not user_message:
         return []
         
@@ -66,6 +66,7 @@ def match_journals(user_message: str, program_id: str = None) -> list:
     if not entries:
         return []
         
+    # Fast path: keyword matching
     msg_clean = user_message.lower()
     matched = []
     
@@ -94,6 +95,35 @@ def match_journals(user_message: str, program_id: str = None) -> list:
     # Sort by score descending, then by timestamp descending
     matched.sort(key=lambda x: (x[0], x[1].get("timestamp", 0)), reverse=True)
     
-    # Return top 3 entries
-    return [item[1] for item in matched[:3]]
+    if matched:
+        return [item[1] for item in matched[:3]]
+    
+    # Semantic fallback: vector similarity when keyword matching finds nothing
+    try:
+        import numpy as np
+        from core.skills.vectorized_databank.databank import get_embedding_model
+        model = get_embedding_model()
+        query_vec = model.encode(user_message)
+        query_norm = np.linalg.norm(query_vec)
+        if query_norm == 0:
+            return []
+        
+        semantic_matched = []
+        for entry in entries:
+            content = entry.get("content", "")
+            if not content:
+                continue
+            content_vec = model.encode(content)
+            content_norm = np.linalg.norm(content_vec)
+            if content_norm == 0:
+                continue
+            similarity = float(np.dot(query_vec, content_vec) / (query_norm * content_norm))
+            if similarity >= 0.35:
+                semantic_matched.append((similarity, entry))
+        
+        semantic_matched.sort(key=lambda x: x[0], reverse=True)
+        return [item[1] for item in semantic_matched[:3]]
+    except Exception as e:
+        print(f"[Journals] Semantic fallback error: {e}")
+        return []
 
