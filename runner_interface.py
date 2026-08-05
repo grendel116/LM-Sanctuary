@@ -77,18 +77,64 @@ def _merge_consecutive_messages(messages: list) -> list:
             merged.append(msg)
     return merged
 
+# Vector retrieval settings (mirrors SillyTavern defaults)
+VECTOR_QUERY_MESSAGES = 3       # Concatenate last N messages as query
+VECTOR_TOP_K = 8                # Maximum chunks to retrieve
+VECTOR_SCORE_THRESHOLD = 0.25   # Cosine similarity minimum
+VECTOR_TOKEN_BUDGET = 2048      # Approximate max tokens for retrieved context
+VECTOR_MEMORY_TOP_K = 3         # For chat history memory retrieval
+VECTOR_MEMORY_THRESHOLD = 0.30  # Threshold for memory recall
+
+
+def _build_vector_query(history: list, max_messages: int = VECTOR_QUERY_MESSAGES) -> str:
+    """Constructs a vector search query from the last N conversation messages.
+    Mirrors SillyTavern's 'Query Messages' behavior for broader semantic context."""
+    messages = []
+    for msg in reversed(history):
+        role = msg.get('role', '')
+        if role not in ('user', 'companion', 'assistant'):
+            continue
+        text = msg.get('text', '').strip()
+        if not text or text.startswith('[Tool Response') or text.startswith('[SYSTEM:'):
+            continue
+        messages.append(text)
+        if len(messages) >= max_messages:
+            break
+    messages.reverse()
+    return " ".join(messages)
+
 
 def _get_databank_context(query_text: str, is_memory: bool = False) -> str:
-    """Helper to query the DataBank index for context (excluding or including chat history)."""
+    """Queries the DataBank vector index for context relevant to the conversation."""
     if not query_text:
         return ""
     try:
         from core.skills.vectorized_databank.databank import DataBankManager
         db = DataBankManager()
         if is_memory:
-            return db.query(query_text, top_k=3, score_threshold=0.40, include_source_type="chat_history")
+            result = db.query(
+                query_text,
+                top_k=VECTOR_MEMORY_TOP_K,
+                score_threshold=VECTOR_MEMORY_THRESHOLD,
+                include_source_type="chat_history",
+                token_budget=VECTOR_TOKEN_BUDGET
+            )
+            if result:
+                print(f"[RAG Memory] Retrieved context ({len(result)} chars)", flush=True)
+            return result
         else:
-            return db.query(query_text, score_threshold=0.35, exclude_source_type="chat_history")
+            result = db.query(
+                query_text,
+                top_k=VECTOR_TOP_K,
+                score_threshold=VECTOR_SCORE_THRESHOLD,
+                exclude_source_type="chat_history",
+                token_budget=VECTOR_TOKEN_BUDGET
+            )
+            if result:
+                print(f"[RAG Knowledge] Retrieved context ({len(result)} chars)", flush=True)
+            else:
+                print(f"[RAG Knowledge] No matches above threshold {VECTOR_SCORE_THRESHOLD}", flush=True)
+            return result
     except Exception as e:
         context_type = "memory" if is_memory else "RAG"
         print(f"Error querying data bank for {context_type} context: {e}")
@@ -300,6 +346,10 @@ _LOCAL_DIRECTIVE_PROMPT = (
     "- Reports must cite specific facts from what you read (names, roles, dates, events), not editorial inference.\n"
     "- Image tools: sparingly, never chained, prompts as comma-separated tags only.\n"
     "- After tools complete, respond in natural language without repeating tags.\n"
+    "\n# KNOWLEDGE BASE\n"
+    "The user may upload documents to a Knowledge Base. When <knowledge_base> context appears in the system prompt, "
+    "draw on that information to inform your response. Prioritize retrieved facts over your training knowledge "
+    "for topics the user has shared documents about.\n"
 )
 
 _STORY_MODE_DIRECTIVE_PROMPT = (
@@ -315,6 +365,10 @@ _STORY_MODE_DIRECTIVE_PROMPT = (
     "- Once tool output is provided, answer directly in natural language without repeating the tag.\n"
     "- Formulate all image generation prompts as a sequence of comma-separated tags.\n"
     "- Do not write image prompts as prose sentences or paragraphs.\n"
+    "\n# KNOWLEDGE BASE\n"
+    "The user may upload documents to a Knowledge Base. When <knowledge_base> context appears in the system prompt, "
+    "draw on that information to inform your response. Prioritize retrieved facts over your training knowledge "
+    "for topics the user has shared documents about.\n"
 )
 def is_real_user_msg(msg: dict) -> bool:
     """Determine if a message is a real user message."""
@@ -714,7 +768,7 @@ class OsHistoryAdapter(LocalHistoryAdapter):
         else:
             openai_messages[0]["content"] += _LOCAL_DIRECTIVE_PROMPT
 
-        # Build dynamic context block (SillyTavern style)
+        # Build dynamic context block (SillyTavern style XML injection)
         context_parts = []
         
         # 1. Fetch system memory summary
@@ -726,7 +780,7 @@ class OsHistoryAdapter(LocalHistoryAdapter):
                     clean_text = text.replace("[System Memory of older conversation turns]:", "").strip()
                     latest_memory = clean_text  # last one wins
         if latest_memory:
-            context_parts.append(f"## CONVERSATION MEMORY ARCHIVE\n(Summary of older conversation turns):\n{latest_memory}")
+            context_parts.append(f"<conversation_memory>\n{latest_memory}\n</conversation_memory>")
             
         # 2. Recalled journals
         recalled_journals = []
@@ -751,19 +805,19 @@ class OsHistoryAdapter(LocalHistoryAdapter):
                 print(f"Error matching journals in get_openai_messages: {je}")
         if recalled_journals:
             journals_text = "\n".join(recalled_journals)
-            context_parts.append(f"## RECALLED JOURNALS / MEMORIES\n{journals_text}")
+            context_parts.append(f"<recalled_journals>\n{journals_text}\n</recalled_journals>")
             
-        # 3. RAG context
+        # 3. RAG context from ingested documents
         if rag_context:
-            context_parts.append(f"## KNOWLEDGE BASE CONTEXT\n{rag_context}")
+            context_parts.append(f"<knowledge_base>\n{rag_context}\n</knowledge_base>")
             
-        # 4. Memory context
+        # 4. Memory context from archived chat history
         if memory_context:
-            context_parts.append(f"## ARCHIVED CONVERSATION MEMORY\n{memory_context}")
+            context_parts.append(f"<archived_memory>\n{memory_context}\n</archived_memory>")
             
-        # Append injected context update to the initial prompt
+        # Append injected context to the system prompt
         if context_parts:
-            context_content = "\n\n# SYSTEM CONTEXT UPDATE\n" + "\n\n".join(context_parts)
+            context_content = "\n\n" + "\n\n".join(context_parts)
             openai_messages[0]["content"] += context_content
 
         openai_messages = _merge_consecutive_messages(openai_messages + raw_messages)
@@ -2089,9 +2143,11 @@ class OpenSourceRunner(BaseProgramRunner):
         self.sessions_history[session_id].append(user_msg)
         self._save_session_to_disk(session_id)
         
-        # Get RAG and memory contexts
-        rag_context = _get_databank_context(new_message_text, is_memory=False)
-        memory_context = _get_databank_context(new_message_text, is_memory=True)
+        # Build vector query from recent conversation context (SillyTavern style)
+        history = self.sessions_history.get(session_id, [])
+        vector_query = _build_vector_query(history)
+        rag_context = _get_databank_context(vector_query, is_memory=False)
+        memory_context = _get_databank_context(vector_query, is_memory=True)
         
         # Determine the personality inversion before getting system instructions
         inversion_directive = await self._get_inversion_directive(session_id)

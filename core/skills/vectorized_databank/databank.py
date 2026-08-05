@@ -375,7 +375,7 @@ class DataBankManager:
         self._save_data(self.memories_path, {"documents": [], "chunks": []})
         print("[Data Bank] Purged all documents and vectors from databank and memories.")
 
-    def query(self, query_text: str, top_k: int = 5, score_threshold: float = 0.25, exclude_source_type: str = None, include_source_type: str = None) -> str:
+    def query(self, query_text: str, top_k: int = 5, score_threshold: float = 0.25, exclude_source_type: str = None, include_source_type: str = None, token_budget: int = None) -> str:
         """Queries the respective JSON vector index and returns clean contextual matching chunks."""
         # Query memories.json for chat history, otherwise query databank.json
         is_chat_history = (include_source_type == 'chat_history')
@@ -429,6 +429,25 @@ class DataBankManager:
         
         if not top_results:
             return ""
+        
+        # Enforce token budget (approximate: 1 token ≈ 4 chars)
+        if token_budget:
+            budget_chars = token_budget * 4
+            budgeted = []
+            char_count = 0
+            for result in top_results:
+                result_chars = len(result[2])
+                if char_count + result_chars > budget_chars and budgeted:
+                    break
+                budgeted.append(result)
+                char_count += result_chars
+            top_results = budgeted
+        
+        # Diagnostic logging
+        best_score = top_results[0][0] if top_results else 0
+        best_source = top_results[0][1] if top_results else "none"
+        context_type = "memory" if is_chat_history else "knowledge"
+        print(f"[RAG] {context_type}: {len(top_results)} chunks retrieved (best: {best_score:.3f} from '{best_source}')", flush=True)
             
         formatted_context = []
         if is_chat_history:
