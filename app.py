@@ -365,6 +365,68 @@ def save_profile_picture():
         print(f"Error saving profile picture: {e}")
         return jsonify({'error': str(e)}), 500
 
+@app.route('/api/programs/profile_picture/crop', methods=['POST'])
+@requires_auth
+def crop_profile_picture():
+    """Server-side crop: receives source image path and crop coordinates, uses PIL to crop and resize."""
+    try:
+        from variables import PROGRAMS_DIR
+        from utils.program import get_active_program
+        from PIL import Image
+        
+        data = request.get_json(silent=True) or {}
+        source_image = data.get('source_image', '')
+        x = int(data.get('x', 0))
+        y = int(data.get('y', 0))
+        w = int(data.get('width', 0))
+        h = int(data.get('height', 0))
+        
+        if not source_image or w <= 0 or h <= 0:
+            return jsonify({'error': 'Invalid crop parameters'}), 400
+        
+        program_id = data.get('program_id') or get_active_program()
+        program_dir = os.path.join(PROGRAMS_DIR, program_id)
+        
+        # Resolve source image path from the URL path to a local file path
+        # Source paths arrive as /images/portraits/xyz.png or /images/xyz.png
+        if source_image.startswith('/images/'):
+            relative_path = source_image[len('/images/'):]
+            source_path = os.path.normpath(os.path.join(program_dir, relative_path))
+        elif source_image.startswith('/profile.png'):
+            source_path = os.path.normpath(os.path.join(program_dir, 'portraits', 'profile.png'))
+        else:
+            return jsonify({'error': 'Unsupported image path'}), 400
+        
+        if not os.path.exists(source_path):
+            return jsonify({'error': f'Source image not found: {source_image}'}), 404
+        
+        # Crop and resize with PIL
+        with Image.open(source_path) as img:
+            # Clamp crop coordinates to image bounds
+            img_w, img_h = img.size
+            x = max(0, min(x, img_w))
+            y = max(0, min(y, img_h))
+            w = min(w, img_w - x)
+            h = min(h, img_h - y)
+            
+            cropped = img.crop((x, y, x + w, y + h))
+            cropped = cropped.resize((256, 256), Image.Resampling.LANCZOS)
+            
+            # Convert to RGB if necessary (handles RGBA, palette, etc.)
+            if cropped.mode not in ('RGB', 'RGBA'):
+                cropped = cropped.convert('RGBA')
+        
+        portraits_dir = os.path.join(program_dir, 'portraits')
+        os.makedirs(portraits_dir, exist_ok=True)
+        dest_path = os.path.join(portraits_dir, 'profile.png')
+        cropped.save(dest_path, 'PNG')
+        
+        print(f"[PROFILE CROP] program={program_id}, source={source_path}, crop=({x},{y},{w},{h}), dest={dest_path}")
+        return jsonify({'status': 'success', 'message': 'Profile picture cropped and saved successfully.'})
+    except Exception as e:
+        print(f"Error cropping profile picture: {e}")
+        return jsonify({'error': str(e)}), 500
+
 @app.route('/sparkle.mp3')
 @requires_auth
 def serve_sparkle_mp3():
