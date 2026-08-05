@@ -6508,6 +6508,7 @@ async function deleteCurrentImage(event) {
 
 // --- Circular Profile Cropping Functions ---
 let profileCropper = null;
+let cropSourcePath = '';
 
 function setCurrentImageAsProfile(event) {
     if (event) event.stopPropagation();
@@ -6515,6 +6516,7 @@ function setCurrentImageAsProfile(event) {
     if (currentSrc.includes('profile.png') || currentSrc.includes('profile.svg')) return;
 
     closeModal();
+    cropSourcePath = currentSrc;
 
     const cropModal = document.getElementById('crop-modal');
     const cropImg = document.getElementById('crop-image-element');
@@ -6610,29 +6612,23 @@ function closeCropModal(event) {
 
 async function saveCroppedProfile(event) {
     if (event) event.stopPropagation();
-    if (!profileCropper) return;
+    if (!profileCropper || !cropSourcePath) return;
 
-    const canvas = profileCropper.getCroppedCanvas({
-        width: 256,
-        height: 256,
-        imageSmoothingEnabled: true,
-        imageSmoothingQuality: 'high'
-    });
-
-    if (!canvas) {
-        showCustomAlert("Error", "Could not get cropped canvas.");
-        return;
-    }
-
-    const dataUrl = canvas.toDataURL('image/png');
+    // Send crop coordinates to the server — PIL handles the actual pixel cropping.
+    // This eliminates all browser canvas compatibility issues.
+    const cropData = profileCropper.getData(true);
     closeCropModal();
     
     try {
-        const response = await fetch('/api/programs/profile_picture/save', {
+        const response = await fetch('/api/programs/profile_picture/crop', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-                cropped_image: dataUrl
+                source_image: cropSourcePath,
+                x: cropData.x,
+                y: cropData.y,
+                width: cropData.width,
+                height: cropData.height
             })
         });
         
