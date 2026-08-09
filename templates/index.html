@@ -17,7 +17,7 @@
     <!-- Modern Typography -->
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <!-- Application Stylesheet -->
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/sanctuary.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/sanctuary.css') }}?v=3">
     <!-- Vendor Stylesheets -->
     <link rel="stylesheet" href="{{ url_for('static', filename='css/github-dark.min.css') }}">
     <link rel="stylesheet" href="{{ url_for('static', filename='css/cropper.min.css') }}">
@@ -37,11 +37,19 @@
         {% if theme.companion_bubble %}--companion-bubble: {{ theme.companion_bubble }};{% endif %}
         {% if theme.send_btn_hover %}--send-btn-hover: {{ theme.send_btn_hover }};{% endif %}
         {% if theme.accent_green %}--accent-green: {{ theme.accent_green }};{% endif %}
-        {% if theme.quote_blue %}--quote-blue: {{ theme.quote_blue }};{% endif %}
-        {% if theme.primary_btn_text %}--primary-btn-text: {{ theme.primary_btn_text }};{% endif %}
     }
     </style>
     {% endif %}
+    <!-- Server-side configuration bridge -->
+    <script>
+        window.__SANCTUARY_CONFIG = {
+            localIp: "{{ local_ip }}",
+            ttsAutoSpeak: {{ tts_auto_speak|tojson }},
+            ttsProvider: "{{ tts_provider }}",
+            activeProgram: "{{ active_program }}",
+            activeUser: "{{ active_user }}"
+        };
+    </script>
 </head>
 <body class="{{ active_program | default('sebile') }}">
     <div id="app-container">
@@ -1044,16 +1052,6 @@
     </div>
 
 
-    <!-- Server-side configuration bridge for cached client script -->
-    <script>
-        window.__SANCTUARY_CONFIG = {
-            localIp: "{{ local_ip }}",
-            ttsAutoSpeak: {{ tts_auto_speak|tojson }},
-            ttsProvider: "{{ tts_provider }}",
-            activeProgram: "{{ active_program }}",
-            activeUser: "{{ active_user }}"
-        };
-    </script>
-    <script defer src="{{ url_for('static', filename='js/sanctuary.js') }}?v=2"></script>
+    <script defer src="{{ url_for('static', filename='js/sanctuary.js') }}?v=4"></script>
 </body>
 </html>

@@ -51,7 +51,32 @@ function showDebugToast(message) {
    I. CONFIGURATION, GLOBAL STATE CONSTANTS & CACHING
    ========================================================================== */
 
-const localIp = window.__SANCTUARY_CONFIG.localIp;
+const safeLocalStorage = {
+    getItem(key) {
+        try { return localStorage.getItem(key); } catch (e) { return null; }
+    },
+    setItem(key, value) {
+        try { localStorage.setItem(key, value); } catch (e) {}
+    },
+    removeItem(key) {
+        try { localStorage.removeItem(key); } catch (e) {}
+    }
+};
+
+const safeSessionStorage = {
+    getItem(key) {
+        try { return sessionStorage.getItem(key); } catch (e) { return null; }
+    },
+    setItem(key, value) {
+        try { sessionStorage.setItem(key, value); } catch (e) {}
+    },
+    removeItem(key) {
+        try { sessionStorage.removeItem(key); } catch (e) {}
+    }
+};
+
+const appConfig = window.__SANCTUARY_CONFIG || {};
+const localIp = appConfig.localIp || "127.0.0.1";
 const chatContainer = document.getElementById('chat-container');
 const userInput = document.getElementById('user-input');
 let companionWelcomeMessage = null;
@@ -107,9 +132,9 @@ let skipScrollSave = false;
 function saveChatScrollState() {
     if (skipScrollSave) return;
     if (chatContainer) {
-        sessionStorage.setItem('chat_scroll_pos', chatContainer.scrollTop);
+        safeSessionStorage.setItem('chat_scroll_pos', chatContainer.scrollTop);
         const isAtBottom = (chatContainer.scrollHeight - chatContainer.scrollTop - chatContainer.clientHeight < 50);
-        sessionStorage.setItem('chat_was_at_bottom', isAtBottom);
+        safeSessionStorage.setItem('chat_was_at_bottom', isAtBottom);
     }
 }
 
@@ -119,8 +144,8 @@ window.addEventListener('pagehide', saveChatScrollState);
 function reloadApp(skipSave = false, forceHardReload = false) {
     if (skipSave) {
         skipScrollSave = true;
-        sessionStorage.removeItem('chat_scroll_pos');
-        sessionStorage.removeItem('chat_was_at_bottom');
+        safeSessionStorage.removeItem('chat_scroll_pos');
+        safeSessionStorage.removeItem('chat_was_at_bottom');
     }
     if (forceHardReload) {
         location.reload();
@@ -290,8 +315,8 @@ if (userInput) {
 }
 
 // TTS Configuration and State
-let ttsAutoSpeak = window.__SANCTUARY_CONFIG.ttsAutoSpeak;
-const ttsProvider = window.__SANCTUARY_CONFIG.ttsProvider;
+let ttsAutoSpeak = appConfig.ttsAutoSpeak || false;
+const ttsProvider = appConfig.ttsProvider || "local";
 let currentAudio = null;
 let currentPlayingBtn = null;
 
@@ -303,8 +328,7 @@ let currentHeartState = {
     intensity: 0.0
 };
 
-// Bind click handler to the heart tracker once DOM starts initializing
-document.addEventListener('DOMContentLoaded', () => {
+function initHeartPulse() {
     const heartElement = document.querySelector('.heart-pulse');
     if (heartElement) {
         heartElement.style.cursor = 'pointer';
@@ -340,7 +364,12 @@ document.addEventListener('DOMContentLoaded', () => {
             triggerHeartBurst();
         });
     }
-});
+}
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initHeartPulse);
+} else {
+    initHeartPulse();
+}
 
 // Unregister Service Workers to prevent aggressive caching of templates/static assets
 if ('serviceWorker' in navigator) {
@@ -350,8 +379,6 @@ if ('serviceWorker' in navigator) {
                 .then(success => {
                     if (success) {
                         console.log('Service Worker unregistered successfully');
-                        // Force reload to get the fresh content from the server
-                        reloadApp(false, true);
                     }
                 });
         }
@@ -640,13 +667,13 @@ async function initializeModelSelect() {
             }
 
             const defaultModel = data.default || 'local-llm';
-            localStorage.setItem('companion_default_model', defaultModel);
+            safeLocalStorage.setItem('companion_default_model', defaultModel);
 
-            let storedModel = localStorage.getItem('companion_selected_model');
+            let storedModel = safeLocalStorage.getItem('companion_selected_model');
             const isValid = availableModels.some(m => m.value === storedModel) || (storedModel === 'local-llm' && availableModels.length === 0);
             if (!isValid) {
                 storedModel = defaultModel;
-                localStorage.setItem('companion_selected_model', storedModel);
+                safeLocalStorage.setItem('companion_selected_model', storedModel);
             }
             
             selectedModel = storedModel;
@@ -3958,7 +3985,7 @@ async function loadHistory() {
                 if (data.sessions && !data.sessions.includes(sessionId)) {
                     console.warn(`Last opened session "${sessionId}" is missing on the server. Falling back to default.`);
                     sessionId = 'default';
-                    localStorage.setItem('companion_session_id', 'default');
+                    safeLocalStorage.setItem('companion_session_id', 'default');
                     
                     // Update the UI header ID display if it exists
                     const sessionDisplay = document.getElementById('session-id-display');
@@ -4033,9 +4060,9 @@ async function loadHistory() {
             } else {
                 showWelcomeMessage();
                 // On a new chat session (no history), default to local model
-                const defaultModel = localStorage.getItem('companion_default_model') || 'local-llm';
+                const defaultModel = safeLocalStorage.getItem('companion_default_model') || 'local-llm';
                 selectedModel = defaultModel;
-                localStorage.setItem('companion_selected_model', selectedModel);
+                safeLocalStorage.setItem('companion_selected_model', selectedModel);
                 const modelSelectElement = document.getElementById('model-select');
                 if (modelSelectElement) {
                     modelSelectElement.value = selectedModel;
@@ -4048,8 +4075,8 @@ async function loadHistory() {
         inversionActive = data.inversion_active || "";
 
         // Restore scroll position
-        const savedScrollPos = sessionStorage.getItem('chat_scroll_pos');
-        const wasAtBottom = sessionStorage.getItem('chat_was_at_bottom');
+        const savedScrollPos = safeSessionStorage.getItem('chat_scroll_pos');
+        const wasAtBottom = safeSessionStorage.getItem('chat_was_at_bottom');
 
         if (wasAtBottom === 'true' || wasAtBottom === null) {
             chatContainer.scrollTop = chatContainer.scrollHeight;
@@ -4080,6 +4107,9 @@ async function loadHistory() {
             chatContainer.classList.add('smooth-scroll');
         }, 50);
         hideLoadingOverlay();
+        if (typeof startSSE === 'function') {
+            startSSE();
+        }
     }
 }
 
@@ -5020,7 +5050,7 @@ function renderMessage(msg, isLive = false) {
                     const beforeText = tempText.substring(0, openIdx);
                     const remainingText = tempText.substring(openIdx + openTagLength);
                     
-                    const closePattern = /(?:<\/think>|\[\/think\]|</thought>|\[\/thought\]|<\|/thought\|>|<\|channel\|>|<channel\|>|<\/\s*think>|\[\s*\/think\s*\])/i;
+                    const closePattern = /(?:<\/think>|\[\/think\]|<\/thought>|\[\/thought\]|<\|\/thought\|>|<\|channel\|>|<channel\|>|<\/\s*think>|\[\s*\/think\s*\])/i;
                     const closeMatch = remainingText.match(closePattern);
                     
                     if (closeMatch) {
@@ -8234,12 +8264,14 @@ const urlParams = new URLSearchParams(window.location.search);
 const sessionFromUrl = !!urlParams.get('session_id');
 let sessionId = urlParams.get('session_id');
 if (sessionId) {
-    localStorage.setItem('companion_session_id', sessionId);
+    safeLocalStorage.setItem('companion_session_id', sessionId);
     // Clean up the URL query parameter so page reloads don't force it later
-    window.history.replaceState({}, document.title, window.location.pathname);
+    try {
+        window.history.replaceState({}, document.title, window.location.pathname);
+    } catch (e) {}
 } else {
-    sessionId = localStorage.getItem('companion_session_id') || 'default';
-    localStorage.setItem('companion_session_id', sessionId);
+    sessionId = safeLocalStorage.getItem('companion_session_id') || 'default';
+    safeLocalStorage.setItem('companion_session_id', sessionId);
 }
 
 // Display session ID signature in header for easy verification
@@ -8250,7 +8282,7 @@ if (sessionDisplay && sessionId) {
 }
 
 // Retrieve selected model from localStorage or use default
-let selectedModel = localStorage.getItem('companion_selected_model') || 'local-llm';
+let selectedModel = safeLocalStorage.getItem('companion_selected_model') || 'local-llm';
 let lastInteractionTime = Date.now();
 let hasTriggeredProactive = false;
 let proactiveAbortController = null;
@@ -8280,74 +8312,81 @@ let activeUserProfile = "";
 modelInitPromise = initializeModelSelect();
 
 // --- SSE Live Connection Status Stream ---
-(function initSSE() {
+let sseStarted = false;
 let evtSource = null;
-function connect() {
-evtSource = new EventSource('/api/events/status');
-evtSource.addEventListener('connection_status', (e) => {
-    try {
-        const payload = JSON.parse(e.data);
-        const status = payload.status;
-        updateConnectionStatus({
-            remote_configured: status.remote_configured,
-            remote_model: status.remote_model,
-            remote_url: status.remote_url,
-            local_online: status.local_online,
-            local_installed: status.local_installed,
-            temperature: status.temperature !== undefined ? status.temperature : connectionStatus.temperature,
-            env_path: status.env_path
-        });
-        // Update ComfyUI status from SSE payload directly
-        comfyStatus.installed = status.comfy_installed;
-        comfyStatus.running = status.comfy_running;
-        // Refresh modal UI if the settings modal is open, using SSE data directly (skipFetch)
-        const modal = document.getElementById('connection-modal');
-        if (modal && modal.style.display !== 'none') {
-            updateConnectionModalStatus();
-            updateComfyModalStatus(true);
+
+function startSSE() {
+    if (sseStarted) return;
+    sseStarted = true;
+
+    function connect() {
+        if (evtSource) {
+            evtSource.close();
         }
-        // Refresh model dropdown to reflect online/offline changes
-        initializeModelSelect();
-    } catch (err) {
-        console.error('SSE parse error:', err);
-    }
-});
-evtSource.onerror = () => {
-    evtSource.close();
-    // Reconnect after 3 seconds
-    setTimeout(connect, 3000);
-};
-}
-connect();
-
-async function refreshAllStatuses() {
-try {
-    await initializeModelSelect();
-    if (typeof updateComfyModalStatus === 'function') {
-        await updateComfyModalStatus(false);
-    }
-} catch (e) {
-    console.error("Error refreshing statuses on focus:", e);
-}
-}
-
-// Reconnect or refresh on page visibility / focus to handle mobile sleep states
-document.addEventListener('visibilitychange', () => {
-if (document.visibilityState === 'visible') {
-    if (evtSource) {
-        evtSource.close();
+        evtSource = new EventSource('/api/events/status');
+        evtSource.addEventListener('connection_status', (e) => {
+            try {
+                const payload = JSON.parse(e.data);
+                const status = payload.status;
+                updateConnectionStatus({
+                    remote_configured: status.remote_configured,
+                    remote_model: status.remote_model,
+                    remote_url: status.remote_url,
+                    local_online: status.local_online,
+                    local_installed: status.local_installed,
+                    temperature: status.temperature !== undefined ? status.temperature : connectionStatus.temperature,
+                    env_path: status.env_path
+                });
+                // Update ComfyUI status from SSE payload directly
+                comfyStatus.installed = status.comfy_installed;
+                comfyStatus.running = status.comfy_running;
+                // Refresh modal UI if the settings modal is open, using SSE data directly (skipFetch)
+                const modal = document.getElementById('connection-modal');
+                if (modal && modal.style.display !== 'none') {
+                    updateConnectionModalStatus();
+                    updateComfyModalStatus(true);
+                }
+                // Refresh model dropdown to reflect online/offline changes
+                initializeModelSelect();
+            } catch (err) {
+                console.error('SSE parse error:', err);
+            }
+        });
+        evtSource.onerror = () => {
+            if (evtSource) {
+                evtSource.close();
+            }
+            // Reconnect after 3 seconds
+            setTimeout(connect, 3000);
+        };
     }
     connect();
-    refreshAllStatuses();
-}
-});
 
-window.addEventListener('focus', () => {
-if (document.visibilityState === 'visible') {
-    refreshAllStatuses();
+    async function refreshAllStatuses() {
+        try {
+            await initializeModelSelect();
+            if (typeof updateComfyModalStatus === 'function') {
+                await updateComfyModalStatus(false);
+            }
+        } catch (e) {
+            console.error("Error refreshing statuses on focus:", e);
+        }
+    }
+
+    // Reconnect or refresh on page visibility / focus to handle mobile sleep states
+    document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible') {
+            connect();
+            refreshAllStatuses();
+        }
+    });
+
+    window.addEventListener('focus', () => {
+        if (document.visibilityState === 'visible') {
+            refreshAllStatuses();
+        }
+    });
 }
-});
-})();
 
 let serverImages = [];
 
@@ -8373,7 +8412,7 @@ document.addEventListener('keydown', (event) => {
 });
 
 // Initialize swipe event listeners once the modal exists in DOM
-window.addEventListener('DOMContentLoaded', () => {
+function initModalListeners() {
     const modal = document.getElementById('image-modal');
     if (modal) {
         modal.addEventListener('touchstart', handleTouchStart, { passive: true });
@@ -8384,7 +8423,12 @@ window.addEventListener('DOMContentLoaded', () => {
     if (ttsBtn && ttsAutoSpeak) {
         ttsBtn.classList.add('active');
     }
-});
+}
+if (document.readyState === 'loading') {
+    window.addEventListener('DOMContentLoaded', initModalListeners);
+} else {
+    initModalListeners();
+}
 
 // Proactive idle action trigger and functions
 function resetIdleTimer() {
@@ -8493,10 +8537,15 @@ setInterval(async () => {
 
 
 // Load previous chat history on DOM ready
-window.addEventListener('DOMContentLoaded', () => {
+function initMainApp() {
     updateProfileImages();
     loadHistory();
-});
+}
+if (document.readyState === 'loading') {
+    window.addEventListener('DOMContentLoaded', initMainApp);
+} else {
+    initMainApp();
+}
 
 // Global error listener to catch image load failures and switch to dynamic colored circles
 window.addEventListener('error', function (e) {

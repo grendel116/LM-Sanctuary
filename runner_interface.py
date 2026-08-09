@@ -1132,12 +1132,10 @@ class BaseProgramRunner:
                 print(f"[COMPACTION] Error generating remote summary: {e}. Falling back to local/default.", flush=True)
                 
         # Fallback to local server
-        from variables import DISABLED_THINKING
         payload = {
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 0.3,
-            "max_tokens": 1024,
-            **DISABLED_THINKING
+            "max_tokens": 1024
         }
         target_model = active_model if (active_model and active_model != 'local-llm') else os.getenv("LOCAL_MODEL_NAME")
         if target_model:
@@ -1248,9 +1246,10 @@ class BaseProgramRunner:
                 "temperature": temperature,
                 "max_tokens": 1024
             }
-            from variables import DISABLED_THINKING, is_thinking_enabled
-            if not is_thinking_enabled(is_cloud):
-                payload.update(DISABLED_THINKING)
+            if is_cloud:
+                from variables import DISABLED_THINKING, is_thinking_enabled
+                if not is_thinking_enabled(is_cloud):
+                    payload.update(DISABLED_THINKING)
             if target_model:
                 payload["model"] = target_model
                 
@@ -1878,9 +1877,10 @@ class OpenSourceRunner(BaseProgramRunner):
             "temperature": temperature,
             "max_tokens": 512
         }
-        if not is_cloud:
-            from variables import DISABLED_THINKING
-            payload.update(DISABLED_THINKING)
+        if is_cloud:
+            from variables import DISABLED_THINKING, is_thinking_enabled
+            if not is_thinking_enabled(is_cloud):
+                payload.update(DISABLED_THINKING)
         if target_model:
             payload["model"] = target_model
 
@@ -2037,29 +2037,17 @@ class OpenSourceRunner(BaseProgramRunner):
             self._load_session_from_disk(session_id)
             raw_history = self.sessions_history.get(session_id, [])
             
-            companion_msgs = [msg for msg in raw_history if msg.get('role') == 'companion']
-            recent_companion_msgs = companion_msgs[-5:] if len(companion_msgs) > 5 else companion_msgs
-            recent_timestamps = {msg.get('timestamp') for msg in recent_companion_msgs}
-
-            from utils.program_mood import extract_and_strip_mood
             updated_any = False
             for msg in raw_history:
                 if msg.get('role') == 'companion' and 'mood' not in msg:
-                    m_text = msg.get('text', '')
-                    if m_text:
-                        if msg.get('timestamp') in recent_timestamps:
-                            clean_text, mood_details = extract_and_strip_mood(m_text)
-                            msg['text'] = clean_text
-                            msg['mood'] = mood_details
-                            updated_any = True
-                        else:
-                            msg['mood'] = {
-                                "name": "calm",
-                                "color": "#85b9eb",
-                                "glow": "rgba(133, 185, 235, 0.9)",
-                                "speed": "2.00s",
-                                "intensity": 0.0
-                            }
+                    msg['mood'] = {
+                        "name": "calm",
+                        "color": "#85b9eb",
+                        "glow": "rgba(133, 185, 235, 0.9)",
+                        "speed": "2.00s",
+                        "intensity": 0.0
+                    }
+                    updated_any = True
                             
             if updated_any:
                 self._save_session_to_disk(session_id)
