@@ -1258,6 +1258,10 @@ class BaseProgramRunner:
                 if response.status_code == 200:
                     res_json = response.json()
                     bot_response_text = res_json['choices'][0]['message']['content']
+                    from variables import is_thinking_enabled
+                    if not is_thinking_enabled(is_cloud):
+                        bot_response_text = re.sub(r'(?:<think>|\[think\]|<thought>|\[thought\]|<\|thought\|>|<\|channel\|>thought|<channel\|>thought)[\s\S]*?(?:</think>|\[/think\]|</thought>|\[/thought\]|<\|/thought\|>|<\|channel\|>|<channel\|>|<\/\s*think>|\[\s*/\s*think\s*\]|$)', '', bot_response_text, flags=re.IGNORECASE)
+                        bot_response_text = re.sub(r'<\|channel\|>|<channel\|>', '', bot_response_text, flags=re.IGNORECASE).strip()
                 elif response.status_code == 400 or "exceeded" in response.text.lower() or "context" in response.text.lower():
                     print("[COMPACTION] Local model server returned context size exceeded error. Attempting emergency history compaction...", flush=True)
                     if hasattr(adapter, 'compact_history'):
