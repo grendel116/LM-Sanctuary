@@ -185,6 +185,10 @@ def start_local_server(model_key):
         "--no-warmup",
         "--fit", "off"
     ]
+    from variables import is_thinking_enabled
+    if not is_thinking_enabled(is_cloud=False):
+        cmd.extend(["--reasoning", "off", "--reasoning-budget", "0"])
+
     if flash_attn:
         cmd.extend(["-fa", "on"])
     if no_mmap:
