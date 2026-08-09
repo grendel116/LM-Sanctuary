@@ -185,6 +185,12 @@ def start_local_server(model_key):
         "--no-warmup",
         "--fit", "off"
     ]
+    local_reasoning = os.getenv("LOCAL_REASONING", "off").lower()
+    if local_reasoning in ("off", "disabled", "false", "0"):
+        cmd.extend(["--reasoning", "off", "--reasoning-budget", "0"])
+    elif local_reasoning in ("on", "enabled", "true"):
+        cmd.extend(["--reasoning", "on"])
+        
     if flash_attn:
         cmd.extend(["-fa", "on"])
     if no_mmap:

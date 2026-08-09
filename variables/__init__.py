@@ -26,6 +26,18 @@ def get_remote_server_headers():
         headers["Authorization"] = f"Bearer {REMOTE_API_KEY}"
     return headers
 
+# Thinking configuration for LLM requests
+DISABLED_THINKING = {
+    "thinking": {"type": "disabled"},
+    "reasoning_budget": 0
+}
+
+def is_thinking_enabled(is_cloud: bool) -> bool:
+    env_val = os.getenv("THINKING_ENABLED")
+    if env_val is not None:
+        return env_val.lower() in ("true", "1", "yes")
+    return True if is_cloud else False
+
 # Dynamically derive models URL from REMOTE_SERVER_URL
 try:
     from urllib.parse import urlparse

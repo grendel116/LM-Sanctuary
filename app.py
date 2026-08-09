@@ -568,13 +568,13 @@ You must return a valid JSON object matching the following schema:
         
         if is_local:
             import requests
-            from variables import REMOTE_SERVER_URL, get_remote_server_headers
+            from variables import REMOTE_SERVER_URL, get_remote_server_headers, DISABLED_THINKING
             target_model = selected_model if (selected_model and selected_model != 'local-llm') else os.getenv("LOCAL_MODEL_NAME")
             payload = {
                 "messages": [{"role": "user", "content": prompt}],
                 "temperature": 0.7,
                 "max_tokens": 320,
-                "thinking": {"type": "disabled"}
+                **DISABLED_THINKING
             }
             if target_model:
                 payload["model"] = target_model
@@ -600,7 +600,8 @@ You must return a valid JSON object matching the following schema:
                     "messages": [{"role": "user", "content": prompt}],
                     "temperature": 0.7,
                     "max_tokens": 320,
-                    "response_format": {"type": "json_object"}
+                    "response_format": {"type": "json_object"},
+                    "thinking": {"type": "disabled"}
                 }
                 try:
                     r = requests.post(remote_cloud_url, json=payload, headers=headers, timeout=30.0)

@@ -246,7 +246,7 @@ def _format_thinking_and_text(thoughts_list: list, texts_list: list) -> str:
     
     temp_text = text_str
     while True:
-        open_match = re.search(r'(?:<think>|\[think\])', temp_text, re.IGNORECASE)
+        open_match = re.search(r'(?:<think>|\[think\]|<thought>|\[thought\]|<\|thought\|>|<\|channel\|>thought|<channel\|>thought)', temp_text, re.IGNORECASE)
         if not open_match:
             cleaned_text_parts.append(temp_text)
             break
@@ -257,7 +257,7 @@ def _format_thinking_and_text(thoughts_list: list, texts_list: list) -> str:
         cleaned_text_parts.append(temp_text[:start_idx])
         remaining = temp_text[end_open_idx:]
         
-        close_match = re.search(r'(?:</think>|\[/think\]|<\/\s*think>|\[\s*/\s*think\s*\])', remaining, re.IGNORECASE)
+        close_match = re.search(r'(?:</think>|\[/think\]|</thought>|\[/thought\]|<\|/thought\|>|<\|channel\|>|<channel\|>|<\/\s*think>|\[\s*/\s*think\s*\])', remaining, re.IGNORECASE)
         if close_match:
             close_start = close_match.start()
             close_end = close_match.end()
@@ -299,8 +299,9 @@ def strip_narration(text: str) -> str:
     if not text:
         return ""
     
-    # 1. Clean <think>...</think> blocks first (handles closed and unclosed tags)
-    text = re.sub(r'(?:<think>|\[think\])[\s\S]*?(?:</think>|\[/think\]|<\/\s*think>|\[\s*/\s*think\s*\]|$)', '', text, flags=re.IGNORECASE)
+    # 1. Clean <think>...</think> and <|channel|>thought...<channel|> blocks first (handles closed and unclosed tags)
+    text = re.sub(r'(?:<think>|\[think\]|<thought>|\[thought\]|<\|thought\|>|<\|channel\|>thought|<channel\|>thought)[\s\S]*?(?:</think>|\[/think\]|</thought>|\[/thought\]|<\|/thought\|>|<\|channel\|>|<channel\|>|<\/\s*think>|\[\s*/\s*think\s*\]|$)', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'<\|channel\|>|<channel\|>', '', text, flags=re.IGNORECASE)
     
     # 2. Strip single asterisks action narration, e.g. *giggles* or *I pull you close*
     pattern = re.compile(r'(?<!\*)\*(?!\*)([\s\S]*?)(?<!\*)\*(?!\*)')
@@ -1123,17 +1124,20 @@ class BaseProgramRunner:
                 response = await self._post_llm_request(remote_cloud_url, payload, headers, timeout=60.0)
                 if response.status_code == 200:
                     res_json = response.json()
-                    return res_json['choices'][0]['message']['content'].strip()
+                    _summary_text = res_json['choices'][0]['message'].get('content', '').strip()
+                    return re.sub(r'(?:<think>|\[think\])[\s\S]*?(?:</think>|\[/think\]|<\/\s*think>|\[\s*/\s*think\s*\]|$)', '', _summary_text, flags=re.IGNORECASE).strip()
                 else:
                     print(f"[COMPACTION] Remote cloud query failed with status {response.status_code}: {response.text}", flush=True)
             except Exception as e:
                 print(f"[COMPACTION] Error generating remote summary: {e}. Falling back to local/default.", flush=True)
                 
         # Fallback to local server
+        from variables import DISABLED_THINKING
         payload = {
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 0.3,
-            "max_tokens": 1024
+            "max_tokens": 1024,
+            **DISABLED_THINKING
         }
         target_model = active_model if (active_model and active_model != 'local-llm') else os.getenv("LOCAL_MODEL_NAME")
         if target_model:
@@ -1143,7 +1147,8 @@ class BaseProgramRunner:
             response = await self._post_llm_request(REMOTE_SERVER_URL, payload, get_remote_server_headers(), timeout=60.0)
             if response.status_code == 200:
                 res_json = response.json()
-                return res_json['choices'][0]['message']['content'].strip()
+                _summary_text = res_json['choices'][0]['message'].get('content', '').strip()
+                return re.sub(r'(?:<think>|\[think\])[\s\S]*?(?:</think>|\[/think\]|<\/\s*think>|\[\s*/\s*think\s*\]|$)', '', _summary_text, flags=re.IGNORECASE).strip()
             else:
                 print(f"Local server returned error for summary: {response.status_code} - {response.text}", flush=True)
         except Exception as e:
@@ -1243,6 +1248,9 @@ class BaseProgramRunner:
                 "temperature": temperature,
                 "max_tokens": 1024
             }
+            from variables import DISABLED_THINKING, is_thinking_enabled
+            if not is_thinking_enabled(is_cloud):
+                payload.update(DISABLED_THINKING)
             if target_model:
                 payload["model"] = target_model
                 
@@ -1690,7 +1698,8 @@ class BaseProgramRunner:
         
         journal_lines = []
         for role, text in seed_turns:
-            clean_text = re.sub(r'(?:<think>|\[think\])[\s\S]*?(?:</think>|\[/think\]|<\/\s*think>|\[\s*/\s*think\s*\]|$)', '', text, flags=re.IGNORECASE)
+            clean_text = re.sub(r'(?:<think>|\[think\]|<thought>|\[thought\]|<\|thought\|>|<\|channel\|>thought|<channel\|>thought)[\s\S]*?(?:</think>|\[/think\]|</thought>|\[/thought\]|<\|/thought\|>|<\|channel\|>|<channel\|>|<\/\s*think>|\[\s*/\s*think\s*\]|$)', '', text, flags=re.IGNORECASE)
+            clean_text = re.sub(r'<\|channel\|>|<channel\|>', '', clean_text, flags=re.IGNORECASE)
             clean_text = re.sub(r'\*.*?\*', '', clean_text)
             clean_text = re.sub(r' +', ' ', clean_text).strip()
             if clean_text:
@@ -1797,6 +1806,8 @@ class BaseProgramRunner:
         )
         instructions += nsfw_directive
         
+
+        
         # Standard-only directives (pasted links and workspace exploration) - skipped in Story Mode
         from core.program_config import is_narration_mode
         if not is_voice and user_message and not is_narration_mode():
@@ -1867,6 +1878,9 @@ class OpenSourceRunner(BaseProgramRunner):
             "temperature": temperature,
             "max_tokens": 512
         }
+        if not is_cloud:
+            from variables import DISABLED_THINKING
+            payload.update(DISABLED_THINKING)
         if target_model:
             payload["model"] = target_model
 
@@ -1874,7 +1888,8 @@ class OpenSourceRunner(BaseProgramRunner):
             r = await self._post_llm_request(url, payload, headers, timeout=60.0)
             if r.status_code == 200:
                 res_json = r.json()
-                return res_json['choices'][0]['message']['content'].strip()
+                _imp_text = res_json['choices'][0]['message'].get('content', '').strip()
+                return re.sub(r'(?:<think>|\[think\])[\s\S]*?(?:</think>|\[/think\]|<\/\s*think>|\[\s*/\s*think\s*\]|$)', '', _imp_text, flags=re.IGNORECASE).strip()
             else:
                 raise Exception(f"HTTP Server returned status code {r.status_code}: {r.text}")
         except Exception as e:
@@ -1896,7 +1911,8 @@ class OpenSourceRunner(BaseProgramRunner):
                         r_fallback = await self._post_llm_request(remote_cloud_url, payload_fallback, fallback_headers, timeout=60.0)
                         if r_fallback.status_code == 200:
                             res_json = r_fallback.json()
-                            return res_json['choices'][0]['message']['content'].strip()
+                            _imp_text = res_json['choices'][0]['message'].get('content', '').strip()
+                            return re.sub(r'(?:<think>|\[think\])[\s\S]*?(?:</think>|\[/think\]|<\/\s*think>|\[\s*/\s*think\s*\]|$)', '', _imp_text, flags=re.IGNORECASE).strip()
                         else:
                             raise Exception(f"Fallback HTTP Server returned status code {r_fallback.status_code}: {r_fallback.text}")
                     except Exception as cloud_err:
