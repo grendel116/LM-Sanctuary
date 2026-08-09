@@ -1112,7 +1112,7 @@ async function expandHFRepo(repoId, btn) {
         files.forEach(f => {
             const fileRow = document.createElement('div');
             fileRow.style.cssText = 'display: flex; flex-direction: column; font-size: 0.7rem; background: rgba(0,0,0,0.15); padding: 8px; border-radius: 6px; gap: 6px; width: 100%; box-sizing: border-box; border: 1px solid rgba(255,255,255,0.03);';
-            const trackingName = `${repoId}@${f.quantization}`;
+            const trackingName = `${repoId}@${f.filename}`;
             const cleanId = trackingName.replace(/[^a-zA-Z0-9]/g, '');
             fileRow.innerHTML = `
                 <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%;">
@@ -1120,7 +1120,7 @@ async function expandHFRepo(repoId, btn) {
                         <div style="font-weight: 500; text-overflow: ellipsis; overflow: hidden; white-space: nowrap; color: var(--text-main);" title="${f.filename}">${f.filename}</div>
                         <div style="font-size: 0.62rem; color: var(--text-muted); margin-top: 1px;">Size: ${formatBytes(f.size)} • Quant: ${f.quantization || 'Unknown'}</div>
                     </div>
-                    <button onclick="downloadHFModel('${repoId}', '${f.quantization}', this)" class="onboarding-btn" style="margin: 0; padding: 2px 6px; font-size: 0.65rem; height: 20px; flex-shrink: 0; border-radius: 4px;">Download</button>
+                    <button onclick="downloadHFModel('${repoId}', '${f.filename}', this)" class="onboarding-btn" style="margin: 0; padding: 2px 6px; font-size: 0.65rem; height: 20px; flex-shrink: 0; border-radius: 4px;">Download</button>
                 </div>
                 <div class="progress-wrapper-${cleanId}" style="display: none; width: 100%;">
                     <div style="display: flex; justify-content: space-between; font-size: 0.58rem; color: var(--text-muted); margin-bottom: 2px; width: 100%;">
