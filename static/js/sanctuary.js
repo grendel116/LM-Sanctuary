@@ -5012,7 +5012,7 @@ function renderMessage(msg, isLive = false) {
                 let thoughts = [];
                 let tempText = item.content;
                 while (true) {
-                    const openMatch = tempText.match(/(?:<think>|\[think\])/i);
+                    const openMatch = tempText.match(/(?:<think>|\[think\]|<thought>|\[thought\]|<\|thought\|>|<\|channel\|>thought|<channel\|>thought)/i);
                     if (!openMatch) break;
                     
                     const openIdx = openMatch.index;
@@ -5020,7 +5020,7 @@ function renderMessage(msg, isLive = false) {
                     const beforeText = tempText.substring(0, openIdx);
                     const remainingText = tempText.substring(openIdx + openTagLength);
                     
-                    const closePattern = /(?:<\/think>|\[\/think\]|<\/\s*think>|\[\s*\/think\s*\])/i;
+                    const closePattern = /(?:<\/think>|\[\/think\]|</thought>|\[\/thought\]|<\|/thought\|>|<\|channel\|>|<channel\|>|<\/\s*think>|\[\s*\/think\s*\])/i;
                     const closeMatch = remainingText.match(closePattern);
                     
                     if (closeMatch) {
@@ -5041,31 +5041,8 @@ function renderMessage(msg, isLive = false) {
                 }
                 
                 let thoughtContent = thoughts.join("\n\n").trim();
-                actualResponse = tempText.trim();
+                actualResponse = tempText.replace(/<\|channel\|>|<channel\|>/gi, '').trim();
 
-                if (thoughtContent) {
-                    const thinkingBlockContainer = document.createElement('div');
-                    thinkingBlockContainer.className = 'thinking-block-container';
-                    
-                    const thinkingBlockHeader = document.createElement('div');
-                    thinkingBlockHeader.className = 'thinking-block-header';
-                    thinkingBlockHeader.onclick = function() { toggleThinkingBlock(this); };
-                    thinkingBlockHeader.innerHTML = `
-                        <span>💭 Thought</span>
-                        <span class="thinking-block-chevron">▼</span>
-                    `;
-                    
-                    const thinkingBlockBody = document.createElement('div');
-                    thinkingBlockBody.className = 'thinking-block-body';
-                    const contentDiv = document.createElement('div');
-                    contentDiv.className = 'thinking-block-content';
-                    contentDiv.textContent = thoughtContent;
-                    thinkingBlockBody.appendChild(contentDiv);
-
-                    thinkingBlockContainer.appendChild(thinkingBlockHeader);
-                    thinkingBlockContainer.appendChild(thinkingBlockBody);
-                    bubble.appendChild(thinkingBlockContainer);
-                }
             }
 
             if (actualResponse) {
