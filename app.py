@@ -573,7 +573,8 @@ You must return a valid JSON object matching the following schema:
             payload = {
                 "messages": [{"role": "user", "content": prompt}],
                 "temperature": 0.7,
-                "max_tokens": 512
+                "max_tokens": 320,
+                "thinking": {"type": "disabled"}
             }
             if target_model:
                 payload["model"] = target_model
@@ -598,7 +599,7 @@ You must return a valid JSON object matching the following schema:
                     "model": target_model,
                     "messages": [{"role": "user", "content": prompt}],
                     "temperature": 0.7,
-                    "max_tokens": 512,
+                    "max_tokens": 320,
                     "response_format": {"type": "json_object"}
                 }
                 try:
