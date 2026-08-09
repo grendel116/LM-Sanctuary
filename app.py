@@ -91,12 +91,9 @@ def check_program_change():
 
 @app.after_request
 def add_cache_control_headers(response):
-    if request.path.startswith('/static/'):
-        response.headers['Cache-Control'] = 'public, max-age=31536000, immutable'
-    else:
-        response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
-        response.headers['Pragma'] = 'no-cache'
-        response.headers['Expires'] = '0'
+    response.headers['Cache-Control'] = 'no-cache, must-revalidate, max-age=0'
+    response.headers['Pragma'] = 'no-cache'
+    response.headers['Expires'] = '0'
     return response
 
 
@@ -568,13 +565,12 @@ You must return a valid JSON object matching the following schema:
         
         if is_local:
             import requests
-            from variables import REMOTE_SERVER_URL, get_remote_server_headers, DISABLED_THINKING
+            from variables import REMOTE_SERVER_URL, get_remote_server_headers
             target_model = selected_model if (selected_model and selected_model != 'local-llm') else os.getenv("LOCAL_MODEL_NAME")
             payload = {
                 "messages": [{"role": "user", "content": prompt}],
                 "temperature": 0.7,
-                "max_tokens": 320,
-                **DISABLED_THINKING
+                "max_tokens": 320
             }
             if target_model:
                 payload["model"] = target_model
