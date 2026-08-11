@@ -1,4 +1,5 @@
 import os
+import re
 import requests
 import base64
 import hashlib
@@ -195,7 +196,9 @@ class SpeechManager:
         Returns None or empty string on failure.
         """
         # Strip simple Markdown markers (asterisks, underscores) for clean reading
-        clean_text = text.replace('*', '').replace('_', '').replace('`', '').strip()
+        clean_text = text.replace('*', '').replace('_', '').replace('`', '')
+        # Strip HTML comment blocks
+        clean_text = re.sub(r'<!--.*?-->', '', clean_text, flags=re.DOTALL).strip()
         if not clean_text:
             return ""
             
