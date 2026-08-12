@@ -39,12 +39,15 @@ def get_active_program() -> str:
         if not active_prog:
             active_prog = "sebile"
 
+    target_folder = os.path.normpath(os.path.join(PARENT_DIR, 'core', 'programs', active_prog))
+    if not os.path.isdir(target_folder) and active_prog != "sebile":
+        active_prog = "sebile"
+        target_folder = os.path.normpath(os.path.join(PARENT_DIR, 'core', 'programs', active_prog))
+
     # Set environment variable
     os.environ["ACTIVE_PROGRAM"] = active_prog
 
     # Ensure settings file is in sync
-    target_folder = os.path.normpath(os.path.join(PARENT_DIR, 'core', 'programs', active_prog))
-
     current_folders = settings.get("folders", [])
     current_active = settings.get("active_program")
 
