@@ -2423,12 +2423,26 @@ class OpenSourceRunner(BaseProgramRunner):
                         indices_to_delete.append(i)
                     modified = True
                 if msg.get('tool_calls'):
+                    cleared_call_ids = set()
                     for tc in msg['tool_calls']:
                         if tc.get('type') == 'response' and tc.get('response') and image_url in tc['response']:
                             has_image = True
                             pattern = r'!\[[^\]]*\]\(' + re.escape(image_url) + r'\)'
                             tc['response'] = re.sub(pattern, '', tc['response']).strip()
+                            if not tc['response']:
+                                cleared_call_ids.add(tc.get('id'))
                             modified = True
+
+                    # Remove the matching 'call' entries for cleared responses
+                    # so the image generation tag is not reconstructed into the
+                    # LLM conversation on subsequent turns.
+                    if cleared_call_ids:
+                        msg['tool_calls'] = [
+                            tc for tc in msg['tool_calls']
+                            if not (tc.get('id') in cleared_call_ids and
+                                    (tc.get('type') == 'call' or
+                                     (tc.get('type') == 'response' and not (tc.get('response') or '').strip())))
+                        ]
                     
                     # If all tool responses in this message are empty, and there is no text, delete the message
                     all_calls_empty = True
