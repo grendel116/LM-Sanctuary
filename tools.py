@@ -1371,7 +1371,7 @@ def apply_comfy_workflow(workflow_path: str, parameters: dict, save_path: str, s
         return f"Error executing ComfyUI workflow: {e}"
 @track_tool_activity
 def generate_local_image(prompt: str) -> str:
-    """Generates a local image using ComfyUI with companion-specific workflow configurations.
+    """Generates a local image using ComfyUI with program-specific workflow configurations.
     
     Args:
         prompt: A prompt describing what you are doing or the scene/expression.
@@ -1413,12 +1413,12 @@ def generate_local_image(prompt: str) -> str:
         return (
             "**Image Generation Inactive (ComfyUI Offline/Not Installed)**\n\n"
             f"*(Reason: {reason})*\n\n"
-            "To enable companion portrait generation, you can install, run, and resolve ComfyUI dependencies directly from the **Connection Settings** panel:\n\n"
+            "To enable program portrait generation, you can install, run, and resolve ComfyUI dependencies directly from the **Connection Settings** panel:\n\n"
             "- **Open Connection Settings**: Click the settings gear icon in the top header.\n"
             "- **Install ComfyUI**: If not already installed, click **Install Headless ComfyUI** under the Image Generation Environment section.\n"
             "- **Start the Server**: Click **Start ComfyUI Engine** to launch the server headlessly.\n"
             "- **Resolve Dependencies**: Click **Resolve Workflow Dependencies** to automatically download the required checkpoints, VAEs, and custom nodes.\n"
-            "- **Request a Portrait**: Once the engine is online, ask the companion to generate a portrait!"
+            "- **Request a Portrait**: Once the engine is online, ask the program to generate a portrait!"
         )
 
     base_dir = os.path.dirname(os.path.abspath(__file__))
@@ -1446,8 +1446,7 @@ def generate_local_image(prompt: str) -> str:
         if available_vaes and selected_vae not in available_vaes:
             raise Exception(f"Missing VAE: The required VAE file `{selected_vae}` was not found.")
 
-        # Load appearance, image details, and negative details from the active program's JSON profile
-        appearance_val = ""
+        # Load image prompt tags from v3 extensions.sanctuary.image_details
         img_details_val = ""
         neg_details_val = ""
         
@@ -1458,26 +1457,15 @@ def generate_local_image(prompt: str) -> str:
         if os.path.exists(program_json_path):
             try:
                 with open(program_json_path, "r", encoding="utf-8") as f:
-                    prof_data = json.load(f)
-                
-                # Appearance from details
-                desc = prof_data.get("description", {})
-                desc_parts = []
-                for k, v in desc.items():
-                    if v:
-                        desc_parts.append(f"{v} {k}")
-                if desc_parts:
-                    appearance_val = ", ".join(desc_parts)
-                    
-                # Image details section
-                img_sec = prof_data.get("image details", {})
-                img_details_val = img_sec.get("image details", "")
-                neg_details_val = img_sec.get("negative details", "")
+                    raw = json.load(f)
+                card = raw.get("data", raw)
+                sanctuary = card.get("extensions", {}).get("sanctuary", {})
+                img_details = sanctuary.get("image_details", {})
+                img_details_val = img_details.get("positive", "")
+                neg_details_val = img_details.get("negative", "")
             except Exception as e:
                 print(f"[DEBUG] Error reading active program JSON for image generation: {e}", flush=True)
 
-        if not appearance_val:
-            appearance_val = f"character named {active_program}"
 
         # Combine prompt and image details
         from core.program_config import replace_placeholders
@@ -1493,7 +1481,6 @@ def generate_local_image(prompt: str) -> str:
         seed_val = random.randint(1, 1125899906842624)
         replacements = {
             "%prompt%": final_prompt,
-            "%appearance%": appearance_val,
             "%negative_prompt%": final_negative,
             "%seed%": seed_val,
             "%model%": selected_checkpoint,
@@ -2271,7 +2258,7 @@ def add_quest(title: str, notes: str, due: str = None, location: str = "", remin
 
 @track_tool_activity
 def add_journal_entry(keyphrases: str, content: str) -> str:
-    """Saves a memory journal entry for the active companion.
+    """Saves a memory journal entry for the active program.
     
     Args:
         keyphrases: Comma separated keywords or phrases that trigger this memory.

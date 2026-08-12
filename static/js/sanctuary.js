@@ -79,12 +79,12 @@ const appConfig = window.__SANCTUARY_CONFIG || {};
 const localIp = appConfig.localIp || "127.0.0.1";
 const chatContainer = document.getElementById('chat-container');
 const userInput = document.getElementById('user-input');
-let companionWelcomeMessage = null;
+let programWelcomeMessage = null;
 
 function replacePlaceholders(text) {
     if (!text) return text;
     const displayUser = getUserDisplayName();
-    const displayChar = activeCompanionName || "Companion";
+    const displayChar = activeProgramName || "Program";
     return text.replace(new RegExp("{" + "{" + "user" + "}" + "}", "gi"), displayUser)
                .replace(new RegExp("{" + "{" + "char" + "}" + "}", "gi"), displayChar);
 }
@@ -165,22 +165,22 @@ async function softReloadApp() {
         const data = await historyRes.json();
         
         if (data.welcome_message) {
-            companionWelcomeMessage = data.welcome_message;
+            programWelcomeMessage = data.welcome_message;
         } else {
-            companionWelcomeMessage = null;
+            programWelcomeMessage = null;
         }
         
         if (data.active_program) {
             applyTheme(data.active_program, data.theme);
         }
         if (data.character_name) {
-            activeCompanionName = data.character_name;
-            const companionTitle = "Sanctuary";
-            document.title = companionTitle;
+            activeProgramName = data.character_name;
+            const programTitle = "Sanctuary";
+            document.title = programTitle;
             
             const headerTitle = document.querySelector('.header-title-area h1');
             if (headerTitle) {
-                headerTitle.textContent = companionTitle;
+                headerTitle.textContent = programTitle;
             }
             
             const userInput = document.getElementById('user-input');
@@ -353,11 +353,11 @@ function initHeartPulse() {
                     sad: "sad"
                 };
                 const quality = stateQualities[inversionActive] || "sad";
-                extraMsg = `<br><br><span style="color: var(--text-muted); font-size: 0.9rem;">${activeCompanionName || 'The companion'} is in a dialectical state: ${quality}.</span>`;
+                extraMsg = `<br><br><span style="color: var(--text-muted); font-size: 0.9rem;">${activeProgramName || 'The program'} is in a dialectical state: ${quality}.</span>`;
             }
             
             showCustomAlert("Heart Status",
-                  `${activeCompanionName || 'Companion'}'s Mood: <strong>${statusName}</strong><br>` +
+                  `${activeProgramName || 'Program'}'s Mood: <strong>${statusName}</strong><br>` +
                   `Emotional Intensity: <strong>${intensityPercent}%</strong>` + extraMsg);
         });
         heartElement.addEventListener('dblclick', () => {
@@ -385,7 +385,7 @@ if ('serviceWorker' in navigator) {
     });
 }
 
-// Update heart icon to reflect Companion's current emotional state
+// Update heart icon to reflect Program's current emotional state
 
 /* ==========================================================================
    II. 1. UTILITY HELPERS & COMMON MIDDLEWARE
@@ -411,10 +411,10 @@ function getRelativePath(url) {
 // --- generateMessageId ---
 function generateMessageId(text, role = 'user') {
     let prefix = 'msg_';
-    if (role === 'companion' || role === 'user') {
+    if (role === 'program' || role === 'user') {
         if (text && text.trim().startsWith('![') && text.trim().endsWith(')')) {
             prefix = 'img_';
-        } else if (role === 'companion') {
+        } else if (role === 'program') {
             if (text && (text.includes('Error') || text.includes('failed') || text.includes('momentarily overwhelmed'))) {
                 prefix = 'err_';
             } else {
@@ -667,13 +667,13 @@ async function initializeModelSelect() {
             }
 
             const defaultModel = data.default || 'local-llm';
-            safeLocalStorage.setItem('companion_default_model', defaultModel);
+            safeLocalStorage.setItem('program_default_model', defaultModel);
 
-            let storedModel = safeLocalStorage.getItem('companion_selected_model');
+            let storedModel = safeLocalStorage.getItem('program_selected_model');
             const isValid = availableModels.some(m => m.value === storedModel) || (storedModel === 'local-llm' && availableModels.length === 0);
             if (!isValid) {
                 storedModel = defaultModel;
-                safeLocalStorage.setItem('companion_selected_model', storedModel);
+                safeLocalStorage.setItem('program_selected_model', storedModel);
             }
             
             selectedModel = storedModel;
@@ -758,7 +758,7 @@ function showOnboardingCard() {
     onboarding.innerHTML = `
         <div class="onboarding-header">
             <h2>👾 Sanctuary Connection Guide</h2>
-            <p>Your companion needs a language model "brain" to speak. Choose one or both options below to connect.</p>
+            <p>Your program needs a language model "brain" to speak. Choose one or both options below to connect.</p>
         </div>
         
         <div class="onboarding-options">
@@ -1598,7 +1598,7 @@ function updateHeartState(state, activeInversion) {
     heartElement.style.setProperty('--heart-speed-active', activeSpeed);
     
     // Add a dynamic description to title tooltips for depth
-    const name = activeCompanionName || "Companion";
+    const name = activeProgramName || "Program";
     const stateTitles = {
         intimate: `${name}'s heart glows warmly with deep intimacy`,
         excited: `${name}'s heart is beating rapidly with playful excitement`,
@@ -1684,7 +1684,7 @@ function updateAvatarElement(el, newSrc) {
         const img = document.createElement('img');
         img.className = el.className.replace('avatar-fallback', '').trim();
         img.src = newSrc;
-        img.alt = el.getAttribute('alt') || 'Companion';
+        img.alt = el.getAttribute('alt') || 'Program';
         
         // Copy all attributes back
         for (let attr of el.attributes) {
@@ -1698,14 +1698,14 @@ function updateAvatarElement(el, newSrc) {
         
         if (el.onclick) {
             img.onclick = el.onclick;
-        } else if (el.classList.contains('companion-avatar')) {
+        } else if (el.classList.contains('program-avatar')) {
             img.onclick = () => expandImage(newSrc);
         }
         
         el.replaceWith(img);
     } else {
         el.src = newSrc;
-        if (el.classList.contains('companion-avatar')) {
+        if (el.classList.contains('program-avatar')) {
             el.onclick = () => expandImage(newSrc);
         }
     }
@@ -1714,7 +1714,7 @@ function updateAvatarElement(el, newSrc) {
 // --- updateProfileImages ---
 function updateProfileImages() {
     const url = getProfileUrl();
-    document.querySelectorAll('.companion-avatar').forEach(img => {
+    document.querySelectorAll('.program-avatar').forEach(img => {
         updateAvatarElement(img, url);
     });
 }
@@ -1729,7 +1729,7 @@ function applyTheme(programId, theme) {
         if (theme.accent_color_b) root.style.setProperty('--accent-color-b', theme.accent_color_b);
         if (theme.primary_accent) root.style.setProperty('--primary-accent', theme.primary_accent);
         if (theme.primary_glow) root.style.setProperty('--primary-glow', theme.primary_glow);
-        if (theme.companion_bubble) root.style.setProperty('--companion-bubble', theme.companion_bubble);
+        if (theme.program_bubble) root.style.setProperty('--program-bubble', theme.program_bubble);
         if (theme.send_btn_hover) root.style.setProperty('--send-btn-hover', theme.send_btn_hover);
         if (theme.accent_green) {
             root.style.setProperty('--accent-green', theme.accent_green);
@@ -1743,7 +1743,7 @@ function applyTheme(programId, theme) {
         root.style.setProperty('--accent-color-b', '#79aeff');
         root.style.setProperty('--primary-accent', '#8b5cf6');
         root.style.setProperty('--primary-glow', 'rgba(139, 92, 246, 0.08)');
-        root.style.setProperty('--companion-bubble', 'rgba(24, 22, 28, 0.85)');
+        root.style.setProperty('--program-bubble', 'rgba(24, 22, 28, 0.85)');
         root.style.setProperty('--send-btn-hover', 'rgba(45, 38, 56, 0.75)');
         root.style.setProperty('--accent-green', '#b19cd9');
         root.style.setProperty('--quote-blue', '#79aeff');
@@ -2055,7 +2055,7 @@ async function updateComfyModalStatus(skipFetch = false) {
                                  ${comfyStatus.running === 'starting' ? 'Starting...' : (comfyStatus.running === 'stopping' ? 'Stopping...' : (comfyStatus.running ? 'Running' : 'Offline'))}
                              </span>
                          </div>
-                         <p class="option-desc" style="font-size: 0.8rem; margin: 8px 0 10px 0;">Generate companion portraits locally using ComfyUI.</p>
+                         <p class="option-desc" style="font-size: 0.8rem; margin: 8px 0 10px 0;">Generate program portraits locally using ComfyUI.</p>
                          
                          <div id="comfy-engine-controls">
                              ${comfyStatus.running === true || comfyStatus.running === 'online' ? `
@@ -2147,7 +2147,7 @@ async function changeModel() {
     if (select) {
         const val = select.value;
         selectedModel = val;
-        localStorage.setItem('companion_selected_model', selectedModel);
+        localStorage.setItem('program_selected_model', selectedModel);
     }
 }
 
@@ -2412,11 +2412,11 @@ function renderUserProfilesList() {
         leftArea.appendChild(info);
         card.appendChild(leftArea);
 
-        // Right side action area (matching companion profile rows)
+        // Right side action area (matching program profile rows)
         const rightArea = document.createElement('div');
         rightArea.style.cssText = 'display: flex; align-items: center; gap: 6px; margin-left: auto;';
 
-        // Add Edit Settings button on each profile row (matching companion profile rows)
+        // Add Edit Settings button on each profile row (matching program profile rows)
         const editBtn = document.createElement('button');
         editBtn.className = 'action-icon-btn';
         editBtn.innerHTML = `
@@ -2436,7 +2436,7 @@ function renderUserProfilesList() {
         };
         rightArea.appendChild(editBtn);
 
-        // Add Delete button on each non-default profile row (matching companion profile rows)
+        // Add Delete button on each non-default profile row (matching program profile rows)
         if (prof.id !== 'builder') {
             const deleteBtn = document.createElement('button');
             deleteBtn.className = 'action-icon-btn';
@@ -2823,11 +2823,11 @@ function deleteSelectedChatSession() {
 
 
 /* ==========================================================================
-   VII. 6. COMPANION / PROGRAM SELECTION
+   VII. 6. PROGRAM / PROGRAM SELECTION
    ========================================================================== */
 
 // --- openAssistantModal ---
-async function openAssistantModal(defaultTab = 'companion') {
+async function openAssistantModal(defaultTab = 'program') {
     document.getElementById('assistant-modal').style.display = 'flex';
     switchAssistantModalTab(defaultTab);
     try {
@@ -2838,7 +2838,7 @@ async function openAssistantModal(defaultTab = 'companion') {
         }
     } catch (e) {
         console.error("Error loading assistants list:", e);
-        showCustomAlert("Error", "Could not fetch companion list from server.");
+        showCustomAlert("Error", "Could not fetch program list from server.");
     }
 }
 
@@ -2849,10 +2849,10 @@ function closeAssistantModal() {
 
 // --- switchAssistantModalTab ---
 function switchAssistantModalTab(tab) {
-    const compBtn = document.getElementById('assistant-tab-btn-companion');
+    const compBtn = document.getElementById('assistant-tab-btn-program');
     const userBtn = document.getElementById('assistant-tab-btn-user');
     const sessBtn = document.getElementById('assistant-tab-btn-sessions');
-    const compTab = document.getElementById('assistant-tab-content-companion');
+    const compTab = document.getElementById('assistant-tab-content-program');
     const userTab = document.getElementById('assistant-tab-content-user');
     const sessTab = document.getElementById('assistant-tab-content-sessions');
     
@@ -2872,7 +2872,7 @@ function switchAssistantModalTab(tab) {
         if (panel) panel.style.display = 'none';
     });
     
-    if (tab === 'companion') {
+    if (tab === 'program') {
         compBtn.style.background = 'rgba(255, 255, 255, 0.08)';
         compBtn.style.color = 'var(--primary-accent)';
         compBtn.style.border = '1px solid var(--primary-accent)';
@@ -2895,23 +2895,24 @@ function switchAssistantModalTab(tab) {
     }
 }
 
-// --- openImportCompanionModal ---
-function openImportCompanionModal() {
+// --- openImportProgramModal ---
+function openImportProgramModal() {
     closeAssistantModal();
-    document.getElementById('import-companion-modal').style.display = 'flex';
+    document.getElementById('import-program-modal').style.display = 'flex';
     
     // Clear inputs
     selectedTavernCardFile = null;
     document.getElementById('tavern-card-input').value = '';
-    document.getElementById('tavern-selected-file').style.display = 'none';
-    document.getElementById('describe-companion-name').value = '';
-    document.getElementById('describe-companion-desc').value = '';
+    const nameEl = document.getElementById('tavern-file-name');
+    if (nameEl) { nameEl.textContent = '+ Select PNG Card'; nameEl.style.color = ''; nameEl.style.fontWeight = ''; }
+    document.getElementById('describe-program-name').value = '';
+    document.getElementById('describe-program-desc').value = '';
     switchImportTab('tavern');
 }
 
-// --- closeImportCompanionModal ---
-function closeImportCompanionModal() {
-    document.getElementById('import-companion-modal').style.display = 'none';
+// --- closeImportProgramModal ---
+function closeImportProgramModal() {
+    document.getElementById('import-program-modal').style.display = 'none';
 }
 
 // --- switchImportTab ---
@@ -2952,8 +2953,12 @@ function handleTavernCardFileChange(e) {
     const files = e.target.files;
     if (files.length > 0) {
         selectedTavernCardFile = files[0];
-        document.getElementById('tavern-file-name').textContent = selectedTavernCardFile.name;
-        document.getElementById('tavern-selected-file').style.display = 'block';
+        const nameEl = document.getElementById('tavern-file-name');
+        if (nameEl) {
+            nameEl.textContent = selectedTavernCardFile.name;
+            nameEl.style.color = 'var(--primary-accent)';
+            nameEl.style.fontWeight = '500';
+        }
     }
 }
 
@@ -2982,21 +2987,21 @@ async function submitTavernCardImport() {
             throw new Error(data.error);
         }
         
-        showCustomAlert("Success", `Companion '${data.name}' imported successfully!`);
-        closeImportCompanionModal();
+        showCustomAlert("Success", `Program '${data.name}' imported successfully!`);
+        closeImportProgramModal();
         openAssistantModal();
     } catch (e) {
         showCustomAlert("Error", e.message || "Failed to import character card.");
     } finally {
         btn.disabled = false;
-        btn.textContent = "Import Companion";
+        btn.textContent = "Import Program";
     }
 }
 
 // --- submitDescriptionImport ---
 async function submitDescriptionImport() {
-    const name = document.getElementById('describe-companion-name').value.trim();
-    const desc = document.getElementById('describe-companion-desc').value.trim();
+    const name = document.getElementById('describe-program-name').value.trim();
+    const desc = document.getElementById('describe-program-desc').value.trim();
     
     if (!name || !desc) {
         showCustomAlert("Error", "Please provide a name and character description.");
@@ -3018,14 +3023,14 @@ async function submitDescriptionImport() {
             throw new Error(data.error);
         }
         
-        showCustomAlert("Success", `Companion '${data.name}' generated successfully!`);
-        closeImportCompanionModal();
+        showCustomAlert("Success", `Program '${data.name}' generated successfully!`);
+        closeImportProgramModal();
         openAssistantModal();
     } catch (e) {
-        showCustomAlert("Error", e.message || "Failed to generate companion.");
+        showCustomAlert("Error", e.message || "Failed to generate program.");
     } finally {
         btn.disabled = false;
-        btn.textContent = "Generate Companion";
+        btn.textContent = "Generate Program";
     }
 }
 
@@ -3063,9 +3068,9 @@ function renderProgramsList(assistants, activeId) {
         const leftArea = document.createElement('div');
         leftArea.style.cssText = 'display: flex; align-items: center; gap: 12px;';
 
-        // Custom companion icon image
+        // Custom program icon image
         const img = document.createElement('img');
-        img.className = 'companion-list-avatar';
+        img.className = 'program-list-avatar';
         img.src = `/programs/${assistant.id}/profile.png?t=${profileCacheBuster}`;
         img.alt = assistant.name;
         img.setAttribute('data-name', assistant.name);
@@ -3097,7 +3102,7 @@ function renderProgramsList(assistants, activeId) {
         leftArea.appendChild(info);
         div.appendChild(leftArea);
 
-        // Add Palette settings button on each companion row
+        // Add Palette settings button on each program row
         const paletteBtn = document.createElement('button');
         paletteBtn.className = 'action-icon-btn';
         paletteBtn.innerHTML = `
@@ -3121,7 +3126,7 @@ function renderProgramsList(assistants, activeId) {
         };
         div.appendChild(paletteBtn);
 
-        // Add Edit Settings button on each companion row
+        // Add Edit Settings button on each program row
         const editBtn = document.createElement('button');
         editBtn.className = 'action-icon-btn';
         editBtn.innerHTML = `
@@ -3130,7 +3135,7 @@ function renderProgramsList(assistants, activeId) {
                 <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"></path>
             </svg>
         `;
-        editBtn.title = 'Edit Companion Persona';
+        editBtn.title = 'Edit Program Persona';
         editBtn.style.width = '26px';
         editBtn.style.height = '26px';
         editBtn.style.borderRadius = '6px';
@@ -3138,29 +3143,17 @@ function renderProgramsList(assistants, activeId) {
         editBtn.style.flexShrink = '0';
         editBtn.onclick = (e) => {
             e.stopPropagation();
-            openCompanionProfileModal(assistant.id);
+            openProgramProfileModal(assistant.id);
         };
         div.appendChild(editBtn);
 
         if (assistant.id !== 'sebile') {
             const deleteBtn = document.createElement('button');
             deleteBtn.className = 'action-icon-btn';
-            deleteBtn.innerHTML = `
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-                    <polyline points="3 6 5 6 21 6"></polyline>
-                    <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
-                </svg>
-            `;
-            deleteBtn.title = 'Delete Companion';
-            deleteBtn.style.width = '26px';
-            deleteBtn.style.height = '26px';
-            deleteBtn.style.borderRadius = '6px';
-            deleteBtn.style.marginLeft = '10px';
-            deleteBtn.style.flexShrink = '0';
-            deleteBtn.onclick = (e) => {
-                e.stopPropagation();
-                deleteAssistant(assistant.id, assistant.name);
-            };
+            deleteBtn.innerHTML = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="display:block"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>`;
+            deleteBtn.title = 'Delete Program';
+            deleteBtn.style.cssText = 'width:26px;height:26px;border-radius:6px;margin-left:10px;flex-shrink:0;';
+            deleteBtn.onclick = (e) => { e.stopPropagation(); deleteAssistant(assistant.id, assistant.name); };
             div.appendChild(deleteBtn);
         }
 
@@ -3224,19 +3217,19 @@ async function selectAssistant(assistantId) {
             loadHistory();
             loadServerImages();
         } else {
-            showCustomAlert("Switch Failed", `Could not select companion: ${data.error}`);
+            showCustomAlert("Switch Failed", `Could not select program: ${data.error}`);
         }
     } catch (e) {
         console.error("Error switching assistant:", e);
-        showCustomAlert("Error", "Could not connect to the server to switch companions.");
+        showCustomAlert("Error", "Could not connect to the server to switch programs.");
     }
 }
 
 // --- deleteAssistant ---
 async function deleteAssistant(assistantId, name) {
     showCustomConfirm(
-        "Delete Companion",
-        `Are you sure you want to permanently delete companion <strong>${name}</strong>? This will remove all their configs, databank documents, and portraits.`,
+        "Delete Program",
+        `Are you sure you want to permanently delete program <strong>${name}</strong>? This will remove all their configs, databank documents, and portraits.`,
         async () => {
             try {
                 const res = await fetch('/api/programs/delete', {
@@ -3246,7 +3239,7 @@ async function deleteAssistant(assistantId, name) {
                 });
                 const data = await res.json();
                 if (data.status === 'success') {
-                    showCustomAlert("Deleted", `Companion <strong>${name}</strong> has been deleted.`);
+                    showCustomAlert("Deleted", `Program <strong>${name}</strong> has been deleted.`);
                     if (data.switched_to === 'sebile') {
                         selectAssistant('sebile');
                     } else {
@@ -3257,130 +3250,78 @@ async function deleteAssistant(assistantId, name) {
                         }
                     }
                 } else {
-                    showCustomAlert("Error", `Could not delete companion: ${data.error}`);
+                    showCustomAlert("Error", `Could not delete program: ${data.error}`);
                 }
             } catch (e) {
                 console.error("Error deleting assistant:", e);
-                showCustomAlert("Error", "Could not connect to server to delete companion.");
+                showCustomAlert("Error", "Could not connect to server to delete program.");
             }
         }
     );
 }
 
-// --- COMPANION PROFILE EDITOR JS METHODS ---
-let currentEditingCompanionId = null;
-let currentEditingCompanionOriginalName = '';
+// --- PROGRAM PROFILE EDITOR JS METHODS ---
+let currentEditingProgramId = null;
+let currentEditingProgramOriginalName = '';
 
-async function openCompanionProfileModal(programId) {
-    currentEditingCompanionId = programId;
+async function openProgramProfileModal(programId) {
+    currentEditingProgramId = programId;
     closeAssistantModal();
-    document.getElementById('companion-profile-modal').style.display = 'flex';
-    switchCompanionProfileTab('core');
+    document.getElementById('program-profile-modal').style.display = 'flex';
+    switchProgramProfileTab('core');
     
-    // Clear inputs first
+    // Clear inputs
     document.getElementById('comp-name').value = '';
     document.getElementById('comp-narration-mode').checked = false;
     document.getElementById('comp-backstory').value = '';
     document.getElementById('comp-directives').value = '';
     document.getElementById('comp-post-history-instructions').value = '';
-    document.getElementById('comp-ontology').value = '';
     document.getElementById('comp-example-msg').value = '';
     document.getElementById('comp-personality-type').value = '';
     document.getElementById('comp-scenario').value = '';
-    
-    document.getElementById('comp-voice').value = '';
     document.getElementById('comp-tts-voice').value = 'af_heart';
-    document.getElementById('comp-ethnicity').value = '';
-    document.getElementById('comp-hair-style').value = '';
-    document.getElementById('comp-hair-color').value = '';
-    document.getElementById('comp-eyes').value = '';
-    document.getElementById('comp-skin').value = '';
-    document.getElementById('comp-breasts').value = '';
-    document.getElementById('comp-butt').value = '';
-    document.getElementById('comp-body').value = '';
     document.getElementById('comp-image-details').value = '';
     document.getElementById('comp-negative-details').value = '';
     
     try {
         const res = await fetch(`/api/programs/profile?program_id=${programId}&t=${Date.now()}`);
         const data = await res.json();
-        if (data.error) {
-            throw new Error(data.error);
-        }
+        if (data.error) throw new Error(data.error);
         
-        // Populating name & narration mode
-        currentEditingCompanionOriginalName = data.name || '';
-        document.getElementById('comp-name').value = currentEditingCompanionOriginalName;
+        // v3 fields
+        currentEditingProgramOriginalName = data.name || '';
+        document.getElementById('comp-name').value = currentEditingProgramOriginalName;
+        document.getElementById('comp-personality-type').value = data.personality || '';
+        document.getElementById('comp-backstory').value = data.description || '';
+        document.getElementById('comp-scenario').value = data.scenario || '';
+        document.getElementById('comp-example-msg').value = data.first_mes || '';
+        document.getElementById('comp-directives').value = data.system_prompt || '';
+        document.getElementById('comp-post-history-instructions').value = data.post_history_instructions || '';
+        document.getElementById('comp-tts-voice').value = data.tts_voice || 'af_heart';
         document.getElementById('comp-narration-mode').checked = data.narration_mode || false;
         
-        // Populating Personality values
-        const operation = data.operation || {};
-        document.getElementById('comp-backstory').value = operation.description || '';
-        document.getElementById('comp-directives').value = operation.response_directive || '';
-        document.getElementById('comp-post-history-instructions').value = operation.post_history_instructions || '';
-        document.getElementById('comp-ontology').value = operation.ontology || '';
-        document.getElementById('comp-example-msg').value = operation.example_message || '';
-        document.getElementById('comp-personality-type').value = operation.personality || '';
-        document.getElementById('comp-scenario').value = operation.scenario || '';
+        // Image prompts from extensions.sanctuary
+        const sanctuary = (data.extensions || {}).sanctuary || {};
+        const imgDetails = sanctuary.image_details || {};
+        document.getElementById('comp-image-details').value = imgDetails.positive || '';
+        document.getElementById('comp-negative-details').value = imgDetails.negative || '';
         
-        // Populating Appearance values
-        const description = data.description || {};
-        document.getElementById('comp-voice').value = description.voice || '';
-        document.getElementById('comp-tts-voice').value = data.tts_voice || 'af_heart';
-        document.getElementById('comp-ethnicity').value = description.ethnicity || '';
-        document.getElementById('comp-hair-style').value = description['hair style'] || '';
-        document.getElementById('comp-hair-color').value = description['hair color'] || '';
-        document.getElementById('comp-eyes').value = description.eyes || '';
-        document.getElementById('comp-skin').value = description.skin || '';
-        
-        // Determine if male from pronouns or keys to show Breasts or Mass
-        let isMale = false;
-        const backstoryText = ((operation.description || '') + " " + (operation.scenario || '')).toLowerCase();
-        const maleMatch = backstoryText.match(/\b(he|him|his|himself)\b/g);
-        const femaleMatch = backstoryText.match(/\b(she|her|hers|herself)\b/g);
-        const maleCount = maleMatch ? maleMatch.length : 0;
-        const femaleCount = femaleMatch ? femaleMatch.length : 0;
-        
-        // Also check if any key in description indicates gender
-        for (const [gk, gv] of Object.entries(description)) {
-            if (['gender', 'sex', 'pronouns'].includes(gk.toLowerCase())) {
-                if (['male', 'man', 'boy', 'masculine', 'he/him', 'he', 'him'].some(x => String(gv).toLowerCase().includes(x))) {
-                    isMale = true;
-                    break;
-                }
-            }
-        }
-        if (description.mass !== undefined || (maleCount > femaleCount)) {
-            isMale = true;
-        }
-        
-        const breastsLabel = document.getElementById('comp-breasts-label');
-        if (breastsLabel) {
-            breastsLabel.textContent = isMale ? "Mass" : "Breasts";
-        }
-        
-        document.getElementById('comp-breasts').value = description.breasts || description.mass || '';
-        document.getElementById('comp-butt').value = description.butt || '';
-        document.getElementById('comp-body').value = description.body || '';
-        
-        const imgDetails = data['image details'] || {};
-        document.getElementById('comp-image-details').value = imgDetails['image details'] || '';
-        document.getElementById('comp-negative-details').value = imgDetails['negative details'] || '';
-        
-        // Load Journals list
-        await loadCompanionJournals();
+        await loadProgramJournals();
     } catch (e) {
-        console.error("Error loading companion profile:", e);
-        showCustomAlert("Error", "Could not load companion profile: " + e.message);
+        console.error('Error loading program profile:', e);
+        showCustomAlert('Error', 'Could not load program profile: ' + e.message);
     }
 }
 
-function closeCompanionProfileModal() {
-    document.getElementById('companion-profile-modal').style.display = 'none';
+
+
+    
+function closeProgramProfileModal() {
+    document.getElementById('program-profile-modal').style.display = 'none';
     openAssistantModal();
 }
 
-let paletteTargetCompanionId = null;
+let paletteTargetProgramId = null;
 const palettePresets = [
     { name: 'Sky Blue', hex: '#38bdf8' },
     { name: 'Amethyst', hex: '#a855f7' },
@@ -3392,9 +3333,9 @@ const palettePresets = [
     { name: 'Pure White', hex: '#ffffff' }
 ];
 
-async function openPaletteModal(programId, companionName) {
-    paletteTargetCompanionId = programId;
-    document.getElementById('palette-companion-name').innerText = companionName;
+async function openPaletteModal(programId, programName) {
+    paletteTargetProgramId = programId;
+    document.getElementById('palette-program-name').innerText = programName;
     
     // Set up presets swatches
     const presetsContainer = document.getElementById('palette-presets-container');
@@ -3458,7 +3399,7 @@ async function openPaletteModal(programId, companionName) {
     // Try to load the current theme color first if theme.json exists
     let currentColor = '#38bdf8';
     try {
-        if (activeCompanionName && programId === activeCompanionName.toLowerCase()) {
+        if (activeProgramName && programId === activeProgramName.toLowerCase()) {
             currentColor = getComputedStyle(document.documentElement).getPropertyValue('--primary-accent').trim();
         } else {
             const response = await fetch(`/api/programs/profile?program_id=${programId}`);
@@ -3511,7 +3452,7 @@ function syncPaletteColorTextToPicker() {
     }
 }
 
-async function saveCompanionPalette() {
+async function saveProgramPalette() {
     const color = document.getElementById('custom-palette-color-text').value.trim();
     if (!/^#[0-9a-fA-F]{6}$/.test(color)) {
         showCustomAlert("Error", "Please enter a valid hex color code (e.g. #38BDF8)");
@@ -3529,15 +3470,15 @@ async function saveCompanionPalette() {
                 'Content-Type': 'application/json'
             },
             body: JSON.stringify({
-                program_id: paletteTargetCompanionId,
+                program_id: paletteTargetProgramId,
                 color: color
             })
         });
         
         const data = await response.json();
         if (response.ok && data.status === 'success') {
-            if (activeCompanionName && paletteTargetCompanionId === activeCompanionName.toLowerCase()) {
-                applyTheme(paletteTargetCompanionId, data.theme);
+            if (activeProgramName && paletteTargetProgramId === activeProgramName.toLowerCase()) {
+                applyTheme(paletteTargetProgramId, data.theme);
             }
             
             document.getElementById('palette-modal').style.display = 'none';
@@ -3554,7 +3495,7 @@ async function saveCompanionPalette() {
     }
 }
 
-function switchCompanionProfileTab(tab) {
+function switchProgramProfileTab(tab) {
     const tabs = ['core', 'phys'];
     tabs.forEach(t => {
         const content = document.getElementById(`comp-tab-content-${t}`);
@@ -3577,25 +3518,30 @@ function switchCompanionProfileTab(tab) {
     });
 }
 
-async function saveCompanionProfile() {
-    if (!currentEditingCompanionId) return;
+function exportProgramCard() {
+    if (!currentEditingProgramId) return;
+    window.location.href = `/api/programs/${encodeURIComponent(currentEditingProgramId)}/export/card`;
+}
+
+async function saveProgramProfile() {
+    if (!currentEditingProgramId) return;
     
     const newName = document.getElementById('comp-name').value.trim();
     if (!newName) {
-        showCustomAlert("Error", "Companion Name cannot be empty.");
+        showCustomAlert("Error", "Program Name cannot be empty.");
         return;
     }
     
-    let targetProgramId = currentEditingCompanionId;
+    let targetProgramId = currentEditingProgramId;
     let wasActive = false;
     
-    if (newName !== currentEditingCompanionOriginalName) {
+    if (newName !== currentEditingProgramOriginalName) {
         try {
             const renameRes = await fetch('/api/programs/rename', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
-                    program_id: currentEditingCompanionId,
+                    program_id: currentEditingProgramId,
                     new_name: newName
                 })
             });
@@ -3607,7 +3553,7 @@ async function saveCompanionProfile() {
             targetProgramId = renameData.new_id;
             wasActive = renameData.was_active;
         } catch (e) {
-            showCustomAlert("Error", "Failed to rename companion: " + e.message);
+            showCustomAlert("Error", "Failed to rename program: " + e.message);
             return;
         }
     }
@@ -3617,29 +3563,20 @@ async function saveCompanionProfile() {
         name: newName,
         narration_mode: document.getElementById('comp-narration-mode').checked,
         tts_voice: document.getElementById('comp-tts-voice').value,
-        operation: {
-            description: document.getElementById('comp-backstory').value.trim(),
-            response_directive: document.getElementById('comp-directives').value.trim(),
-            post_history_instructions: document.getElementById('comp-post-history-instructions').value.trim(),
-            ontology: document.getElementById('comp-ontology').value.trim(),
-            example_message: document.getElementById('comp-example-msg').value.trim(),
-            personality: document.getElementById('comp-personality-type').value.trim(),
-            scenario: document.getElementById('comp-scenario').value.trim()
-        },
-        description: {
-            voice: document.getElementById('comp-voice').value.trim(),
-            ethnicity: document.getElementById('comp-ethnicity').value.trim(),
-            'hair style': document.getElementById('comp-hair-style').value.trim(),
-            'hair color': document.getElementById('comp-hair-color').value.trim(),
-            eyes: document.getElementById('comp-eyes').value.trim(),
-            skin: document.getElementById('comp-skin').value.trim(),
-            breasts: document.getElementById('comp-breasts').value.trim(),
-            butt: document.getElementById('comp-butt').value.trim(),
-            body: document.getElementById('comp-body').value.trim()
-        },
-        'image details': {
-            'image details': document.getElementById('comp-image-details').value.trim(),
-            'negative details': document.getElementById('comp-negative-details').value.trim()
+        description: document.getElementById('comp-backstory').value.trim(),
+        personality: document.getElementById('comp-personality-type').value.trim(),
+        scenario: document.getElementById('comp-scenario').value.trim(),
+        first_mes: document.getElementById('comp-example-msg').value.trim(),
+        system_prompt: document.getElementById('comp-directives').value.trim(),
+        post_history_instructions: document.getElementById('comp-post-history-instructions').value.trim(),
+        extensions: {
+            sanctuary: {
+                program_id: targetProgramId,
+                image_details: {
+                    positive: document.getElementById('comp-image-details').value.trim(),
+                    negative: document.getElementById('comp-negative-details').value.trim()
+                }
+            }
         }
     };
     
@@ -3654,25 +3591,25 @@ async function saveCompanionProfile() {
             throw new Error(data.error);
         }
         
-        document.getElementById('companion-profile-modal').style.display = 'none';
+        document.getElementById('program-profile-modal').style.display = 'none';
         
-        // If the edited companion is currently active, reload active session details
+        // If the edited program is currently active, reload active session details
         const activeProgramText = document.getElementById('user-input');
-        if (wasActive || (activeProgramText && (activeProgramText.placeholder.toLowerCase().includes(currentEditingCompanionId) || activeProgramText.placeholder.toLowerCase().includes(targetProgramId)))) {
+        if (wasActive || (activeProgramText && (activeProgramText.placeholder.toLowerCase().includes(currentEditingProgramId) || activeProgramText.placeholder.toLowerCase().includes(targetProgramId)))) {
             await selectAssistant(targetProgramId);
         } else {
             openAssistantModal();
         }
     } catch (e) {
-        console.error("Error saving companion profile:", e);
-        showCustomAlert("Error", "Could not save companion profile: " + e.message);
+        console.error("Error saving program profile:", e);
+        showCustomAlert("Error", "Could not save program profile: " + e.message);
     }
 }
 
-async function loadCompanionJournals() {
-    if (!currentEditingCompanionId) return;
-    const journalsContainer = document.getElementById('companion-journals-list');
-    const memoriesContainer = document.getElementById('companion-memories-list');
+async function loadProgramJournals() {
+    if (!currentEditingProgramId) return;
+    const journalsContainer = document.getElementById('program-journals-list');
+    const memoriesContainer = document.getElementById('program-memories-list');
     if (journalsContainer) {
         journalsContainer.innerHTML = '<div style="color: var(--text-muted); font-size: 0.8rem; text-align: center; padding: 10px;">Loading journals...</div>';
     }
@@ -3682,7 +3619,7 @@ async function loadCompanionJournals() {
     
     try {
         // 1. Fetch Keyphrase-Triggered Journals
-        const res = await fetch(`/api/programs/journals?program_id=${currentEditingCompanionId}&t=${Date.now()}`);
+        const res = await fetch(`/api/programs/journals?program_id=${currentEditingProgramId}&t=${Date.now()}`);
         const data = await res.json();
         if (data.error) throw new Error(data.error);
         
@@ -3690,7 +3627,7 @@ async function loadCompanionJournals() {
         if (journalsContainer) {
             journalsContainer.innerHTML = '';
             if (entries.length === 0) {
-                journalsContainer.innerHTML = '<div class="empty-state">No memory journals saved for this companion yet.</div>';
+                journalsContainer.innerHTML = '<div class="empty-state">No memory journals saved for this program yet.</div>';
             } else {
                 entries.forEach(e => {
                     const row = document.createElement('div');
@@ -3719,7 +3656,7 @@ async function loadCompanionJournals() {
                     deleteBtn.style.height = '26px';
                     deleteBtn.style.borderRadius = '6px';
                     deleteBtn.style.flexShrink = '0';
-                    deleteBtn.onclick = () => deleteCompanionJournalEntry(e.id);
+                    deleteBtn.onclick = () => deleteProgramJournalEntry(e.id);
                     header.appendChild(deleteBtn);
                     
                     row.appendChild(header);
@@ -3728,8 +3665,8 @@ async function loadCompanionJournals() {
                     text.className = 'list-entry-content';
                     let displayContent = e.content || '';
                     const userDisplayName = getUserDisplayName();
-                    const companionDisplayName = activeCompanionName || 'Companion';
-                    displayContent = displayContent.replace(/\{\{user\}\}/gi, userDisplayName).replace(/\{\{char\}\}/gi, companionDisplayName);
+                    const programDisplayName = activeProgramName || 'Program';
+                    displayContent = displayContent.replace(/\{\{user\}\}/gi, userDisplayName).replace(/\{\{char\}\}/gi, programDisplayName);
                     text.textContent = displayContent;
                     row.appendChild(text);
                     
@@ -3741,13 +3678,13 @@ async function loadCompanionJournals() {
         // 2. Fetch Chat Compaction Memories (from memories.json for this program)
         if (memoriesContainer) {
             memoriesContainer.innerHTML = '';
-            const memoriesRes = await fetch(`/api/programs/memories?program_id=${currentEditingCompanionId}&t=${Date.now()}`);
+            const memoriesRes = await fetch(`/api/programs/memories?program_id=${currentEditingProgramId}&t=${Date.now()}`);
             const memoriesData = await memoriesRes.json();
             
             const memoryList = memoriesData.memories || [];
             
             if (memoryList.length === 0) {
-                memoriesContainer.innerHTML = '<div class="empty-state">No consolidated memories created for this companion yet.</div>';
+                memoriesContainer.innerHTML = '<div class="empty-state">No consolidated memories created for this program yet.</div>';
             } else {
                 memoryList.forEach(msg => {
                     // Clean up text
@@ -3804,8 +3741,8 @@ async function loadCompanionJournals() {
                     text.className = 'list-entry-content italic';
                     let displayMem = cleanText;
                     const userDisplayName = getUserDisplayName();
-                    const companionDisplayName = activeCompanionName || 'Companion';
-                    displayMem = displayMem.replace(/\{\{user\}\}/gi, userDisplayName).replace(/\{\{char\}\}/gi, companionDisplayName);
+                    const programDisplayName = activeProgramName || 'Program';
+                    displayMem = displayMem.replace(/\{\{user\}\}/gi, userDisplayName).replace(/\{\{char\}\}/gi, programDisplayName);
                     text.textContent = displayMem;
                     row.appendChild(text);
                     
@@ -3815,7 +3752,7 @@ async function loadCompanionJournals() {
         }
         
     } catch (e) {
-        console.error("Error in loadCompanionJournals:", e);
+        console.error("Error in loadProgramJournals:", e);
         if (journalsContainer) {
             journalsContainer.innerHTML = '<div style="color: #fca5a5; font-size: 0.75rem; text-align: center; padding: 10px;">Failed to load journals.</div>';
         }
@@ -3826,7 +3763,7 @@ async function loadCompanionJournals() {
 }
 
 async function addManualJournalEntry() {
-    if (!currentEditingCompanionId) return;
+    if (!currentEditingProgramId) return;
     const kpInput = document.getElementById('journal-keyphrases-input');
     const cInput = document.getElementById('journal-content-input');
     if (!kpInput || !cInput) return;
@@ -3843,7 +3780,7 @@ async function addManualJournalEntry() {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-                program_id: currentEditingCompanionId,
+                program_id: currentEditingProgramId,
                 keyphrases: keyphrases,
                 content: content
             })
@@ -3853,30 +3790,30 @@ async function addManualJournalEntry() {
         
         kpInput.value = '';
         cInput.value = '';
-        await loadCompanionJournals();
+        await loadProgramJournals();
     } catch (e) {
         showCustomAlert("Error", "Could not add journal: " + e.message);
     }
 }
 
-async function deleteCompanionJournalEntry(entryId) {
-    if (!currentEditingCompanionId) return;
+async function deleteProgramJournalEntry(entryId) {
+    if (!currentEditingProgramId) return;
     showCustomConfirm(
         "Delete Memory Entry",
-        "Are you sure you want to permanently delete this memory entry? The companion will forget this context immediately.",
+        "Are you sure you want to permanently delete this memory entry? The program will forget this context immediately.",
         async () => {
             try {
                 const res = await fetch('/api/programs/journals/delete', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
-                        program_id: currentEditingCompanionId,
+                        program_id: currentEditingProgramId,
                         id: entryId
                     })
                 });
                 const data = await res.json();
                 if (data.error) throw new Error(data.error);
-                await loadCompanionJournals();
+                await loadProgramJournals();
             } catch (e) {
                 showCustomAlert("Error", "Could not delete memory entry: " + e.message);
             }
@@ -3887,7 +3824,7 @@ async function deleteCompanionJournalEntry(entryId) {
 async function deleteConsolidatedMemory(session_id, timestamp) {
     showCustomConfirm(
         "Delete Consolidated Memory",
-        "Are you sure you want to permanently delete this compacted chat history block? Your companion will lose this memory immediately.",
+        "Are you sure you want to permanently delete this compacted chat history block? Your program will lose this memory immediately.",
         async () => {
             try {
                 const res = await fetch('/api/programs/memories/delete', {
@@ -3900,7 +3837,7 @@ async function deleteConsolidatedMemory(session_id, timestamp) {
                 });
                 const data = await res.json();
                 if (data.error) throw new Error(data.error);
-                await loadCompanionJournals();
+                await loadProgramJournals();
             } catch (e) {
                 showCustomAlert("Error", "Could not delete memory: " + e.message);
             }
@@ -3932,7 +3869,7 @@ function showWelcomeMessage() {
 
     let welcome = document.getElementById('welcome-message');
     const displayUser = getUserDisplayName();
-    const greetingText = companionWelcomeMessage || ("Hello, " + "{" + "{" + "user" + "}" + "}.");
+    const greetingText = programWelcomeMessage || ("Hello, " + "{" + "{" + "user" + "}" + "}.");
     const resolvedGreeting = replacePlaceholders(greetingText);
     
     let parsedText = resolvedGreeting;
@@ -3948,14 +3885,14 @@ function showWelcomeMessage() {
 
     if (!welcome) {
         welcome = document.createElement('div');
-        welcome.className = 'message-row companion-row';
+        welcome.className = 'message-row program-row';
         welcome.id = 'welcome-message';
         const profileUrl = getProfileUrl();
         welcome.innerHTML = `
             <div class="avatar-container">
-                <img class="avatar companion-avatar" src="${profileUrl}" alt="Companion" onclick="expandImage('${profileUrl}')">
+                <img class="avatar program-avatar" src="${profileUrl}" alt="Program" onclick="expandImage('${profileUrl}')">
             </div>
-            <div class="message companion">
+            <div class="message program">
                 <div class="message-text">
                     ${parsedText}
                 </div>
@@ -3985,7 +3922,7 @@ async function loadHistory() {
                 if (data.sessions && !data.sessions.includes(sessionId)) {
                     console.warn(`Last opened session "${sessionId}" is missing on the server. Falling back to default.`);
                     sessionId = 'default';
-                    safeLocalStorage.setItem('companion_session_id', 'default');
+                    safeLocalStorage.setItem('program_session_id', 'default');
                     
                     // Update the UI header ID display if it exists
                     const sessionDisplay = document.getElementById('session-id-display');
@@ -4006,21 +3943,21 @@ async function loadHistory() {
         ]);
         const data = await historyRes.json();
         if (data.welcome_message) {
-            companionWelcomeMessage = data.welcome_message;
+            programWelcomeMessage = data.welcome_message;
         } else {
-            companionWelcomeMessage = null;
+            programWelcomeMessage = null;
         }
         if (data.active_program) {
             applyTheme(data.active_program, data.theme);
         }
         if (data.character_name) {
-            activeCompanionName = data.character_name;
-            const companionTitle = "Sanctuary";
-            document.title = companionTitle;
+            activeProgramName = data.character_name;
+            const programTitle = "Sanctuary";
+            document.title = programTitle;
             
             const headerTitle = document.querySelector('.header-title-area h1');
             if (headerTitle) {
-                headerTitle.textContent = companionTitle;
+                headerTitle.textContent = programTitle;
             }
             
             const userInput = document.getElementById('user-input');
@@ -4060,9 +3997,9 @@ async function loadHistory() {
             } else {
                 showWelcomeMessage();
                 // On a new chat session (no history), default to local model
-                const defaultModel = safeLocalStorage.getItem('companion_default_model') || 'local-llm';
+                const defaultModel = safeLocalStorage.getItem('program_default_model') || 'local-llm';
                 selectedModel = defaultModel;
-                safeLocalStorage.setItem('companion_selected_model', selectedModel);
+                safeLocalStorage.setItem('program_selected_model', selectedModel);
                 const modelSelectElement = document.getElementById('model-select');
                 if (modelSelectElement) {
                     modelSelectElement.value = selectedModel;
@@ -4135,8 +4072,8 @@ async function resetSession() {
         } catch (e) {
             console.error("Failed to reset session on server:", e);
         }
-        localStorage.removeItem('companion_session_id');
-        localStorage.removeItem('companion_selected_model');
+        localStorage.removeItem('program_session_id');
+        localStorage.removeItem('program_selected_model');
         reloadApp(true, true);
     });
 }
@@ -4664,7 +4601,7 @@ function normalizeChatResponse(data) {
     let imagePrompt = null;
     const toolCalls = data.tool_calls || [];
     const imgCall = toolCalls.find(tc => tc.type === 'call' && [
-        'generate_companion_portrait', 'generate_local_image',
+        'generate_program_portrait', 'generate_local_image',
         'generate_imagen', 'generate_general_image'
     ].includes(tc.name));
     if (imgCall && imgCall.args && imgCall.args.prompt) {
@@ -4678,8 +4615,8 @@ function normalizeChatResponse(data) {
     }
 
     return {
-        id: data.companion_msg_id,
-        role: 'companion',
+        id: data.program_msg_id,
+        role: 'program',
         text: cleanText,
         media: media,
         tool_calls: toolCalls,
@@ -4734,7 +4671,7 @@ function renderVoiceCallRow(msg) {
     const textDiv = document.createElement('div');
     const title = document.createElement('h4');
     title.className = 'voice-call-record-title';
-    title.textContent = `Voice Call with ${activeCompanionName || 'Companion'}`;
+    title.textContent = `Voice Call with ${activeProgramName || 'Program'}`;
     
     const meta = document.createElement('p');
     meta.className = 'voice-call-record-meta';
@@ -4781,7 +4718,7 @@ function renderVoiceCallRow(msg) {
             
             const speakerSpan = document.createElement('span');
             speakerSpan.className = `turn-speaker ${turn.speaker}`;
-            speakerSpan.textContent = turn.speaker === 'user' ? `${getUserDisplayName()}:` : `${activeCompanionName || 'Companion'}:`;
+            speakerSpan.textContent = turn.speaker === 'user' ? `${getUserDisplayName()}:` : `${activeProgramName || 'Program'}:`;
             
             const textSpan = document.createElement('span');
             textSpan.textContent = ` ${turn.text}`;
@@ -4835,7 +4772,7 @@ function renderMessage(msg, isLive = false) {
     const text = msg.text || '';
     const msgId = msg.id || generateMessageId(text, role);
 
-    const isMsgTransient = msg.isTransient || (role === 'companion' && (
+    const isMsgTransient = msg.isTransient || (role === 'program' && (
         text === '*(Generation stopped)*' || 
         text === '*(Generation cancelled)*' || 
         text === 'Error connecting to the Sanctuary.' ||
@@ -4847,7 +4784,7 @@ function renderMessage(msg, isLive = false) {
     let portraitPrompt = null;
     if (msg.tool_calls && msg.tool_calls.length > 0) {
         const call = msg.tool_calls.find(tc => tc.type === 'call' && (
-            tc.name === 'generate_companion_portrait' ||
+            tc.name === 'generate_program_portrait' ||
             tc.name === 'generate_local_image' ||
             tc.name === 'generate_imagen' ||
             tc.name === 'generate_general_image'
@@ -4870,15 +4807,15 @@ function renderMessage(msg, isLive = false) {
     row.dataset.msgId = msgId;
     row.dataset.contentHash = computeContentHash(msg);
 
-    if (role === 'companion') {
+    if (role === 'program') {
         const avatarContainer = document.createElement('div');
         avatarContainer.className = 'avatar-container';
 
         const avatar = document.createElement('img');
-        avatar.className = 'avatar companion-avatar';
+        avatar.className = 'avatar program-avatar';
         const profileUrl = getProfileUrl();
         avatar.src = profileUrl;
-        avatar.alt = 'Companion';
+        avatar.alt = 'Program';
         avatar.title = 'Click to expand profile';
         avatar.onclick = () => expandImage(profileUrl);
         avatarContainer.appendChild(avatar);
@@ -4964,7 +4901,7 @@ function renderMessage(msg, isLive = false) {
                 `;
                 deleteBtn.onclick = () => deleteTurnFromMessage(deleteBtn);
                 actions.appendChild(deleteBtn);
-            } else if (role === 'companion' && !text.startsWith("Hello, " + getUserDisplayName())) {
+            } else if (role === 'program' && !text.startsWith("Hello, " + getUserDisplayName())) {
                 if (isMsgTransient) {
                     const deleteBtn = document.createElement('button');
                     deleteBtn.className = 'action-icon-btn';
@@ -5038,7 +4975,7 @@ function renderMessage(msg, isLive = false) {
 
         if (item.type === 'text') {
             let actualResponse = item.content;
-            if (role === 'companion') {
+            if (role === 'program') {
                 let thoughts = [];
                 let tempText = item.content;
                 while (true) {
@@ -5078,7 +5015,7 @@ function renderMessage(msg, isLive = false) {
             if (actualResponse) {
                 const textDiv = document.createElement('div');
                 textDiv.className = 'message-text';
-                if (role === 'companion' || role === 'user') {
+                if (role === 'program' || role === 'user') {
                     let parsedHtml = actualResponse;
                     if (typeof marked !== 'undefined' && marked.parse) {
                         try {
@@ -5239,7 +5176,7 @@ function renderMessage(msg, isLive = false) {
     chatContainer.appendChild(row);
     chatContainer.scrollTop = chatContainer.scrollHeight;
 
-    if (role === 'companion' && isLive && ttsAutoSpeak) {
+    if (role === 'program' && isLive && ttsAutoSpeak) {
         setTimeout(() => {
             const speakBtn = bubblesContainer.querySelector('.speak-btn');
             if (speakBtn) speakMessage(speakBtn);
@@ -5259,7 +5196,7 @@ function appendMessage(role, text, imageUrl = null, toolCalls = null, isLive = f
         });
     }
     let cleanText = text || '';
-    if (role === 'user' || role === 'companion') {
+    if (role === 'user' || role === 'program') {
         const imgRegex = /!\[([^\]]*)\]\(([^)]+)\)/g;
         let match;
         while ((match = imgRegex.exec(cleanText)) !== null) {
@@ -5284,7 +5221,7 @@ function appendMessage(role, text, imageUrl = null, toolCalls = null, isLive = f
         duration: duration,
         isTransient: isTransient,
         mood: null,
-        editable: role === 'user' || role === 'companion',
+        editable: role === 'user' || role === 'program',
         deletable: true
     };
     return renderMessage(msg, isLive);
@@ -5443,7 +5380,7 @@ function handleToolReloadOrRecovery() {
                 if (checkAttempts > 20) {
                     clearInterval(checkInterval);
                     document.getElementById('reconnect-modal').style.display = 'none';
-                    appendMessage('companion', 'The Sanctuary is taking a while to restart. Please refresh manually.');
+                    appendMessage('program', 'The Sanctuary is taking a while to restart. Please refresh manually.');
                 }
             }
         }, 2000);
@@ -5486,7 +5423,7 @@ async function sendMessage() {
     const userMsgId = prefix + Math.random().toString(36).substr(2, 9) + Date.now().toString(36);
     appendMessage('user', text, userImageUrl, null, false, Date.now() / 1000, null, false, userMsgId);
 
-    // Trigger heart jiggle on high user interaction or when Companion is generating/responding
+    // Trigger heart jiggle on high user interaction or when Program is generating/responding
     const heartElement = document.querySelector('.heart-pulse');
     if (heartElement) {
         heartElement.classList.add('jiggling');
@@ -5509,13 +5446,13 @@ async function sendMessage() {
     updateInputGlow();
 
     const typingIndicatorRow = document.createElement('div');
-    typingIndicatorRow.className = 'message-row companion-row';
+    typingIndicatorRow.className = 'message-row program-row';
     const profileUrl = getProfileUrl();
     typingIndicatorRow.innerHTML = `
         <div class="avatar-container">
-            <img class="avatar companion-avatar" src="${profileUrl}" alt="Companion" onclick="expandImage('${profileUrl}')">
+            <img class="avatar program-avatar" src="${profileUrl}" alt="Program" onclick="expandImage('${profileUrl}')">
         </div>
-        <div class="message companion">
+        <div class="message program">
             <div class="typing-indicator">
                 <div class="typing-dot"></div>
                 <div class="typing-dot"></div>
@@ -5555,13 +5492,13 @@ async function sendMessage() {
         }
         
         if (data.response !== undefined) {
-            appendMessage('companion', data.response, null, data.tool_calls, true, data.timestamp, data.duration, false, data.companion_msg_id);
+            appendMessage('program', data.response, null, data.tool_calls, true, data.timestamp, data.duration, false, data.program_msg_id);
         } else if (data.error) {
             let errMsg = data.error;
             if (errMsg.includes("429") || errMsg.includes("RESOURCE_EXHAUSTED")) {
                 errMsg = "The Sanctuary is momentarily overwhelmed (Gemini Rate Limit 429: Resource Exhausted). Let us pause, take a slow breath, and try our chavruta again in 15 seconds.";
             }
-            appendMessage('companion', errMsg);
+            appendMessage('program', errMsg);
         }
         if (data.state) {
             updateHeartState(data.state, data.inversion_active);
@@ -5576,15 +5513,15 @@ async function sendMessage() {
             chatContainer.removeChild(typingIndicatorRow);
         }
         if (error.name === 'AbortError') {
-            appendMessage('companion', '*(Generation stopped)*');
+            appendMessage('program', '*(Generation stopped)*');
         } else {
-            appendMessage('companion', 'Error connecting to the Sanctuary.');
+            appendMessage('program', 'Error connecting to the Sanctuary.');
         }
         handleToolReloadOrRecovery();
     } finally {
         setGenerating(false);
         userInput.disabled = false;
-        userInput.placeholder = "Ask " + (activeCompanionName || "Companion");
+        userInput.placeholder = "Ask " + (activeProgramName || "Program");
         updateInputGlow();
         stopToolPolling();
         if (heartElement) {
@@ -5615,13 +5552,13 @@ async function continueMessage() {
     }
     
     const typingIndicatorRow = document.createElement('div');
-    typingIndicatorRow.className = 'message-row companion-row';
+    typingIndicatorRow.className = 'message-row program-row';
     const profileUrl = getProfileUrl();
     typingIndicatorRow.innerHTML = `
         <div class="avatar-container">
-            <img class="avatar companion-avatar" src="${profileUrl}" alt="Companion" onclick="expandImage('${profileUrl}')">
+            <img class="avatar program-avatar" src="${profileUrl}" alt="Program" onclick="expandImage('${profileUrl}')">
         </div>
-        <div class="message companion">
+        <div class="message program">
             <div class="typing-indicator">
                 <div class="typing-dot"></div>
                 <div class="typing-dot"></div>
@@ -5659,14 +5596,14 @@ async function continueMessage() {
             chatContainer.removeChild(typingIndicatorRow);
         }
         if (error.name === 'AbortError') {
-            appendMessage('companion', '*(Generation stopped)*');
+            appendMessage('program', '*(Generation stopped)*');
         } else {
-            appendMessage('companion', 'Error connecting to the Sanctuary.');
+            appendMessage('program', 'Error connecting to the Sanctuary.');
         }
     } finally {
         setGenerating(false);
         userInput.disabled = false;
-        userInput.placeholder = "Ask " + (activeCompanionName || "Companion");
+        userInput.placeholder = "Ask " + (activeProgramName || "Program");
         updateInputGlow();
         if (heartElement) {
             heartElement.classList.remove('jiggling');
@@ -5904,13 +5841,13 @@ async function resendUserMessage(bubble) {
     }
 
     const typingIndicatorRow = document.createElement('div');
-    typingIndicatorRow.className = 'message-row companion-row';
+    typingIndicatorRow.className = 'message-row program-row';
     const profileUrl = getProfileUrl();
     typingIndicatorRow.innerHTML = `
         <div class="avatar-container">
-            <img class="avatar companion-avatar" src="${profileUrl}" alt="Companion" onclick="expandImage('${profileUrl}')">
+            <img class="avatar program-avatar" src="${profileUrl}" alt="Program" onclick="expandImage('${profileUrl}')">
         </div>
-        <div class="message companion">
+        <div class="message program">
             <div class="typing-indicator">
                 <div class="typing-dot"></div>
                 <div class="typing-dot"></div>
@@ -5948,13 +5885,13 @@ async function resendUserMessage(bubble) {
         
         const data = await response.json();
         if (data.response !== undefined) {
-            appendMessage('companion', data.response, null, data.tool_calls, true, data.timestamp, data.duration, false, data.companion_msg_id);
+            appendMessage('program', data.response, null, data.tool_calls, true, data.timestamp, data.duration, false, data.program_msg_id);
         } else if (data.error) {
             let errMsg = data.error;
             if (errMsg.includes("429") || errMsg.includes("RESOURCE_EXHAUSTED")) {
                 errMsg = "The Sanctuary is momentarily overwhelmed (Gemini Rate Limit 429: Resource Exhausted). Let us pause, take a slow breath, and try our chavruta again in 15 seconds.";
             }
-            appendMessage('companion', errMsg);
+            appendMessage('program', errMsg);
         }
         if (data.state) {
             updateHeartState(data.state, data.inversion_active);
@@ -5969,16 +5906,16 @@ async function resendUserMessage(bubble) {
             chatContainer.removeChild(typingIndicatorRow);
         }
         if (error.name === 'AbortError') {
-            appendMessage('companion', '*(Generation stopped)*');
+            appendMessage('program', '*(Generation stopped)*');
         } else {
-            appendMessage('companion', 'Error connecting to the Sanctuary.');
+            appendMessage('program', 'Error connecting to the Sanctuary.');
         }
         handleToolReloadOrRecovery();
     } finally {
         stopToolPolling();
         setGenerating(false);
         userInput.disabled = false;
-        userInput.placeholder = "Ask " + (activeCompanionName || "Companion");
+        userInput.placeholder = "Ask " + (activeProgramName || "Program");
         if (heartElement) {
             heartElement.classList.remove('jiggling');
         }
@@ -5988,7 +5925,7 @@ async function resendUserMessage(bubble) {
 // --- rerollFromMessage ---
 async function rerollFromMessage(button) {
     const bubble = button.closest('.message');
-    const row = bubble.closest('.message-row.companion-row');
+    const row = bubble.closest('.message-row.program-row');
     if (!row) return;
     
     let prevRow = row.previousElementSibling;
@@ -6017,13 +5954,13 @@ async function rerollFromMessage(button) {
     }
 
     const typingIndicatorRow = document.createElement('div');
-    typingIndicatorRow.className = 'message-row companion-row';
+    typingIndicatorRow.className = 'message-row program-row';
     const profileUrl = getProfileUrl();
     typingIndicatorRow.innerHTML = `
         <div class="avatar-container">
-            <img class="avatar companion-avatar" src="${profileUrl}" alt="Companion" onclick="expandImage('${profileUrl}')">
+            <img class="avatar program-avatar" src="${profileUrl}" alt="Program" onclick="expandImage('${profileUrl}')">
         </div>
-        <div class="message companion">
+        <div class="message program">
             <div class="typing-indicator">
                 <div class="typing-dot"></div>
                 <div class="typing-dot"></div>
@@ -6063,13 +6000,13 @@ async function rerollFromMessage(button) {
         
         const data = await response.json();
         if (data.response !== undefined) {
-            appendMessage('companion', data.response, null, data.tool_calls, true, data.timestamp, data.duration, false, data.companion_msg_id);
+            appendMessage('program', data.response, null, data.tool_calls, true, data.timestamp, data.duration, false, data.program_msg_id);
         } else if (data.error) {
             let errMsg = data.error;
             if (errMsg.includes("429") || errMsg.includes("RESOURCE_EXHAUSTED")) {
                 errMsg = "The Sanctuary is momentarily overwhelmed (Gemini Rate Limit 429: Resource Exhausted). Let us pause, take a slow breath, and try our chavruta again in 15 seconds.";
             }
-            appendMessage('companion', errMsg);
+            appendMessage('program', errMsg);
         }
         if (data.state) {
             updateHeartState(data.state, data.inversion_active);
@@ -6084,16 +6021,16 @@ async function rerollFromMessage(button) {
             chatContainer.removeChild(typingIndicatorRow);
         }
         if (error.name === 'AbortError') {
-            appendMessage('companion', '*(Generation stopped)*');
+            appendMessage('program', '*(Generation stopped)*');
         } else {
-            appendMessage('companion', 'Error connecting to the Sanctuary.');
+            appendMessage('program', 'Error connecting to the Sanctuary.');
         }
         handleToolReloadOrRecovery();
     } finally {
         stopToolPolling();
         setGenerating(false);
         userInput.disabled = false;
-        userInput.placeholder = "Ask " + (activeCompanionName || "Companion");
+        userInput.placeholder = "Ask " + (activeProgramName || "Program");
         if (heartElement) {
             heartElement.classList.remove('jiggling');
         }
@@ -6642,7 +6579,7 @@ async function saveCroppedProfile(event) {
         if (response.ok) {
             profileCacheBuster = Date.now();
             updateProfileImages();
-            document.querySelectorAll('.companion-list-avatar').forEach(img => {
+            document.querySelectorAll('.program-list-avatar').forEach(img => {
                 const originalSrc = img.tagName === 'DIV' ? img.getAttribute('src') : img.src;
                 if (originalSrc) {
                     const newSrc = originalSrc.split('?')[0] + `?t=${profileCacheBuster}`;
@@ -6738,7 +6675,7 @@ async function autoGenerateUserMessage() {
         btn.title = "Auto-Generate Message (Impersonate)";
         btn.innerHTML = origIcon;
         userInput.disabled = false;
-        userInput.placeholder = "Ask " + (activeCompanionName || "Companion");
+        userInput.placeholder = "Ask " + (activeProgramName || "Program");
     }
 }
 
@@ -6794,7 +6731,7 @@ async function regenerateImage(buttonElement, oldImageUrl, prompt) {
 
             // Re-render Activity Log in completed ("Ran...") state
             try {
-                const bubble = buttonElement.closest('.message.companion');
+                const bubble = buttonElement.closest('.message.program');
                 if (bubble) {
                     const logRes = await fetch(`/api/session_tool_calls?session_id=${sessionId}`);
                     const logData = await logRes.json();
@@ -6936,7 +6873,7 @@ function showImageErrorOverlay(container, error) {
 }
 
 function swapImageWithVideo(container, videoUrl) {
-    const bubble = container.closest('.message.companion');
+    const bubble = container.closest('.message.program');
     if (bubble) {
         container.remove();
         
@@ -7148,7 +7085,7 @@ function startToolPolling() {
             // Update activity exclamation badge on the avatar if typing indicator exists
             const typingIndicator = document.querySelector('.typing-indicator');
             if (typingIndicator) {
-                const row = typingIndicator.closest('.companion-row');
+                const row = typingIndicator.closest('.program-row');
                 if (row) {
                     const avatarContainer = row.querySelector('.avatar-container');
                     if (avatarContainer) {
@@ -7184,7 +7121,7 @@ function startToolPolling() {
                     }
                 }
                 
-                const bubble = typingIndicator.closest('.message.companion');
+                const bubble = typingIndicator.closest('.message.program');
                 if (bubble) {
                     try {
                         const logRes = await fetch(`/api/session_tool_calls?session_id=${sessionId}`);
@@ -7380,13 +7317,10 @@ async function respondToToolCall(status) {
 // --- openDataBank ---
 function openDataBank() {
     document.getElementById('databank-modal').style.display = 'flex';
-    if (activeCompanionName) {
-        currentEditingCompanionId = activeCompanionName.toLowerCase();
-    }
     switchDataBankTab('upload');
     loadDataBankFiles();
     loadProjectSettings();
-    loadCompanionJournals();
+    loadProgramJournals();
 }
 
 // --- closeDataBank ---
@@ -7422,7 +7356,7 @@ async function loadQuests() {
         const quests = data.quests || [];
         
         if (!quests || quests.length === 0) {
-            container.innerHTML = `<p style="color: var(--text-muted); font-size: 0.85rem; text-align: center; margin: 20px 0;">No active quests. Ask your companion to assign you one!</p>`;
+            container.innerHTML = `<p style="color: var(--text-muted); font-size: 0.85rem; text-align: center; margin: 20px 0;">No active quests. Ask your program to assign you one!</p>`;
             return;
         }
         
@@ -7541,7 +7475,7 @@ function downloadQuest(questId) {
 async function deleteQuest(questId) {
     showCustomConfirm(
         "Delete Quest",
-        "Are you sure you want to permanently delete this quest? Your companion will not be notified.",
+        "Are you sure you want to permanently delete this quest? Your program will not be notified.",
         async () => {
             try {
                 const response = await fetch(`/api/quests/${questId}/delete`, { method: 'POST' });
@@ -7594,13 +7528,15 @@ function switchDataBankTab(tab) {
     const uploadTab = document.getElementById('databank-tab-upload');
     const settingsTab = document.getElementById('databank-tab-settings');
     const memoriesTab = document.getElementById('databank-tab-memories');
+    const lorebooksTab = document.getElementById('databank-tab-lorebooks');
     const docsContainer = document.getElementById('databank-documents-container');
     const uploadBtn = document.getElementById('tab-btn-upload');
     const settingsBtn = document.getElementById('tab-btn-settings');
     const memoriesBtn = document.getElementById('tab-btn-memories');
-    
-    // Reset active buttons
-    [uploadBtn, settingsBtn, memoriesBtn].forEach(btn => {
+    const lorebooksBtn = document.getElementById('tab-btn-lorebooks');
+
+    // Reset all buttons
+    [uploadBtn, settingsBtn, memoriesBtn, lorebooksBtn].forEach(btn => {
         if (btn) {
             btn.style.background = 'rgba(255,255,255,0.05)';
             btn.style.color = 'var(--text-muted)';
@@ -7608,42 +7544,309 @@ function switchDataBankTab(tab) {
             btn.classList.add('edit-cancel-btn');
         }
     });
-    
+
     // Hide all tabs
-    [uploadTab, settingsTab, memoriesTab].forEach(t => {
+    [uploadTab, settingsTab, memoriesTab, lorebooksTab].forEach(t => {
         if (t) t.style.display = 'none';
     });
-    
+
     if (docsContainer) {
         docsContainer.style.display = (tab === 'upload') ? 'flex' : 'none';
     }
-    
-    if (tab === 'upload') {
-        if (uploadTab) uploadTab.style.display = 'flex';
-        if (uploadBtn) {
-            uploadBtn.style.background = 'rgba(255, 255, 255, 0.08)';
-            uploadBtn.style.color = 'var(--primary-accent)';
-            uploadBtn.style.border = '1px solid var(--primary-accent)';
-            uploadBtn.classList.remove('edit-cancel-btn');
+
+    const activate = (el, btn) => {
+        if (el) el.style.display = 'flex';
+        if (btn) {
+            btn.style.background = 'rgba(255, 255, 255, 0.08)';
+            btn.style.color = 'var(--primary-accent)';
+            btn.style.border = '1px solid var(--primary-accent)';
+            btn.classList.remove('edit-cancel-btn');
         }
-    } else if (tab === 'settings') {
-        if (settingsTab) settingsTab.style.display = 'flex';
-        if (settingsBtn) {
-            settingsBtn.style.background = 'rgba(255, 255, 255, 0.08)';
-            settingsBtn.style.color = 'var(--primary-accent)';
-            settingsBtn.style.border = '1px solid var(--primary-accent)';
-            settingsBtn.classList.remove('edit-cancel-btn');
+    };
+
+    if (tab === 'upload')     activate(uploadTab, uploadBtn);
+    else if (tab === 'settings')  activate(settingsTab, settingsBtn);
+    else if (tab === 'memories')  activate(memoriesTab, memoriesBtn);
+    else if (tab === 'lorebooks') { activate(lorebooksTab, lorebooksBtn); loadLorebooks(); }
+}
+
+// --- Lorebook management ---
+
+async function loadLorebooks() {
+    const container = document.getElementById('lorebooks-list-container');
+    if (!container) return;
+    container.innerHTML = '<p style="color: var(--text-muted); font-size: 0.8rem;">Loading...</p>';
+    try {
+        const res = await fetch('/api/lorebooks');
+        const data = await res.json();
+        const books = data.lorebooks || [];
+        if (!books.length) {
+            container.innerHTML = '<p style="color: var(--text-muted); font-size: 0.8rem;">No lorebooks loaded. Import a SillyTavern World Info JSON to get started.</p>';
+            return;
         }
-    } else if (tab === 'memories') {
-        if (memoriesTab) memoriesTab.style.display = 'flex';
-        if (memoriesBtn) {
-            memoriesBtn.style.background = 'rgba(255, 255, 255, 0.08)';
-            memoriesBtn.style.color = 'var(--primary-accent)';
-            memoriesBtn.style.border = '1px solid var(--primary-accent)';
-            memoriesBtn.classList.remove('edit-cancel-btn');
+        container.innerHTML = '';
+        for (const book of books) {
+            container.appendChild(buildLorebookCard(book));
         }
+    } catch (e) {
+        container.innerHTML = `<p style="color: var(--danger-color); font-size: 0.8rem;">Error loading lorebooks.</p>`;
     }
 }
+
+function buildLorebookCard(book) {
+    const card = document.createElement('div');
+    card.style.cssText = 'background: var(--glass-bg-light); border: 1px solid var(--border-color); border-radius: 12px; overflow: hidden;';
+
+    // Header row
+    const header = document.createElement('div');
+    header.style.cssText = 'display: flex; align-items: center; justify-content: space-between; padding: 10px 14px; cursor: pointer; user-select: none;';
+    const nameSpan = document.createElement('div');
+    nameSpan.style.cssText = 'display: flex; flex-direction: column; gap: 2px;';
+    nameSpan.innerHTML = `
+        <span style="font-size: 0.85rem; color: var(--text-main); font-weight: 500;">${book.name}</span>
+        <span style="font-size: 0.75rem; color: var(--text-muted);">${book.entry_count} entr${book.entry_count === 1 ? 'y' : 'ies'} &bull; ${book.source === 'card' ? 'embedded in card' : 'standalone file'}</span>
+    `;
+    const headerActions = document.createElement('div');
+    headerActions.style.cssText = 'display: flex; gap: 6px; align-items: center;';
+
+    const chevron = document.createElement('span');
+    chevron.textContent = '▸';
+    chevron.style.cssText = 'color: var(--text-muted); font-size: 0.75rem; transition: transform 0.2s;';
+
+    if (book.source === 'card') {
+        const exportBtn = document.createElement('button');
+        exportBtn.className = 'action-icon-btn';
+        exportBtn.title = 'Export embedded lorebook';
+        exportBtn.style.cssText = 'width: 26px; height: 26px; border-radius: 6px; flex-shrink: 0;';
+        exportBtn.innerHTML = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="display:block"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"></path></svg>`;
+        exportBtn.onclick = e => { e.stopPropagation(); window.location.href = `/api/programs/${encodeURIComponent(book.program_id || '')}/export/lorebook`; };
+        headerActions.appendChild(exportBtn);
+    }
+    if (book.source === 'file') {
+        const exportBtn = document.createElement('button');
+        exportBtn.className = 'action-icon-btn';
+        exportBtn.title = 'Export lorebook';
+        exportBtn.style.cssText = 'width: 26px; height: 26px; border-radius: 6px; flex-shrink: 0;';
+        exportBtn.innerHTML = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="display:block"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"></path></svg>`;
+        exportBtn.onclick = e => { e.stopPropagation(); window.location.href = `/api/lorebooks/${encodeURIComponent(book.filename)}/export`; };
+        const delBtn = document.createElement('button');
+        delBtn.className = 'action-icon-btn';
+        delBtn.title = 'Delete lorebook';
+        delBtn.style.cssText = 'width: 26px; height: 26px; border-radius: 6px; flex-shrink: 0;';
+        delBtn.innerHTML = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="display:block"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>`;
+        delBtn.onclick = e => { e.stopPropagation(); deleteLorebook(book.filename, book.name); };
+        headerActions.appendChild(exportBtn);
+        headerActions.appendChild(delBtn);
+    }
+    headerActions.appendChild(chevron);
+    header.appendChild(nameSpan);
+    header.appendChild(headerActions);
+
+    // Entry editor panel (hidden by default)
+    const panel = document.createElement('div');
+    panel.style.cssText = 'display: none; flex-direction: column; gap: 0; border-top: 1px solid var(--border-color);';
+
+    let expanded = false;
+    let entriesCache = null;
+
+    header.onclick = async () => {
+        expanded = !expanded;
+        chevron.style.transform = expanded ? 'rotate(90deg)' : '';
+        if (expanded) {
+            panel.style.display = 'flex';
+            if (!entriesCache) {
+                panel.innerHTML = '<p style="padding: 12px 14px; color: var(--text-muted); font-size: 0.8rem;">Loading entries...</p>';
+                const url = book.source === 'card'
+                    ? '/api/lorebooks/card/entries'
+                    : `/api/lorebooks/${encodeURIComponent(book.filename)}/entries`;
+                const saveUrl = book.source === 'card'
+                    ? '/api/lorebooks/card/save'
+                    : `/api/lorebooks/${encodeURIComponent(book.filename)}/save`;
+                try {
+                    const r = await fetch(url);
+                    const d = await r.json();
+                    entriesCache = d.entries || [];
+                } catch { entriesCache = []; }
+                renderEntries(panel, entriesCache, saveUrl);
+            }
+        } else {
+            panel.style.display = 'none';
+        }
+    };
+
+    card.appendChild(header);
+    card.appendChild(panel);
+    return card;
+}
+
+function renderEntries(panel, entries, saveUrl) {
+    panel.innerHTML = '';
+
+    // Scrollable entries list
+    const list = document.createElement('div');
+    list.style.cssText = 'display: flex; flex-direction: column;';
+
+    // Working copy for edits
+    const working = entries.map(e => ({
+        keys: (e.keys || e.key || []).join(', '),
+        secondary_keys: (e.secondary_keys || e.keysecondary || []).join(', '),
+        content: e.content || '',
+        constant: !!e.constant,
+        enabled: e.enabled !== false,
+        name: e.name || e.comment || '',
+        insertion_order: e.insertion_order ?? e.order ?? 100,
+        position: e.position ?? 'before_char',
+        _raw: e
+    }));
+
+    const rebuild = () => renderEntries(panel, working.map(w => ({
+        keys: w.keys.split(',').map(k => k.trim()).filter(Boolean),
+        content: w.content, constant: w.constant, enabled: w.enabled,
+        name: w.name, insertion_order: w.insertion_order, position: w.position
+    })), saveUrl);
+
+    if (!working.length) {
+        list.innerHTML = '<p style="padding: 12px 14px; color: var(--text-muted); font-size: 0.8rem;">No entries.</p>';
+    }
+
+    working.forEach((entry, idx) => {
+        const row = document.createElement('div');
+        row.style.cssText = 'padding: 10px 14px; border-bottom: 1px solid var(--border-subtle); display: flex; flex-direction: column; gap: 6px;';
+
+        const labelRow = document.createElement('div');
+        labelRow.style.cssText = 'display: flex; align-items: center; justify-content: space-between; gap: 8px;';
+
+        const nameInput = document.createElement('input');
+        nameInput.value = entry.name;
+        nameInput.placeholder = 'Entry name';
+        nameInput.style.cssText = 'flex: 1; background: transparent; border: none; border-bottom: 1px solid var(--border-light); color: var(--text-main); font-size: 0.8rem; font-weight: 500; padding: 2px 0; outline: none;';
+        nameInput.oninput = () => { working[idx].name = nameInput.value; };
+
+        const constLabel = document.createElement('label');
+        constLabel.style.cssText = 'display: flex; align-items: center; gap: 4px; font-size: 0.75rem; color: var(--text-muted); cursor: pointer; white-space: nowrap;';
+        const constCheck = document.createElement('input');
+        constCheck.type = 'checkbox';
+        constCheck.checked = entry.constant;
+        constCheck.style.accentColor = 'var(--primary-accent)';
+        constCheck.onchange = () => { working[idx].constant = constCheck.checked; };
+        constLabel.appendChild(constCheck);
+        constLabel.appendChild(document.createTextNode(' Always on'));
+
+        labelRow.appendChild(nameInput);
+        labelRow.appendChild(constLabel);
+
+        const deleteEntryBtn = document.createElement('button');
+        deleteEntryBtn.className = 'action-icon-btn';
+        deleteEntryBtn.title = 'Delete entry';
+        deleteEntryBtn.style.cssText = 'width: 24px; height: 24px; border-radius: 5px; flex-shrink: 0;';
+        deleteEntryBtn.innerHTML = `<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="display:block"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>`;
+        deleteEntryBtn.onclick = () => { working.splice(idx, 1); rebuild(); };
+        labelRow.appendChild(deleteEntryBtn);
+
+        const keysInput = document.createElement('input');
+        keysInput.value = entry.keys;
+        keysInput.placeholder = 'Keywords (comma-separated)';
+        keysInput.style.cssText = 'width: 100%; background: var(--glass-bg-medium); border: 1px solid var(--border-color); border-radius: 6px; color: var(--text-main); font-size: 0.78rem; padding: 5px 8px; outline: none; box-sizing: border-box;';
+        keysInput.oninput = () => { working[idx].keys = keysInput.value; };
+
+        const contentInput = document.createElement('textarea');
+        contentInput.value = entry.content;
+        contentInput.placeholder = 'Content injected into context when triggered';
+        contentInput.style.cssText = 'width: 100%; background: var(--glass-bg-medium); border: 1px solid var(--border-color); border-radius: 6px; color: var(--text-main); font-size: 0.78rem; padding: 6px 8px; resize: vertical; min-height: 52px; outline: none; box-sizing: border-box; font-family: inherit;';
+        contentInput.oninput = () => { working[idx].content = contentInput.value; };
+
+        row.appendChild(labelRow);
+        row.appendChild(keysInput);
+        row.appendChild(contentInput);
+        list.appendChild(row);
+    });
+
+    // Sticky footer — always visible below the scroll area
+    const footer = document.createElement('div');
+    footer.style.cssText = 'padding: 8px 14px; display: flex; justify-content: space-between; align-items: center; border-top: 1px solid var(--border-subtle); flex-shrink: 0;';
+
+    const addBtn = document.createElement('button');
+    addBtn.className = 'dashed-action-btn';
+    addBtn.style.cssText = 'width: auto; padding: 4px 14px; font-size: 0.78rem;';
+    addBtn.textContent = '+ Add Entry';
+    addBtn.onclick = () => {
+        working.push({ keys: '', secondary_keys: '', content: '', constant: false, enabled: true, name: 'New Entry', insertion_order: 100, position: 'before_char', _raw: {} });
+        rebuild();
+        // Scroll new entry into view
+        setTimeout(() => { list.scrollTop = list.scrollHeight; }, 50);
+    };
+
+    const saveBtn = document.createElement('button');
+    saveBtn.className = 'onboarding-btn';
+    saveBtn.style.cssText = 'padding: 5px 14px; font-size: 0.78rem; min-width: auto; width: auto; height: auto; margin: 0;';
+    saveBtn.textContent = 'Save';
+    saveBtn.onclick = async () => {
+        const payload = working.map(w => ({
+            ...(w._raw || {}),
+            name: w.name,
+            keys: w.keys.split(',').map(k => k.trim()).filter(Boolean),
+            secondary_keys: w.secondary_keys.split(',').map(k => k.trim()).filter(Boolean),
+            content: w.content,
+            constant: w.constant,
+            enabled: w.enabled,
+            insertion_order: w.insertion_order,
+            position: w.position,
+        }));
+        try {
+            const r = await fetch(saveUrl, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ entries: payload })
+            });
+            const d = await r.json();
+            if (d.success) {
+                saveBtn.textContent = 'Saved ✓';
+                setTimeout(() => { saveBtn.textContent = 'Save'; }, 1800);
+            } else {
+                showCustomAlert('Save failed', d.error || 'Unknown error');
+            }
+        } catch (e) { showCustomAlert('Save failed', e.message); }
+    };
+
+    footer.appendChild(addBtn);
+    footer.appendChild(saveBtn);
+    panel.appendChild(list);
+    panel.appendChild(footer);
+}
+
+
+async function importLorebook(event) {
+    const file = event.target.files[0];
+    if (!file) return;
+    const formData = new FormData();
+    formData.append('file', file);
+    try {
+        const res = await fetch('/api/lorebooks/import', { method: 'POST', body: formData });
+        const data = await res.json();
+        if (data.success) {
+            showCustomAlert('Lorebook imported', `"${file.name}" has been imported successfully.`);
+            loadLorebooks();
+        } else {
+            showCustomAlert('Import failed', data.error || 'Unknown error');
+        }
+    } catch (e) {
+        showCustomAlert('Import failed', e.message);
+    }
+    event.target.value = '';
+}
+
+async function deleteLorebook(filename, name) {
+    if (!confirm(`Delete lorebook "${name}"?`)) return;
+    try {
+        const res = await fetch(`/api/lorebooks/${encodeURIComponent(filename)}/delete`, { method: 'POST' });
+        const data = await res.json();
+        if (data.success) loadLorebooks();
+        else showCustomAlert('Delete failed', data.error || 'Unknown error');
+    } catch (e) {
+        showCustomAlert('Delete failed', e.message);
+    }
+}
+
 
 // --- Project Settings JS Methods ---
 let currentProjectSettings = {
@@ -7908,7 +8111,7 @@ async function deleteDataBankFile(docId, event) {
 
 // --- purgeDataBank ---
 function purgeDataBank() {
-    showCustomConfirm("Purge Knowledge Base", "Are you sure you want to delete all indexed files and empty the companion's vectorized memory?", async () => {
+    showCustomConfirm("Purge Knowledge Base", "Are you sure you want to delete all indexed files and empty the program's vectorized memory?", async () => {
         const loader = document.getElementById('databank-loader');
         const loaderText = document.getElementById('databank-loader-text');
         loaderText.textContent = "Purging knowledge index...";
@@ -8039,16 +8242,16 @@ function purgeDataBank() {
 // --- saveActiveUserProfile ---
 
 /* ==========================================================================
-   VII. 6. COMPANION / PROGRAM SELECTION
+   VII. 6. PROGRAM / PROGRAM SELECTION
    ========================================================================== */
 
 // --- openAssistantModal ---
 
 // --- closeAssistantModal ---
 
-// --- openImportCompanionModal ---
+// --- openImportProgramModal ---
 
-// --- closeImportCompanionModal ---
+// --- closeImportProgramModal ---
 
 // --- switchImportTab ---
 
@@ -8264,14 +8467,14 @@ const urlParams = new URLSearchParams(window.location.search);
 const sessionFromUrl = !!urlParams.get('session_id');
 let sessionId = urlParams.get('session_id');
 if (sessionId) {
-    safeLocalStorage.setItem('companion_session_id', sessionId);
+    safeLocalStorage.setItem('program_session_id', sessionId);
     // Clean up the URL query parameter so page reloads don't force it later
     try {
         window.history.replaceState({}, document.title, window.location.pathname);
     } catch (e) {}
 } else {
-    sessionId = safeLocalStorage.getItem('companion_session_id') || 'default';
-    safeLocalStorage.setItem('companion_session_id', sessionId);
+    sessionId = safeLocalStorage.getItem('program_session_id') || 'default';
+    safeLocalStorage.setItem('program_session_id', sessionId);
 }
 
 // Display session ID signature in header for easy verification
@@ -8282,11 +8485,11 @@ if (sessionDisplay && sessionId) {
 }
 
 // Retrieve selected model from localStorage or use default
-let selectedModel = safeLocalStorage.getItem('companion_selected_model') || 'local-llm';
+let selectedModel = safeLocalStorage.getItem('program_selected_model') || 'local-llm';
 let lastInteractionTime = Date.now();
 let hasTriggeredProactive = false;
 let proactiveAbortController = null;
-let activeCompanionName = "";
+let activeProgramName = "";
 let availableModels = [];
 let connectionStatus = { remote_configured: false, gemini_configured: false, local_online: false };
 let modelInitPromise = null;
@@ -8483,7 +8686,7 @@ function showThoughtBubbleOverlay(text) {
     hideThoughtBubbleOverlay(); // Remove existing if any
     
     const row = document.createElement('div');
-    row.className = 'message-row companion-row thought-row';
+    row.className = 'message-row program-row thought-row';
     row.id = 'active-thought-bubble';
     row.onclick = () => hideThoughtBubbleOverlay();
     
@@ -8491,9 +8694,9 @@ function showThoughtBubbleOverlay(text) {
     
     row.innerHTML = `
         <div class="avatar-container" style="opacity: 0.5;">
-            <img class="avatar companion-avatar thinking-glow" src="${profileUrl}" alt="Companion">
+            <img class="avatar program-avatar thinking-glow" src="${profileUrl}" alt="Program">
         </div>
-        <div class="message companion thought-bubble">
+        <div class="message program thought-bubble">
             <div class="thought-badge">
                 <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 5px; display: inline-block; vertical-align: -1px;">
                     <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
@@ -8515,8 +8718,8 @@ function hideThoughtBubbleOverlay() {
     if (bubble) {
         bubble.remove();
     }
-    // Remove glow from all companion avatars
-    document.querySelectorAll('.companion-avatar.thinking-glow').forEach(img => {
+    // Remove glow from all program avatars
+    document.querySelectorAll('.program-avatar.thinking-glow').forEach(img => {
         img.classList.remove('thinking-glow');
     });
 }
@@ -8549,7 +8752,7 @@ if (document.readyState === 'loading') {
 
 // Global error listener to catch image load failures and switch to dynamic colored circles
 window.addEventListener('error', function (e) {
-    if (e.target && e.target.tagName === 'IMG' && (e.target.classList.contains('companion-avatar') || e.target.classList.contains('companion-list-avatar') || e.target.classList.contains('voice-call-avatar') || e.target.classList.contains('voice-call-companion-avatar'))) {
+    if (e.target && e.target.tagName === 'IMG' && (e.target.classList.contains('program-avatar') || e.target.classList.contains('program-list-avatar') || e.target.classList.contains('voice-call-avatar') || e.target.classList.contains('voice-call-program-avatar'))) {
         switchToCircleFallback(e.target);
     }
 }, true);
@@ -8559,11 +8762,11 @@ function switchToCircleFallback(img) {
     let color = '';
     let useAccent = false;
     
-    if (img.classList.contains('companion-list-avatar')) {
+    if (img.classList.contains('program-list-avatar')) {
         name = img.getAttribute('data-name') || '';
         color = img.getAttribute('data-color') || '';
     } else {
-        name = activeCompanionName || '';
+        name = activeProgramName || '';
         if (!name) {
             const input = document.getElementById('user-input');
             if (input && input.placeholder && input.placeholder.startsWith('Ask ')) {
@@ -8574,7 +8777,7 @@ function switchToCircleFallback(img) {
         useAccent = true;
     }
     
-    if (!name) name = 'Companion';
+    if (!name) name = 'Program';
     if (!color) color = '#38bdf8';
     
     const fallback = document.createElement('div');
@@ -8591,9 +8794,9 @@ function switchToCircleFallback(img) {
     
     // Determine size based on element class to prevent copying stretched layout dimensions
     let size = '48px';
-    if (img.classList.contains('companion-list-avatar')) {
+    if (img.classList.contains('program-list-avatar')) {
         size = '44px';
-    } else if (img.classList.contains('voice-call-avatar') || img.classList.contains('voice-call-companion-avatar')) {
+    } else if (img.classList.contains('voice-call-avatar') || img.classList.contains('voice-call-program-avatar')) {
         size = '120px';
     }
     
@@ -8651,7 +8854,7 @@ let currentPendingCallId = null;
 
 // --- VECTORIZED DATA BANK FUNCTIONS ---
 
-// --- COMPANION ASSISTANT SELECTION FUNCTIONS ---
+// --- PROGRAM ASSISTANT SELECTION FUNCTIONS ---
 
 let selectedTavernCardFile = null;
 
@@ -8738,8 +8941,8 @@ function startVoiceCall() {
     const overlay = document.getElementById('voice-call-overlay');
     overlay.style.display = 'flex';
     
-    document.getElementById('voice-call-companion-name').textContent = activeCompanionName || "Companion";
-    const voiceAvatar = document.getElementById('voice-call-companion-avatar');
+    document.getElementById('voice-call-program-name').textContent = activeProgramName || "Program";
+    const voiceAvatar = document.getElementById('voice-call-program-avatar');
     if (voiceAvatar) {
         updateAvatarElement(voiceAvatar, getProfileUrl());
     }
@@ -8763,8 +8966,8 @@ function startVoiceCall() {
     voiceCallTranscript = [];
     voiceCallMuted = false;
     voiceCallSpeakerMuted = false;
-    isCompanionSpeaking = false;
-    isCompanionThinking = false;
+    isProgramSpeaking = false;
+    isProgramThinking = false;
     consecutiveShortSessions = 0;
     visualizerTime = 0;
     currentSpeechText = "";
@@ -8817,7 +9020,7 @@ function startVoiceCall() {
     };
     
     voiceCallRecognition.onresult = (event) => {
-        if (!isVoiceCallActive || isCompanionSpeaking || isCompanionThinking || voiceCallMuted) return;
+        if (!isVoiceCallActive || isProgramSpeaking || isProgramThinking || voiceCallMuted) return;
         
         let interimTranscript = "";
         let finalTranscript = "";
@@ -8838,7 +9041,7 @@ function startVoiceCall() {
             
             if (silenceTimer) clearTimeout(silenceTimer);
             silenceTimer = setTimeout(() => {
-                if (currentSpeechText && isVoiceCallActive && !isCompanionSpeaking && !isCompanionThinking) {
+                if (currentSpeechText && isVoiceCallActive && !isProgramSpeaking && !isProgramThinking) {
                     const speechToProcess = currentSpeechText;
                     currentSpeechText = "";
                     processUserSpeech(speechToProcess);
@@ -8866,11 +9069,11 @@ function startVoiceCall() {
             return;
         }
         
-        if (isVoiceCallActive && !isCompanionSpeaking && !isCompanionThinking && !voiceCallMuted) {
+        if (isVoiceCallActive && !isProgramSpeaking && !isProgramThinking && !voiceCallMuted) {
             updateVoiceCallStatus("Paused...");
             if (restartTimeout) clearTimeout(restartTimeout);
             restartTimeout = setTimeout(() => {
-                if (isVoiceCallActive && !isCompanionSpeaking && !isCompanionThinking && !voiceCallMuted) {
+                if (isVoiceCallActive && !isProgramSpeaking && !isProgramThinking && !voiceCallMuted) {
                     try {
                         updateVoiceCallStatus("Listening...");
                         voiceCallRecognition.start();
@@ -8930,7 +9133,7 @@ function addVoiceCallTurn(speaker, text) {
     
     const speakerSpan = document.createElement('span');
     speakerSpan.className = `turn-speaker ${speaker}`;
-    speakerSpan.textContent = speaker === 'user' ? `${getUserDisplayName()}: ` : `${activeCompanionName || 'Companion'}: `;
+    speakerSpan.textContent = speaker === 'user' ? `${getUserDisplayName()}: ` : `${activeProgramName || 'Program'}: `;
     
     const textSpan = document.createElement('span');
     textSpan.textContent = text;
@@ -8957,8 +9160,8 @@ async function processUserSpeech(text) {
     
     addVoiceCallTurn('user', text);
     
-    isCompanionThinking = true;
-    updateVoiceCallStatus(`${activeCompanionName || 'Companion'} is thinking...`);
+    isProgramThinking = true;
+    updateVoiceCallStatus(`${activeProgramName || 'Program'} is thinking...`);
     
     let shouldResume = false;
     try {
@@ -8991,9 +9194,9 @@ async function processUserSpeech(text) {
         
         let replyText = data.response || "";
         if (replyText) {
-            addVoiceCallTurn('companion', replyText);
-            updateVoiceCallStatus(`${activeCompanionName || 'Companion'} is speaking...`);
-            await playCompanionSpeech(replyText);
+            addVoiceCallTurn('program', replyText);
+            updateVoiceCallStatus(`${activeProgramName || 'Program'} is speaking...`);
+            await playProgramSpeech(replyText);
         } else {
             updateVoiceCallStatus("Listening...");
             shouldResume = true;
@@ -9003,21 +9206,21 @@ async function processUserSpeech(text) {
         updateVoiceCallStatus("Error. Listening...");
         shouldResume = true;
     } finally {
-        isCompanionThinking = false;
+        isProgramThinking = false;
         if (shouldResume) {
             resumeVoiceRecognition();
         }
     }
 }
 
-async function playCompanionSpeech(text) {
+async function playProgramSpeech(text) {
     if (voiceCallSpeakerMuted) {
         updateVoiceCallStatus("Listening...");
         resumeVoiceRecognition();
         return;
     }
     
-    isCompanionSpeaking = true;
+    isProgramSpeaking = true;
     const tempMsgId = "voice-" + Date.now();
     
     try {
@@ -9053,18 +9256,18 @@ async function playCompanionSpeech(text) {
             source.connect(voiceCallAnalyser);
             voiceCallAnalyser.connect(voiceCallAudioContext.destination);
         } catch(ae) {
-            console.warn("Could not setup companion audio visualizer node:", ae);
+            console.warn("Could not setup program audio visualizer node:", ae);
         }
         
         voiceCallActiveAudio.onended = () => {
-            isCompanionSpeaking = false;
+            isProgramSpeaking = false;
             updateVoiceCallStatus("Listening...");
             resumeVoiceRecognition();
         };
         
         voiceCallActiveAudio.onerror = () => {
             console.error("Audio playback error");
-            isCompanionSpeaking = false;
+            isProgramSpeaking = false;
             updateVoiceCallStatus("Listening...");
             resumeVoiceRecognition();
         };
@@ -9072,14 +9275,14 @@ async function playCompanionSpeech(text) {
         await voiceCallActiveAudio.play();
     } catch (err) {
         console.error("TTS generation or playback error:", err);
-        isCompanionSpeaking = false;
+        isProgramSpeaking = false;
         updateVoiceCallStatus("Listening...");
         resumeVoiceRecognition();
     }
 }
 
 function resumeVoiceRecognition() {
-    if (!isVoiceCallActive || isCompanionSpeaking || isCompanionThinking || voiceCallMuted) return;
+    if (!isVoiceCallActive || isProgramSpeaking || isProgramThinking || voiceCallMuted) return;
     try {
         if (voiceCallRecognition) {
             voiceCallRecognition.start();
@@ -9117,7 +9320,7 @@ function toggleCallSpeaker() {
     } else {
         btn.classList.remove('disabled');
         btn.title = "Mute Speaker";
-        if (voiceCallActiveAudio && isCompanionSpeaking) {
+        if (voiceCallActiveAudio && isProgramSpeaking) {
             try { voiceCallActiveAudio.play(); } catch(e) {}
         }
     }
@@ -9213,7 +9416,7 @@ function drawVisualizer() {
     const statusEl = document.getElementById('voice-call-status');
     const currentStatus = statusEl ? statusEl.textContent : "";
     
-    if (isCompanionSpeaking && !voiceCallSpeakerMuted && voiceCallAnalyser) {
+    if (isProgramSpeaking && !voiceCallSpeakerMuted && voiceCallAnalyser) {
         const bufferLength = voiceCallAnalyser.frequencyBinCount;
         const dataArray = new Uint8Array(bufferLength);
         voiceCallAnalyser.getByteFrequencyData(dataArray);
@@ -9225,7 +9428,7 @@ function drawVisualizer() {
         const avgVolume = sum / bufferLength; // 0 to 255
         targetAmp = Math.max(3, (avgVolume / 255) * 45);
         speed = 0.05 + (avgVolume / 255) * 0.25;
-    } else if (isCompanionThinking) {
+    } else if (isProgramThinking) {
         targetAmp = 4;
         speed = 0.03;
     } else if (isVoiceCallActive && !voiceCallMuted && currentStatus === "Listening...") {
@@ -9262,7 +9465,7 @@ function drawVisualizer() {
     
     const ring1 = document.querySelector('.voice-call-pulse-ring.ring1');
     const ring2 = document.querySelector('.voice-call-pulse-ring.ring2');
-    const avatar = document.getElementById('voice-call-companion-avatar');
+    const avatar = document.getElementById('voice-call-program-avatar');
     
     if (ring1 && ring2) {
         let scaleVal1 = 1.0;
@@ -9270,7 +9473,7 @@ function drawVisualizer() {
         let scaleVal2 = 1.0;
         let opacityVal2 = 0.0;
         
-        if (isCompanionSpeaking) {
+        if (isProgramSpeaking) {
             // Audio reactive ring pulses + avatar pulsing size (slightly tighter scale)
             const scaleFactor = 1.0 + (visualizerAmplitude / 45) * 0.45;
             const timeScale1 = (Date.now() / 800) % 2.0; // cycle 0 to 2
@@ -9285,7 +9488,7 @@ function drawVisualizer() {
             if (avatar) {
                 avatar.style.transform = `scale(${1.0 + (visualizerAmplitude / 45) * 0.07})`;
             }
-        } else if (isCompanionThinking) {
+        } else if (isProgramThinking) {
             // Rapid circular breath wave for thinking
             const timeVal = Date.now() / 200;
             scaleVal1 = 1.04 + Math.sin(timeVal) * 0.08;
