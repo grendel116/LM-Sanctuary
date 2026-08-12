@@ -1,5 +1,5 @@
 """
-Utility module for extracting the companion's emotional state from generated text,
+Utility module for extracting the program's emotional state from generated text,
 and mapping it strictly to dynamic heart indicator styles (glow, color, speed) in the UI.
 """
 import os
@@ -10,7 +10,7 @@ import requests
 base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 def analyze_sentiment_with_llm(text: str) -> dict:
-    """Classifies companion's message text into one of the core emotional states and intensity using the LLM."""
+    """Classifies program's message text into one of the core emotional states and intensity using the LLM."""
     if not text:
         return {
             "name": "calm",
@@ -31,7 +31,7 @@ def analyze_sentiment_with_llm(text: str) -> dict:
     
     # Prompt instructing the LLM to classify the emotional state and intensity
     system_instruction = (
-        "You are an emotional analysis subagent. Analyze the emotional state of the companion message. "
+        "You are an emotional analysis subagent. Analyze the emotional state of the program message. "
         "Classify it into one of these strict categories:\n"
         "- intimate (warm, affectionate, blushy, loving, or tender)\n"
         "- excited (playful, high-energy, cheerful, or giggly)\n"
@@ -146,7 +146,7 @@ def analyze_sentiment_with_llm(text: str) -> dict:
     return details
 
 def extract_and_strip_mood(text: str) -> tuple[str, dict]:
-    """Classifies companion's message text using LLM-based sentiment analysis.
+    """Classifies program's message text using LLM-based sentiment analysis.
     No tags are expected or stripped from the text.
     
     Returns:

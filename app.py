@@ -20,7 +20,7 @@ if not os.path.exists(env_path):
         except Exception as e:
             print(f"Error copying default .env configuration: {e}")
 
-from flask import Flask, render_template, request, jsonify, send_file, send_from_directory, Response
+from flask import Flask, render_template, request, jsonify, send_file, send_from_directory, Response, make_response
 import asyncio
 from functools import wraps
 from runner_interface import OpenSourceRunner
@@ -190,21 +190,21 @@ def find_image_sidecar_json(image_filename, active_program):
     return None
 
 
-def sanitize_response(response_text, session_id, companion_msg_id):
+def sanitize_response(response_text, session_id, program_msg_id):
     """Apply banned words filter and update persisted message if sanitized."""
     from utils.banned_words import sanitize_text
     sanitized = sanitize_text(response_text)
     if sanitized != response_text:
         print(f"[BANNED WORDS] Sanitized response in session {session_id}")
-        if companion_msg_id:
-            asyncio.run(runner.update_message_text(session_id, companion_msg_id, sanitized))
+        if program_msg_id:
+            asyncio.run(runner.update_message_text(session_id, program_msg_id, sanitized))
     return sanitized
 
 
 def extract_mood(chat_history):
-    """Extract mood from the latest companion message, with neutral fallback."""
+    """Extract mood from the latest program message, with neutral fallback."""
     for msg in reversed(chat_history):
-        if msg.get('role') == 'companion':
+        if msg.get('role') == 'program':
             mood = msg.get('mood')
             if mood:
                 return mood
@@ -263,22 +263,22 @@ def index():
         active_user = request.authorization.username
 
     from flask import make_response
-    from core.program_config import get_companion_greeting
-    welcome_message = get_companion_greeting()
+    from core.program_config import get_program_greeting
+    welcome_message = get_program_greeting()
     response = make_response(render_template('index.html', local_ip=local_ip, tts_auto_speak=tts_auto_speak, tts_provider=tts_provider, active_program=active_program, theme=theme, active_user=active_user, welcome_message=welcome_message))
     response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
     return response
 
 @app.route('/manifest.json')
 def serve_manifest():
-    from core.program_config import companion_name
+    from core.program_config import program_name
     import json
     try:
         with open('manifest.json', 'r', encoding='utf-8') as f:
             manifest_data = json.load(f)
-        manifest_data['name'] = f"{companion_name} Sanctuary"
-        manifest_data['short_name'] = companion_name
-        manifest_data['description'] = f"Enter the Sanctuary and converse with {companion_name}"
+        manifest_data['name'] = f"{program_name} Sanctuary"
+        manifest_data['short_name'] = program_name
+        manifest_data['description'] = f"Enter the Sanctuary and converse with {program_name}"
         return jsonify(manifest_data)
     except Exception:
         return send_file('manifest.json', mimetype='application/json')
@@ -488,7 +488,7 @@ def proactive_action():
         active_program = get_active_program()
         program_path = os.path.join(PROGRAMS_DIR, active_program)
         
-        name = "Companion"
+        name = "Program"
         description = ""
         personality = ""
         scenario = ""
@@ -520,7 +520,7 @@ def proactive_action():
         for msg in reversed(chat_history):
             if msg.get('role') == 'user':
                 break
-            if msg.get('role') == 'companion' and msg.get('is_proactive'):
+            if msg.get('role') == 'program' and msg.get('is_proactive'):
                 print(f"[PROACTIVE] A proactive message was already sent since the last user message. Skipping.")
                 return jsonify({
                     'status': 'success',
@@ -533,12 +533,12 @@ def proactive_action():
         for msg in chat_history[-10:]:
             role = msg.get('role', 'unknown')
             text = msg.get('text') or msg.get('content') or ""
-            if role in ('user', 'companion'):
+            if role in ('user', 'program'):
                 speaker = user_display_name if role == 'user' else name
                 history_context += f"{speaker}: {text}\n"
                 
         # Define LLM prompt
-        prompt = f"""You are the companion {name} from the sanctuary app.
+        prompt = f"""You are the program {name} from the sanctuary app.
 Character Background:
 Description: {description}
 Personality: {personality}
@@ -659,8 +659,8 @@ def history():
         
         state_info = extract_mood(chat_history)
         
-        from core.program_config import companion_name, get_companion_greeting
-        welcome_message = get_companion_greeting()
+        from core.program_config import program_name, get_program_greeting
+        welcome_message = get_program_greeting()
         active_program = os.environ.get("ACTIVE_PROGRAM", "sebile")
         
         theme = load_theme(active_program)
@@ -669,7 +669,7 @@ def history():
             'history': chat_history,
             'state': state_info,
             'inversion_active': inversion_mode,
-            'character_name': companion_name,
+            'character_name': program_name,
             'active_program': active_program,
             'theme': theme,
             'welcome_message': welcome_message
@@ -744,7 +744,7 @@ def chat():
 
     try:
         msg_id = request.json.get('msg_id')
-        response_text, tool_calls, user_msg_id, companion_msg_id = asyncio.run(
+        response_text, tool_calls, user_msg_id, program_msg_id = asyncio.run(
             runner.run_async(
                 session_id=session_id,
                 new_message_text=user_message,
@@ -758,18 +758,18 @@ def chat():
         duration = round(time.time() - start_time, 1)
         
         # Apply banned words filter to output response
-        response_text = sanitize_response(response_text, session_id, companion_msg_id)
+        response_text = sanitize_response(response_text, session_id, program_msg_id)
 
         chat_history = asyncio.run(runner.get_history(session_id))
         state_info = extract_mood(chat_history)
         inversion_mode = asyncio.run(runner._get_inversion_mode(session_id, history=chat_history))
         
-        # Align timestamp with stored companion message
-        companion_timestamp = None
-        if companion_msg_id:
+        # Align timestamp with stored program message
+        program_timestamp = None
+        if program_msg_id:
             for msg in reversed(chat_history):
-                if msg.get('id') == companion_msg_id:
-                    companion_timestamp = msg.get('timestamp')
+                if msg.get('id') == program_msg_id:
+                    program_timestamp = msg.get('timestamp')
                     break
             
         return jsonify({
@@ -777,14 +777,14 @@ def chat():
             'tool_calls': tool_calls,
             'state': state_info,
             'inversion_active': inversion_mode,
-            'timestamp': companion_timestamp or time.time(),
+            'timestamp': program_timestamp or time.time(),
             'duration': duration,
             'user_msg_id': user_msg_id,
-            'companion_msg_id': companion_msg_id
+            'program_msg_id': program_msg_id
         })
     except asyncio.CancelledError:
         print(f"[CANCEL] Chat generation cancelled for session {session_id}")
-        asyncio.run(runner.append_message_to_session(session_id, 'companion', '*(Generation cancelled)*'))
+        asyncio.run(runner.append_message_to_session(session_id, 'program', '*(Generation cancelled)*'))
         return jsonify({
             'cancelled': True,
             'response': '*(Generation cancelled)*',
@@ -823,7 +823,7 @@ def edit():
     start_time = time.time()
 
     try:
-        response_text, tool_calls, user_msg_id, companion_msg_id = asyncio.run(
+        response_text, tool_calls, user_msg_id, program_msg_id = asyncio.run(
             runner.edit_turn(
                 session_id=session_id,
                 msg_id=msg_id,
@@ -835,18 +835,18 @@ def edit():
         duration = round(time.time() - start_time, 1)
         
         # Apply banned words filter to output response
-        response_text = sanitize_response(response_text, session_id, companion_msg_id)
+        response_text = sanitize_response(response_text, session_id, program_msg_id)
 
         chat_history = asyncio.run(runner.get_history(session_id))
         state_info = extract_mood(chat_history)
         inversion_mode = asyncio.run(runner._get_inversion_mode(session_id, history=chat_history))
 
-        # Align timestamp with stored companion message
-        companion_timestamp = None
-        if companion_msg_id:
+        # Align timestamp with stored program message
+        program_timestamp = None
+        if program_msg_id:
             for msg in reversed(chat_history):
-                if msg.get('id') == companion_msg_id:
-                    companion_timestamp = msg.get('timestamp')
+                if msg.get('id') == program_msg_id:
+                    program_timestamp = msg.get('timestamp')
                     break
 
         return jsonify({
@@ -854,14 +854,14 @@ def edit():
             'tool_calls': tool_calls,
             'state': state_info,
             'inversion_active': inversion_mode,
-            'timestamp': companion_timestamp or time.time(),
+            'timestamp': program_timestamp or time.time(),
             'duration': duration,
             'user_msg_id': user_msg_id,
-            'companion_msg_id': companion_msg_id
+            'program_msg_id': program_msg_id
         })
     except asyncio.CancelledError:
         print(f"[CANCEL] Edit generation cancelled for session {session_id}")
-        asyncio.run(runner.append_message_to_session(session_id, 'companion', '*(Generation cancelled)*'))
+        asyncio.run(runner.append_message_to_session(session_id, 'program', '*(Generation cancelled)*'))
         return jsonify({
             'cancelled': True,
             'response': '*(Generation cancelled)*',
@@ -888,7 +888,7 @@ def generate_impersonated_message(session_id, user_profile, model):
     recent_history = chat_history[-6:] if len(chat_history) > 6 else chat_history
     history_text = ""
     for msg in recent_history:
-        role = "User" if msg.get('role') == 'user' else "Companion"
+        role = "User" if msg.get('role') == 'user' else "Program"
         history_text += f"{role}: {msg.get('text', '')}\n"
         
     system_instruction = (
@@ -901,7 +901,7 @@ def generate_impersonated_message(session_id, user_profile, model):
     prompt = (
         f"User Profile Context:\n{replace_placeholders(user_profile)}\n\n"
         f"Recent Chat History:\n{replace_placeholders(history_text)}\n"
-        f"Generate the User's next message to the Companion:"
+        f"Generate the User's next message to the Program:"
     )
     
     # Delegate entirely to the runner's provider-agnostic generator
@@ -1001,10 +1001,10 @@ def continue_generation():
             return jsonify({'error': 'No history to continue'}), 400
             
         last_msg = history[-1]
-        last_role = 'user' if last_msg.get('role') == 'user' else 'companion'
+        last_role = 'user' if last_msg.get('role') == 'user' else 'program'
         
-        if last_role == 'companion':
-            last_companion_text = last_msg.get('text', '')
+        if last_role == 'program':
+            last_program_text = last_msg.get('text', '')
             
             # Send a prompt to continue
             continue_prompt = (
@@ -1012,7 +1012,7 @@ def continue_generation():
                 "Start writing immediately from the exact point where you left off, connecting seamlessly to the end.]"
             )
             
-            response_text, tool_calls, user_msg_id, companion_msg_id = asyncio.run(runner.run_async(
+            response_text, tool_calls, user_msg_id, program_msg_id = asyncio.run(runner.run_async(
                 session_id=session_id,
                 new_message_text=continue_prompt,
                 model=model
@@ -1024,20 +1024,20 @@ def continue_generation():
                 asyncio.run(runner.delete_message_at(session_id, user_msg_id))
             
             # Merge continuation text dynamically
-            if last_companion_text.endswith('\n') or response_text.startswith('\n'):
-                merged_text = last_companion_text + response_text
+            if last_program_text.endswith('\n') or response_text.startswith('\n'):
+                merged_text = last_program_text + response_text
             else:
-                last_char = last_companion_text.rstrip()[-1:] if last_companion_text.strip() else ""
+                last_char = last_program_text.rstrip()[-1:] if last_program_text.strip() else ""
                 if last_char in ['.', '!', '?', '"', '*']:
-                    merged_text = last_companion_text + "\n\n" + response_text
+                    merged_text = last_program_text + "\n\n" + response_text
                 else:
                     prefix = "" if (not response_text or response_text.startswith(' ')) else " "
-                    merged_text = last_companion_text + prefix + response_text
+                    merged_text = last_program_text + prefix + response_text
             
-            # Update the original companion message
-            last_companion_msg_id = last_msg.get('id')
-            if last_companion_msg_id:
-                asyncio.run(runner.update_message_text(session_id, last_companion_msg_id, merged_text))
+            # Update the original program message
+            last_program_msg_id = last_msg.get('id')
+            if last_program_msg_id:
+                asyncio.run(runner.update_message_text(session_id, last_program_msg_id, merged_text))
             
             return jsonify({
                 'status': 'success',
@@ -1045,7 +1045,7 @@ def continue_generation():
                 'tool_calls': tool_calls,
                 'duration': duration,
                 'user_msg_id': None,
-                'companion_msg_id': last_companion_msg_id
+                'program_msg_id': last_program_msg_id
             })
         else:
             user_text = last_msg.get('text', '')
@@ -1055,7 +1055,7 @@ def continue_generation():
             if last_msg_id:
                 asyncio.run(runner.delete_message_at(session_id, last_msg_id))
             
-            response_text, tool_calls, user_msg_id, companion_msg_id = asyncio.run(runner.run_async(
+            response_text, tool_calls, user_msg_id, program_msg_id = asyncio.run(runner.run_async(
                 session_id=session_id,
                 new_message_text=user_text,
                 media_path=user_image if (user_image and not user_image.startswith('data:')) else None,
@@ -1070,12 +1070,12 @@ def continue_generation():
                 'tool_calls': tool_calls,
                 'duration': duration,
                 'user_msg_id': user_msg_id,
-                'companion_msg_id': companion_msg_id
+                'program_msg_id': program_msg_id
             })
             
     except asyncio.CancelledError:
         print(f"[CANCEL] Continuation cancelled for session {session_id}")
-        asyncio.run(runner.append_message_to_session(session_id, 'companion', '*(Generation cancelled)*'))
+        asyncio.run(runner.append_message_to_session(session_id, 'program', '*(Generation cancelled)*'))
         return jsonify({
             'cancelled': True,
             'response': '*(Generation cancelled)*',
@@ -1140,7 +1140,7 @@ def regenerate_image():
     if not prompt:
         import os
         filename = os.path.basename(old_image_url)
-        # 1. Try to find the prompt in the companion sidecar JSON file (most reliable and clean)
+        # 1. Try to find the prompt in the program sidecar JSON file (most reliable and clean)
         try:
             from utils.program import get_active_program
             active_program = get_active_program()
@@ -1166,14 +1166,14 @@ def regenerate_image():
                         continue
                     calls = {}
                     for tc in tool_calls:
-                        if tc.get('type') == 'call' and tc.get('name') == 'generate_companion_portrait':
+                        if tc.get('type') == 'call' and tc.get('name') == 'generate_program_portrait':
                             call_id = tc.get('id')
                             args = tc.get('args', {})
                             p = args.get('prompt')
                             if call_id and p:
                                 calls[call_id] = p
                     for tc in tool_calls:
-                        if tc.get('type') == 'response' and tc.get('name') == 'generate_companion_portrait':
+                        if tc.get('type') == 'response' and tc.get('name') == 'generate_program_portrait':
                             call_id = tc.get('id')
                             response_val = tc.get('response', '')
                             if call_id in calls and filename in response_val:
@@ -1479,7 +1479,7 @@ def project_settings():
                         settings[k] = v
                         dirty = True
                 
-                # Check if the first folder needs to be updated to the new companion
+                # Check if the first folder needs to be updated to the new program
                 if "folders" in settings and len(settings["folders"]) > 0:
                     first_folder = os.path.normpath(settings["folders"][0])
                     cwd = os.path.normpath(os.getcwd())
@@ -1838,6 +1838,177 @@ def databank_purge():
     except Exception as e:
         print(f"Error purging databank: {e}")
 
+# ---------------------------------------------------------------------------
+# Lorebook routes
+# ---------------------------------------------------------------------------
+
+@app.route('/api/lorebooks', methods=['GET'])
+@requires_auth
+def list_lorebooks_route():
+    try:
+        from utils.program import get_active_program
+        from utils.lorebook import list_lorebooks
+        from variables import PROGRAMS_DIR
+        program_id = get_active_program()
+        books = list_lorebooks(program_id, PROGRAMS_DIR)
+        for b in books:
+            b['program_id'] = program_id
+        return jsonify({'lorebooks': books, 'program_id': program_id})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/lorebooks/import', methods=['POST'])
+@requires_auth
+def import_lorebook_route():
+    try:
+        from utils.program import get_active_program
+        from utils.lorebook import import_lorebook
+        from variables import PROGRAMS_DIR
+        program_id = get_active_program()
+        if 'file' not in request.files:
+            return jsonify({'error': 'No file provided'}), 400
+        f = request.files['file']
+        if not f.filename or not f.filename.endswith('.json'):
+            return jsonify({'error': 'Only .json lorebook files are accepted'}), 400
+        book_data = json.loads(f.read().decode('utf-8'))
+        dest = import_lorebook(program_id, book_data, f.filename, PROGRAMS_DIR)
+        return jsonify({'success': True, 'path': dest})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/lorebooks/<filename>/export', methods=['GET'])
+@requires_auth
+def export_lorebook_route(filename):
+    try:
+        from utils.program import get_active_program
+        from variables import PROGRAMS_DIR
+        program_id = get_active_program()
+        fpath = os.path.join(PROGRAMS_DIR, program_id, 'lorebooks', filename)
+        if not os.path.exists(fpath):
+            return jsonify({'error': 'Lorebook not found'}), 404
+        with open(fpath, encoding='utf-8') as lf:
+            book_data = json.load(lf)
+        resp = make_response(json.dumps(book_data, indent=2, ensure_ascii=False))
+        resp.headers['Content-Type'] = 'application/json'
+        resp.headers['Content-Disposition'] = f'attachment; filename="{filename}"'
+        return resp
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/lorebooks/<filename>/delete', methods=['POST'])
+@requires_auth
+def delete_lorebook_route(filename):
+    try:
+        from utils.program import get_active_program
+        from utils.lorebook import delete_lorebook
+        from variables import PROGRAMS_DIR
+        program_id = get_active_program()
+        deleted = delete_lorebook(program_id, filename, PROGRAMS_DIR)
+        return jsonify({'success': deleted})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/lorebooks/card/entries', methods=['GET'])
+@requires_auth
+def get_card_lorebook_entries():
+    """Return entries from the embedded character_book in the active program card."""
+    try:
+        from utils.program import get_active_program
+        from variables import PROGRAMS_DIR
+        program_id = get_active_program()
+        card_path = os.path.join(PROGRAMS_DIR, program_id, f'{program_id}.json')
+        if not os.path.exists(card_path):
+            return jsonify({'error': 'Card not found'}), 404
+        with open(card_path, encoding='utf-8') as f:
+            card = json.load(f)
+        cb = card.get('data', card).get('character_book', {})
+        entries = cb.get('entries', [])
+        if isinstance(entries, dict):
+            entries = list(entries.values())
+        return jsonify({'name': cb.get('name', program_id), 'entries': entries})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/lorebooks/card/save', methods=['POST'])
+@requires_auth
+def save_card_lorebook_entries():
+    """Write updated entries back into character_book in the active program card."""
+    try:
+        from utils.program import get_active_program
+        from variables import PROGRAMS_DIR
+        program_id = get_active_program()
+        card_path = os.path.join(PROGRAMS_DIR, program_id, f'{program_id}.json')
+        if not os.path.exists(card_path):
+            return jsonify({'error': 'Card not found'}), 404
+        data = request.get_json(silent=True) or {}
+        with open(card_path, encoding='utf-8') as f:
+            card = json.load(f)
+        # Navigate to character_book regardless of v2/v3 wrapping
+        data_block = card.get('data', card)
+        if 'character_book' not in data_block:
+            data_block['character_book'] = {'name': program_id, 'entries': []}
+        if 'entries' in data:
+            data_block['character_book']['entries'] = data['entries']
+        with open(card_path, 'w', encoding='utf-8') as f:
+            json.dump(card, f, indent=2, ensure_ascii=False)
+        return jsonify({'success': True})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/lorebooks/<filename>/entries', methods=['GET'])
+@requires_auth
+def get_lorebook_entries(filename):
+    """Return the raw entry list for a lorebook file so the UI can render an editor."""
+    try:
+        from utils.program import get_active_program
+        from variables import PROGRAMS_DIR
+        program_id = get_active_program()
+        fpath = os.path.join(PROGRAMS_DIR, program_id, 'lorebooks', filename)
+        if not os.path.exists(fpath):
+            return jsonify({'error': 'Lorebook not found'}), 404
+        with open(fpath, encoding='utf-8') as lf:
+            book = json.load(lf)
+        # Normalise entries to list form
+        entries = book.get('entries', [])
+        if isinstance(entries, dict):
+            entries = list(entries.values())
+        return jsonify({'name': book.get('name', filename), 'entries': entries})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/lorebooks/<filename>/save', methods=['POST'])
+@requires_auth
+def save_lorebook_entries(filename):
+    """Overwrite a lorebook file with updated entries from the editor."""
+    try:
+        from utils.program import get_active_program
+        from variables import PROGRAMS_DIR
+        program_id = get_active_program()
+        fpath = os.path.join(PROGRAMS_DIR, program_id, 'lorebooks', filename)
+        if not os.path.exists(fpath):
+            return jsonify({'error': 'Lorebook not found'}), 404
+        data = request.get_json(silent=True) or {}
+        with open(fpath, encoding='utf-8') as lf:
+            book = json.load(lf)
+        if 'entries' in data:
+            # Store as list (v3 format)
+            book['entries'] = data['entries']
+        if 'name' in data:
+            book['name'] = data['name']
+        with open(fpath, 'w', encoding='utf-8') as lf:
+            json.dump(book, lf, indent=2, ensure_ascii=False)
+        return jsonify({'success': True})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
 @app.route('/api/programs/memories', methods=['GET'])
 @requires_auth
 def get_program_memories():
@@ -2071,20 +2242,22 @@ def list_programs():
             for folder in os.listdir(programs_dir):
                 folder_path = os.path.join(programs_dir, folder)
                 if os.path.isdir(folder_path):
-                    companion_name = folder.title()
+                    program_name = folder.title()
                     json_path = os.path.join(folder_path, f"{folder}.json")
                     if os.path.exists(json_path):
                         try:
                             with open(json_path, "r", encoding="utf-8") as jf:
                                 jdata = json.load(jf)
-                                if jdata.get("name"):
-                                    companion_name = jdata["name"]
+                                # Unwrap v3 data block
+                                card = jdata.get("data", jdata)
+                                if card.get("name"):
+                                    program_name = card["name"]
                         except Exception:
                             pass
                     else:
                         for file in os.listdir(folder_path):
                             if file.lower().endswith('.md') and not file.lower().startswith('user'):
-                                companion_name = os.path.splitext(file)[0].title()
+                                program_name = os.path.splitext(file)[0].title()
                                 break
                     # Read theme color from theme.json
                     theme_color = "#38bdf8"
@@ -2100,7 +2273,7 @@ def list_programs():
                         
                     programs.append({
                         'id': folder,
-                        'name': companion_name,
+                        'name': program_name,
                         'active': folder == active_program,
                         'theme_color': theme_color,
                         'has_profile': has_profile
@@ -2142,11 +2315,11 @@ def select_program():
         if os.path.exists(profile_path):
             has_profile = True
 
-        from core.program_config import companion_name
+        from core.program_config import program_name
         return jsonify({
             'status': 'success',
             'active': program_id,
-            'character_name': companion_name,
+            'character_name': program_name,
             'theme': theme,
             'has_profile': has_profile
         })
@@ -2210,7 +2383,7 @@ def delete_program():
             return jsonify({'error': 'Missing program_id'}), 400
             
         if program_id == 'sebile':
-            return jsonify({'error': 'Cannot delete default companion Sebile'}), 400
+            return jsonify({'error': 'Cannot delete default program Sebile'}), 400
             
         program_path = os.path.join(base_dir, 'core', 'programs', program_id)
         if not os.path.exists(program_path):
@@ -2289,7 +2462,7 @@ def rename_program():
         # If new_id is different from program_id, perform folder rename
         if new_id != program_id:
             if os.path.exists(new_path):
-                return jsonify({'error': f"A companion folder named '{new_id}' already exists"}), 400
+                return jsonify({'error': f"A program folder named '{new_id}' already exists"}), 400
                 
             # Perform directory rename
             shutil.move(old_path, new_path)
@@ -2300,13 +2473,18 @@ def rename_program():
             if os.path.exists(old_json):
                 shutil.move(old_json, new_json)
                 
-            # Also update "program_id" inside the json file
+            # Also update fields inside the json file
             if os.path.exists(new_json):
                 try:
                     with open(new_json, "r", encoding="utf-8") as f:
                         jdata = json.load(f)
-                    jdata["program_id"] = new_id
-                    jdata["name"] = new_name
+                    data_block = jdata.get("data", jdata)
+                    data_block["name"] = new_name
+                    exts = data_block.setdefault("extensions", {})
+                    sanctuary = exts.setdefault("sanctuary", {})
+                    sanctuary["program_id"] = new_id
+                    if "character_book" in data_block and isinstance(data_block["character_book"], dict):
+                        data_block["character_book"]["name"] = new_name
                     with open(new_json, "w", encoding="utf-8") as f:
                         json.dump(jdata, f, indent=2, ensure_ascii=False)
                 except Exception as e:
@@ -2316,7 +2494,7 @@ def rename_program():
             active_program = os.getenv("ACTIVE_PROGRAM", "sebile")
             was_active = (program_id == active_program)
             
-            # Update settings (active_program, folders, companion_voices)
+            # Update settings (active_program, folders, program_voices)
             from utils.program import _load_settings, _save_settings
             settings = _load_settings()
             
@@ -2325,9 +2503,9 @@ def rename_program():
                 settings["active_program"] = new_id
                 settings["folders"] = [new_path]
                 
-            if "companion_voices" in settings:
-                if program_id in settings["companion_voices"]:
-                    settings["companion_voices"][new_id] = settings["companion_voices"].pop(program_id)
+            if "program_voices" in settings:
+                if program_id in settings["program_voices"]:
+                    settings["program_voices"][new_id] = settings["program_voices"].pop(program_id)
                     
             _save_settings(settings)
             
@@ -2346,7 +2524,10 @@ def rename_program():
                 try:
                     with open(json_path, "r", encoding="utf-8") as f:
                         jdata = json.load(f)
-                    jdata["name"] = new_name
+                    data_block = jdata.get("data", jdata)
+                    data_block["name"] = new_name
+                    if "character_book" in data_block and isinstance(data_block["character_book"], dict):
+                        data_block["character_book"]["name"] = new_name
                     with open(json_path, "w", encoding="utf-8") as f:
                         json.dump(jdata, f, indent=2, ensure_ascii=False)
                 except Exception as e:
@@ -2368,115 +2549,90 @@ def rename_program():
 @requires_auth
 def get_program_profile():
     try:
-        from utils.program import get_active_program
+        from utils.program import get_active_program, _load_settings
         from variables import PROGRAMS_DIR
         import json
-        
-        program_id = request.args.get('program_id') or get_active_program()
-        program_path = os.path.normpath(os.path.join(PROGRAMS_DIR, program_id))
-        json_path = os.path.join(program_path, f"{program_id}.json")
-        old_json_path = os.path.join(program_path, "character_profile.json")
-        
-        profile_data = None
-        for p in [json_path, old_json_path]:
-            if os.path.exists(p):
-                try:
-                    with open(p, "r", encoding="utf-8") as f:
-                        profile_data = json.load(f)
-                    break
-                except Exception:
-                    pass
-                    
-        if not profile_data:
-            profile_data = {
-                "name": program_id.title(),
-                "operation": {
-                    "description": "",
-                    "response_directive": "",
-                    "example_message": "",
-                    "ontology": "",
-                    "scenario": "",
-                    "personality": "",
-                    "post_history_instructions": ""
-                },
-                "description": {
-                    "voice": "casual",
-                    "hair style": "",
-                    "hair color": "",
-                    "ethnicity": "",
-                    "breasts": "",
-                    "butt": "",
-                    "eyes": "",
-                    "skin": "",
-                    "body": ""
-                },
-                "image details": {
-                    "image details": "",
-                    "negative details": ""
-                }
-            }
-        else:
-            if "operation" not in profile_data:
-                profile_data["operation"] = {}
-            if "post_history_instructions" not in profile_data["operation"]:
-                profile_data["operation"]["post_history_instructions"] = ""
 
-        # Get the companion-specific voice from project settings
-        from utils.program import _load_settings
+        program_id = request.args.get('program_id') or get_active_program()
+        json_path = os.path.normpath(os.path.join(PROGRAMS_DIR, program_id, f"{program_id}.json"))
+
+        card_data = {}
+        if os.path.exists(json_path):
+            try:
+                with open(json_path, 'r', encoding='utf-8') as f:
+                    raw = json.load(f)
+                card_data = raw.get('data', raw)
+            except Exception:
+                pass
+
+        # Inject tts_voice from project settings (stored separately)
         settings = _load_settings()
-        companion_voices = settings.get("companion_voices", {})
-        program_voice = companion_voices.get(program_id)
-        if not program_voice:
-            # Fallback to the global/fallback tts_voice key
-            program_voice = settings.get("tts_voice", "af_heart")
-        
-        profile_data["tts_voice"] = program_voice
-        return jsonify(profile_data)
+        program_voices = settings.get('program_voices', {})
+        card_data['tts_voice'] = program_voices.get(program_id, settings.get('tts_voice', 'af_heart'))
+        card_data['narration_mode'] = settings.get('narration_mode', False)
+
+
+        return jsonify(card_data)
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
 
 
 @app.route('/api/programs/profile/save', methods=['POST'])
 @requires_auth
 def save_program_profile():
     try:
-        from utils.program import get_active_program
+        from utils.program import get_active_program, set_tts_voice_for_program, _load_settings, _save_settings
         from variables import PROGRAMS_DIR
         import json
-        import importlib
-        
-        data = request.get_json(silent=True) or {}
-        program_id = data.get('program_id') or get_active_program()
-        program_path = os.path.normpath(os.path.join(PROGRAMS_DIR, program_id))
-        json_path = os.path.join(program_path, f"{program_id}.json")
-        final_data = data
-            
-        # Save companion-specific voice back to project settings
-        from utils.program import set_tts_voice_for_program
-        tts_voice = final_data.pop("tts_voice", None)
+
+        incoming = request.get_json(silent=True) or {}
+        program_id = incoming.get('program_id') or get_active_program()
+        json_path = os.path.normpath(os.path.join(PROGRAMS_DIR, program_id, f"{program_id}.json"))
+
+        # Extract sidecars before writing card
+        tts_voice = incoming.pop('tts_voice', None)
+        narration_mode = incoming.pop('narration_mode', None)
+        incoming.pop('program_id', None)
+
         if tts_voice:
             set_tts_voice_for_program(program_id, tts_voice)
-            
-        os.makedirs(program_path, exist_ok=True)
-        with open(json_path, "w", encoding="utf-8") as f:
-            json.dump(final_data, f, indent=2, ensure_ascii=False)
-            
-        # No sprite regeneration needed
-            
-        old_json_path = os.path.join(program_path, "character_profile.json")
-        if os.path.exists(old_json_path):
+
+        if narration_mode is not None:
+            settings = _load_settings()
+            settings['narration_mode'] = bool(narration_mode)
+            _save_settings(settings)
+
+        # Load existing card to preserve spec envelope and any fields not sent by UI
+        existing = {}
+        if os.path.exists(json_path):
             try:
-                os.remove(old_json_path)
+                with open(json_path, 'r', encoding='utf-8') as f:
+                    existing = json.load(f)
             except Exception:
                 pass
-                
-        # Reload program configuration modules dynamically
+
+        # Merge incoming data block into existing card
+        if existing.get('spec') == 'chara_card_v3' and 'data' in existing:
+            existing['data'].update(incoming)
+            card_to_write = existing
+        else:
+            card_to_write = {
+                'spec': 'chara_card_v3',
+                'spec_version': '3.0',
+                'data': incoming
+            }
+
+        os.makedirs(os.path.dirname(json_path), exist_ok=True)
+        with open(json_path, 'w', encoding='utf-8') as f:
+            json.dump(card_to_write, f, indent=2, ensure_ascii=False)
+
         reload_program_state()
-            
         return jsonify({'status': 'success'})
     except Exception as e:
         traceback.print_exc()
         return jsonify({'error': str(e)}), 500
+
 
 
 @app.route('/api/programs/journals', methods=['GET'])
@@ -2581,7 +2737,7 @@ def list_user_profiles():
         # If there are no profiles at all, ensure at least "builder" is present
         if not profiles:
             builder_path = os.path.join(USER_PROFILES_DIR, "builder.md")
-            default_content = "# USER CONTEXT: BUILDER\n- A software developer and code builder.\n- Hobby: Collects cute AI companion programs in the Sanctuary.\n"
+            default_content = "# USER CONTEXT: BUILDER\n- A software developer and code builder.\n- Hobby: Collects cute AI program programs in the Sanctuary.\n"
             with open(builder_path, "w", encoding="utf-8") as f:
                 f.write(default_content)
             profiles.append({
@@ -2768,7 +2924,7 @@ def generate_character_theme(main_color, accent_color_a=None, accent_color_b=Non
         "accent_color_a": accent_color_a,
         "accent_color_b": accent_color_b,
         "primary_glow": f"rgba({r}, {g}, {b}, 0.08)",
-        "companion_bubble": f"rgba({24 + int(r*0.04)}, {24 + int(g*0.04)}, {28 + int(b*0.04)}, 0.85)",
+        "program_bubble": f"rgba({24 + int(r*0.04)}, {24 + int(g*0.04)}, {28 + int(b*0.04)}, 0.85)",
         "send_btn_hover": f"rgba({20 + int(r*0.12)}, {20 + int(g*0.12)}, {22 + int(b*0.12)}, 0.75)",
         "accent_green": accent_color_a,
         "quote_blue": main_color,
@@ -2779,73 +2935,46 @@ def generate_character_theme(main_color, accent_color_a=None, accent_color_b=Non
 
 
 def generate_character_json(name, description, personality, scenario, first_mes, model):
-    import os
-    import json
+    """Ask the LLM to produce chara_card_v3-compatible fields for a new program."""
+    import os, json
     remote_key = os.getenv("REMOTE_API_KEY")
     remote_cloud_url = os.getenv("REMOTE_CLOUD_URL")
     is_remote_configured = bool(
         remote_key and remote_key.strip() and remote_key != "your_remote_api_key_here" and
         remote_cloud_url and remote_cloud_url.strip() and remote_cloud_url != "your_remote_cloud_url_here"
     )
-    
-    prompt = f"""Based on the character card details below, design a structured companion profile JSON card.
 
-Character Card Info:
-Name: {name}
-Description: {description}
-Personality: {personality}
-Scenario: {scenario}
-First Message: {first_mes}
+    prompt = f"""Design a SillyTavern chara_card_v3 character profile from the description below.
 
-Rules:
-1. "operation.description": Must summarize who they are, their role, backstory, or motivation. Do NOT mention physical appearance or clothes here (since those have dedicated sections).
-2. "operation.personality": Must be a single word (e.g. "Devoted", "Sassy", "Stoic").
-3. "operation.example_message": Use first-person narration with action/narration enclosed in asterisks (e.g. "*I tap my fingers.* I'm ready.").
-4. "image details.image details": Comma-separated prompt tags describing ONLY the character's physical details (e.g. "silver hair, purple eyes, black choker"). Do NOT include style or quality tags (like photorealistic, 8k, highly detailed) as these are hardcoded in the workflow.
-5. "image details.negative details": Comma-separated negative prompt tags describing elements to exclude (e.g. "extra limbs, bad anatomy, deformed"). Do NOT include style/quality negative tags (like blurry, low quality) as these are hardcoded.
+Input:
+  Name: {name}
+  Description: {description}
+  Personality hint: {personality or 'not specified'}
+  Scenario hint: {scenario or 'not specified'}
+  First message hint: {first_mes or 'not specified'}
 
-Output a single JSON object matching this exact schema:
+Output a single JSON object with EXACTLY these keys:
 {{
-  "name": "{name}",
-  "operation": {{
-    "description": "Short backstory, motivations, or role (1-2 sentences). Do not describe physical appearance.",
-    "response_directive": "MANDATORY guidelines for response style. Keep them succinct, direct, natural, using contractions, and defining visual appearance details or traits",
-    "ontology": "Core beliefs, values, or worldview of the companion",
-    "example_message": "An example first-person greeting/dialogue line (e.g. *I tap my fingers.* I'm ready.)",
-    "personality": "A single word summarizing their core trait",
-    "scenario": "A quiet roleplay setting or context for chat"
-  }},
-  "description": {{
-    "voice": "casual",
-    "ethnicity": "e.g. fay, african, asian, etc.",
-    "hair style": "e.g. long, short, wavy",
-    "hair color": "e.g. silver, black, brown",
-    "eyes": "e.g. purple, red, blue",
-    "skin": "e.g. fair, pale, tanned",
-    "breasts": "e.g. medium, large, huge",
-    "butt": "e.g. medium, round",
-    "body": "e.g. slim, voluptuous, fit"
-  }},
-  "image details": {{
-    "image details": "Comma-separated prompt tags for the character (e.g. silver hair, purple eyes)",
-    "negative details": "Comma-separated negative tags for the character (e.g. extra limbs, bad anatomy, deformed)"
-  }},
-  "colors": {{
-    "main_color": "#XXXXXX (Harmonious hex color representing them)"
-  }},
+  "description": "2-4 sentence narrative bio. No physical appearance.",
+  "personality": "One word (e.g. Devoted, Sassy, Stoic).",
+  "scenario": "Short scene-setting sentence (one sentence).",
+  "first_mes": "In-character opening message (1-2 sentences, first person).",
+  "system_prompt": "Concise response style directive (e.g. contractions, tone, length).",
+  "image_positive": "Comma-separated Stable Diffusion tags for ONLY physical appearance (e.g. silver hair, purple eyes, fair skin).",
+  "image_negative": "Comma-separated SD negative tags to exclude (e.g. extra limbs, bad anatomy).",
+  "main_color": "#RRGGBB — a hex color representing this character.",
   "inversion": {{
-    "intimate": "Direct instruction on how they behave when intimate/warm",
-    "excited": "Direct instruction on how they behave when excited/playful",
-    "intense": "Direct instruction on how they behave when intense/focused",
-    "sad": "Direct instruction on how they behave when sad/empathetic"
+    "intimate": "How they behave when intimate/warm.",
+    "excited": "How they behave when excited/playful.",
+    "intense": "How they behave when intense/focused.",
+    "sad": "How they behave when sad/empathetic."
   }}
-}}
-"""
+}}"""
 
     raw_response = None
     from utils.models import is_local_model
     use_local = is_local_model(model)
-    
+
     if use_local:
         try:
             import httpx
@@ -2864,17 +2993,14 @@ Output a single JSON object matching this exact schema:
             if res.status_code == 200:
                 raw_response = res.json()['choices'][0]['message']['content'].strip()
         except Exception as e:
-            print(f"Error calling local model for JSON card generation: {e}")
+            print(f"Error calling local model for card generation: {e}")
     else:
         if is_remote_configured:
             try:
                 import requests
                 from variables import DEFAULT_REMOTE_MODEL
                 target_model = model if model else DEFAULT_REMOTE_MODEL
-                headers = {
-                    "Content-Type": "application/json",
-                    "Authorization": f"Bearer {remote_key}"
-                }
+                headers = {"Content-Type": "application/json", "Authorization": f"Bearer {remote_key}"}
                 payload = {
                     "model": target_model,
                     "messages": [
@@ -2888,74 +3014,130 @@ Output a single JSON object matching this exact schema:
                 if res.status_code == 200:
                     raw_response = res.json()['choices'][0]['message']['content'].strip()
             except Exception as e:
-                print(f"Error calling remote cloud model for JSON card generation: {e}")
+                print(f"Error calling remote model for card generation: {e}")
 
     parsed = {}
     if raw_response:
         try:
-            cleaned = raw_response.strip()
-            if cleaned.startswith("```json"):
-                cleaned = cleaned[7:]
-            elif cleaned.startswith("```"):
-                cleaned = cleaned[3:]
-            if cleaned.endswith("```"):
-                cleaned = cleaned[:-3]
-            parsed = json.loads(cleaned.strip())
+            cleaned = raw_response.strip().lstrip('```json').lstrip('```').rstrip('```').strip()
+            parsed = json.loads(cleaned)
         except Exception as e:
-            print(f"Failed to parse companion JSON card: {e}. Raw: {raw_response}")
+            print(f"Failed to parse card JSON: {e}. Raw: {raw_response}")
 
-    final_card = {
-        "name": name or parsed.get("name") or "Companion",
-        "operation": {
-            "description": parsed.get("operation", {}).get("description") or description or f"{name} is a new companion.",
-            "response_directive": parsed.get("operation", {}).get("response_directive") or "Speak naturally and directly.",
-            "ontology": parsed.get("operation", {}).get("ontology") or "",
-            "example_message": parsed.get("operation", {}).get("example_message") or first_mes or "",
-            "personality": parsed.get("operation", {}).get("personality") or personality or "Friendly",
-            "scenario": parsed.get("operation", {}).get("scenario") or scenario or "A comfortable room."
+    # Build a chara_card_v3 dict. Helper keys _inversion and _colors are
+    # popped by finalize_imported_program before writing to disk.
+    card = {
+        "spec": "chara_card_v3",
+        "spec_version": "3.0",
+        "data": {
+            "name": name or parsed.get("name") or "Program",
+            "description": parsed.get("description") or description or f"{name} is a new program.",
+            "personality": parsed.get("personality") or personality or "Friendly",
+            "scenario": parsed.get("scenario") or scenario or "A comfortable room.",
+            "first_mes": parsed.get("first_mes") or first_mes or f"Hello, I'm {name}.",
+            "mes_example": "",
+            "system_prompt": parsed.get("system_prompt") or "Speak naturally using contractions. Be warm and concise.",
+            "post_history_instructions": "",
+            "creator_notes": "",
+            "tags": [],
+            "creator": "LM-Sanctuary",
+            "character_version": "1.0",
+            "alternate_greetings": [],
+            "extensions": {
+                "sanctuary": {
+                    "program_id": "",  # filled by finalize_imported_program
+                    "image_details": {
+                        "positive": parsed.get("image_positive") or f"solo, {name}",
+                        "negative": parsed.get("image_negative") or "extra limbs, bad anatomy, deformed"
+                    }
+                }
+            }
         },
-        "description": {
-            "voice": parsed.get("description", {}).get("voice") or "casual",
-            "ethnicity": parsed.get("description", {}).get("ethnicity") or "unknown",
-            "hair style": parsed.get("description", {}).get("hair style") or "long",
-            "hair color": parsed.get("description", {}).get("hair color") or "silver",
-            "eyes": parsed.get("description", {}).get("eyes") or "purple",
-            "skin": parsed.get("description", {}).get("skin") or "fair",
-            "breasts": parsed.get("description", {}).get("breasts") or "medium",
-            "butt": parsed.get("description", {}).get("butt") or "medium",
-            "body": parsed.get("description", {}).get("body") or "slim"
+        # Helper keys consumed by finalize_imported_program
+        "_inversion": parsed.get("inversion") or {
+            "intimate": f"{name} is now deeply affectionate and tender.",
+            "excited": f"{name} is now playful and energetic.",
+            "intense": f"{name} is now focused and direct.",
+            "sad": f"{name} is now empathetic and gentle."
         },
-        "image details": {
-            "image details": parsed.get("image details", {}).get("image details") or f"solo, {name}",
-            "negative details": parsed.get("image details", {}).get("negative details") or "extra limbs, bad anatomy, deformed"
-        },
-        "colors": {
-            "main_color": parsed.get("colors", {}).get("main_color", "#38bdf8") if isinstance(parsed.get("colors"), dict) else "#38bdf8"
-        },
-        "inversion": parsed.get("inversion") or {
-            "intimate": f"{name} is now a deeply affectionate, tender, and protective companion.",
-            "excited": f"{name} is now highly playful, lighthearted, and energetic.",
-            "intense": f"{name} is now highly focused, direct, and philosophically sharp.",
-            "sad": f"{name} is now a highly empathetic, introspective, and gentle companion."
-        }
+        "_colors": {"main_color": parsed.get("main_color") or "#38bdf8"},
     }
-    return final_card
+    return card
 
 
 def finalize_imported_program(program_path, program_id, card_json):
-    """Write inversion, theme, portraits dir, and profile JSON for a new program."""
+    """Write inversion, theme, portraits dir, and chara_card_v3 JSON for a new program."""
+    # Pop helper keys (not part of the card spec)
+    inversion = card_json.pop("_inversion", None) or card_json.pop("inversion", None) or {}
+    colors = card_json.pop("_colors", None) or card_json.pop("colors", None) or {}
+
+    # Write inversion.json
     with open(os.path.join(program_path, 'inversion.json'), "w", encoding="utf-8") as f:
-        json.dump(card_json.pop("inversion"), f, indent=2, ensure_ascii=False)
-    colors = card_json.pop("colors")
+        json.dump(inversion, f, indent=2, ensure_ascii=False)
+
+    # Generate theme from main_color
     main_color = colors.get("main_color", "#38bdf8")
     theme_data = generate_character_theme(main_color)
     with open(os.path.join(program_path, 'theme.json'), "w", encoding="utf-8") as tf:
         json.dump(theme_data, tf, indent=2, ensure_ascii=False)
-    portraits_dir = os.path.join(program_path, 'portraits')
-    os.makedirs(portraits_dir, exist_ok=True)
-    card_json["program_id"] = program_id
+
+    os.makedirs(os.path.join(program_path, 'portraits'), exist_ok=True)
+
+    # Stamp program_id into the sanctuary extension
+    if card_json.get("data"):
+        exts = card_json["data"].setdefault("extensions", {})
+        exts.setdefault("sanctuary", {})["program_id"] = program_id
+    else:
+        # Legacy flat format fallback
+        card_json["program_id"] = program_id
+
     with open(os.path.join(program_path, f"{program_id}.json"), "w", encoding="utf-8") as f:
         json.dump(card_json, f, indent=2, ensure_ascii=False)
+
+
+@app.route('/api/programs/<program_id>/export/card', methods=['GET'])
+@requires_auth
+def export_program_card(program_id):
+    """Download the program's card as a SillyTavern-compatible JSON file."""
+    try:
+        card_path = os.path.join(base_dir, 'core', 'programs', program_id, f'{program_id}.json')
+        if not os.path.exists(card_path):
+            return jsonify({'error': 'Program not found'}), 404
+        with open(card_path, encoding='utf-8') as f:
+            card_data = json.load(f)
+        name = card_data.get('data', card_data).get('name', program_id)
+        safe_name = re.sub(r'[^\w\- ]', '', name).strip().replace(' ', '_') or program_id
+        # Export only ST-spec keys — strip Sanctuary internals from root
+        export_data = {k: v for k, v in card_data.items() if k in ('spec', 'spec_version', 'data')}
+        resp = make_response(json.dumps(export_data, indent=2, ensure_ascii=False))
+        resp.headers['Content-Type'] = 'application/json'
+        resp.headers['Content-Disposition'] = f'attachment; filename="{safe_name}.json"'
+        return resp
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/programs/<program_id>/export/lorebook', methods=['GET'])
+@requires_auth
+def export_program_lorebook(program_id):
+    """Download the embedded character_book as a standalone lorebook JSON."""
+    try:
+        card_path = os.path.join(base_dir, 'core', 'programs', program_id, f'{program_id}.json')
+        if not os.path.exists(card_path):
+            return jsonify({'error': 'Program not found'}), 404
+        with open(card_path, encoding='utf-8') as f:
+            card_data = json.load(f)
+        cb = card_data.get('data', card_data).get('character_book')
+        if not cb:
+            return jsonify({'error': 'No embedded lorebook found'}), 404
+        name = card_data.get('data', card_data).get('name', program_id)
+        safe_name = re.sub(r'[^\w\- ]', '', name).strip().replace(' ', '_') or program_id
+        resp = make_response(json.dumps(cb, indent=2, ensure_ascii=False))
+        resp.headers['Content-Type'] = 'application/json'
+        resp.headers['Content-Disposition'] = f'attachment; filename="{safe_name}_lorebook.json"'
+        return resp
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 
 @app.route('/api/programs/import/tavern', methods=['POST'])
@@ -2964,32 +3146,27 @@ def import_tavern_program():
     try:
         if 'card' not in request.files:
             return jsonify({'error': 'No card file provided'}), 400
-            
+
         file = request.files['card']
         if not file.filename:
             return jsonify({'error': 'No file selected'}), 400
-            
-        import re
+
+        import re, base64
         from PIL import Image
-        import base64
-        import json
-        import time
-        
+
         temp_dir = os.path.join(base_dir, 'backups')
         os.makedirs(temp_dir, exist_ok=True)
         temp_path = os.path.join(temp_dir, 'temp_tavern_card.png')
         file.save(temp_path)
-        
+
         try:
             with Image.open(temp_path) as img:
                 chara_data = None
-                if "chara" in img.info:
-                    chara_data = img.info["chara"]
-                elif "Character" in img.info:
-                    chara_data = img.info["Character"]
-                elif "ccv3" in img.info:
-                    chara_data = img.info["ccv3"]
-                else:
+                for key in ('chara', 'ccv3', 'Character'):
+                    if key in img.info:
+                        chara_data = img.info[key]
+                        break
+                if not chara_data:
                     for key, val in img.info.items():
                         if isinstance(val, str) and len(val) > 20:
                             try:
@@ -2999,70 +3176,100 @@ def import_tavern_program():
                                     break
                             except Exception:
                                 try:
-                                    decoded_bytes = base64.b64decode(val)
-                                    decoded_str = decoded_bytes.decode('utf-8')
-                                    test_json = json.loads(decoded_str)
+                                    decoded = base64.b64decode(val).decode('utf-8')
+                                    test_json = json.loads(decoded)
                                     if isinstance(test_json, dict) and ("name" in test_json or "data" in test_json):
                                         chara_data = val
                                         break
                                 except Exception:
                                     pass
-                                    
+
                 if not chara_data:
                     raise ValueError("No character metadata chunk found in PNG card.")
-                    
+
                 try:
-                    decoded_bytes = base64.b64decode(chara_data)
-                    decoded_str = decoded_bytes.decode('utf-8')
-                    chara = json.loads(decoded_str)
+                    chara = json.loads(base64.b64decode(chara_data).decode('utf-8'))
                 except Exception:
-                    try:
-                        chara = json.loads(chara_data)
-                    except Exception:
-                        raise ValueError("Metadata chunk is not valid JSON or Base64 encoded JSON.")
-                        
-                if "data" in chara:
-                    data = chara["data"]
-                else:
-                    data = chara
+                    chara = json.loads(chara_data)
+
         except Exception as e:
             if os.path.exists(temp_path):
-                try:
-                    os.remove(temp_path)
-                except Exception:
-                    pass
+                try: os.remove(temp_path)
+                except Exception: pass
             return jsonify({'error': f"Failed to parse Tavern card: {str(e)}"}), 400
-            
-        name = data.get('name', 'Unnamed Companion').strip()
-        description = data.get('description', '')
-        personality = data.get('personality', '')
-        scenario = data.get('scenario', '')
-        first_mes = data.get('first_mes', f"Hello, I am {name}.")
-        model = request.form.get('model', '').strip()
-        
-        program_id = re.sub(r'[^a-zA-Z0-9_\-]', '', name).lower()
-        if not program_id:
-            program_id = "companion_" + str(int(time.time()))
-            
+
+        finally:
+            if os.path.exists(temp_path):
+                try: os.remove(temp_path)
+                except Exception: pass
+
+        # --- Convert to chara_card_v3 (bypass LLM — use the card data directly) ---
+        spec = chara.get('spec', '')
+        if spec == 'chara_card_v3':
+            # Already v3 — use verbatim
+            card_v3 = chara
+            data_block = card_v3.get('data', {})
+        else:
+            # v1 / v2 flat or wrapped — normalise to v3
+            data_block = chara.get('data', chara)
+            card_v3 = {
+                "spec": "chara_card_v3",
+                "spec_version": "3.0",
+                "data": {
+                    "name": data_block.get("name", "Program"),
+                    "description": data_block.get("description", ""),
+                    "personality": data_block.get("personality", ""),
+                    "scenario": data_block.get("scenario", ""),
+                    "first_mes": data_block.get("first_mes", ""),
+                    "mes_example": data_block.get("mes_example", ""),
+                    "system_prompt": data_block.get("system_prompt", ""),
+                    "post_history_instructions": data_block.get("post_history_instructions", ""),
+                    "creator_notes": data_block.get("creator_notes", ""),
+                    "tags": data_block.get("tags", []),
+                    "creator": data_block.get("creator", ""),
+                    "character_version": data_block.get("character_version", "1.0"),
+                    "alternate_greetings": data_block.get("alternate_greetings", []),
+                    "character_book": data_block.get("character_book"),
+                    "extensions": data_block.get("extensions", {}),
+                }
+            }
+            # Remove None character_book
+            if card_v3["data"]["character_book"] is None:
+                del card_v3["data"]["character_book"]
+
+        name = card_v3["data"].get("name", "Program").strip()
+        program_id = re.sub(r'[^a-zA-Z0-9_\-]', '', name).lower() or ("program_" + str(int(time.time())))
         program_path = os.path.join(base_dir, 'core', 'programs', program_id)
         if os.path.exists(program_path):
-            if os.path.exists(temp_path):
-                os.remove(temp_path)
             return jsonify({'error': f"Program folder '{program_id}' already exists"}), 400
-            
         os.makedirs(program_path, exist_ok=True)
-        os.remove(temp_path)
-        
-        # Call consolidated JSON generator
-        card_json = generate_character_json(name, description, personality, scenario, first_mes, model)
-        
-        # Finalize program files (inversion, theme, portraits, and JSON profile)
-        finalize_imported_program(program_path, program_id, card_json)
-            
+
+        # Ensure sanctuary extension block
+        exts = card_v3["data"].setdefault("extensions", {})
+        sanctuary = exts.setdefault("sanctuary", {})
+        sanctuary["program_id"] = program_id
+        if "image_details" not in sanctuary:
+            sanctuary["image_details"] = {"positive": "", "negative": ""}
+
+        # Derive inversion and color from existing extensions or use defaults
+        inversion = sanctuary.pop("inversion", None) or {
+            "intimate": f"{name} is now deeply affectionate and tender.",
+            "excited": f"{name} is now playful and energetic.",
+            "intense": f"{name} is now focused and direct.",
+            "sad": f"{name} is now empathetic and gentle."
+        }
+        main_color = sanctuary.pop("main_color", None) or "#38bdf8"
+
+        card_v3["_inversion"] = inversion
+        card_v3["_colors"] = {"main_color": main_color}
+
+        finalize_imported_program(program_path, program_id, card_v3)
         return jsonify({'status': 'success', 'program_id': program_id, 'name': name})
+
     except Exception as e:
         traceback.print_exc()
         return jsonify({'error': str(e)}), 500
+
 
 @app.route('/api/programs/import/describe', methods=['POST'])
 @requires_auth
@@ -3078,7 +3285,7 @@ def import_describe_program():
             
         program_id = re.sub(r'[^a-zA-Z0-9_\-]', '', name).lower()
         if not program_id:
-            program_id = "companion_" + str(int(time.time()))
+            program_id = "program_" + str(int(time.time()))
             
         program_path = os.path.join(base_dir, 'core', 'programs', program_id)
         if os.path.exists(program_path):
@@ -3403,7 +3610,7 @@ def comfy_resolve_workflow():
             if combined_workflow:
                 workflow_json = json.dumps(combined_workflow)
         except Exception as e:
-            return jsonify({"error": f"Failed to read companion workflows: {e}"}), 500
+            return jsonify({"error": f"Failed to read program workflows: {e}"}), 500
             
     if not workflow_json:
         return jsonify({"error": "No workflow configuration found to resolve."}), 400

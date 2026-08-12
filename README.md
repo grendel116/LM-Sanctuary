@@ -61,7 +61,7 @@ These are the things your companion can do on your computer. By default, before 
 * **Procedural Journals & Memories**: Companions build dynamic memory structures (`memories.json`) and journal logs (`journals.json`), preserving context and relationships across sessions.
 * **Quest Log & Calendar Export**: Integrated quest system to track and display user objectives in the UI. Companions can assign quests (chores, habits, tasks) using the local `add_quest` tool. Each quest card provides a quick-action to export the task:
   * **Download ICS**: Download a standard `.ics` file containing a `VALARM` notification alert for native desktop/mobile task/calendar clients.
-* **Companion Editing & Imports**: Profile updating, and support for importing custom Tavern cards.
+* **Program Editing, Imports & Exports**: Edit companion profiles, import SillyTavern character cards (`.json`), import World Info lorebooks (`.json`), and export cards and lorebooks back to SillyTavern format.
 * **Character Accent Palette**: Dynamic accent colors resolved from your companion's profile card that automatically generate and update themed CSS variables (buttons, borders, highlights, and active states).
 * **Idle Thoughts**: Inline monologue bubbles (`.thought-row`) showing a companion's thoughts during inactivity.
 * **Temperature Control**: A dynamic slider in settings to control chat creativity.
@@ -90,5 +90,7 @@ Open browser: **`http://localhost:5000`**
 
 * **`app.py`**: The server brain. Runs locally on your PC.
 * **`templates/index.html`**: The UI. Completely responsive for phone and PC.
-* **`core/programs/` & `core/skills/`**: Where your friends live (profiles, themes, memory, and skills).
-* **`tools.py`**: Actions your friends can do (run commands, write files, generate images).
+* **`core/programs/`**: Where your companions live — profiles, themes, memory, lorebooks, and sessions.
+* **`core/skills/`**: Companion skills and capabilities (speech, image generation, tools).
+* **`utils/lorebook.py`**: ST-compatible lorebook engine. Loads and keyword-scans World Info entries per chat turn.
+* **`tools.py`**: Actions your companions can do (run commands, write files, generate images).

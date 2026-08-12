@@ -48,10 +48,10 @@ with zipfile.ZipFile(user_zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
         zip_dir(portrait_gen_dir, zipf, exclude_names={"__pycache__"})
 
 # 2. backup_programs.zip
-# Everything specific to companion programs/sessions (databank, profiles, journals, media, portraits, memories)
+# Everything specific to program programs/sessions (databank, profiles, journals, media, portraits, memories)
 programs_zip_path = os.path.join(backups_dir, "backup_programs.zip")
 programs_dir = os.path.normpath(os.path.join(workspace_dir, "core", "programs"))
-print("Creating backup_programs.zip (Companion programs and user chat data)...")
+print("Creating backup_programs.zip (Program programs and user chat data)...")
 with zipfile.ZipFile(programs_zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
     if os.path.exists(programs_dir):
         zip_dir(programs_dir, zipf, exclude_names={"__pycache__"})

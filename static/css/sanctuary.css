@@ -17,7 +17,7 @@ Theme overrides (Jinja) remain inline in the HTML template.
     --text-main: #f3effa;
     --text-muted: #8a95a5;
     --user-bubble: #1f1f22; /* Neutral Gray Bubble */
-    --companion-bubble: rgba(24, 22, 28, 0.85); /* Desaturated Dark Purple Companion Bubble */
+    --program-bubble: rgba(24, 22, 28, 0.85); /* Desaturated Dark Purple Program Bubble */
     --send-btn-hover: rgba(45, 38, 56, 0.75); /* Soft Purple Send Button Hover */
     --accent-green: #b19cd9; /* Soft purple for hover */
     --quote-blue: #79aeff; /* Gentle moonlit blue for quotations */
@@ -229,13 +229,13 @@ header {
     justify-content: center;
     width: 32px;
     height: 32px;
-    /* Dynamic variables for Companion's emotional state */
+    /* Dynamic variables for Program's emotional state */
     --heart-color: #85b9eb;
     --heart-glow: rgba(133, 185, 235, 0.9);
     --heart-speed: 2.0s;
 
     color: var(--heart-color);
-    /* Companion's Heartbeat Pulse Animation - Remembers our shared connection */
+    /* Program's Heartbeat Pulse Animation - Remembers our shared connection */
     animation: heartPulse var(--heart-speed) infinite ease-in-out;
     transition: color 0.8s cubic-bezier(0.4, 0, 0.2, 1);
     transform-origin: center;
@@ -351,7 +351,7 @@ header {
     justify-content: flex-end;
 }
 
-.message-row.companion-row {
+.message-row.program-row {
     justify-content: flex-start;
 }
 
@@ -396,8 +396,8 @@ header {
     border: none;
 }
 
-.companion {
-    background: var(--companion-bubble);
+.program {
+    background: var(--program-bubble);
     color: var(--text-main);
     border-radius: 20px;
     border-top-left-radius: 4px;
@@ -420,7 +420,7 @@ header {
 .message-row.user-row .message-bubbles-container {
     align-items: flex-end;
 }
-.message-row.companion-row .message-bubbles-container {
+.message-row.program-row .message-bubbles-container {
     align-items: flex-start;
 }
 .message.image-message {
@@ -815,7 +815,7 @@ header {
     touch-action: none !important;
 }
 
-.message-row.companion-row {
+.message-row.program-row {
     justify-content: flex-start;
     gap: 12px;
 }
@@ -1832,7 +1832,7 @@ header {
     transform: translateY(4px);
 }
 
-.message-row.companion-row .message-actions {
+.message-row.program-row .message-actions {
     bottom: -12px;
     right: 12px;
     top: auto;
@@ -1882,8 +1882,8 @@ header {
 .message-bubbles-container.editing-container,
 .message-row.user-row .message-bubbles-container:has(.editing),
 .message-row.user-row .message-bubbles-container.editing-container,
-.message-row.companion-row .message-bubbles-container:has(.editing),
-.message-row.companion-row .message-bubbles-container.editing-container {
+.message-row.program-row .message-bubbles-container:has(.editing),
+.message-row.program-row .message-bubbles-container.editing-container {
     width: 100% !important;
     max-width: 100% !important;
     flex: 1 !important;
@@ -2067,10 +2067,10 @@ header {
         min-width: 0;
         box-sizing: border-box;
     }
-    .message-row.companion-row .avatar-container {
+    .message-row.program-row .avatar-container {
         order: 1;
     }
-    .message-row.companion-row .message-bubbles-container {
+    .message-row.program-row .message-bubbles-container {
         max-width: calc(100% - 60px);
         width: fit-content;
         min-width: 0;
@@ -2086,8 +2086,8 @@ header {
     .message-bubbles-container.editing-container,
     .message-row.user-row .message-bubbles-container:has(.editing),
     .message-row.user-row .message-bubbles-container.editing-container,
-    .message-row.companion-row .message-bubbles-container:has(.editing),
-    .message-row.companion-row .message-bubbles-container.editing-container {
+    .message-row.program-row .message-bubbles-container:has(.editing),
+    .message-row.program-row .message-bubbles-container.editing-container {
         width: 100% !important;
         max-width: 100% !important;
         flex: 1 !important;
@@ -2817,7 +2817,7 @@ input.onboarding-input {
     0% { transform: scale(1); opacity: 0.8; }
     100% { transform: scale(1.6); opacity: 0; }
 }
-.voice-call-companion-name {
+.voice-call-program-name {
     font-size: 1.5rem;
     font-weight: 600;
     color: var(--text-main);
@@ -2864,7 +2864,7 @@ input.onboarding-input {
     font-weight: 600;
     color: var(--primary-accent);
 }
-.voice-call-transcript-turn .turn-speaker.companion {
+.voice-call-transcript-turn .turn-speaker.program {
     font-weight: 600;
     color: var(--quote-blue);
 }
@@ -3045,7 +3045,7 @@ input.onboarding-input {
     opacity: 0.85;
     margin-bottom: 6px;
 }
-.companion-avatar.thinking-glow {
+.program-avatar.thinking-glow {
     box-shadow: 0 0 12px 3px rgba(167, 139, 250, 0.6);
     animation: avatarGlow 2s infinite ease-in-out;
     transition: box-shadow 0.3s ease;

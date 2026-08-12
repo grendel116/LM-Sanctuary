@@ -103,8 +103,8 @@ def get_tts_voice() -> str:
     settings = _load_settings()
     active_program = settings.get("active_program")
     if active_program:
-        companion_voices = settings.get("companion_voices", {})
-        voice = companion_voices.get(active_program)
+        program_voices = settings.get("program_voices", {})
+        voice = program_voices.get(active_program)
         if voice:
             return voice
     voice = settings.get("tts_voice")
@@ -121,9 +121,9 @@ def set_tts_voice(voice: str):
 
 def set_tts_voice_for_program(program_id: str, voice: str):
     settings = _load_settings()
-    if "companion_voices" not in settings:
-        settings["companion_voices"] = {}
-    settings["companion_voices"][program_id] = voice
+    if "program_voices" not in settings:
+        settings["program_voices"] = {}
+    settings["program_voices"][program_id] = voice
     
     # Also sync global key and environment variable if this program is active
     if settings.get("active_program") == program_id:

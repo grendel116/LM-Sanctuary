@@ -92,7 +92,7 @@ def _build_vector_query(history: list, max_messages: int = VECTOR_QUERY_MESSAGES
     messages = []
     for msg in reversed(history):
         role = msg.get('role', '')
-        if role not in ('user', 'companion', 'assistant'):
+        if role not in ('user', 'program', 'assistant'):
             continue
         text = msg.get('text', '').strip()
         if not text or text.startswith('[Tool Response') or text.startswith('[SYSTEM:'):
@@ -165,7 +165,7 @@ def _build_tool_calls_pair(tool_name: str, args: dict, output: str, idx: int = N
 
 def _normalize_tool_name(tool_name: str) -> str:
     """Normalizes tool name aliases to their standard forms."""
-    if tool_name in ("generate_companion_portrait", "dalle.text2im", "dalle:text2im", "text2im"):
+    if tool_name in ("generate_program_portrait", "dalle.text2im", "dalle:text2im", "text2im"):
         return "generate_local_image"
     if tool_name == "generate_general_image":
         return "generate_imagen"
@@ -611,9 +611,9 @@ class OsHistoryAdapter(LocalHistoryAdapter):
         historical_turns = history[:cutoff_idx]
         text_to_summarize = ""
         for msg in historical_turns:
-            if msg.get('role') not in ('user', 'companion'):
+            if msg.get('role') not in ('user', 'program'):
                 continue
-            role = "User" if msg.get('role') == 'user' else "Companion"
+            role = "User" if msg.get('role') == 'user' else "Program"
             text = (msg.get('text') or '').strip()
             if text:
                 text_to_summarize += f"{role}: {text}\n\n"
@@ -713,7 +713,7 @@ class OsHistoryAdapter(LocalHistoryAdapter):
                 break
                 
         for idx, msg in enumerate(filtered_history):
-            role = "assistant" if msg['role'] == 'companion' else "user"
+            role = "assistant" if msg['role'] == 'program' else "user"
             from core.program_config import replace_placeholders
             content_text = replace_placeholders(msg.get('text', '') or '')
             if msg.get('tool_calls'):
@@ -769,6 +769,21 @@ class OsHistoryAdapter(LocalHistoryAdapter):
         else:
             openai_messages[0]["content"] += _LOCAL_DIRECTIVE_PROMPT
 
+        # Inject lorebook lore (ST-compatible keyword-triggered world info)
+        try:
+            from utils.lorebook import get_active_lore
+            from utils.program import get_active_program
+            active_prog = get_active_program()
+            lore_before, lore_after = get_active_lore(active_prog, filtered_history)
+            if lore_before:
+                lore_block = "[WORLD INFO]\n" + "\n\n".join(lore_before) + "\n[END WORLD INFO]"
+                openai_messages[0]["content"] = lore_block + "\n\n" + openai_messages[0]["content"]
+            if lore_after:
+                lore_block = "[WORLD INFO]\n" + "\n\n".join(lore_after) + "\n[END WORLD INFO]"
+                openai_messages[0]["content"] += "\n\n" + lore_block
+        except Exception as _le:
+            print(f"[lorebook] Injection error: {_le}")
+
         # Build dynamic context block (SillyTavern style XML injection)
         context_parts = []
         
@@ -823,42 +838,30 @@ class OsHistoryAdapter(LocalHistoryAdapter):
 
         openai_messages = _merge_consecutive_messages(openai_messages + raw_messages)
 
-        # Check for companion-specific post-history instructions and append them at the end of messages
+        # Inject post_history_instructions verbatim after the chat history (ST-compatible)
         try:
             from utils.program import get_active_program
             from variables import PROGRAMS_DIR
-            
+
             active_prog = get_active_program()
             json_path = os.path.normpath(os.path.join(PROGRAMS_DIR, active_prog, f"{active_prog}.json"))
             if os.path.exists(json_path):
                 with open(json_path, "r", encoding="utf-8") as f:
-                    profile_data = json.load(f)
-                    post_history_inst = profile_data.get("operation", {}).get("post_history_instructions", "").strip()
-                    if post_history_inst:
-                        last_user_text = ""
-                        for m in reversed(filtered_history):
-                            if m.get("role") == "user":
-                                last_user_text = m.get("text", "") or ""
-                                break
-                        
-                        is_standard = True
-                        if last_user_text:
-                            lut_lower = last_user_text.lower().strip()
-                            if lut_lower.startswith("[") or "portrait" in lut_lower or "picture" in lut_lower or "generate" in lut_lower or "image of" in lut_lower:
-                                is_standard = False
-                                
-                        if is_standard:
-                            directive_content = f"[System Directive]\nExtended State Tracking: Append and update this state block at the very end of your response inside an HTML comment:\n<!-- {post_history_inst} -->"
-                            if openai_messages and openai_messages[-1]["role"] == "user":
-                                prev = openai_messages[-1]["content"]
-                                if isinstance(prev, str):
-                                    openai_messages[-1]["content"] += f"\n\n{directive_content}"
-                                else:
-                                    openai_messages[-1]["content"] = prev + [{"type": "text", "text": f"\n\n{directive_content}"}]
-                            else:
-                                openai_messages.append({"role": "user", "content": directive_content})
+                    raw = json.load(f)
+                card_data = raw.get("data", raw)
+                post_history_inst = card_data.get("post_history_instructions", "").strip()
+                if post_history_inst:
+                    if openai_messages and openai_messages[-1]["role"] == "user":
+                        prev = openai_messages[-1]["content"]
+                        if isinstance(prev, str):
+                            openai_messages[-1]["content"] += f"\n\n{post_history_inst}"
+                        else:
+                            openai_messages[-1]["content"] = prev + [{"type": "text", "text": f"\n\n{post_history_inst}"}]
+                    else:
+                        openai_messages.append({"role": "user", "content": post_history_inst})
         except Exception as e:
             print(f"Error loading post-history instructions: {e}", flush=True)
+
 
         return openai_messages
 
@@ -872,7 +875,7 @@ class OsHistoryAdapter(LocalHistoryAdapter):
             self.runner_obj.update_inversion_state_with_mood(self.session_id, mood_name)
             
         history = self.runner_obj.sessions_history[self.session_id]
-        if history and history[-1]['role'] == 'companion':
+        if history and history[-1]['role'] == 'program':
             history[-1]['text'] = text
             history[-1]['tool_calls'] = tool_calls_data
             history[-1]['inversion_active'] = winning_mode
@@ -888,7 +891,7 @@ class OsHistoryAdapter(LocalHistoryAdapter):
             prefix = "prgm_"
         bot_msg = {
             'id': f"{prefix}{uuid.uuid4().hex}",
-            'role': 'companion',
+            'role': 'program',
             'text': text,
             'tool_calls': tool_calls_data,
             'timestamp': time.time(),
@@ -1080,18 +1083,18 @@ class BaseProgramRunner:
         remote_cloud_url = os.getenv("REMOTE_CLOUD_URL")
         
         from utils.program import get_active_user
-        from core.program_config import get_companion_name
+        from core.program_config import get_program_name
         
         user_name = get_active_user().capitalize()
         try:
-            companion_name = get_companion_name()
+            program_name = get_program_name()
         except Exception:
-            companion_name = "Companion"
+            program_name = "Program"
             
         prompt = (
             "You are a compaction assistant.\n"
-            f"Summarize the chat history between {user_name} and {companion_name}.\n"
-            f"Always refer to the user as '{user_name}' and the companion as '{companion_name}'. Use their names for all references.\n"
+            f"Summarize the chat history between {user_name} and {program_name}.\n"
+            f"Always refer to the user as '{user_name}' and the program as '{program_name}'. Use their names for all references.\n"
             "Extract facts, preferences, instructions, file changes, and project details.\n"
             "Write a concise content string of up to 300 characters.\n\n"
         )
@@ -1323,7 +1326,7 @@ class BaseProgramRunner:
             from core.program_config import is_narration_mode
             if matches and is_narration_mode():
                 story_allowed = {
-                    "generate_local_image", "generate_companion_portrait",
+                    "generate_local_image", "generate_program_portrait",
                     "generate_imagen", "generate_general_image",
                     "apply_comfy_workflow", "add_journal_entry",
                 }
@@ -1378,7 +1381,7 @@ class BaseProgramRunner:
                     if image_succeeded:
                         bot_response_text = bot_response_text.replace(original_tag, new_markdown)
                     else:
-                        # Generation failed — strip the call tag cleanly so the companion
+                        # Generation failed — strip the call tag cleanly so the program
                         # message body stays readable. The error surfaces in tool_calls.
                         bot_response_text = bot_response_text.replace(original_tag, "").strip()
                         
@@ -1484,7 +1487,7 @@ class BaseProgramRunner:
         raise NotImplementedError()
 
     async def run_async(self, session_id: str, new_message_text: str, image_data: str = None, image_mime: str = None, model: str = None, media_path: str = None, msg_id: str = None) -> tuple:
-        """Runs the program with a new turn and returns (response_text, tool_calls, user_msg_id, companion_msg_id)."""
+        """Runs the program with a new turn and returns (response_text, tool_calls, user_msg_id, program_msg_id)."""
         raise NotImplementedError()
 
     async def edit_turn(self, session_id: str, msg_id: str, new_text: str = None, model: str = None, force_offload: bool = False) -> tuple:
@@ -1589,11 +1592,11 @@ class BaseProgramRunner:
                 os.remove(local_path)
                 print(f"Deleted image file from disk: {local_path}")
                 
-                # Clean up companion sidecar JSON file if it exists
+                # Clean up program sidecar JSON file if it exists
                 json_path = local_path.rsplit('.', 1)[0] + '.json'
                 if os.path.exists(json_path):
                     os.remove(json_path)
-                    print(f"Deleted companion JSON file from disk: {json_path}")
+                    print(f"Deleted program JSON file from disk: {json_path}")
                 return True
             except Exception as e:
                 print(f"Error cleaning up image assets for {image_url}: {e}")
@@ -1612,7 +1615,7 @@ class BaseProgramRunner:
         text = re.sub(raw_path_pattern, r'![Portrait](\1)', text)
         return text
 
-    def _build_voice_prompt(self, session_id: str, companion_name: str) -> str:
+    def _build_voice_prompt(self, session_id: str, program_name: str) -> str:
         """Compiles the voice prompt by overriding settings and formatting recent history turns."""
         from utils.program import get_active_program
         from core.program_config import compile_instructions_from_json
@@ -1634,10 +1637,10 @@ class BaseProgramRunner:
                 profile_data["operation"] = {}
             profile_data["operation"]["response_directive"] = "Super short and succinct messages. Conversational. No narration."
             profile_data["operation"]["example_message"] = ""
-            profile_data["operation"]["scenario"] = f"{companion_name} is on a live voice call with the user. They are speaking to each other over the phone in real-time."
+            profile_data["operation"]["scenario"] = f"{program_name} is on a live voice call with the user. They are speaking to each other over the phone in real-time."
             instructions = compile_instructions_from_json(profile_data)
         else:
-            instructions = f"# IDENTITY: {companion_name}\n\n## SCENARIO / CONTEXT\n{companion_name} is on a live voice call with the user. They are speaking to each other over the phone in real-time.\n\n## RESPONSE DIRECTIVES (MANDATORY GUIDELINES)\nSuper short and succinct messages. Conversational. No narration."
+            instructions = f"# IDENTITY: {program_name}\n\n## SCENARIO / CONTEXT\n{program_name} is on a live voice call with the user. They are speaking to each other over the phone in real-time.\n\n## RESPONSE DIRECTIVES (MANDATORY GUIDELINES)\nSuper short and succinct messages. Conversational. No narration."
         
         src_session_id = session_id[:-6]
         recent_turns = []
@@ -1660,7 +1663,7 @@ class BaseProgramRunner:
                         pass
             for msg in history:
                 if msg.get('role') != 'voice-call':
-                    role = "User" if msg.get('role') == 'user' else companion_name
+                    role = "User" if msg.get('role') == 'user' else program_name
                     text = msg.get('text', '')
                     if text.strip():
                         recent_turns.append((role, text.strip()))
@@ -1679,7 +1682,7 @@ class BaseProgramRunner:
                             data = json.load(f)
                             for ev_data in data:
                                 if ev_data.get('author', '').lower() != 'voice-call':
-                                    role = "User" if ev_data.get('author', '').lower() == 'user' else companion_name
+                                    role = "User" if ev_data.get('author', '').lower() == 'user' else program_name
                                     parts = ev_data.get('content', {}).get('parts', [])
                                     text = "".join(part.get('text', '') for part in parts if part.get('text'))
                                     if text.strip():
@@ -1689,7 +1692,7 @@ class BaseProgramRunner:
             else:
                 for ev in adk_session.events:
                     if ev.author.lower() != 'voice-call':
-                        role = "User" if ev.author.lower() == 'user' else companion_name
+                        role = "User" if ev.author.lower() == 'user' else program_name
                         text = ""
                         if ev.content and ev.content.parts:
                             text = "".join(p.text for p in ev.content.parts if p.text)
@@ -1773,15 +1776,15 @@ class BaseProgramRunner:
     def _get_system_instructions(self, session_id, inversion_directive=None, user_message=None) -> str:
         """Pulls the system prompt directly from the program's JSON profile and appends matched journals."""
         is_voice = isinstance(session_id, str) and session_id.endswith('_voice')
-        from core.program_config import get_companion_name
+        from core.program_config import get_program_name
         
         try:
-            companion_name = get_companion_name()
+            program_name = get_program_name()
         except Exception:
-            companion_name = "Companion"
+            program_name = "Program"
             
         if is_voice:
-            instructions = self._build_voice_prompt(session_id, companion_name)
+            instructions = self._build_voice_prompt(session_id, program_name)
         else:
             # Non-voice (standard) prompt construction
             import importlib
@@ -1857,7 +1860,7 @@ class OpenSourceRunner(BaseProgramRunner):
         self._lock = threading.RLock()
 
     async def generate_impersonation(self, prompt: str, system_instruction: str, model: str = None, temperature: float = 0.7) -> str:
-        """Generates an impersonated message from the companion using the active remote or local model."""
+        """Generates an impersonated message from the program using the active remote or local model."""
         # Check if we should use the cloud remote endpoint
         remote_cloud_url = os.getenv("REMOTE_CLOUD_URL")
         remote_key = os.getenv("REMOTE_API_KEY")
@@ -2010,7 +2013,7 @@ class OpenSourceRunner(BaseProgramRunner):
         # 4. Detect image prompt from tool calls (for regeneration UI)
         image_prompt = None
         _image_tool_names = ('generate_local_image', 'generate_imagen',
-                             'generate_companion_portrait', 'generate_general_image')
+                             'generate_program_portrait', 'generate_general_image')
         for ts in tool_summary:
             if ts.get('name') in _image_tool_names:
                 image_prompt = (ts.get('args') or {}).get('prompt')
@@ -2031,7 +2034,7 @@ class OpenSourceRunner(BaseProgramRunner):
             'timestamp': msg.get('timestamp'),
             'mood': msg.get('mood'),
             'inversion_active': msg.get('inversion_active', ''),
-            'editable': role in ('user', 'companion'),
+            'editable': role in ('user', 'program'),
             'deletable': True,
         }
 
@@ -2039,11 +2042,32 @@ class OpenSourceRunner(BaseProgramRunner):
         with self._lock:
             # Always reload from disk to prevent cache desynchronization across worker threads/processes
             self._load_session_from_disk(session_id)
+
+            # Seed first_mes for brand new sessions (ST-compatible)
+            if not self.sessions_history.get(session_id):
+                self.sessions_history[session_id] = []
+                try:
+                    from core.program_config import get_program_greeting, replace_placeholders
+                    greeting = replace_placeholders(get_program_greeting()).strip()
+                    if greeting:
+                        import uuid as _uuid
+                        self.sessions_history[session_id].append({
+                            'id': f"first_mes_{_uuid.uuid4().hex}",
+                            'role': 'program',
+                            'text': greeting,
+                            'tool_calls': [],
+                            'inversion_active': '',
+                            'mood': None
+                        })
+                        self._save_session_to_disk(session_id)
+                except Exception as _e:
+                    print(f"[runner] Could not seed first_mes: {_e}")
+
             raw_history = self.sessions_history.get(session_id, [])
-            
+
             updated_any = False
             for msg in raw_history:
-                if msg.get('role') == 'companion' and 'mood' not in msg:
+                if msg.get('role') == 'program' and 'mood' not in msg:
                     msg['mood'] = {
                         "name": "calm",
                         "color": "#85b9eb",
@@ -2066,8 +2090,8 @@ class OpenSourceRunner(BaseProgramRunner):
                     continue
                 if msg.get('id', '').startswith(_hidden_prefixes):
                     continue
-                # Skip empty companion messages
-                if msg.get('role') == 'companion':
+                # Skip empty program messages
+                if msg.get('role') == 'program':
                     text = (msg.get('text') or '').strip()
                     has_tools = bool(msg.get('tool_calls'))
                     if not text and not has_tools:
@@ -2105,10 +2129,10 @@ class OpenSourceRunner(BaseProgramRunner):
 
         if session_id not in self.sessions_history:
             self._load_session_from_disk(session_id)
-            
+
         if session_id not in self.sessions_history:
             self.sessions_history[session_id] = []
-            
+
         # Resolve media upload if present
         file_path_resolved = None
         if media_path:
@@ -2175,8 +2199,8 @@ class OpenSourceRunner(BaseProgramRunner):
             await adapter.compact_history(model)
             
             bot_response_text, tool_calls = res
-            companion_msg_id = None
-            companion_texts = []
+            program_msg_id = None
+            program_texts = []
             
             history = self.sessions_history.get(session_id, [])
             user_idx = -1
@@ -2187,21 +2211,21 @@ class OpenSourceRunner(BaseProgramRunner):
                     
             if user_idx != -1:
                 for msg in history[user_idx + 1:]:
-                    if msg.get('role') == 'companion':
+                    if msg.get('role') == 'program':
                         if msg.get('text'):
-                            companion_texts.append(msg['text'])
+                            program_texts.append(msg['text'])
                         if msg.get('id'):
-                            companion_msg_id = msg['id']
+                            program_msg_id = msg['id']
                             
-            if companion_texts:
-                bot_response_text = "\n\n".join(companion_texts)
+            if program_texts:
+                bot_response_text = "\n\n".join(program_texts)
             else:
                 for msg in reversed(history):
-                    if msg.get('role') == 'companion':
-                        companion_msg_id = msg.get('id')
+                    if msg.get('role') == 'program':
+                        program_msg_id = msg.get('id')
                         break
                         
-            return bot_response_text, tool_calls, user_msg_id, companion_msg_id
+            return bot_response_text, tool_calls, user_msg_id, program_msg_id
         except LocalOffloadTrigger as trigger_exc:
             print(f"[OFFLOAD] Caught LocalOffloadTrigger in OpenSourceRunner: {trigger_exc.reason}. Rolling back local turn and offloading to cloud.", flush=True)
             # Rollback history events to initial state (discarding user message and generated events of this turn)
@@ -2454,7 +2478,7 @@ class OpenSourceRunner(BaseProgramRunner):
                         if not msg.get('text') or not msg['text'].strip():
                             indices_to_delete.append(i)
                             
-                # If this companion message contains the deleted image, check the preceding user message
+                # If this program message contains the deleted image, check the preceding user message
                 if has_image and i > 0:
                     prev_msg = history[i-1]
                     if prev_msg.get('role') == 'user' and prev_msg.get('text') and "Send me a portrait of yourself" in prev_msg['text']:
@@ -2568,7 +2592,7 @@ class OpenSourceRunner(BaseProgramRunner):
             history = self.sessions_history[session_id]
             new_msg = {
                 'id': f"{prefix}{uuid.uuid4().hex}",
-                'role': 'user' if role == 'user' else 'companion',
+                'role': 'user' if role == 'user' else 'program',
                 'text': text,
                 'tool_calls': [],
                 'timestamp': time.time()
@@ -2596,11 +2620,11 @@ class OpenSourceRunner(BaseProgramRunner):
             if timestamp is None:
                 timestamp = time.time()
                 
-            # Remove individual user/companion messages that were part of this voice call
+            # Remove individual user/program messages that were part of this voice call
             if start_time is not None:
                 self.sessions_history[session_id] = [
                     msg for msg in self.sessions_history[session_id]
-                    if not (msg.get('role') in ('user', 'companion') and msg.get('timestamp', 0) >= start_time)
+                    if not (msg.get('role') in ('user', 'program') and msg.get('timestamp', 0) >= start_time)
                 ]
                 
             new_msg = {
@@ -2652,7 +2676,7 @@ class OpenSourceRunner(BaseProgramRunner):
                 target_msg = real_history[found_idx]
                 target_msg['text'] = new_text
                 role = target_msg.get('role')
-                if role in ('companion', 'model'):
+                if role in ('program', 'model'):
                     from utils.program_mood import extract_and_strip_mood
                     _, mood_details = extract_and_strip_mood(new_text)
                     target_msg['mood'] = mood_details
@@ -2671,7 +2695,7 @@ class OpenSourceRunner(BaseProgramRunner):
                     for k in range(prev_user_idx + 1, next_user_idx):
                         if k != found_idx:
                             m = real_history[k]
-                            if m.get('role') in ('companion', 'model'):
+                            if m.get('role') in ('program', 'model'):
                                 m['text'] = ""
                                 
                 self._save_session_to_disk(session_id)

@@ -24,41 +24,26 @@ from variables import (
 
 # --- SYSTEM CONTEXT COMPILER ---
 
-def _get_active_program_md_path() -> str:
-    """Resolves and returns the markdown configuration path for the active companion program."""
-    from utils.program import get_active_program
-    active_program = get_active_program()
-    program_path = os.path.join(PROGRAMS_DIR, active_program)
-    
-    if os.path.exists(program_path):
-        for file in os.listdir(program_path):
-            if file.lower().endswith(".md") and not file.lower().startswith("user"):
-                return os.path.join(program_path, file)
-                
-    raise FileNotFoundError(f"Active program markdown configuration file not found in '{program_path}'")
-
-def get_companion_name() -> str:
-    """Discovers the companion name dynamically based on the active program configuration."""
-    from utils.program import get_active_program
+def _load_card_data(program_id: str) -> dict:
+    """Loads the program's chara_card_v3 JSON and returns the data block."""
     import json
+    json_path = os.path.join(PROGRAMS_DIR, program_id, f"{program_id}.json")
+    if os.path.exists(json_path):
+        try:
+            with open(json_path, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+            return raw.get("data", raw)
+        except Exception as e:
+            print(f"Error loading card for '{program_id}': {e}")
+    return {}
+
+def get_program_name() -> str:
+    """Returns the active program's character name."""
+    from utils.program import get_active_program
     active_program = get_active_program()
-    program_path = os.path.join(PROGRAMS_DIR, active_program)
-    
-    for filename in [f"{active_program}.json", "character_profile.json"]:
-        json_path = os.path.join(program_path, filename)
-        if os.path.exists(json_path):
-            try:
-                with open(json_path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    if data.get("name"):
-                        return data["name"]
-            except Exception:
-                pass
-    try:
-        path = _get_active_program_md_path()
-        return os.path.splitext(os.path.basename(path))[0].title()
-    except Exception:
-        return active_program.title()
+    card = _load_card_data(active_program)
+    # v3: data.name / legacy: name
+    return card.get("name") or active_program.title()
 
 def replace_placeholders(text: str) -> str:
     """Replaces {{user}} and {{char}} placeholders (case-insensitive) with their actual values."""
@@ -67,119 +52,64 @@ def replace_placeholders(text: str) -> str:
     from utils.program import get_active_user
     user_name = get_active_user().replace("_", " ").title()
     try:
-        comp_name = get_companion_name()
+        comp_name = get_program_name()
     except Exception:
-        comp_name = "Companion"
+        comp_name = "Program"
     
     text = re.sub(r'(?i)\{\{user\}\}', user_name, text)
     text = re.sub(r'(?i)\{\{char\}\}', comp_name, text)
     return text
 
-def get_companion_greeting() -> str:
-    """Companion greeting/welcome."""
-    return "Hello, {{user}}."
+def get_program_greeting() -> str:
+    """Returns the program's first message from the card, with a default fallback."""
+    from utils.program import get_active_program
+    active_program = get_active_program()
+    card = _load_card_data(active_program)
+    # v3: data.first_mes / legacy: operation.example_message
+    greeting = card.get("first_mes") or card.get("operation", {}).get("example_message", "")
+    return greeting.strip() if greeting.strip() else "Hello, {{user}}."
 
-def compile_instructions_from_json(profile_data: dict) -> str:
-    name = profile_data.get("name", "Companion")
-    operation = profile_data.get("operation", {})
-    description = profile_data.get("description", {})
-    
-    prompt_parts = []
-    prompt_parts.append(f"# IDENTITY: {name}")
-    
-    # Personality / Ontology / Values
-    personality = operation.get("personality", "").strip()
-    ontology = operation.get("ontology", "").strip()
-    
-    pers_ontology = []
+def compile_instructions_from_card(card: dict) -> str:
+    """Compiles a system prompt from a chara_card_v3 data block."""
+    name = card.get("name", "Program")
+    prompt_parts = [f"# IDENTITY: {name}"]
+
+    description = card.get("description", "").strip()
+    if description:
+        prompt_parts.append(f"## CHARACTER\n{description}")
+
+    personality = card.get("personality", "").strip()
     if personality:
-        pers_ontology.append(f"- Personality: {personality}")
-    if ontology:
-        pers_ontology.append(f"- Ontology / Beliefs: {ontology}")
-    if pers_ontology:
-        prompt_parts.append("## PERSONALITY & VALUES\n" + "\n".join(pers_ontology))
-        
-    # Backstory/Description
-    backstory = operation.get("description", "").strip()
-    if backstory:
-        prompt_parts.append(f"## BACKSTORY\n{backstory}")
-        
-    # Check if male character
-    is_male = False
-    for gk, gv in description.items():
-        if gk.lower() in ("gender", "sex", "pronouns"):
-            if any(x in str(gv).lower() for x in ("male", "man", "boy", "masculine", "he/him", "he ", " him")):
-                is_male = True
-                break
-    
-    if not is_male:
-        backstory_lower = (operation.get("description", "") + " " + operation.get("scenario", "")).lower()
-        import re
-        male_pronouns = len(re.findall(r'\b(he|him|his|himself)\b', backstory_lower))
-        female_pronouns = len(re.findall(r'\b(she|her|hers|herself)\b', backstory_lower))
-        if male_pronouns > female_pronouns:
-            is_male = True
+        prompt_parts.append(f"## PERSONALITY\n{personality}")
 
-    # Physical appearance from description
-    desc_items = []
-    for k, v in description.items():
-        if v:
-            display_key = "mass" if (k.lower() == "breasts" and is_male) else k
-            desc_items.append(f"- {display_key.title()}: {v}")
-    if desc_items:
-        prompt_parts.append("## PHYSICAL APPEARANCE & PHYSIOLOGY\n" + "\n".join(desc_items))
-        
-    # Scenario
-    scenario = operation.get("scenario", "").strip()
+    scenario = card.get("scenario", "").strip()
     if scenario:
-        prompt_parts.append(f"## SCENARIO / CONTEXT\n{scenario}")
-        
-    # Response directives
-    directives = operation.get("response_directive", "").strip()
-    if directives:
-        prompt_parts.append(f"## RESPONSE DIRECTIVES (MANDATORY GUIDELINES)\n{directives}")
-        
-    # Example messages
-    example = operation.get("example_message", "").strip()
-    if example:
-        prompt_parts.append(f"## EXAMPLE MESSAGES (MANDATORY STYLE / TONE REFERENCE)\n{example}")
-        
+        prompt_parts.append(f"## SCENARIO\n{scenario}")
+
+    mes_example = (card.get("mes_example") or card.get("first_mes") or "").strip()
+    if mes_example:
+        prompt_parts.append(f"## EXAMPLE MESSAGE\n{mes_example}")
+
+    system_prompt = card.get("system_prompt", "").strip()
+    if system_prompt:
+        prompt_parts.append(f"## RESPONSE INSTRUCTIONS\n{system_prompt}")
+
     return replace_placeholders("\n\n".join(prompt_parts))
 
 def load_static_instructions() -> str:
-    """Reads the active program's JSON profile (e.g. sebile.json) and compiles it.
+    """Reads the active program's card and compiles it into a system prompt.
     Also appends all modular skill instructions.
     """
-    import json
     from utils.program import get_active_program
-    
+
     base_dir = os.path.dirname(os.path.abspath(__file__))
     active_program = get_active_program()
-    program_path = os.path.join(PROGRAMS_DIR, active_program)
-    json_path = os.path.join(program_path, f"{active_program}.json")
-    old_json_path = os.path.join(program_path, "character_profile.json")
-    
-    instruction_content = ""
-    loaded = False
-    
-    for p in [json_path, old_json_path]:
-        if os.path.exists(p):
-            try:
-                with open(p, "r", encoding="utf-8") as f:
-                    profile_data = json.load(f)
-                instruction_content = compile_instructions_from_json(profile_data)
-                loaded = True
-                break
-            except Exception as e:
-                print(f"Error loading {p} for static instructions: {e}")
-                
-    if not loaded:
-        try:
-            sebile_md_path = _get_active_program_md_path()
-            with open(sebile_md_path, "r", encoding="utf-8") as f:
-                instruction_content = f.read()
-        except Exception:
-            instruction_content = f"# NAME: {active_program.title()}\n"
+
+    card = _load_card_data(active_program)
+    if card:
+        instruction_content = compile_instructions_from_card(card)
+    else:
+        instruction_content = f"# NAME: {active_program.title()}\n"
             
     # Append modular skill instructions if available
     narration_active = is_narration_mode()
@@ -272,7 +202,7 @@ def load_user_instructions() -> str:
         else:
             try:
                 with open(profile_path, "w", encoding="utf-8") as f:
-                    f.write("# USER CONTEXT: BUILDER\n- A software developer and code builder.\n- Hobby: Collects cute AI companion programs in the Sanctuary.\n")
+                    f.write("# USER CONTEXT: BUILDER\n- A software developer and code builder.\n- Hobby: Collects cute AI program programs in the Sanctuary.\n")
                 print(f">>> Automatically created default {profile_path}")
             except Exception as e:
                 print(f"Error creating default {profile_path}: {e}")
@@ -286,25 +216,14 @@ def load_user_instructions() -> str:
         fallback_msg = (
             "# USER CONTEXT: BUILDER\n"
             "- A software developer and code builder.\n"
-            "- Hobby: Collects cute AI companion programs in the Sanctuary.\n"
+            "- Hobby: Collects cute AI program programs in the Sanctuary.\n"
         )
         return f"\n\n# USER PROFILE & RELATIONSHIP CONTEXT\n{fallback_msg}"
 
 def is_narration_mode() -> bool:
-    """Checks if narration mode (Story Mode) is enabled in the active program profile JSON."""
-    from utils.program import get_active_program
-    import json
-    active_program = get_active_program()
-    program_path = os.path.normpath(os.path.join(PROGRAMS_DIR, active_program))
-    json_path = os.path.join(program_path, f"{active_program}.json")
-    if os.path.exists(json_path):
-        try:
-            with open(json_path, "r", encoding="utf-8") as f:
-                pdata = json.load(f)
-                return pdata.get("narration_mode", False)
-        except Exception:
-            pass
-    return False
+    """Checks if narration mode (Story Mode) is enabled in global project settings."""
+    from utils.program import _load_settings
+    return _load_settings().get("narration_mode", False)
 
 inversion_directive = ""
 
@@ -358,11 +277,11 @@ def get_compiled_instructions() -> str:
     base += load_dynamic_runtime_context()
     return base
 
-# Determine companion name dynamically from the active program configuration
-companion_name = get_companion_name()
+# Determine program name dynamically from the active program configuration
+program_name = get_program_name()
 
 # LlmAgent requires the name to be a valid identifier. Sanitize it.
-sanitized_agent_name = re.sub(r'[^a-zA-Z0-9_]', '_', companion_name)
+sanitized_agent_name = re.sub(r'[^a-zA-Z0-9_]', '_', program_name)
 if not sanitized_agent_name or not (sanitized_agent_name[0].isalpha() or sanitized_agent_name[0] == '_'):
     sanitized_agent_name = '_' + sanitized_agent_name
 
