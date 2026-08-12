@@ -2385,10 +2385,10 @@ class OpenSourceRunner(BaseProgramRunner):
             if user_idx == -1:
                 raise ValueError("User message not found")
                 
-            # Find the next user event
+            # Find the next real user event (skip tool/port/quest response messages)
             next_user_idx = -1
             for i in range(user_idx + 1, len(history)):
-                if history[i]['role'] == 'user':
+                if is_real_user_msg(history[i]):
                     next_user_idx = i
                     break
                     

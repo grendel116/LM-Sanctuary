@@ -7315,11 +7315,22 @@ async function respondToToolCall(status) {
    ========================================================================== */
 
 // --- openDataBank ---
-function openDataBank() {
+async function openDataBank() {
     document.getElementById('databank-modal').style.display = 'flex';
     switchDataBankTab('upload');
     loadDataBankFiles();
     loadProjectSettings();
+    if (!currentEditingProgramId) {
+        try {
+            const res = await fetch(`/history?session_id=default&t=${Date.now()}`);
+            const data = await res.json();
+            if (data.active_program) {
+                currentEditingProgramId = data.active_program;
+            }
+        } catch (e) {
+            console.error('openDataBank: failed to resolve active program', e);
+        }
+    }
     loadProgramJournals();
 }
 
