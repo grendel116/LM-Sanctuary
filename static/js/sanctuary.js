@@ -3240,7 +3240,7 @@ async function deleteAssistant(assistantId, name) {
                 const data = await res.json();
                 if (data.status === 'success') {
                     showCustomAlert("Deleted", `Program <strong>${name}</strong> has been deleted.`);
-                    if (data.switched_to === 'sebile') {
+                    if (data.switched_to === 'sebile' || activeProgram === assistantId) {
                         selectAssistant('sebile');
                     } else {
                         const listRes = await fetch('/api/programs');

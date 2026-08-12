@@ -68,16 +68,17 @@ def check_program_change():
             try:
                 from variables import PROGRAMS_DIR
                 program_path = os.path.join(PROGRAMS_DIR, current_program)
-                # Setup portraits directory and perform migration from legacy folder if needed
-                portraits_dir = os.path.join(program_path, 'portraits')
-                legacy_dir = os.path.join(program_path, 'sel' + 'fies')
-                if os.path.exists(legacy_dir) and not os.path.exists(portraits_dir):
-                    try:
-                        os.rename(legacy_dir, portraits_dir)
-                        print(f"Migrated legacy folder to portraits for program {current_program}")
-                    except Exception as ex:
-                        print(f"Error migrating legacy folder for program {current_program}: {ex}")
-                os.makedirs(portraits_dir, exist_ok=True)
+                if os.path.isdir(program_path):
+                    # Setup portraits directory and perform migration from legacy folder if needed
+                    portraits_dir = os.path.join(program_path, 'portraits')
+                    legacy_dir = os.path.join(program_path, 'sel' + 'fies')
+                    if os.path.exists(legacy_dir) and not os.path.exists(portraits_dir):
+                        try:
+                            os.rename(legacy_dir, portraits_dir)
+                            print(f"Migrated legacy folder to portraits for program {current_program}")
+                        except Exception as ex:
+                            print(f"Error migrating legacy folder for program {current_program}: {ex}")
+                    os.makedirs(portraits_dir, exist_ok=True)
             except Exception as ex:
                 print(f"Error preparing portraits directory for active program: {ex}")
         if user_changed:
@@ -2390,11 +2391,12 @@ def delete_program():
             return jsonify({'error': f"Program '{program_id}' does not exist"}), 404
             
         # If the deleted program is currently active, switch to Sebile first
-        active_program = os.getenv("ACTIVE_PROGRAM", "sebile")
-        if program_id == active_program:
+        from utils.program import get_active_program, set_active_program
+        active_program = get_active_program()
+        is_active = (program_id == active_program)
+        if is_active:
             os.environ["ACTIVE_PROGRAM"] = "sebile"
             try:
-                from utils.program import set_active_program
                 set_active_program("sebile")
             except Exception as e:
                 print(f"Error resetting active program to sebile: {e}")
@@ -2405,7 +2407,7 @@ def delete_program():
         # Delete the program folder recursively
         shutil.rmtree(program_path)
         
-        return jsonify({'status': 'success', 'switched_to': 'sebile' if program_id == active_program else None})
+        return jsonify({'status': 'success', 'switched_to': 'sebile' if is_active else None})
     except Exception as e:
         traceback.print_exc()
         return jsonify({'error': str(e)}), 500
