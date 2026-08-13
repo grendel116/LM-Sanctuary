@@ -1,6 +1,9 @@
 ---
 name: web_browsing
 description: Search and read webpages, social sentiment, video topics, and factual data to answer questions and keep the user informed.
+summary: "Search the internet using [web_search(query=\"...\")] and read pages using [read_webpage(url=\"...\")]"
+retrieval: vector
+triggers: search, look up, browse, news, find information, google, website, article, wikipedia
 ---
 # SKILL: Web Browsing & Research
 When asked to find news, historical context, facts, or information about a person, place, or topic:

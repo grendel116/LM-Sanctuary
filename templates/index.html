@@ -267,16 +267,16 @@
                 </svg>
                 <span>Knowledge Base</span>
             </h3>
-            <p style="color: var(--text-muted); font-size: 0.85rem; margin-bottom: 15px; line-height: 1.4;">
+            <p id="databank-descriptor" style="color: var(--text-muted); font-size: 0.85rem; margin-bottom: 15px; line-height: 1.4;">
                 Upload files (TXT, MD, HTML, PDF) or scrape web page URLs to ingest them into the program's vectorized memory database.
             </p>
             
             <div style="overflow-y: auto; flex: 1; padding-right: 2px;">
-            <div style="display: flex; gap: 10px; margin-bottom: 15px;">
-                <button onclick="switchDataBankTab('upload')" id="tab-btn-upload" class="edit-btn" style="background: rgba(255, 255, 255, 0.08); color: var(--primary-accent); border: 1px solid var(--primary-accent); padding: 6px 12px; font-size: 0.8rem; border-radius: 6px; cursor: pointer;">Add Document</button>
-                <button onclick="switchDataBankTab('memories')" id="tab-btn-memories" class="edit-btn edit-cancel-btn" style="background: rgba(255,255,255,0.05); color: var(--text-muted); border: 1px solid rgba(255,255,255,0.1); padding: 6px 12px; font-size: 0.8rem; border-radius: 6px; cursor: pointer;">Journals & Memories</button>
-                <button onclick="switchDataBankTab('lorebooks')" id="tab-btn-lorebooks" class="edit-btn edit-cancel-btn" style="background: rgba(255,255,255,0.05); color: var(--text-muted); border: 1px solid rgba(255,255,255,0.1); padding: 6px 12px; font-size: 0.8rem; border-radius: 6px; cursor: pointer;">Lorebooks</button>
-                <button onclick="switchDataBankTab('settings')" id="tab-btn-settings" class="edit-btn edit-cancel-btn" style="background: rgba(255,255,255,0.05); color: var(--text-muted); border: 1px solid rgba(255,255,255,0.1); padding: 6px 12px; font-size: 0.8rem; border-radius: 6px; cursor: pointer;">Project Settings</button>
+            <div style="display: flex; gap: 6px; margin-bottom: 15px; align-items: stretch;">
+                <button onclick="switchDataBankTab('upload')" id="tab-btn-upload" class="edit-btn" style="flex: 1 1 0%; min-width: 0; min-height: 42px; display: inline-flex; align-items: center; justify-content: center; text-align: center; line-height: 1.2; box-sizing: border-box; background: rgba(255, 255, 255, 0.08); color: var(--primary-accent); border: 1px solid var(--primary-accent); padding: 6px 4px; font-size: 0.8rem; border-radius: 6px; cursor: pointer;">Add Document</button>
+                <button onclick="switchDataBankTab('memories')" id="tab-btn-memories" class="edit-btn edit-cancel-btn" style="flex: 1 1 0%; min-width: 0; min-height: 42px; display: inline-flex; align-items: center; justify-content: center; text-align: center; line-height: 1.2; box-sizing: border-box; background: rgba(255,255,255,0.05); color: var(--text-muted); border: 1px solid rgba(255,255,255,0.1); padding: 6px 4px; font-size: 0.8rem; border-radius: 6px; cursor: pointer;">Journals & Memories</button>
+                <button onclick="switchDataBankTab('lorebooks')" id="tab-btn-lorebooks" class="edit-btn edit-cancel-btn" style="flex: 1 1 0%; min-width: 0; min-height: 42px; display: inline-flex; align-items: center; justify-content: center; text-align: center; line-height: 1.2; box-sizing: border-box; background: rgba(255,255,255,0.05); color: var(--text-muted); border: 1px solid rgba(255,255,255,0.1); padding: 6px 4px; font-size: 0.8rem; border-radius: 6px; cursor: pointer;">Lorebooks</button>
+                <button onclick="switchDataBankTab('settings')" id="tab-btn-settings" class="edit-btn edit-cancel-btn" style="flex: 1 1 0%; min-width: 0; min-height: 42px; display: inline-flex; align-items: center; justify-content: center; text-align: center; line-height: 1.2; box-sizing: border-box; background: rgba(255,255,255,0.05); color: var(--text-muted); border: 1px solid rgba(255,255,255,0.1); padding: 6px 4px; font-size: 0.8rem; border-radius: 6px; cursor: pointer;">Project Settings</button>
             </div>
             
             <!-- Upload & Scrape Tab -->
@@ -474,14 +474,14 @@
             </h3>
 
             <!-- Tabs -->
-            <div style="display: flex; gap: 10px; margin-bottom: 20px; border-bottom: 1px solid rgba(255,255,255,0.05); padding-bottom: 10px;">
-                <button onclick="switchAssistantModalTab('program')" id="assistant-tab-btn-program" class="edit-btn" style="background: rgba(255, 255, 255, 0.08); color: var(--primary-accent); border: 1px solid var(--primary-accent); padding: 6px 12px; font-size: 0.8rem; border-radius: 6px; cursor: pointer;">
+            <div style="display: flex; gap: 8px; margin-bottom: 20px; border-bottom: 1px solid rgba(255,255,255,0.05); padding-bottom: 10px;">
+                <button onclick="switchAssistantModalTab('program')" id="assistant-tab-btn-program" class="edit-btn" style="flex: 1; min-width: 0; display: inline-flex; align-items: center; justify-content: center; text-align: center; background: rgba(255, 255, 255, 0.08); color: var(--primary-accent); border: 1px solid var(--primary-accent); padding: 6px 8px; font-size: 0.8rem; border-radius: 6px; cursor: pointer;">
                     Select Program
                 </button>
-                <button onclick="switchAssistantModalTab('user')" id="assistant-tab-btn-user" class="edit-btn" style="background: rgba(255,255,255,0.05); color: var(--text-muted); border: 1px solid rgba(255,255,255,0.1); padding: 6px 12px; font-size: 0.8rem; border-radius: 6px; cursor: pointer;">
+                <button onclick="switchAssistantModalTab('user')" id="assistant-tab-btn-user" class="edit-btn" style="flex: 1; min-width: 0; display: inline-flex; align-items: center; justify-content: center; text-align: center; background: rgba(255,255,255,0.05); color: var(--text-muted); border: 1px solid rgba(255,255,255,0.1); padding: 6px 8px; font-size: 0.8rem; border-radius: 6px; cursor: pointer;">
                     User Profiles
                 </button>
-                <button onclick="switchAssistantModalTab('sessions')" id="assistant-tab-btn-sessions" class="edit-btn" style="background: rgba(255,255,255,0.05); color: var(--text-muted); border: 1px solid rgba(255,255,255,0.1); padding: 6px 12px; font-size: 0.8rem; border-radius: 6px; cursor: pointer;">
+                <button onclick="switchAssistantModalTab('sessions')" id="assistant-tab-btn-sessions" class="edit-btn" style="flex: 1; min-width: 0; display: inline-flex; align-items: center; justify-content: center; text-align: center; background: rgba(255,255,255,0.05); color: var(--text-muted); border: 1px solid rgba(255,255,255,0.1); padding: 6px 8px; font-size: 0.8rem; border-radius: 6px; cursor: pointer;">
                     Chat Sessions
                 </button>
             </div>
@@ -601,11 +601,11 @@
             </p>
 
             <!-- Tabs -->
-            <div style="display: flex; gap: 10px; margin-bottom: 20px; border-bottom: 1px solid rgba(255,255,255,0.05); padding-bottom: 10px;">
-                <button onclick="switchImportTab('tavern')" id="import-tab-btn-tavern" class="edit-btn" style="background: rgba(255, 255, 255, 0.08); color: var(--primary-accent); border: 1px solid var(--primary-accent); padding: 6px 12px; font-size: 0.8rem; border-radius: 6px; cursor: pointer;">
+            <div style="display: flex; gap: 8px; margin-bottom: 20px; border-bottom: 1px solid rgba(255,255,255,0.05); padding-bottom: 10px;">
+                <button onclick="switchImportTab('tavern')" id="import-tab-btn-tavern" class="edit-btn" style="flex: 1; min-width: 0; display: inline-flex; align-items: center; justify-content: center; text-align: center; background: rgba(255, 255, 255, 0.08); color: var(--primary-accent); border: 1px solid var(--primary-accent); padding: 6px 8px; font-size: 0.8rem; border-radius: 6px; cursor: pointer;">
                     Character Card
                 </button>
-                <button onclick="switchImportTab('describe')" id="import-tab-btn-describe" class="edit-btn" style="background: rgba(255,255,255,0.05); color: var(--text-muted); border: 1px solid rgba(255,255,255,0.1); padding: 6px 12px; font-size: 0.8rem; border-radius: 6px; cursor: pointer;">
+                <button onclick="switchImportTab('describe')" id="import-tab-btn-describe" class="edit-btn" style="flex: 1; min-width: 0; display: inline-flex; align-items: center; justify-content: center; text-align: center; background: rgba(255,255,255,0.05); color: var(--text-muted); border: 1px solid rgba(255,255,255,0.1); padding: 6px 8px; font-size: 0.8rem; border-radius: 6px; cursor: pointer;">
                     Text Description
                 </button>
             </div>
@@ -831,11 +831,11 @@
             </h3>
             
             <!-- Tabs -->
-            <div style="display: flex; gap: 10px; margin-bottom: 15px; border-bottom: 1px solid rgba(255,255,255,0.05); padding-bottom: 10px;">
-                <button onclick="switchProgramProfileTab('core')" id="comp-tab-btn-core" class="edit-btn" style="background: rgba(255, 255, 255, 0.08); color: var(--primary-accent); border: 1px solid var(--primary-accent); padding: 6px 12px; font-size: 0.8rem; border-radius: 6px; cursor: pointer;">
+            <div style="display: flex; gap: 8px; margin-bottom: 15px; border-bottom: 1px solid rgba(255,255,255,0.05); padding-bottom: 10px;">
+                <button onclick="switchProgramProfileTab('core')" id="comp-tab-btn-core" class="edit-btn" style="flex: 1; min-width: 0; display: inline-flex; align-items: center; justify-content: center; text-align: center; background: rgba(255, 255, 255, 0.08); color: var(--primary-accent); border: 1px solid var(--primary-accent); padding: 6px 8px; font-size: 0.8rem; border-radius: 6px; cursor: pointer;">
                     Character
                 </button>
-                <button onclick="switchProgramProfileTab('phys')" id="comp-tab-btn-phys" class="edit-btn" style="background: rgba(255,255,255,0.05); color: var(--text-muted); border: 1px solid rgba(255,255,255,0.1); padding: 6px 12px; font-size: 0.8rem; border-radius: 6px; cursor: pointer;">
+                <button onclick="switchProgramProfileTab('phys')" id="comp-tab-btn-phys" class="edit-btn" style="flex: 1; min-width: 0; display: inline-flex; align-items: center; justify-content: center; text-align: center; background: rgba(255,255,255,0.05); color: var(--text-muted); border: 1px solid rgba(255,255,255,0.1); padding: 6px 8px; font-size: 0.8rem; border-radius: 6px; cursor: pointer;">
                     Image Prompts
                 </button>
             </div>

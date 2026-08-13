@@ -7545,6 +7545,18 @@ function switchDataBankTab(tab) {
     const settingsBtn = document.getElementById('tab-btn-settings');
     const memoriesBtn = document.getElementById('tab-btn-memories');
     const lorebooksBtn = document.getElementById('tab-btn-lorebooks');
+    const descriptor = document.getElementById('databank-descriptor');
+
+    const descriptors = {
+        upload: "Upload files (TXT, MD, HTML, PDF) or scrape web page URLs to ingest them into the program's vectorized memory database.",
+        memories: "Manage keyword-triggered memory journals and long-term conversation compactions.",
+        lorebooks: "Import and manage interactive lorebooks and World Info files (.json) for dynamic context insertion.",
+        settings: "Configure project folder access paths, security execution policies, and search engine integration."
+    };
+
+    if (descriptor && descriptors[tab]) {
+        descriptor.textContent = descriptors[tab];
+    }
 
     // Reset all buttons
     [uploadBtn, settingsBtn, memoriesBtn, lorebooksBtn].forEach(btn => {

@@ -831,10 +831,27 @@ class OsHistoryAdapter(LocalHistoryAdapter):
         if memory_context:
             context_parts.append(f"<archived_memory>\n{memory_context}\n</archived_memory>")
             
+        # 5. Vector retrieved skill instructions (Toolbelt tier 2)
+        if last_user_message:
+            try:
+                from core.skill_retriever import retrieve_skill_instructions
+                from core.program_config import is_narration_mode
+                skill_instructions = retrieve_skill_instructions(
+                    query=last_user_message,
+                    narration_active=is_narration_mode(),
+                    threshold=0.35,
+                    top_k=2
+                )
+                if skill_instructions:
+                    context_parts.append(skill_instructions)
+            except Exception as se:
+                print(f"[skills] Retrieval error: {se}")
+
         # Append injected context to the system prompt
         if context_parts:
             context_content = "\n\n" + "\n\n".join(context_parts)
             openai_messages[0]["content"] += context_content
+
 
         openai_messages = _merge_consecutive_messages(openai_messages + raw_messages)
 
