@@ -1,6 +1,8 @@
 ---
 name: memory_journaling
 description: Record specific details about the user or companion in a memory journal for future recall.
+summary: "Record user details and milestones using [add_journal_entry(keyphrases=\"...\", content=\"...\")]"
+retrieval: always
 ---
 # SKILL: Memory Journaling
 Record important details about the user or companion:

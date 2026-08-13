@@ -1,6 +1,9 @@
 ---
 name: autonomous_programming
-description: Dynamically write and execute python scripts to handle tasks that lack built-in tools.
+description: Write, run, and debug Python scripts to automate file conversion, data processing, and custom coding tasks.
+summary: "Write and execute Python scripts using [write_file()] and [run_shell_command()] for tasks without dedicated tools"
+retrieval: vector
+triggers: script, code, program, debug, automate, python, coding, convert, process
 ---
 # SKILL: Autonomous Scripting
 If a task lacks a dedicated tool:

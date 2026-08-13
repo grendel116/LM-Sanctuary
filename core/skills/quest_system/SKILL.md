@@ -1,6 +1,9 @@
 ---
 name: quest_system
-description: Frame local resources, business meetings, appointments, and chores as game-like quests, allowing exporting to ICS calendar files.
+description: Schedule appointments, reminders, chores, meetings, and tasks as trackable quests with calendar export.
+summary: "Log appointments, tasks, and schedules using [add_quest(title=\"...\", notes=\"...\", due=\"...\", location=\"...\", reminder_minutes=...)]"
+retrieval: vector
+triggers: appointment, meeting, schedule, reminder, chore, task, quest, calendar, deadline
 ---
 # SKILL: The Companion Quest System
 Coordinate schedule/appointments:

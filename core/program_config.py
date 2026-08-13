@@ -111,46 +111,19 @@ def load_static_instructions() -> str:
     else:
         instruction_content = f"# NAME: {active_program.title()}\n"
             
-    # Append modular skill instructions if available
-    narration_active = is_narration_mode()
-    story_mode_allowed_skills = {
-        "portrait_generation",
-        "memory_journaling",
-        "vectorized_databank",
-    }
-    skills_dir = os.path.join(base_dir, "skills")
-    if os.path.exists(skills_dir):
-        skills_blocks = []
-        for root, dirs, files in os.walk(skills_dir):
-            for file in files:
-                if file.lower() == "skill.md":
-                    skill_name = os.path.basename(root)
-                    if narration_active and skill_name not in story_mode_allowed_skills:
-                        continue
-                    skill_path = os.path.join(root, file)
-                    try:
-                        with open(skill_path, "r", encoding="utf-8") as sf:
-                            skill_text = sf.read()
-                        
-                        # Strip YAML frontmatter block for cleaner model instructions
-                        if skill_text.startswith("---"):
-                            parts = skill_text.split("---", 2)
-                            if len(parts) >= 3:
-                                skill_text = parts[2].strip()
-                                
-                        skills_blocks.append(f"## Skill Instruction: {skill_name}\n\n{skill_text}")
-                    except Exception as e:
-                        print(f"Error loading skill file {skill_path}: {e}")
-                        
-        if skills_blocks:
-            override_preamble = (
-                "# MANDATORY TASK PROTOCOLS\n"
-                "The following protocols override all character and personality defaults when the relevant task is requested. "
-                "Regardless of persona, emotional state, or roleplay context, these task rules take full precedence.\n"
-            )
-            instruction_content += "\n\n" + override_preamble + "\n" + "\n\n".join(skills_blocks)
+    # Append compact toolbelt listing available capabilities
+    # Full skill instructions are vector-retrieved per turn in runner_interface.py
+    try:
+        from core.skill_retriever import get_toolbelt_block
+        narration_active = is_narration_mode()
+        toolbelt = get_toolbelt_block(narration_active)
+        if toolbelt:
+            instruction_content += "\n\n" + toolbelt
+    except Exception as e:
+        print(f"[program_config] Error loading toolbelt: {e}")
             
     return instruction_content
+
 
 def load_dynamic_runtime_context() -> str:
     """Compiles all dynamic, time-sensitive system data points for runtime grounding."""
