@@ -58,7 +58,7 @@ def delete_journal_entry(entry_id: str, program_id: str = None) -> bool:
     return False
 
 def match_journals(user_message: str, program_id: str = None) -> list:
-    """Finds top 3 matching journal entries using keyword matching with vector similarity fallback."""
+    """Finds top 3 matching journal entries using keyword matching, semantic similarity, and recent entries fallback."""
     if not user_message:
         return []
         
@@ -66,8 +66,13 @@ def match_journals(user_message: str, program_id: str = None) -> list:
     if not entries:
         return []
         
-    # Fast path: keyword matching
     msg_clean = user_message.lower()
+    
+    # Generic memory query check
+    memory_keywords = {"journal", "journals", "memory", "memories", "remember", "remembering", "recollect", "recalled", "notes", "past", "history"}
+    has_memory_keyword = any(re.search(r'\b' + re.escape(kw) + r'\b', msg_clean) for kw in memory_keywords)
+    
+    # Fast path: keyword matching
     matched = []
     
     for entry in entries:
@@ -78,16 +83,14 @@ def match_journals(user_message: str, program_id: str = None) -> list:
             
         score = 0
         for kp in kps:
-            # Word boundary check for short keyphrases, substring check for multi-word phrases
+            # Word boundary check for short keyphrases, substring check for multi word phrases
             if len(kp) <= 3:
-                # Require word boundaries for very short words (e.g. 'cat', 'job')
                 pattern = r'\b' + re.escape(kp) + r'\b'
                 if re.search(pattern, msg_clean):
                     score += 1
             else:
-                # Substring check for longer phrases
                 if kp in msg_clean:
-                    score += len(kp) # longer matches get higher weight
+                    score += len(kp)
                     
         if score > 0:
             matched.append((score, entry))
@@ -105,25 +108,30 @@ def match_journals(user_message: str, program_id: str = None) -> list:
         model = get_embedding_model()
         query_vec = model.encode(user_message)
         query_norm = np.linalg.norm(query_vec)
-        if query_norm == 0:
-            return []
-        
-        semantic_matched = []
-        for entry in entries:
-            content = entry.get("content", "")
-            if not content:
-                continue
-            content_vec = model.encode(content)
-            content_norm = np.linalg.norm(content_vec)
-            if content_norm == 0:
-                continue
-            similarity = float(np.dot(query_vec, content_vec) / (query_norm * content_norm))
-            if similarity >= 0.35:
-                semantic_matched.append((similarity, entry))
-        
-        semantic_matched.sort(key=lambda x: x[0], reverse=True)
-        return [item[1] for item in semantic_matched[:3]]
+        if query_norm > 0:
+            semantic_matched = []
+            for entry in entries:
+                content = entry.get("content", "")
+                if not content:
+                    continue
+                content_vec = model.encode(content)
+                content_norm = np.linalg.norm(content_vec)
+                if content_norm == 0:
+                    continue
+                similarity = float(np.dot(query_vec, content_vec) / (query_norm * content_norm))
+                if similarity >= 0.25:
+                    semantic_matched.append((similarity, entry))
+            
+            semantic_matched.sort(key=lambda x: x[0], reverse=True)
+            if semantic_matched:
+                return [item[1] for item in semantic_matched[:3]]
     except Exception as e:
         print(f"[Journals] Semantic fallback error: {e}")
-        return []
+        
+    # If user inquired about memories/journals or if no specific topic matched, return most recent entries
+    if has_memory_keyword or len(entries) <= 3:
+        sorted_recent = sorted(entries, key=lambda x: x.get("timestamp", 0), reverse=True)
+        return sorted_recent[:3]
+
+    return []
 

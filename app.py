@@ -173,21 +173,23 @@ def load_temperature():
 
 def find_image_sidecar_json(image_filename, active_program):
     """Locate the sidecar .json for an image, scanning active then all programs."""
-    png_path = os.path.normpath(
-        os.path.join(base_dir, 'core', 'programs', active_program, 'portraits', image_filename)
-    )
-    json_path = png_path.rsplit('.', 1)[0] + '.json'
-    if os.path.exists(json_path):
-        return json_path
+    for folder in ('portraits', 'media'):
+        png_path = os.path.normpath(
+            os.path.join(base_dir, 'core', 'programs', active_program, folder, image_filename)
+        )
+        json_path = png_path.rsplit('.', 1)[0] + '.json'
+        if os.path.exists(json_path):
+            return json_path
     from variables import PROGRAMS_DIR
     if os.path.exists(PROGRAMS_DIR):
         for prog in os.listdir(PROGRAMS_DIR):
-            candidate = os.path.normpath(
-                os.path.join(PROGRAMS_DIR, prog, 'portraits', image_filename)
-            )
-            candidate_json = candidate.rsplit('.', 1)[0] + '.json'
-            if os.path.exists(candidate_json):
-                return candidate_json
+            for folder in ('portraits', 'media'):
+                candidate = os.path.normpath(
+                    os.path.join(PROGRAMS_DIR, prog, folder, image_filename)
+                )
+                candidate_json = candidate.rsplit('.', 1)[0] + '.json'
+                if os.path.exists(candidate_json):
+                    return candidate_json
     return None
 
 
@@ -733,6 +735,7 @@ def chat():
 
     import tools
     tools.current_session_id.set(session_id)
+    tools.current_use_imagen.set(request.json.get('use_imagen', False))
     with tools.session_tool_calls_lock:
         tools.session_tool_calls[session_id] = []
 
@@ -816,6 +819,7 @@ def edit():
 
     import tools
     tools.current_session_id.set(session_id)
+    tools.current_use_imagen.set(request.json.get('use_imagen', False))
     with tools.session_tool_calls_lock:
         tools.session_tool_calls[session_id] = []
 
@@ -989,6 +993,7 @@ def continue_generation():
     
     import tools
     tools.current_session_id.set(session_id)
+    tools.current_use_imagen.set(request.json.get('use_imagen', False))
     with tools.session_tool_calls_lock:
         tools.session_tool_calls[session_id] = []
 
@@ -1194,16 +1199,19 @@ def regenerate_image():
         tools.current_session_id.set(session_id)
         with tools.session_tool_calls_lock:
             tools.session_tool_calls[session_id] = []
+        use_imagen = request.json.get('use_imagen', False)
         # Generate new portrait
-        new_markdown = tools.generate_local_image(prompt)
+        if use_imagen:
+            new_markdown = tools.generate_imagen(prompt)
+        else:
+            new_markdown = tools.generate_local_image(prompt)
         if new_markdown.startswith("Error"):
             return jsonify({'error': new_markdown}), 500
             
-        # Parse the new image URL from Markdown link: ![Portrait](/images/portraits/portrait_123.png)
+        # Parse the new image URL from Markdown link: ![...](/images/...)
         new_image_url = None
-        if new_markdown.startswith("![Portrait](") and new_markdown.endswith(")"):
-            prefix_len = 12
-            new_image_url = new_markdown[prefix_len:-1]
+        if new_markdown.startswith("![") and new_markdown.endswith(")"):
+            new_image_url = new_markdown.split("(", 1)[1][:-1]
             
         if not new_image_url:
             return jsonify({'error': f'Failed to parse generated image markdown: {new_markdown}'}), 500
@@ -1267,7 +1275,7 @@ def run_background_video_gen(task_id, session_id, image_url, local_path, prompt)
 def animate_image():
     session_id = request.json.get('session_id', 'default')
     image_url = request.json.get('image_url')
-    prompt = request.json.get('prompt', 'gentle head turn, smiling, blinking, looking at camera')
+    prompt = request.json.get('prompt', '')
     
     if not image_url:
         return jsonify({'error': 'Missing image_url'}), 400
@@ -1330,13 +1338,24 @@ def list_generations():
 def list_images():
     try:
         active_program = os.getenv("ACTIVE_PROGRAM", "sebile")
-        portraits_dir = os.path.join('core', 'programs', active_program, 'portraits')
-        if not os.path.exists(portraits_dir):
-            return jsonify({'images': []})
-        files = os.listdir(portraits_dir)
-        image_files = [f for f in files if f.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.mp4', '.webm')) and f.lower() != 'profile.png']
-        image_files.sort(key=lambda x: os.path.getmtime(os.path.join(portraits_dir, x)), reverse=True)
-        image_urls = [f"/images/portraits/{f}" for f in image_files]
+        program_dir = os.path.join('core', 'programs', active_program)
+        all_items = []
+        valid_exts = ('.png', '.jpg', '.jpeg', '.gif', '.mp4', '.webm')
+
+        for folder in ('portraits', 'media'):
+            target_dir = os.path.join(program_dir, folder)
+            if os.path.exists(target_dir):
+                for f in os.listdir(target_dir):
+                    if f.lower().endswith(valid_exts) and f.lower() != 'profile.png':
+                        full_path = os.path.join(target_dir, f)
+                        if os.path.isfile(full_path):
+                            all_items.append({
+                                'url': f"/images/{folder}/{f}",
+                                'mtime': os.path.getmtime(full_path)
+                            })
+
+        all_items.sort(key=lambda x: x['mtime'], reverse=True)
+        image_urls = [x['url'] for x in all_items]
         return jsonify({'images': image_urls})
     except Exception as e:
         print(f"Error listing images: {e}")
