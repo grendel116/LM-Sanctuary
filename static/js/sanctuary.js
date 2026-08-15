@@ -356,7 +356,7 @@ function initHeartPulse() {
                 extraMsg = `<br><br><span style="color: var(--text-muted); font-size: 0.9rem;">${activeProgramName || 'The program'} is in a dialectical state: ${quality}.</span>`;
             }
             
-            showCustomAlert("Heart Status",
+            showCustomAlert("",
                   `${activeProgramName || 'Program'}'s Mood: <strong>${statusName}</strong><br>` +
                   `Emotional Intensity: <strong>${intensityPercent}%</strong>` + extraMsg);
         });
@@ -421,7 +421,7 @@ function generateMessageId(text, role = 'user') {
                 prefix = 'prgm_';
             }
         } else {
-            if (text && text.includes("Send me a portrait of yourself")) {
+            if (text && (text.includes("Send me a portrait of yourself") || text.includes("[GENERATE_IMAGE:") || text.includes("[GENERATE_IMAGEN:"))) {
                 prefix = 'port_';
             } else if (text && text.startsWith("[SYSTEM: User has completed")) {
                 prefix = 'quest_';
@@ -1061,6 +1061,26 @@ async function stopComfyUI(btn) {
     } finally {
         _comfyStopping = false;
         updateComfyModalStatus(true);
+    }
+}
+
+// --- Imagen Mode Switch ---
+let useImagenMode = false;
+const savedImagenMode = safeLocalStorage.getItem('arena_use_imagen');
+if (savedImagenMode === 'true') {
+    useImagenMode = true;
+}
+
+function toggleImagenMode() {
+    useImagenMode = !useImagenMode;
+    safeLocalStorage.setItem('arena_use_imagen', useImagenMode.toString());
+    updateImagenToggleUI();
+}
+
+function updateImagenToggleUI() {
+    const checkbox = document.getElementById('imagen-toggle-checkbox');
+    if (checkbox) {
+        checkbox.checked = useImagenMode;
     }
 }
 
@@ -2116,9 +2136,45 @@ async function updateComfyModalStatus(skipFetch = false) {
 // --- openConnectionModal ---
 function openConnectionModal() {
     document.getElementById('connection-modal').style.display = 'flex';
+    switchConnectionTab('engine');
     updateConnectionModalStatus();
     verifyConnections(true);
     updateComfyModalStatus();
+    loadProjectSettings();
+}
+
+// --- switchConnectionTab ---
+function switchConnectionTab(tab) {
+    const engineTab = document.getElementById('connection-tab-engine');
+    const projectTab = document.getElementById('connection-tab-project');
+    const engineBtn = document.getElementById('conn-tab-btn-engine');
+    const projectBtn = document.getElementById('conn-tab-btn-project');
+    const descriptor = document.getElementById('connection-descriptor');
+
+    const descriptors = {
+        engine: "Select your preferred model configuration. You can run completely offline, configure cloud connections, and manage your image generation environments.",
+        project: "Configure project folder access paths, security execution policies, and search engine integration."
+    };
+
+    if (descriptor && descriptors[tab]) {
+        descriptor.textContent = descriptors[tab];
+    }
+
+    [engineBtn, projectBtn].forEach(btn => {
+        if (btn) btn.classList.remove('active');
+    });
+
+    if (engineTab) engineTab.style.display = 'none';
+    if (projectTab) projectTab.style.display = 'none';
+
+    if (tab === 'engine') {
+        if (engineTab) engineTab.style.display = 'flex';
+        if (engineBtn) engineBtn.classList.add('active');
+    } else if (tab === 'project') {
+        if (projectTab) projectTab.style.display = 'block';
+        if (projectBtn) projectBtn.classList.add('active');
+        loadProjectSettings();
+    }
 }
 
 // --- closeConnectionModal ---
@@ -2151,12 +2207,24 @@ async function changeModel() {
     }
 }
 
+function setCustomDialogTitle(title) {
+    const titleElem = document.getElementById('custom-dialog-title');
+    if (titleElem) {
+        if (title) {
+            titleElem.innerHTML = title;
+            titleElem.style.display = 'block';
+        } else {
+            titleElem.style.display = 'none';
+        }
+    }
+}
+
 // --- showCustomAlert ---
 function showCustomAlert(title, message, callback = null) {
     const modalDeco = document.querySelector('#custom-dialog-modal .modal-card');
     if (modalDeco) modalDeco.style.maxWidth = '400px';
 
-    document.getElementById('custom-dialog-title').innerHTML = title;
+    setCustomDialogTitle(title);
     document.getElementById('custom-dialog-message').innerHTML = message;
     
     const buttonsContainer = document.getElementById('custom-dialog-buttons');
@@ -2176,7 +2244,7 @@ function showCustomConfirm(title, message, onConfirm, onCancel = null) {
     const modalDeco = document.querySelector('#custom-dialog-modal .modal-card');
     if (modalDeco) modalDeco.style.maxWidth = '400px';
 
-    document.getElementById('custom-dialog-title').innerHTML = title;
+    setCustomDialogTitle(title);
     document.getElementById('custom-dialog-message').innerHTML = message;
     
     const buttonsContainer = document.getElementById('custom-dialog-buttons');
@@ -2209,7 +2277,7 @@ function showCustomPrompt(title, message, defaultValue, onConfirm, onCancel = nu
     const modalDeco = document.querySelector('#custom-dialog-modal .modal-card');
     if (modalDeco) modalDeco.style.maxWidth = '400px';
 
-    document.getElementById('custom-dialog-title').innerHTML = title;
+    setCustomDialogTitle(title);
     document.getElementById('custom-dialog-message').innerHTML = `
         <p style="margin-top: 0; margin-bottom: 10px;">${message}</p>
         <input type="text" id="custom-dialog-input" value="${defaultValue}" class="onboarding-input" style="font-size: 0.9rem; margin-bottom: 10px;">
@@ -2252,7 +2320,7 @@ function showCustomTextareaPrompt(title, message, defaultValue, onConfirm, onCan
     const modalDeco = document.querySelector('#custom-dialog-modal .modal-card');
     if (modalDeco) modalDeco.style.maxWidth = '600px';
 
-    document.getElementById('custom-dialog-title').innerHTML = title;
+    setCustomDialogTitle(title);
     document.getElementById('custom-dialog-message').innerHTML = `
         <p style="margin-top: 0; margin-bottom: 10px;">${message}</p>
         <textarea id="custom-dialog-input" class="onboarding-input" style="height: 160px; font-size: 0.9rem; margin-bottom: 10px; resize: vertical; font-family: inherit; line-height: 1.5;"></textarea>
@@ -2861,9 +2929,10 @@ function switchAssistantModalTab(tab) {
     // De-activate all tab buttons by default
     [compBtn, userBtn, sessBtn].forEach(btn => {
         if (btn) {
-            btn.style.background = 'rgba(255,255,255,0.05)';
-            btn.style.color = 'var(--text-muted)';
-            btn.style.border = '1px solid rgba(255,255,255,0.1)';
+            btn.classList.remove('active');
+            btn.style.background = '';
+            btn.style.color = '';
+            btn.style.border = '';
         }
     });
     
@@ -2873,23 +2942,15 @@ function switchAssistantModalTab(tab) {
     });
     
     if (tab === 'program') {
-        compBtn.style.background = 'rgba(255, 255, 255, 0.08)';
-        compBtn.style.color = 'var(--primary-accent)';
-        compBtn.style.border = '1px solid var(--primary-accent)';
-        compTab.style.display = 'block';
+        if (compBtn) compBtn.classList.add('active');
+        if (compTab) compTab.style.display = 'block';
     } else if (tab === 'user') {
-        userBtn.style.background = 'rgba(255, 255, 255, 0.08)';
-        userBtn.style.color = 'var(--primary-accent)';
-        userBtn.style.border = '1px solid var(--primary-accent)';
-        userTab.style.display = 'block';
+        if (userBtn) userBtn.classList.add('active');
+        if (userTab) userTab.style.display = 'block';
         closeUserProfileEditor();
         loadUserProfiles();
     } else if (tab === 'sessions') {
-        if (sessBtn) {
-            sessBtn.style.background = 'rgba(255, 255, 255, 0.08)';
-            sessBtn.style.color = 'var(--primary-accent)';
-            sessBtn.style.border = '1px solid var(--primary-accent)';
-        }
+        if (sessBtn) sessBtn.classList.add('active');
         if (sessTab) sessTab.style.display = 'block';
         loadChatSessions();
     }
@@ -2922,24 +2983,23 @@ function switchImportTab(tab) {
     const btnTavern = document.getElementById('import-tab-btn-tavern');
     const btnDescribe = document.getElementById('import-tab-btn-describe');
     
+    [btnTavern, btnDescribe].forEach(btn => {
+        if (btn) {
+            btn.classList.remove('active');
+            btn.style.background = '';
+            btn.style.color = '';
+            btn.style.border = '';
+        }
+    });
+
     if (tab === 'tavern') {
-        tabTavern.style.display = 'block';
-        tabDescribe.style.display = 'none';
-        btnTavern.style.background = 'rgba(255, 255, 255, 0.08)';
-        btnTavern.style.color = 'var(--primary-accent)';
-        btnTavern.style.border = '1px solid var(--primary-accent)';
-        btnDescribe.style.background = 'rgba(255,255,255,0.05)';
-        btnDescribe.style.color = 'var(--text-muted)';
-        btnDescribe.style.border = '1px solid rgba(255,255,255,0.1)';
+        if (tabTavern) tabTavern.style.display = 'block';
+        if (tabDescribe) tabDescribe.style.display = 'none';
+        if (btnTavern) btnTavern.classList.add('active');
     } else {
-        tabTavern.style.display = 'none';
-        tabDescribe.style.display = 'block';
-        btnTavern.style.background = 'rgba(255,255,255,0.05)';
-        btnTavern.style.color = 'var(--text-muted)';
-        btnTavern.style.border = '1px solid rgba(255,255,255,0.1)';
-        btnDescribe.style.background = 'rgba(255, 255, 255, 0.08)';
-        btnDescribe.style.color = 'var(--primary-accent)';
-        btnDescribe.style.border = '1px solid var(--primary-accent)';
+        if (tabTavern) tabTavern.style.display = 'none';
+        if (tabDescribe) tabDescribe.style.display = 'block';
+        if (btnDescribe) btnDescribe.classList.add('active');
     }
 }
 
@@ -3500,20 +3560,17 @@ function switchProgramProfileTab(tab) {
     tabs.forEach(t => {
         const content = document.getElementById(`comp-tab-content-${t}`);
         const btn = document.getElementById(`comp-tab-btn-${t}`);
+        if (btn) {
+            btn.style.background = '';
+            btn.style.color = '';
+            btn.style.border = '';
+        }
         if (t === tab) {
             if (content) content.style.display = 'block';
-            if (btn) {
-                btn.style.background = 'rgba(255, 255, 255, 0.08)';
-                btn.style.color = 'var(--primary-accent)';
-                btn.style.border = '1px solid var(--primary-accent)';
-            }
+            if (btn) btn.classList.add('active');
         } else {
             if (content) content.style.display = 'none';
-            if (btn) {
-                btn.style.background = 'rgba(255, 255, 255, 0.05)';
-                btn.style.color = 'var(--text-muted)';
-                btn.style.border = '1px solid rgba(255, 255, 255, 0.1)';
-            }
+            if (btn) btn.classList.remove('active');
         }
     });
 }
@@ -3887,6 +3944,9 @@ function showWelcomeMessage() {
         welcome = document.createElement('div');
         welcome.className = 'message-row program-row';
         welcome.id = 'welcome-message';
+        welcome.dataset.msgId = 'first_mes_welcome';
+        welcome.dataset.role = 'program';
+        welcome.dataset.rawText = resolvedGreeting;
         const profileUrl = getProfileUrl();
         welcome.innerHTML = `
             <div class="avatar-container">
@@ -3900,6 +3960,9 @@ function showWelcomeMessage() {
         `;
         chatContainer.appendChild(welcome);
     } else {
+        welcome.dataset.msgId = welcome.dataset.msgId || 'first_mes_welcome';
+        welcome.dataset.role = 'program';
+        welcome.dataset.rawText = resolvedGreeting;
         const textDiv = welcome.querySelector('.message-text');
         if (textDiv) {
             textDiv.innerHTML = parsedText;
@@ -4759,17 +4822,19 @@ function renderMessage(msg, isLive = false) {
         return renderVoiceCallRow(msg);
     }
 
+    const role = msg.role;
+    const text = msg.text || '';
+
     // Client-side hidden prefix check
     const _hiddenPrefixes = ['port_', 'quest_', 'tool_'];
     if (msg.id && _hiddenPrefixes.some(p => msg.id.startsWith(p))) return null;
+    if (text && (text.includes("Send me a portrait of yourself") || text.includes("[GENERATE_IMAGE:") || text.includes("[GENERATE_IMAGEN:"))) return null;
 
     const welcome = document.getElementById('welcome-message');
     if (welcome) welcome.remove();
     const onboarding = document.getElementById('onboarding-container');
     if (onboarding) onboarding.remove();
 
-    const role = msg.role;
-    const text = msg.text || '';
     const msgId = msg.id || generateMessageId(text, role);
 
     const isMsgTransient = msg.isTransient || (role === 'program' && (
@@ -4864,29 +4929,31 @@ function renderMessage(msg, isLive = false) {
             }
 
             if (role === 'user') {
-                const reuseBtn = document.createElement('button');
-                reuseBtn.className = 'action-icon-btn';
-                reuseBtn.title = 'Resend prompt (local)';
-                reuseBtn.innerHTML = `
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-                        <polyline points="9 17 4 12 9 7"></polyline>
-                        <path d="M20 18v-2a4 4 0 0 0-4-4H4"></path>
-                    </svg>
-                `;
-                reuseBtn.onclick = () => reusePromptFromMessage(reuseBtn);
-                actions.appendChild(reuseBtn);
+                if (!isMediaItem) {
+                    const reuseBtn = document.createElement('button');
+                    reuseBtn.className = 'action-icon-btn';
+                    reuseBtn.title = 'Resend prompt (local)';
+                    reuseBtn.innerHTML = `
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                            <polyline points="9 17 4 12 9 7"></polyline>
+                            <path d="M20 18v-2a4 4 0 0 0-4-4H4"></path>
+                        </svg>
+                    `;
+                    reuseBtn.onclick = () => reusePromptFromMessage(reuseBtn);
+                    actions.appendChild(reuseBtn);
 
-                const editBtn = document.createElement('button');
-                editBtn.className = 'action-icon-btn';
-                editBtn.title = 'Edit message';
-                editBtn.innerHTML = `
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                        <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path>
-                        <path d="M18.5 2.5a2.121 2.121 0 1 1 3 3L12 15l-4 1 1-4z"></path>
-                    </svg>
-                `;
-                editBtn.onclick = () => startEditMessage(editBtn);
-                actions.appendChild(editBtn);
+                    const editBtn = document.createElement('button');
+                    editBtn.className = 'action-icon-btn';
+                    editBtn.title = 'Edit message';
+                    editBtn.innerHTML = `
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path>
+                            <path d="M18.5 2.5a2.121 2.121 0 1 1 3 3L12 15l-4 1 1-4z"></path>
+                        </svg>
+                    `;
+                    editBtn.onclick = () => startEditMessage(editBtn);
+                    actions.appendChild(editBtn);
+                }
 
                 const deleteBtn = document.createElement('button');
                 deleteBtn.className = 'action-icon-btn';
@@ -4902,7 +4969,7 @@ function renderMessage(msg, isLive = false) {
                 deleteBtn.onclick = () => deleteTurnFromMessage(deleteBtn);
                 actions.appendChild(deleteBtn);
             } else if (role === 'program' && !text.startsWith("Hello, " + getUserDisplayName())) {
-                if (isMsgTransient) {
+                if (isMsgTransient || isMediaItem) {
                     const deleteBtn = document.createElement('button');
                     deleteBtn.className = 'action-icon-btn';
                     deleteBtn.title = 'Delete message from history';
@@ -5100,8 +5167,8 @@ function renderMessage(msg, isLive = false) {
                             console.error("Failed to fetch prompt from server:", err);
                         }
                         showCustomTextareaPrompt(
-                            "Edit Portrait Prompt",
-                            "Modify the ComfyUI prompt to regenerate this portrait (Ctrl+Enter to save):",
+                            "Edit Image Prompt",
+                            "Modify the prompt to regenerate this image (Ctrl+Enter to save):",
                             activePrompt || "",
                             (newPrompt) => {
                                 if (newPrompt !== null) {
@@ -5115,7 +5182,7 @@ function renderMessage(msg, isLive = false) {
 
                     const recycleBtn = document.createElement('button');
                     recycleBtn.className = 'image-action-btn';
-                    recycleBtn.title = 'Reroll portrait with the same prompt';
+                    recycleBtn.title = 'Reroll image with the same prompt';
                     recycleBtn.innerHTML = `
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
                             <polyline points="23 4 23 10 17 10"></polyline>
@@ -5135,7 +5202,7 @@ function renderMessage(msg, isLive = false) {
 
                     const animateBtn = document.createElement('button');
                     animateBtn.className = 'image-action-btn';
-                    animateBtn.title = 'Animate portrait (video generation)';
+                    animateBtn.title = 'Animate image (video generation)';
                     animateBtn.innerHTML = `
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
                             <polygon points="23 7 16 12 23 17 23 7"></polygon>
@@ -5145,9 +5212,9 @@ function renderMessage(msg, isLive = false) {
                     animateBtn.onclick = (e) => {
                         e.stopPropagation();
                         showCustomTextareaPrompt(
-                            "Animate Portrait",
-                            "Describe the motion or animation for this portrait (e.g. blinking, smiling, wind in hair, looking at camera):",
-                            "gentle head turn, smiling, blinking, looking at camera",
+                            "Animate Image",
+                            "Describe the motion or animation for this image (e.g. blinking, smiling, wind in hair, looking at camera):",
+                            "",
                             (motionPrompt) => {
                                 if (motionPrompt !== null) {
                                     animateImage(animateBtn, img.src, motionPrompt);
@@ -5413,7 +5480,7 @@ async function sendMessage() {
         userImageUrl = `data:${attachedMime};base64,${attachedBase64}`;
     }
     let prefix = 'usr_';
-    if (text && text.includes("Send me a portrait of yourself")) {
+    if (text && (text.includes("Send me a portrait of yourself") || text.includes("[GENERATE_IMAGE:") || text.includes("[GENERATE_IMAGEN:"))) {
         prefix = 'port_';
     } else if (text && text.startsWith("[SYSTEM: User has completed")) {
         prefix = 'quest_';
@@ -5436,7 +5503,8 @@ async function sendMessage() {
         image_mime: attachedMime,
         media_path: attachedMediaPath,
         session_id: sessionId,
-        model: selectedModel
+        model: selectedModel,
+        use_imagen: useImagenMode
     };
 
     userInput.value = '';
@@ -5576,7 +5644,8 @@ async function continueMessage() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 session_id: sessionId,
-                model: selectedModel
+                model: selectedModel,
+                use_imagen: useImagenMode
             }),
             signal: chatAbortController.signal
         });
@@ -5874,7 +5943,8 @@ async function resendUserMessage(bubble) {
                 session_id: sessionId,
                 msg_id: msgId,
                 new_text: bubble.dataset.rawText || '',
-                model: selectedModel
+                model: selectedModel,
+                use_imagen: useImagenMode
             }),
             signal: chatAbortController.signal
         });
@@ -5989,7 +6059,8 @@ async function rerollFromMessage(button) {
                 msg_id: msgId,
                 new_text: null,
                 model: selectedModel,
-                force_offload: true
+                force_offload: true,
+                use_imagen: useImagenMode
             }),
             signal: chatAbortController.signal
         });
@@ -6620,7 +6691,11 @@ function handleSwipeGesture() {
 // --- generatePortraitPrompt ---
 async function generatePortraitPrompt() {
     if (isGenerating) return;
-    userInput.value = "Send me a portrait of yourself based on the context of our last message/current dialogue!";
+    if (useImagenMode) {
+        userInput.value = "[GENERATE_IMAGEN: Render a visual illustration of the current scene or character using Google Imagen. Do not narrate new story events or call mechanics tools.]";
+    } else {
+        userInput.value = "Send me a portrait of yourself based on the context of our last message/current dialogue!";
+    }
     await sendMessage();
 }
 
@@ -6719,7 +6794,8 @@ async function regenerateImage(buttonElement, oldImageUrl, prompt) {
             body: JSON.stringify({
                 session_id: sessionId,
                 old_image_url: getRelativePath(oldImageUrl),
-                prompt: prompt
+                prompt: prompt,
+                use_imagen: useImagenMode
             })
         });
         
@@ -7319,7 +7395,6 @@ async function openDataBank() {
     document.getElementById('databank-modal').style.display = 'flex';
     switchDataBankTab('upload');
     loadDataBankFiles();
-    loadProjectSettings();
     if (!currentEditingProgramId) {
         try {
             const res = await fetch(`/history?session_id=default&t=${Date.now()}`);
@@ -7537,12 +7612,10 @@ async function completeQuest(questId) {
 // --- switchDataBankTab ---
 function switchDataBankTab(tab) {
     const uploadTab = document.getElementById('databank-tab-upload');
-    const settingsTab = document.getElementById('databank-tab-settings');
     const memoriesTab = document.getElementById('databank-tab-memories');
     const lorebooksTab = document.getElementById('databank-tab-lorebooks');
     const docsContainer = document.getElementById('databank-documents-container');
     const uploadBtn = document.getElementById('tab-btn-upload');
-    const settingsBtn = document.getElementById('tab-btn-settings');
     const memoriesBtn = document.getElementById('tab-btn-memories');
     const lorebooksBtn = document.getElementById('tab-btn-lorebooks');
     const descriptor = document.getElementById('databank-descriptor');
@@ -7550,8 +7623,7 @@ function switchDataBankTab(tab) {
     const descriptors = {
         upload: "Upload files (TXT, MD, HTML, PDF) or scrape web page URLs to ingest them into the program's vectorized memory database.",
         memories: "Manage keyword-triggered memory journals and long-term conversation compactions.",
-        lorebooks: "Import and manage interactive lorebooks and World Info files (.json) for dynamic context insertion.",
-        settings: "Configure project folder access paths, security execution policies, and search engine integration."
+        lorebooks: "Import and manage interactive lorebooks and World Info files (.json) for dynamic context insertion."
     };
 
     if (descriptor && descriptors[tab]) {
@@ -7559,17 +7631,18 @@ function switchDataBankTab(tab) {
     }
 
     // Reset all buttons
-    [uploadBtn, settingsBtn, memoriesBtn, lorebooksBtn].forEach(btn => {
+    [uploadBtn, memoriesBtn, lorebooksBtn].forEach(btn => {
         if (btn) {
-            btn.style.background = 'rgba(255,255,255,0.05)';
-            btn.style.color = 'var(--text-muted)';
-            btn.style.border = '1px solid rgba(255,255,255,0.1)';
-            btn.classList.add('edit-cancel-btn');
+            btn.classList.remove('active');
+            btn.classList.remove('edit-cancel-btn');
+            btn.style.background = '';
+            btn.style.color = '';
+            btn.style.border = '';
         }
     });
 
     // Hide all tabs
-    [uploadTab, settingsTab, memoriesTab, lorebooksTab].forEach(t => {
+    [uploadTab, memoriesTab, lorebooksTab].forEach(t => {
         if (t) t.style.display = 'none';
     });
 
@@ -7579,16 +7652,10 @@ function switchDataBankTab(tab) {
 
     const activate = (el, btn) => {
         if (el) el.style.display = 'flex';
-        if (btn) {
-            btn.style.background = 'rgba(255, 255, 255, 0.08)';
-            btn.style.color = 'var(--primary-accent)';
-            btn.style.border = '1px solid var(--primary-accent)';
-            btn.classList.remove('edit-cancel-btn');
-        }
+        if (btn) btn.classList.add('active');
     };
 
     if (tab === 'upload')     activate(uploadTab, uploadBtn);
-    else if (tab === 'settings')  activate(settingsTab, settingsBtn);
     else if (tab === 'memories')  activate(memoriesTab, memoriesBtn);
     else if (tab === 'lorebooks') { activate(lorebooksTab, lorebooksBtn); loadLorebooks(); }
 }

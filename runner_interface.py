@@ -178,6 +178,9 @@ def _execute_emulated_tool(tool_name: str, args_str: str) -> tuple[dict, str]:
     parsed_args = _parse_emulated_tool_call(normalized_name, args_str)
     
     import tools
+    if normalized_name == "generate_imagen" and not tools.current_use_imagen.get():
+        return parsed_args, "Error: Imagen rendering is disabled in settings."
+
     func = getattr(tools, normalized_name, None)
     if not func:
         return parsed_args, f"Error: Tool '{normalized_name}' not found."
@@ -764,10 +767,14 @@ class OsHistoryAdapter(LocalHistoryAdapter):
                     
         openai_messages = [{"role": "system", "content": sys_inst}]
         from core.program_config import is_narration_mode
-        if is_narration_mode():
-            openai_messages[0]["content"] += _STORY_MODE_DIRECTIVE_PROMPT
-        else:
-            openai_messages[0]["content"] += _LOCAL_DIRECTIVE_PROMPT
+        directive = _STORY_MODE_DIRECTIVE_PROMPT if is_narration_mode() else _LOCAL_DIRECTIVE_PROMPT
+        
+        import tools
+        if not tools.current_use_imagen.get():
+            directive_lines = [line for line in directive.split('\n') if 'generate_imagen' not in line]
+            directive = '\n'.join(directive_lines)
+
+        openai_messages[0]["content"] += directive
 
         # Inject lorebook lore (ST-compatible keyword-triggered world info)
         try:
@@ -1380,7 +1387,11 @@ class BaseProgramRunner:
                 has_image_gen = False
                 for m in matches:
                     tool_name = m.group(1)
-                    if _normalize_tool_name(tool_name) in ("generate_local_image", "generate_imagen"):
+                    norm_name = _normalize_tool_name(tool_name)
+                    if norm_name == "generate_local_image":
+                        has_image_gen = True
+                        break
+                    elif norm_name == "generate_imagen" and tools.current_use_imagen.get():
                         has_image_gen = True
                         break
                         
@@ -1398,9 +1409,8 @@ class BaseProgramRunner:
                     if image_succeeded:
                         bot_response_text = bot_response_text.replace(original_tag, new_markdown)
                     else:
-                        # Generation failed — strip the call tag cleanly so the program
-                        # message body stays readable. The error surfaces in tool_calls.
-                        bot_response_text = bot_response_text.replace(original_tag, "").strip()
+                        # Generation failed — display formatted error message
+                        bot_response_text = bot_response_text.replace(original_tag, f"*({new_markdown})*").strip()
                         
                     resolved_args = parsed_args["kwargs"] if parsed_args["kwargs"] else {"prompt": parsed_args["args"][0] if parsed_args["args"] else ""}
                     t_calls = _build_tool_calls_pair(normalized_name, resolved_args, new_markdown)
@@ -1963,6 +1973,55 @@ class OpenSourceRunner(BaseProgramRunner):
             except Exception as e:
                 print(f"Error saving OS session {session_id} to disk: {e}")
 
+    def _ensure_first_message(self, session_id: str):
+        """Ensures sessions have a persistent starting message (first_mes) with a valid ID."""
+        if session_id not in self.sessions_history:
+            self.sessions_history[session_id] = []
+
+        history = self.sessions_history[session_id]
+
+        has_first_mes = False
+        for msg in history:
+            msg_id = msg.get('id', '')
+            if msg_id.startswith('first_mes') or (msg.get('role') == 'program' and msg == history[0]):
+                has_first_mes = True
+                if not msg_id:
+                    import uuid as _uuid
+                    msg['id'] = f"first_mes_{_uuid.uuid4().hex}"
+                    self._save_session_to_disk(session_id)
+                break
+
+        if not has_first_mes:
+            try:
+                from core.program_config import get_program_greeting, replace_placeholders
+                greeting = replace_placeholders(get_program_greeting()).strip()
+                if greeting:
+                    import uuid as _uuid
+                    starting_msg = {
+                        'id': f"first_mes_{_uuid.uuid4().hex}",
+                        'role': 'program',
+                        'text': greeting,
+                        'tool_calls': [],
+                        'inversion_active': '',
+                        'mood': None,
+                        'timestamp': time.time()
+                    }
+                    history.insert(0, starting_msg)
+                    self._save_session_to_disk(session_id)
+            except Exception as _e:
+                print(f"[runner] Could not seed first_mes: {_e}")
+
+        updated = False
+        for idx, msg in enumerate(self.sessions_history[session_id]):
+            if not msg.get('id'):
+                import uuid as _uuid
+                role = msg.get('role', 'msg')
+                prefix = "first_mes" if role == 'program' and idx == 0 else role
+                msg['id'] = f"{prefix}_{_uuid.uuid4().hex}"
+                updated = True
+        if updated:
+            self._save_session_to_disk(session_id)
+
     def _load_session_from_disk(self, session_id: str):
         with self._lock:
             path = self._get_session_path(session_id)
@@ -1974,6 +2033,7 @@ class OpenSourceRunner(BaseProgramRunner):
                 
                 self.sessions_history[session_id] = data["messages"]
                 self.sessions_inversion_state[session_id] = data.get("inversion_state", copy.deepcopy(_DEFAULT_INVERSION_STATE))
+                self._ensure_first_message(session_id)
                 return True
             except Exception as e:
                 print(f"Error loading OS session {session_id} from disk: {e}")
@@ -2059,26 +2119,7 @@ class OpenSourceRunner(BaseProgramRunner):
         with self._lock:
             # Always reload from disk to prevent cache desynchronization across worker threads/processes
             self._load_session_from_disk(session_id)
-
-            # Seed first_mes for brand new sessions (ST-compatible)
-            if not self.sessions_history.get(session_id):
-                self.sessions_history[session_id] = []
-                try:
-                    from core.program_config import get_program_greeting, replace_placeholders
-                    greeting = replace_placeholders(get_program_greeting()).strip()
-                    if greeting:
-                        import uuid as _uuid
-                        self.sessions_history[session_id].append({
-                            'id': f"first_mes_{_uuid.uuid4().hex}",
-                            'role': 'program',
-                            'text': greeting,
-                            'tool_calls': [],
-                            'inversion_active': '',
-                            'mood': None
-                        })
-                        self._save_session_to_disk(session_id)
-                except Exception as _e:
-                    print(f"[runner] Could not seed first_mes: {_e}")
+            self._ensure_first_message(session_id)
 
             raw_history = self.sessions_history.get(session_id, [])
 
@@ -2147,8 +2188,7 @@ class OpenSourceRunner(BaseProgramRunner):
         if session_id not in self.sessions_history:
             self._load_session_from_disk(session_id)
 
-        if session_id not in self.sessions_history:
-            self.sessions_history[session_id] = []
+        self._ensure_first_message(session_id)
 
         # Resolve media upload if present
         file_path_resolved = None
@@ -2171,7 +2211,7 @@ class OpenSourceRunner(BaseProgramRunner):
         if not msg_id:
             if new_message_text.startswith("[SYSTEM: User has completed"):
                 prefix = "quest_"
-            elif "Send me a portrait of yourself" in new_message_text:
+            elif "Send me a portrait of yourself" in new_message_text or "[GENERATE_IMAGE:" in new_message_text or "[GENERATE_IMAGEN:" in new_message_text:
                 prefix = "port_"
             elif new_message_text.startswith("[Tool Response from"):
                 prefix = "tool_"
@@ -2590,14 +2630,13 @@ class OpenSourceRunner(BaseProgramRunner):
         with self._lock:
             if session_id not in self.sessions_history:
                 self._load_session_from_disk(session_id)
-            if session_id not in self.sessions_history:
-                self.sessions_history[session_id] = []
+            self._ensure_first_message(session_id)
                 
             prefix = 'usr_' if role == 'user' else 'prgm_'
             if role == 'user':
                 if text.startswith("[SYSTEM: User has completed"):
                     prefix = "quest_"
-                elif "Send me a portrait of yourself" in text:
+                elif "Send me a portrait of yourself" in text or "[GENERATE_IMAGE:" in text or "[GENERATE_IMAGEN:" in text:
                     prefix = "port_"
                 elif text.startswith("[Tool Response from"):
                     prefix = "tool_"

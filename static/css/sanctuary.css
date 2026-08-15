@@ -1917,13 +1917,16 @@ header {
     margin-top: 8px;
 }
 .edit-btn {
-    padding: 6px 12px;
+    padding: 7px 14px;
     border-radius: 8px;
-    font-size: 0.85rem;
+    font-size: 0.82rem;
     font-family: inherit;
     cursor: pointer;
-    font-weight: 500;
+    font-weight: 600;
     transition: all 0.2s ease;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
 }
 
 .edit-cancel-btn {
@@ -1937,14 +1940,13 @@ header {
     color: var(--text-main);
     border-color: rgba(255, 255, 255, 0.3);
     background: rgba(255, 255, 255, 0.08);
-    transform: scale(1.05);
 }
 
 .edit-save-btn {
     background: #1c1c22;
     border: 1px solid var(--border-color);
     color: var(--text-muted);
-    font-weight: 500;
+    font-weight: 600;
     box-shadow: 0 4px 10px rgba(0, 0, 0, 0.3);
 }
 
@@ -1952,7 +1954,42 @@ header {
     color: var(--text-main);
     border-color: rgba(255, 255, 255, 0.3);
     background: rgba(255, 255, 255, 0.08);
-    transform: scale(1.05);
+}
+
+/* Standardized Modal Tab Button */
+.modal-tab-btn {
+    flex: 1 1 0%;
+    min-width: 0;
+    min-height: 38px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    line-height: 1.2;
+    box-sizing: border-box;
+    background: rgba(255, 255, 255, 0.04);
+    color: var(--text-muted);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    padding: 7px 12px;
+    font-size: 0.82rem;
+    font-weight: 600;
+    font-family: inherit;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: background 0.2s ease, border-color 0.2s ease, color 0.2s ease;
+}
+
+.modal-tab-btn:hover:not(.active) {
+    background: rgba(255, 255, 255, 0.08);
+    color: var(--text-main);
+    border-color: rgba(255, 255, 255, 0.18);
+}
+
+.modal-tab-btn.active {
+    background: rgba(255, 255, 255, 0.08);
+    color: var(--primary-accent);
+    border: 1px solid var(--primary-accent);
+    box-shadow: 0 0 10px rgba(192, 132, 252, 0.12);
 }
 
 /* Input buttons row */
@@ -2360,7 +2397,6 @@ input.onboarding-input {
     color: var(--text-main);
     border-color: rgba(255, 255, 255, 0.3);
     background: rgba(255, 255, 255, 0.08);
-    transform: scale(1.05);
 }
 .onboarding-btn:disabled {
     opacity: 0.5;
