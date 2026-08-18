@@ -318,29 +318,49 @@ header {
 .mood-header-box {
     display: flex;
     align-items: center;
-    gap: 12px;
-    padding: 10px 14px;
+    gap: 14px;
+    padding: 12px 16px;
     background: rgba(147, 112, 219, 0.04);
     border: 1px solid rgba(147, 112, 219, 0.15);
     border-radius: 12px;
 }
 
 .mood-header-emoji {
-    font-size: 1.7rem;
+    font-size: 1.75rem;
     line-height: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
     filter: drop-shadow(0 0 8px var(--card-glow, rgba(147, 112, 219, 0.3)));
 }
 
 .mood-header-info {
     flex: 1;
     min-width: 0;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: 2px;
+}
+
+.mood-header-prefix {
+    font-size: 0.76rem;
+    line-height: 1.1;
+    font-weight: 500;
+    color: var(--text-muted, #8a95a5);
+    letter-spacing: 0.3px;
+    margin: 0;
+    padding: 0;
 }
 
 .mood-header-title {
-    font-size: 1.05rem;
+    font-size: 1.15rem;
+    line-height: 1.2;
     font-weight: 600;
     color: var(--text-main, #f3effa);
     margin: 0;
+    padding: 0;
 }
 
 .mood-header-subtitle {
