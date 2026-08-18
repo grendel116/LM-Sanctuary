@@ -1448,7 +1448,7 @@ header {
 }
 .image-actions-overlay {
     position: absolute;
-    top: 8px;
+    bottom: 8px;
     right: 8px;
     display: flex;
     gap: 6px;
@@ -1456,7 +1456,8 @@ header {
     opacity: 0;
     transition: opacity 0.2s ease;
 }
-.message-image-container:hover .image-actions-overlay {
+.message-image-container:hover .image-actions-overlay,
+.message.image-message:hover .image-actions-overlay {
     opacity: 1;
 }
 .image-action-btn {
