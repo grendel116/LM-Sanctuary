@@ -421,8 +421,8 @@ function showMoodStatusPopup() {
             <div class="mood-header-box">
                 <div class="mood-header-emoji">${meta.emoji}</div>
                 <div class="mood-header-info">
-                    <h3 class="mood-header-title">${name}'s Mood: ${meta.label}</h3>
-                    <div class="mood-header-subtitle">${meta.desc}</div>
+                    <div class="mood-header-prefix">${name}'s Mood</div>
+                    <div class="mood-header-title">${meta.label}</div>
                 </div>
             </div>
 
@@ -1728,7 +1728,7 @@ function updateHeartState(state, activeInversion, inversionState, msgId = null, 
     // Add dynamic description to title tooltips
     const name = activeProgramName || "Program";
     const meta = MOOD_META[state.name] || MOOD_META.calm;
-    let title = `${name}'s Encoded Heart: ${meta.label} (${meta.desc})`;
+    let title = `${name}'s Encoded Heart: ${meta.label}`;
     if (resolvedInversion) {
         const invMeta = MOOD_META[resolvedInversion] || { label: resolvedInversion };
         title += ` • Inversion Active: ${invMeta.label || resolvedInversion}`;
