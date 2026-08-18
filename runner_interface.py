@@ -32,6 +32,8 @@ def _run_async_in_background_thread(coro):
     t.start()
 
 
+# Default personality inversion state per session.
+# 'calm' is intentionally excluded from the mood tally as baseline equilibrium.
 _DEFAULT_INVERSION_STATE = {
     "active_inversion": "",
     "inversion_consecutive_turns": 0,
@@ -892,12 +894,13 @@ class OsHistoryAdapter(LocalHistoryAdapter):
     def append_assistant_message(self, text: str, tool_calls_data: list, invocation_id: str, intermediate: bool = False):
         from utils.program_mood import extract_and_strip_mood
         _, mood_details = extract_and_strip_mood(text)
-        winning_mode = self.runner_obj._winning_mode_cache.get(self.session_id, "")
         
         if mood_details:
             mood_name = mood_details.get('name')
             self.runner_obj.update_inversion_state_with_mood(self.session_id, mood_name)
             
+        winning_mode = self.runner_obj.sessions_inversion_state.get(self.session_id, {}).get("active_inversion", "")
+        
         history = self.runner_obj.sessions_history[self.session_id]
         if history and history[-1]['role'] == 'program':
             history[-1]['text'] = text
@@ -964,7 +967,6 @@ def _is_cloud_model_check(model: str) -> bool:
 class BaseProgramRunner:
     def __init__(self, app_name="Sanctuary"):
         self.app_name = app_name
-        self._winning_mode_cache = {}
 
     async def _post_llm_request(
         self,
@@ -1578,16 +1580,29 @@ class BaseProgramRunner:
                 state["inversion_consecutive_turns"] = 0
             return
             
-        # If no active inversion, count the mood
+        # If no active inversion, count the mood with tally decay
         tally = state.setdefault("mood_tally", copy.deepcopy(_DEFAULT_INVERSION_STATE["mood_tally"]))
         if mood_name in tally:
             tally[mood_name] += 1
+            # Decay all other non-matching moods by 1 (floor at 0)
+            for k in tally:
+                if k != mood_name and tally[k] > 0:
+                    tally[k] -= 1
             if tally[mood_name] >= 5:
                 # Trigger inversion!
                 state["active_inversion"] = mood_name
                 state["inversion_consecutive_turns"] = 0
                 # Reset tally
                 state["mood_tally"] = copy.deepcopy(_DEFAULT_INVERSION_STATE["mood_tally"])
+        elif mood_name == "calm":
+            # Calm mood decays all tallies by 1 towards baseline equilibrium
+            for k in tally:
+                if tally[k] > 0:
+                    tally[k] -= 1
+
+    def get_inversion_state(self, session_id: str) -> dict:
+        """Returns a deep copy of the current inversion state for a given session."""
+        return copy.deepcopy(self.sessions_inversion_state.get(session_id, copy.deepcopy(_DEFAULT_INVERSION_STATE)))
 
     async def _get_inversion_mode(self, session_id: str, history: list = None) -> str:
         state = self.sessions_inversion_state.setdefault(session_id, copy.deepcopy(_DEFAULT_INVERSION_STATE))
@@ -1595,7 +1610,6 @@ class BaseProgramRunner:
 
     async def _get_inversion_directive(self, session_id: str) -> str:
         winning_mode = await self._get_inversion_mode(session_id)
-        self._winning_mode_cache[session_id] = winning_mode
         if winning_mode:
             from utils.program import get_active_program
             active_program = get_active_program()

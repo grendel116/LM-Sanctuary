@@ -24,7 +24,7 @@ Local-First workspace. Your chats, your memory, and your data stay on your drive
 
 Here is what a Sanctuary session looks like:
 
-![Sample Chat](./images/samplechat.png)
+![Sample Chat](./static/img/samplechat.png)
 
 ---
 
