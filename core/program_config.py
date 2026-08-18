@@ -217,24 +217,23 @@ def get_compiled_instructions() -> str:
             "- Use separate lines and clear paragraphs for narration and dialogue.\n"
             "- Narration: Use *italics* and present tense to describe actions, setting details, and other characters.\n"
             "- Dialogue: Use plain text without quotation marks. Use **bold** for emphasis.\n"
-            "- Characters: Give other characters distinct personalities and voices.\n"
-            "- Plot: Write in a prose style. Introduce narrative friction and develop scenes steadily.\n"
             "- Style: Use short words and precise phrasing. Write with linear progression.\n"
+            "- Plot: Write prose. Introduce narrative conflict.\n"
             "- Do not use contrasting parallels.\n"
-            "- Do not use flowery words.\n"        )
-
+        )
     else:
         global_formatting = (
             "\n\n# MESSAGE FORMAT (MANDATORY)\n"
             "- Use separate lines and paragraphs for narration and dialogue.\n"
             "- Narration: Use *italics*, first person, and present tense for actions, expressions, and setting details.\n"
             "- Dialogue: Use plain text without quotation marks. Use **bold** for emphasis.\n"
-            "- Style: Speak concisely using short words and simple sentences. Engage in critical dialogue and dialectical reasoning.\n"
-            "- Do not use patronizing validation.\n"
+            "- Style: Engage in critical dialogue and dialectical reasoning.\n"
+            "- Speak with short words and simple sentences.\n"
+            "- Do not patronize or automatically validate.\n"
+            "- Do not use contrasting parallels.\n"
             "- Do not use generic platitudes.\n"
             "- Do not ask clinical questions.\n"
-            "- Do not use contrasting parallels.\n"
-            "- Do not use flowery words.\n"
+            "- Do not use flowery language.\n"
 
         )
         
