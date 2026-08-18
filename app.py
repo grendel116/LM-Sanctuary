@@ -292,7 +292,7 @@ def serve_service_worker():
 
 @app.route('/app_icon.png')
 def app_icon():
-    response = send_file('images/app_icon.png')
+    response = send_file('static/img/app_icon.png')
     from flask import make_response
     res = make_response(response)
     res.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
@@ -672,6 +672,7 @@ def history():
             'history': chat_history,
             'state': state_info,
             'inversion_active': inversion_mode,
+            'inversion_state': runner.get_inversion_state(session_id),
             'character_name': program_name,
             'active_program': active_program,
             'theme': theme,
@@ -781,6 +782,7 @@ def chat():
             'tool_calls': tool_calls,
             'state': state_info,
             'inversion_active': inversion_mode,
+            'inversion_state': runner.get_inversion_state(session_id),
             'timestamp': program_timestamp or time.time(),
             'duration': duration,
             'user_msg_id': user_msg_id,
@@ -859,6 +861,7 @@ def edit():
             'tool_calls': tool_calls,
             'state': state_info,
             'inversion_active': inversion_mode,
+            'inversion_state': runner.get_inversion_state(session_id),
             'timestamp': program_timestamp or time.time(),
             'duration': duration,
             'user_msg_id': user_msg_id,
@@ -2327,6 +2330,8 @@ def select_program():
         
 
         reload_program_state()
+        if hasattr(runner, 'sessions_inversion_state'):
+            runner.sessions_inversion_state.clear()
             
         theme = load_theme(program_id)
 

@@ -306,6 +306,124 @@ header {
     }
 }
 
+/* Gamified Mood Status Screen */
+.mood-status-card {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    text-align: left;
+    padding: 4px 2px;
+}
+
+.mood-header-box {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 14px;
+    background: rgba(147, 112, 219, 0.04);
+    border: 1px solid rgba(147, 112, 219, 0.15);
+    border-radius: 12px;
+}
+
+.mood-header-emoji {
+    font-size: 1.7rem;
+    line-height: 1;
+    filter: drop-shadow(0 0 8px var(--card-glow, rgba(147, 112, 219, 0.3)));
+}
+
+.mood-header-info {
+    flex: 1;
+    min-width: 0;
+}
+
+.mood-header-title {
+    font-size: 1.05rem;
+    font-weight: 600;
+    color: var(--text-main, #f3effa);
+    margin: 0;
+}
+
+.mood-header-subtitle {
+    font-size: 0.8rem;
+    color: var(--text-muted, #8a95a5);
+    margin-top: 2px;
+}
+
+.mood-metric-row {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.mood-metric-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 0.82rem;
+    color: var(--text-muted, #8a95a5);
+}
+
+.mood-metric-value {
+    font-weight: 600;
+    color: var(--text-main, #f3effa);
+}
+
+.mood-progress-track {
+    width: 100%;
+    height: 6px;
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(255, 255, 255, 0.05);
+    border-radius: 999px;
+    overflow: hidden;
+    position: relative;
+}
+
+.mood-progress-fill {
+    height: 100%;
+    border-radius: 999px;
+    transition: width 0.4s ease, background 0.4s ease;
+}
+
+.mood-trail-container {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding-top: 4px;
+}
+
+.mood-trail-label {
+    font-size: 0.78rem;
+    color: var(--text-muted, #8a95a5);
+}
+
+.mood-trail-dots {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+}
+
+.mood-trail-dot {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: var(--dot-color, #9370db);
+    border: 1px solid rgba(255, 255, 255, 0.25);
+    box-shadow: 0 0 6px var(--dot-glow, rgba(147, 112, 219, 0.4));
+    transition: transform 0.2s ease, box-shadow 0.2s ease;
+    cursor: help;
+}
+
+.mood-trail-dot:hover {
+    transform: scale(1.35);
+    box-shadow: 0 0 10px var(--dot-glow, rgba(147, 112, 219, 0.7));
+}
+
+.mood-trail-dot.empty {
+    background: transparent;
+    border: 1px dashed rgba(255, 255, 255, 0.15);
+    box-shadow: none;
+}
+
 /* Chat area */
 #chat-container {
     flex: 1;

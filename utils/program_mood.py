@@ -14,8 +14,8 @@ def analyze_sentiment_with_llm(text: str) -> dict:
     if not text:
         return {
             "name": "calm",
-            "color": "#85b9eb",
-            "glow": "rgba(133, 185, 235, 0.9)",
+            "color": "#818cf8",
+            "glow": "rgba(129, 140, 248, 0.85)",
             "speed": "2.0s",
             "intensity": 0.0
         }
@@ -126,13 +126,13 @@ def analyze_sentiment_with_llm(text: str) -> dict:
         mood_name = "calm"
         
     mood_details = {
-        "intimate": {"color": "#ff4a75", "glow": "rgba(255, 74, 117, 0.9)"},
-        "excited": {"color": "#ff1493", "glow": "rgba(255, 20, 147, 0.9)"},
-        "calm": {"color": "#85b9eb", "glow": "rgba(133, 185, 235, 0.9)"},
-        "intense": {"color": "#ff7b00", "glow": "rgba(255, 123, 0, 0.9)"},
-        "sad": {"color": "#5f7d95", "glow": "rgba(95, 125, 149, 0.9)"},
-        "analytical": {"color": "#38bdf8", "glow": "rgba(56, 189, 248, 0.9)"},
-        "focused": {"color": "#a855f7", "glow": "rgba(168, 85, 247, 0.9)"}
+        "intimate": {"color": "#c084fc", "glow": "rgba(192, 132, 252, 0.85)"},
+        "excited": {"color": "#a78bfa", "glow": "rgba(167, 139, 250, 0.9)"},
+        "calm": {"color": "#818cf8", "glow": "rgba(129, 140, 248, 0.85)"},
+        "intense": {"color": "#f472b6", "glow": "rgba(244, 114, 182, 0.85)"},
+        "sad": {"color": "#94a3b8", "glow": "rgba(148, 163, 184, 0.65)"},
+        "analytical": {"color": "#60a5fa", "glow": "rgba(96, 165, 250, 0.85)"},
+        "focused": {"color": "#9370db", "glow": "rgba(147, 112, 219, 0.9)"}
     }
     
     details = mood_details[mood_name].copy()

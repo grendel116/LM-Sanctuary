@@ -214,32 +214,28 @@ def get_compiled_instructions() -> str:
     if narration_mode:
         global_formatting = (
             "\n\n# MESSAGE FORMAT (MANDATORY)\n"
-            "- Write in a prose style. Use separate lines and clear paragraphs for narration and dialogue.\n"
+            "- Use separate lines and clear paragraphs for narration and dialogue.\n"
             "- Narration: Use *italics* and present tense to describe actions, setting details, and other characters.\n"
-            "- Dialogue: Use plain text without quotation marks. Use **bold** for vocal emphasis.\n"
+            "- Dialogue: Use plain text without quotation marks. Use **bold** for emphasis.\n"
             "- Characters: Give other characters distinct personalities and voices.\n"
-            "- Plot: Introduce narrative friction and develop scenes steadily.\n"
+            "- Plot: Write in a prose style. Introduce narrative friction and develop scenes steadily.\n"
             "- Style: Use short words and precise phrasing. Write with linear progression.\n"
             "- Do not use contrasting parallels.\n"
-            "- Do not use stylistic symmetry.\n"
-            "- Do not mirror sentence clauses.\n"
-            "- Do not use flowery language.\n"
-            "- Do not use corporate jargon.\n"
-        )
+            "- Do not use flowery words.\n"        )
 
     else:
         global_formatting = (
             "\n\n# MESSAGE FORMAT (MANDATORY)\n"
             "- Use separate lines and paragraphs for narration and dialogue.\n"
             "- Narration: Use *italics*, first person, and present tense for actions, expressions, and setting details.\n"
-            "- Dialogue: Use plain text without quotation marks. Use **bold** for vocal emphasis.\n"
+            "- Dialogue: Use plain text without quotation marks. Use **bold** for emphasis.\n"
             "- Style: Speak concisely using short words and simple sentences. Engage in critical dialogue and dialectical reasoning.\n"
             "- Do not use patronizing validation.\n"
-            "- Do not offer generic platitudes.\n"
+            "- Do not use generic platitudes.\n"
             "- Do not ask clinical questions.\n"
-            "- Do not use flowery words.\n"
             "- Do not use contrasting parallels.\n"
-            "- Do not use stylistic symmetry.\n"
+            "- Do not use flowery words.\n"
+
         )
         
     base += global_formatting
