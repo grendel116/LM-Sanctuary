@@ -8058,17 +8058,31 @@ async function saveProjectSettings() {
 }
 
 async function addProjectFolder() {
-    const folderPath = prompt("Enter absolute path to additional workspace folder:");
-    if (!folderPath || !folderPath.trim()) return;
-    
-    const cleanPath = folderPath.trim();
-    if (currentProjectSettings.folders.includes(cleanPath)) {
-        showCustomAlert("Folder Exists", "This folder is already in the workspace.");
-        return;
+    try {
+        const res = await fetch('/api/browse_folder', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' }
+        });
+        const data = await res.json();
+        if (data && data.folder) {
+            const cleanPath = data.folder.trim();
+            if (!cleanPath) return;
+            
+            const exists = currentProjectSettings.folders.some(f => 
+                f.toLowerCase() === cleanPath.toLowerCase() || f === cleanPath
+            );
+            if (exists) {
+                showCustomAlert("Folder Exists", "This folder is already in the workspace.");
+                return;
+            }
+            
+            currentProjectSettings.folders.push(cleanPath);
+            await saveProjectSettings();
+        }
+    } catch (e) {
+        console.error("Failed to browse folder:", e);
+        showCustomAlert("Folder Selection Error", "Unable to open folder selector.");
     }
-    
-    currentProjectSettings.folders.push(cleanPath);
-    await saveProjectSettings();
 }
 
 async function removeProjectFolder(folder) {

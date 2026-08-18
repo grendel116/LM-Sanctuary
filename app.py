@@ -1576,6 +1576,54 @@ def project_settings():
             print(f"Error saving project settings: {e}")
             return jsonify({"error": str(e)}), 500
 
+@app.route('/api/browse_folder', methods=['POST'])
+@requires_auth
+def browse_folder():
+    import sys, subprocess, os, json
+    title = "Select Workspace Folder"
+    selected_folder = ""
+
+    if sys.platform == 'darwin':
+        try:
+            cmd = ['osascript', '-e', f'set f to choose folder with prompt {json.dumps(title)}', '-e', 'POSIX path of f']
+            res = subprocess.run(cmd, capture_output=True, text=True)
+            if res.returncode == 0 and res.stdout.strip():
+                selected_folder = res.stdout.strip()
+        except Exception as e:
+            print(f"macOS folder dialog error: {e}")
+    elif sys.platform.startswith('linux'):
+        try:
+            cmd = ['zenity', '--file-selection', '--directory', f'--title={title}']
+            res = subprocess.run(cmd, capture_output=True, text=True)
+            if res.returncode == 0 and res.stdout.strip():
+                selected_folder = res.stdout.strip()
+        except Exception:
+            pass
+
+    if not selected_folder:
+        script = (
+            "import tkinter as tk\n"
+            "from tkinter import filedialog\n"
+            "root = tk.Tk()\n"
+            "root.withdraw()\n"
+            "root.attributes('-topmost', True)\n"
+            "root.focus_force()\n"
+            f"folder = filedialog.askdirectory(title={json.dumps(title)})\n"
+            "root.destroy()\n"
+            "if folder:\n"
+            "    print(folder)\n"
+        )
+        try:
+            res = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True)
+            if res.returncode == 0 and res.stdout.strip():
+                selected_folder = res.stdout.strip()
+        except Exception as e:
+            print(f"Tkinter folder dialog error: {e}")
+
+    if selected_folder:
+        return jsonify({"folder": os.path.normpath(selected_folder)})
+    return jsonify({"folder": None, "cancelled": True})
+
 @app.route('/api/save_generation_params', methods=['POST'])
 @requires_auth
 def save_generation_params():

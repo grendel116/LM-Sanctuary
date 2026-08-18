@@ -2670,10 +2670,6 @@ input.onboarding-input {
     flex-direction: column;
     gap: 15px;
 }
-.form-section-divider {
-    border-top: 1px solid rgba(255, 255, 255, 0.05);
-    padding-top: 12px;
-}
 .upload-zone {
     background: rgba(0, 0, 0, 0.4);
     border: 1.5px dashed rgba(255, 255, 255, 0.08);
