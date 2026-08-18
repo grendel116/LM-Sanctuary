@@ -817,7 +817,7 @@ def edit():
     msg_id = request.json.get('msg_id')
     new_text = request.json.get('new_text') # None means reroll (use original text)
     selected_model = request.json.get('model')
-    force_offload = request.json.get('force_offload', new_text is None)
+    force_offload = request.json.get('force_offload', False)
 
     import tools
     tools.current_session_id.set(session_id)

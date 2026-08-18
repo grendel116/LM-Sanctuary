@@ -287,12 +287,40 @@ class DataBankManager:
             
         print(f"[Data Bank] Deleted {len(doc_ids_to_delete)} chat history archives for session '{session_id}' in memories.")
 
+    def update_memory_document(self, doc_name: str, new_text: str) -> bool:
+        """Re-chunks and re-embeds an existing memory document with distilled or updated text."""
+        data = self._load_data(self.memories_path)
+        matching_docs = [d for d in data.get("documents", []) if d.get("name") == doc_name and d.get("source_type") == 'chat_history']
+        if not matching_docs:
+            return False
+        doc = matching_docs[0]
+        doc_id = doc["id"]
+        
+        # Remove old chunks
+        data["chunks"] = [c for c in data.get("chunks", []) if c.get("doc_id") != doc_id]
+        
+        # Re-chunk and embed
+        model = get_embedding_model()
+        new_chunks = self.chunk_text(new_text)
+        if new_chunks:
+            vectors = model.encode(new_chunks)
+            for idx, (chunk_str, vec) in enumerate(zip(new_chunks, vectors)):
+                data["chunks"].append({
+                    "doc_id": doc_id,
+                    "chunk_index": idx,
+                    "text": chunk_str,
+                    "vector": vec.tolist() if hasattr(vec, 'tolist') else list(vec)
+                })
+        doc["size"] = len(new_text)
+        self._save_data(self.memories_path, data)
+        return True
+
     def get_all_memories(self) -> list:
         """Retrieves all chat history archives from memories.json, including their concatenated chunk text."""
         data = self._load_data(self.memories_path)
         
         chat_docs = [
-            d for d in data["documents"]
+            d for d in data.get("documents", [])
             if d.get("source_type") == 'chat_history'
         ]
         
@@ -301,7 +329,7 @@ class DataBankManager:
         results = []
         for doc in chat_docs:
             doc_id = doc["id"]
-            doc_chunks = [c for c in data["chunks"] if c.get("doc_id") == doc_id]
+            doc_chunks = [c for c in data.get("chunks", []) if c.get("doc_id") == doc_id]
             doc_chunks.sort(key=lambda x: x.get("chunk_index", 0))
             
             text = "\n".join(c["text"] for c in doc_chunks)
@@ -328,7 +356,7 @@ class DataBankManager:
         data = self._load_data(self.memories_path)
         
         chat_docs = [
-            d for d in data["documents"]
+            d for d in data.get("documents", [])
             if d.get("source_type") == 'chat_history'
         ]
         
@@ -338,7 +366,7 @@ class DataBankManager:
         archives = []
         for doc in target_docs:
             doc_id = doc["id"]
-            doc_chunks = [c for c in data["chunks"] if c.get("doc_id") == doc_id]
+            doc_chunks = [c for c in data.get("chunks", []) if c.get("doc_id") == doc_id]
             doc_chunks.sort(key=lambda x: x.get("chunk_index", 0))
             
             archives.append({
@@ -349,25 +377,62 @@ class DataBankManager:
         return archives
 
     def prune_chat_histories(self, session_id: str = None, keep_limit: int = 3):
-        """Prunes older chat history archives globally from memories.json."""
+        """Consolidates the oldest chat history archives when exceeding keep_limit so narrative history is preserved."""
         data = self._load_data(self.memories_path)
         
         chat_docs = [
-            d for d in data["documents"]
+            d for d in data.get("documents", [])
             if d.get("source_type") == 'chat_history'
         ]
         
-        chat_docs.sort(key=lambda x: x.get("timestamp", 0), reverse=True)
+        # Sort chronologically with oldest documents first
+        chat_docs.sort(key=lambda x: x.get("timestamp", 0))
         
-        if len(chat_docs) > keep_limit:
-            to_delete_docs = chat_docs[keep_limit:]
-            to_delete_ids = set(d["id"] for d in to_delete_docs)
+        # Iteratively merge the two oldest documents until total documents match keep_limit
+        while len(chat_docs) > keep_limit:
+            doc_1 = chat_docs[0]
+            doc_2 = chat_docs[1]
             
-            data["documents"] = [d for d in data["documents"] if d["id"] not in to_delete_ids]
-            data["chunks"] = [c for c in data["chunks"] if c["doc_id"] not in to_delete_ids]
+            # Fetch text chunks of both documents
+            chunks_1 = [c["text"] for c in data.get("chunks", []) if c.get("doc_id") == doc_1["id"]]
+            chunks_2 = [c["text"] for c in data.get("chunks", []) if c.get("doc_id") == doc_2["id"]]
             
-            self._save_data(self.memories_path, data)
-            print(f"[Data Bank] Pruned {len(to_delete_ids)} older chat history archives globally in memories.")
+            text_1 = " ".join(chunks_1).strip()
+            text_2 = " ".join(chunks_2).strip()
+            merged_text = f"{text_1} {text_2}".strip()
+            
+            # Remove old chunks for both documents
+            to_remove_ids = {doc_1["id"], doc_2["id"]}
+            data["chunks"] = [c for c in data.get("chunks", []) if c.get("doc_id") not in to_remove_ids]
+            
+            # Re-chunk and embed the consolidated narrative text under doc_1
+            model = get_embedding_model()
+            merged_chunks = self.chunk_text(merged_text)
+            if merged_chunks:
+                vectors = model.encode(merged_chunks)
+                for idx, (chunk_str, vec) in enumerate(zip(merged_chunks, vectors)):
+                    data["chunks"].append({
+                        "doc_id": doc_1["id"],
+                        "chunk_index": idx,
+                        "text": chunk_str,
+                        "vector": vec.tolist() if hasattr(vec, 'tolist') else list(vec)
+                    })
+                    
+            # Update doc_1 size and preserve oldest timestamp
+            doc_1["size"] = len(merged_text)
+            
+            # Remove doc_2 from the document registry
+            data["documents"] = [d for d in data.get("documents", []) if d["id"] != doc_2["id"]]
+            
+            # Refresh sorted list
+            chat_docs = [
+                d for d in data.get("documents", [])
+                if d.get("source_type") == 'chat_history'
+            ]
+            chat_docs.sort(key=lambda x: x.get("timestamp", 0))
+            print(f"[Data Bank] Consolidated oldest archives '{doc_1['name']}' and '{doc_2['name']}' into single progressive memory chapter.")
+            
+        self._save_data(self.memories_path, data)
 
     def purge_all(self):
         """Purges both databank.json and memories.json."""

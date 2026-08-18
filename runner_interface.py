@@ -601,11 +601,9 @@ class OsHistoryAdapter(LocalHistoryAdapter):
         user_msg_indices = [idx for idx, msg in enumerate(history) if msg.get('role') == 'user' and not msg.get('compacted')]
         
         if force:
-            keep_turns = 3
+            keep_turns = 2
         else:
-            if len(user_msg_indices) < 12:
-                return
-            keep_turns = 5
+            keep_turns = 4
             
         if len(user_msg_indices) <= keep_turns:
             return
@@ -614,8 +612,9 @@ class OsHistoryAdapter(LocalHistoryAdapter):
         
         # Extract turns before cutoff to summarize
         historical_turns = history[:cutoff_idx]
+        uncompacted_historical_turns = [msg for msg in historical_turns if not msg.get('compacted')]
         text_to_summarize = ""
-        for msg in historical_turns:
+        for msg in uncompacted_historical_turns:
             if msg.get('role') not in ('user', 'program'):
                 continue
             role = "User" if msg.get('role') == 'user' else "Program"
@@ -656,6 +655,16 @@ class OsHistoryAdapter(LocalHistoryAdapter):
                 source_type="chat_history"
             )
             db.prune_chat_histories(self.session_id, keep_limit=3)
+            
+            # Check if Slot 1 (the oldest consolidated chronicle) exceeds size threshold for distillation
+            priors = db.get_prior_chat_histories(self.session_id, limit=3)
+            if len(priors) == 3:
+                oldest_doc = priors[-1]
+                if len(oldest_doc.get("text", "")) > 1200:
+                    distilled_chronicle = await self.runner_obj._distill_epic_chronicle(oldest_doc["text"], active_model)
+                    if distilled_chronicle and not distilled_chronicle.startswith("Distillation failed"):
+                        db.update_memory_document(oldest_doc["name"], distilled_chronicle)
+                        print(f"[COMPACTION OS] Distilled historical chronicle in '{oldest_doc['name']}' to {len(distilled_chronicle)} chars.", flush=True)
             print(f"[COMPACTION OS] Ingested history to vector database.", flush=True)
         except Exception as e:
             print(f"[COMPACTION OS ERROR] Failed to ingest: {e}", flush=True)
@@ -1118,22 +1127,23 @@ class BaseProgramRunner:
             program_name = "Program"
             
         prompt = (
-            "You are a compaction assistant.\n"
-            f"Summarize the chat history between {user_name} and {program_name}.\n"
+            "You are a progressive memory compaction assistant.\n"
+            f"Summarize the NEW chapter of events involving {user_name} and {program_name}.\n"
             f"Always refer to the user as '{user_name}' and the program as '{program_name}'. Use their names for all references.\n"
-            "Extract facts, preferences, instructions, file changes, and project details.\n"
-            "Write a concise content string of up to 300 characters.\n\n"
+            "Extract new key developments, decisions, relationship milestones, file changes, and project details.\n"
+            "Write a concise narrative summary (2-3 sentences, up to 500 characters).\n"
+            "Focus STRICTLY on the new developments in the recent chat history and do NOT repeat details already recorded in prior memories.\n\n"
         )
 
         if prior_memories:
-            prompt += "Excerpts of prior memories:\n"
+            prompt += "Excerpts of prior memory chapters:\n"
             for pm in prior_memories:
                 prompt += f"{pm}\n\n"
-            prompt += "Reference the prior memories to keep the summary coherent with the context.\n\n"
+            prompt += "Ensure the new summary advances the timeline without repeating the prior memory chapters above.\n\n"
             
         prompt += (
-            f"NEW CHAT HISTORY TO SUMMARIZE:\n{text_to_summarize}\n\n"
-            "SUMMARY:"
+            f"NEW CHAT HISTORY TO SUMMARIZE (NEW CHAPTER):\n{text_to_summarize}\n\n"
+            "INCREMENTAL SUMMARY:"
         )
         
         if is_remote_configured:
@@ -1181,6 +1191,71 @@ class BaseProgramRunner:
         except Exception as e:
             print(f"Error generating local summary: {e}", flush=True)
         return "Memory compaction summary generation failed due to connection error."
+
+    async def _distill_epic_chronicle(self, text_to_distill: str, active_model: str) -> str:
+        """Condenses an extended multi-chapter historical chronicle into a high-level general summary."""
+        from utils.program import get_active_user
+        from core.program_config import get_program_name
+        
+        user_name = get_active_user().capitalize()
+        try:
+            program_name = get_program_name()
+        except Exception:
+            program_name = "Program"
+            
+        prompt = (
+            f"You are the memory chronicler for the ongoing interaction between {user_name} and {program_name}.\n"
+            "The following text is the accumulated chronicle of earlier conversation chapters.\n"
+            f"Condense these events into a single cohesive, high-level general summary (2-3 concise paragraphs, up to 900 characters).\n"
+            "Retain major milestones, key user preferences, shared history, project decisions, and relationship dynamics.\n\n"
+            f"ACCUMULATED CHRONICLE TO DISTILL:\n{text_to_distill}\n\n"
+            "DISTILLED GENERAL SUMMARY:"
+        )
+        
+        is_remote_configured = _is_remote_configured()
+        remote_cloud_url = os.getenv("REMOTE_CLOUD_URL")
+        remote_key = os.getenv("REMOTE_API_KEY")
+        
+        if is_remote_configured:
+            try:
+                target_model = os.getenv("REMOTE_MODEL", "gemini-3.1-flash-lite")
+                headers = {
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {remote_key}"
+                }
+                payload = {
+                    "model": target_model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.3,
+                    "max_tokens": 1024
+                }
+                response = await self._post_llm_request(remote_cloud_url, payload, headers, timeout=60.0)
+                if response.status_code == 200:
+                    res_json = response.json()
+                    _text = res_json['choices'][0]['message'].get('content', '').strip()
+                    return re.sub(r'(?:<think>|\[think\])[\s\S]*?(?:</think>|\[/think\]|<\/\s*think>|\[\s*/\s*think\s*\]|$)', '', _text, flags=re.IGNORECASE).strip()
+            except Exception as e:
+                print(f"[COMPACTION] Error generating remote distilled chronicle: {e}. Falling back to local.", flush=True)
+                
+        # Local fallback
+        payload = {
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.3,
+            "max_tokens": 1024
+        }
+        target_model = active_model if (active_model and active_model != 'local-llm') else os.getenv("LOCAL_MODEL_NAME")
+        if target_model:
+            payload["model"] = target_model
+            
+        try:
+            response = await self._post_llm_request(REMOTE_SERVER_URL, payload, get_remote_server_headers(), timeout=60.0)
+            if response.status_code == 200:
+                res_json = response.json()
+                _text = res_json['choices'][0]['message'].get('content', '').strip()
+                return re.sub(r'(?:<think>|\[think\])[\s\S]*?(?:</think>|\[/think\]|<\/\s*think>|\[\s*/\s*think\s*\]|$)', '', _text, flags=re.IGNORECASE).strip()
+        except Exception as e:
+            print(f"Error generating local distilled chronicle: {e}", flush=True)
+        return "Distillation failed due to connection error."
 
     async def _execute_local_llm_loop(
         self,

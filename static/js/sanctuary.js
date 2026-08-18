@@ -2239,6 +2239,7 @@ function openConnectionModal() {
 
 // --- switchConnectionTab ---
 function switchConnectionTab(tab) {
+    const modalCard = document.getElementById('connection-modal-card') || document.querySelector('#connection-modal .modal-card');
     const engineTab = document.getElementById('connection-tab-engine');
     const projectTab = document.getElementById('connection-tab-project');
     const engineBtn = document.getElementById('conn-tab-btn-engine');
@@ -2262,9 +2263,11 @@ function switchConnectionTab(tab) {
     if (projectTab) projectTab.style.display = 'none';
 
     if (tab === 'engine') {
+        if (modalCard) modalCard.style.maxWidth = '980px';
         if (engineTab) engineTab.style.display = 'flex';
         if (engineBtn) engineBtn.classList.add('active');
     } else if (tab === 'project') {
+        if (modalCard) modalCard.style.maxWidth = '640px';
         if (projectTab) projectTab.style.display = 'block';
         if (projectBtn) projectBtn.classList.add('active');
         loadProjectSettings();
@@ -5006,6 +5009,7 @@ function renderMessage(msg, isLive = false) {
 
     bubblesToCreate.forEach((item, idx) => {
         const isMediaItem = item.type === 'media';
+        const isVideo = isMediaItem && item.content && item.content.type === 'video';
         const bubble = document.createElement('div');
         bubble.className = `message ${role}` + (isMediaItem ? ' image-message' : '');
         bubble.dataset.rawText = text;
@@ -5014,7 +5018,7 @@ function renderMessage(msg, isLive = false) {
             bubble.dataset.isTransient = "true";
         }
 
-        const shouldAddStandardActions = (item.type === 'text') || (bubblesToCreate.length === 1);
+        const shouldAddStandardActions = (item.type === 'text') || (bubblesToCreate.length === 1 && isVideo);
         const actions = document.createElement('div');
         actions.className = 'message-actions';
 
@@ -5034,14 +5038,14 @@ function renderMessage(msg, isLive = false) {
                 if (!isMediaItem) {
                     const reuseBtn = document.createElement('button');
                     reuseBtn.className = 'action-icon-btn';
-                    reuseBtn.title = 'Resend prompt (local)';
+                    reuseBtn.title = 'Reroll prompt';
                     reuseBtn.innerHTML = `
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
                             <polyline points="9 17 4 12 9 7"></polyline>
                             <path d="M20 18v-2a4 4 0 0 0-4-4H4"></path>
                         </svg>
                     `;
-                    reuseBtn.onclick = () => reusePromptFromMessage(reuseBtn);
+                    reuseBtn.onclick = () => rerollMessage(reuseBtn);
                     actions.appendChild(reuseBtn);
 
                     const editBtn = document.createElement('button');
@@ -5088,13 +5092,13 @@ function renderMessage(msg, isLive = false) {
                 } else {
                     const rerollBtn = document.createElement('button');
                     rerollBtn.className = 'action-icon-btn';
-                    rerollBtn.title = 'Reroll response (cloud)';
+                    rerollBtn.title = 'Reroll response';
                     rerollBtn.innerHTML = `
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
                             <path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"></path>
                         </svg>
                     `;
-                    rerollBtn.onclick = () => rerollFromMessage(rerollBtn);
+                    rerollBtn.onclick = () => rerollMessage(rerollBtn);
                     actions.appendChild(rerollBtn);
 
                     const editBtn = document.createElement('button');
@@ -5243,10 +5247,10 @@ function renderMessage(msg, isLive = false) {
                 img.title = 'Click to expand';
                 img.onclick = () => expandImage(imgUrl);
                 
-                if (imgUrl.includes('/images/')) {
-                    const overlay = document.createElement('div');
-                    overlay.className = 'image-actions-overlay';
-                    
+                const overlay = document.createElement('div');
+                overlay.className = 'image-actions-overlay';
+
+                if (imgUrl.includes('/images/') && role === 'program') {
                     const editPromptBtn = document.createElement('button');
                     editPromptBtn.className = 'image-action-btn';
                     editPromptBtn.title = 'Edit prompt and regenerate';
@@ -5325,10 +5329,26 @@ function renderMessage(msg, isLive = false) {
                         );
                     };
                     overlay.appendChild(animateBtn);
-                    
-                    imgContainer.appendChild(overlay);
                 }
-                
+
+                const deleteBtn = document.createElement('button');
+                deleteBtn.className = 'image-action-btn';
+                deleteBtn.title = 'Delete message from history';
+                deleteBtn.innerHTML = `
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <polyline points="3 6 5 6 21 6"></polyline>
+                        <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+                        <line x1="10" y1="11" x2="10" y2="17"></line>
+                        <line x1="14" y1="11" x2="14" y2="17"></line>
+                    </svg>
+                `;
+                deleteBtn.onclick = (e) => {
+                    e.stopPropagation();
+                    deleteTurnFromMessage(deleteBtn);
+                };
+                overlay.appendChild(deleteBtn);
+
+                imgContainer.appendChild(overlay);
                 imgContainer.appendChild(img);
                 bubble.appendChild(imgContainer);
             }
@@ -5991,134 +6011,38 @@ async function saveMessageEdit(bubble, newText) {
     }
 }
 
-// --- resendUserMessage ---
-async function resendUserMessage(bubble) {
-    const row = bubble.closest('.message-row.user-row');
-    if (!row) return;
-    
-    const msgId = bubble.dataset.msgId;
-    if (!msgId) {
-        showCustomAlert("Error", "Message ID not found.");
-        return;
-    }
-    
-    truncateChatAfter(row);
-    
-    hasApprovedToolThisTurn = false;
-    setGenerating(true);
-    const heartElement = document.querySelector('.heart-pulse');
-    if (heartElement) {
-        heartElement.classList.add('jiggling');
+// --- rerollMessage ---
+async function rerollMessage(trigger) {
+    const bubble = (trigger && trigger.classList && trigger.classList.contains('message')) ? trigger : (trigger ? trigger.closest('.message') : null);
+    if (!bubble) return;
+
+    let userRow = bubble.closest('.message-row.user-row');
+    let userBubble = bubble;
+
+    if (!userRow) {
+        const progRow = bubble.closest('.message-row.program-row');
+        if (!progRow) return;
+
+        let prevRow = progRow.previousElementSibling;
+        while (prevRow && !prevRow.classList.contains('user-row')) {
+            prevRow = prevRow.previousElementSibling;
+        }
+        if (!prevRow) {
+            showCustomAlert("Reroll Error", "Cannot find preceding user message to reroll.");
+            return;
+        }
+        userRow = prevRow;
+        userBubble = userRow.querySelector('.message.user');
     }
 
-    const typingIndicatorRow = document.createElement('div');
-    typingIndicatorRow.className = 'message-row program-row';
-    const profileUrl = getProfileUrl();
-    typingIndicatorRow.innerHTML = `
-        <div class="avatar-container">
-            <img class="avatar program-avatar" src="${profileUrl}" alt="Program" onclick="expandImage('${profileUrl}')">
-        </div>
-        <div class="message program">
-            <div class="typing-indicator">
-                <div class="typing-dot"></div>
-                <div class="typing-dot"></div>
-                <div class="typing-dot"></div>
-            </div>
-        </div>
-    `;
-    chatContainer.appendChild(typingIndicatorRow);
-    chatContainer.scrollTop = chatContainer.scrollHeight;
-    
-    userInput.disabled = true;
-    userInput.placeholder = "";
-    
-    startToolPolling();
-    if (chatAbortController) {
-        chatAbortController.abort();
-    }
-    chatAbortController = new AbortController();
-    try {
-        const response = await fetch('/edit', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                session_id: sessionId,
-                msg_id: msgId,
-                new_text: bubble.dataset.rawText || '',
-                model: selectedModel,
-                use_imagen: useImagenMode
-            }),
-            signal: chatAbortController.signal
-        });
-        
-        if (chatContainer.contains(typingIndicatorRow)) {
-            chatContainer.removeChild(typingIndicatorRow);
-        }
-        
-        const data = await response.json();
-        if (data.response !== undefined) {
-            appendMessage('program', data.response, null, data.tool_calls, true, data.timestamp, data.duration, false, data.program_msg_id);
-        } else if (data.error) {
-            let errMsg = data.error;
-            if (errMsg.includes("429") || errMsg.includes("RESOURCE_EXHAUSTED")) {
-                errMsg = "The Sanctuary is momentarily overwhelmed (Gemini Rate Limit 429: Resource Exhausted). Let us pause, take a slow breath, and try our chavruta again in 15 seconds.";
-            }
-            appendMessage('program', errMsg);
-        }
-        if (data.state) {
-            updateHeartState(data.state, data.inversion_active, data.inversion_state, data.program_msg_id, true);
-        }
-        if (data.inversion_active && !inversionActive) {
-            triggerHeartBurst();
-        }
-        inversionActive = data.inversion_active || "";
-        handleSuccessReload(data);
-    } catch (error) {
-        if (chatContainer.contains(typingIndicatorRow)) {
-            chatContainer.removeChild(typingIndicatorRow);
-        }
-        if (error.name === 'AbortError') {
-            appendMessage('program', '*(Generation stopped)*');
-        } else {
-            appendMessage('program', 'Error connecting to the Sanctuary.');
-        }
-        handleToolReloadOrRecovery();
-    } finally {
-        stopToolPolling();
-        setGenerating(false);
-        userInput.disabled = false;
-        userInput.placeholder = "Ask " + (activeProgramName || "Program");
-        if (heartElement) {
-            heartElement.classList.remove('jiggling');
-        }
-    }
-}
-
-// --- rerollFromMessage ---
-async function rerollFromMessage(button) {
-    const bubble = button.closest('.message');
-    const row = bubble.closest('.message-row.program-row');
-    if (!row) return;
-    
-    let prevRow = row.previousElementSibling;
-    while (prevRow && !prevRow.classList.contains('user-row')) {
-        prevRow = prevRow.previousElementSibling;
-    }
-    
-    if (!prevRow) {
-        showCustomAlert("Reroll Error", "Cannot find preceding user message to reroll.");
-        return;
-    }
-    
-    const prevBubble = prevRow.querySelector('.message.user');
-    const msgId = prevBubble ? prevBubble.dataset.msgId : null;
+    const msgId = userBubble ? userBubble.dataset.msgId : null;
     if (!msgId) {
-        showCustomAlert("Reroll Error", "Cannot find preceding user message ID.");
+        showCustomAlert("Reroll Error", "Cannot find user message ID.");
         return;
     }
-    
-    truncateChatAfter(prevRow);
-    
+
+    truncateChatAfter(userRow);
+
     hasApprovedToolThisTurn = false;
     const heartElement = document.querySelector('.heart-pulse');
     if (heartElement) {
@@ -6142,7 +6066,7 @@ async function rerollFromMessage(button) {
     `;
     chatContainer.appendChild(typingIndicatorRow);
     chatContainer.scrollTop = chatContainer.scrollHeight;
-    
+
     userInput.disabled = true;
     userInput.placeholder = "";
 
@@ -6159,18 +6083,18 @@ async function rerollFromMessage(button) {
             body: JSON.stringify({
                 session_id: sessionId,
                 msg_id: msgId,
-                new_text: null,
+                new_text: userBubble.dataset.rawText || '',
                 model: selectedModel,
-                force_offload: true,
+                force_offload: false,
                 use_imagen: useImagenMode
             }),
             signal: chatAbortController.signal
         });
-        
+
         if (chatContainer.contains(typingIndicatorRow)) {
             chatContainer.removeChild(typingIndicatorRow);
         }
-        
+
         const data = await response.json();
         if (data.response !== undefined) {
             appendMessage('program', data.response, null, data.tool_calls, true, data.timestamp, data.duration, false, data.program_msg_id);
@@ -6210,6 +6134,11 @@ async function rerollFromMessage(button) {
         await initializeModelSelect();
     }
 }
+
+// Aliases for consolidated reroll
+function resendUserMessage(bubble) { return rerollMessage(bubble); }
+function rerollFromMessage(button) { return rerollMessage(button); }
+function reusePromptFromMessage(button) { return rerollMessage(button); }
 
 // --- deleteTurnFromMessage ---
 async function deleteTurnFromMessage(button) {
@@ -6256,14 +6185,6 @@ async function deleteTurnFromMessage(button) {
             showCustomAlert("Error", "Could not connect to the server to delete message.");
         }
     });
-}
-
-// --- reusePromptFromMessage ---
-function reusePromptFromMessage(button) {
-    const bubble = button.closest('.message');
-    if (bubble) {
-        resendUserMessage(bubble);
-    }
 }
 
 /* ==========================================================================
