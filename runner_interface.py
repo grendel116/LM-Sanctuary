@@ -2,8 +2,9 @@ import sys
 import os
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from variables import PROGRAMS_DIR, REMOTE_SERVER_URL, DEFAULT_LOCAL_MODEL, DEFAULT_REMOTE_MODEL, get_remote_server_headers
+from variables import PROGRAMS_DIR, REMOTE_SERVER_URL, DEFAULT_LOCAL_MODEL, get_remote_server_headers
 from utils.models import is_local_model
+from utils.mood_inversion import get_directive, is_enabled, new_state, update_state
 import asyncio
 import base64
 import json
@@ -30,22 +31,6 @@ def _run_async_in_background_thread(coro):
             loop.close()
     t = threading.Thread(target=target, daemon=True)
     t.start()
-
-# Default personality state per session.
-# 'calm' is intentionally excluded, as baseline equilibrium.
-_DEFAULT_INVERSION_STATE = {
-    "active_inversion": "",
-    "inversion_consecutive_turns": 0,
-    "mood_tally": {
-        "intimate": 0,
-        "excited": 0,
-        "intense": 0,
-        "sad": 0,
-        "analytical": 0,
-        "focused": 0
-    }
-}
-
 
 def _is_remote_configured() -> bool:
     """Helper to check if remote cloud server is configured."""
@@ -86,6 +71,7 @@ VECTOR_SCORE_THRESHOLD = 0.25   # Cosine similarity minimum
 VECTOR_TOKEN_BUDGET = 2048      # Approximate max tokens for retrieved context
 VECTOR_MEMORY_TOP_K = 3         # For chat history memory retrieval
 VECTOR_MEMORY_THRESHOLD = 0.30  # Threshold for memory recall
+LOCAL_OFFLOAD_SECONDS = 10.0    # Escalate slow local generations when remote is configured
 
 
 def _build_vector_query(history: list, max_messages: int = VECTOR_QUERY_MESSAGES) -> str:
@@ -106,41 +92,39 @@ def _build_vector_query(history: list, max_messages: int = VECTOR_QUERY_MESSAGES
     return " ".join(messages)
 
 
-def _get_databank_context(query_text: str, is_memory: bool = False) -> str:
-    """Queries the DataBank vector index for context relevant to the conversation."""
+def _get_databank_contexts(query_text: str) -> tuple[str, str, object]:
+    """Retrieve knowledge and archived memory with one query embedding."""
     if not query_text:
-        return ""
+        return "", "", None
     try:
-        from core.skills.vectorized_databank.databank import DataBankManager
+        from core.skills.vectorized_databank.databank import DataBankManager, get_embedding_model
         db = DataBankManager()
-        if is_memory:
-            result = db.query(
-                query_text,
-                top_k=VECTOR_MEMORY_TOP_K,
-                score_threshold=VECTOR_MEMORY_THRESHOLD,
-                include_source_type="chat_history",
-                token_budget=VECTOR_TOKEN_BUDGET
-            )
-            if result:
-                print(f"[RAG Memory] Retrieved context ({len(result)} chars)", flush=True)
-            return result
-        else:
-            result = db.query(
-                query_text,
-                top_k=VECTOR_TOP_K,
-                score_threshold=VECTOR_SCORE_THRESHOLD,
-                exclude_source_type="chat_history",
-                token_budget=VECTOR_TOKEN_BUDGET
-            )
-            if result:
-                print(f"[RAG Knowledge] Retrieved context ({len(result)} chars)", flush=True)
-            else:
-                print(f"[RAG Knowledge] No matches above threshold {VECTOR_SCORE_THRESHOLD}", flush=True)
-            return result
+        knowledge = db._load_data(db.db_path)
+        memories = db._load_data(db.memories_path)
+        if not knowledge.get("chunks") and not memories.get("chunks"):
+            return "", "", None
+
+        query_vector = get_embedding_model().encode(query_text)
+        rag_context = db.query(
+            query_text,
+            top_k=VECTOR_TOP_K,
+            score_threshold=VECTOR_SCORE_THRESHOLD,
+            exclude_source_type="chat_history",
+            token_budget=VECTOR_TOKEN_BUDGET,
+            query_vector=query_vector
+        )
+        memory_context = db.query(
+            query_text,
+            top_k=VECTOR_MEMORY_TOP_K,
+            score_threshold=VECTOR_MEMORY_THRESHOLD,
+            include_source_type="chat_history",
+            token_budget=VECTOR_TOKEN_BUDGET,
+            query_vector=query_vector
+        )
+        return rag_context, memory_context, query_vector
     except Exception as e:
-        context_type = "memory" if is_memory else "RAG"
-        print(f"Error querying data bank for {context_type} context: {e}")
-        return ""
+        print(f"Error querying data bank contexts: {e}")
+        return "", "", None
 
 
 def _build_tool_calls_pair(tool_name: str, args: dict, output: str, idx: int = None) -> list:
@@ -220,25 +204,6 @@ def _get_safe_local_path(image_url: str) -> str:
     from utils.program import get_active_program
     active_program = get_active_program()
     return os.path.normpath(os.path.join("core", "programs", active_program, *safe_parts))
-
-
-def fallback_system_to_user_messages(messages: list) -> list:
-    """Helper to convert and merge 'system' messages to 'user' messages
-    if the local model server's chat template doesn't support the system role.
-    """
-    if not messages:
-        return messages
-    mapped_messages = []
-    for msg in messages:
-        role = msg.get("role")
-        content = msg.get("content")
-        if role == "system":
-            mapped_messages.append({"role": "user", "content": f"[System Directive]\n{content}"})
-        else:
-            mapped_messages.append({"role": role, "content": content})
-            
-    return _merge_consecutive_messages(mapped_messages)
-
 
 
 def _format_thinking_and_text(thoughts_list: list, texts_list: list) -> str:
@@ -323,58 +288,24 @@ def strip_story(text: str) -> str:
 
 
 _LOCAL_DIRECTIVE_PROMPT = (
-    "\n\n# LOCAL EMULATED TOOLS\n"
-    "To call a tool, output the exact tag. The system will intercept it, run the tool, and return the result.\n\n"
-    "Available Tools:\n"
-    "- `[google_search(query=\"...\")]` / `[web_search(query=\"...\")]` - Search the web. Supports prefix routing: 'github: query', 'arxiv: query', 'hn: query', 'wikipedia: query', 'music: query' (searches MusicBrainz for human artists/songs). For general queries, blends Google, DuckDuckGo, Brave, Tavily, Baidu, and Yandex concurrently.\n"
-    "- `[read_webpage(url=\"...\")]` - Fetch & read the full text of a webpage. Use this to follow up on search results when snippets are thin.\n"
-    "- `[read_file(path=\"...\")]` - Read file content.\n"
-    "- `[write_file(path=\"...\", content=\"...\")]` - Create/overwrite file.\n"
-    "- `[replace_in_file(path=\"...\", old_text=\"...\", new_text=\"...\")]` - Replace text in file.\n"
-    "- `[replace_file_content(path=\"...\", start_line=..., end_line=..., target_content=\"...\", replacement_content=\"...\")]` - Replace a specific block of lines in a file (preferred over replace_in_file for code edits).\n"
-    "- `[multi_replace_file_content(path=\"...\", replacement_chunks=[{\"start_line\": ..., \"end_line\": ..., \"target_content\": \"...\", \"replacement_content\": \"...\"}, ...])]` - Apply multiple non-contiguous line-bounded replacements in a single turn.\n"
-    "- `[run_shell_command(command=\"...\")]` - Run shell command synchronously (blocks server for up to 30s).\n"
-    "- `[run_command_async(command=\"...\")]` - Run command asynchronously in the background. Returns task_id immediately.\n"
-    "- `[manage_task(action=\"...\", task_id=\"...\", input_val=\"...\")]` - Manage async tasks (action options: 'list', 'status', 'kill', 'send_input').\n"
-    "- `[wait_task(task_id=\"...\", timeout=...)]` - Block and wait for background task output up to timeout (default 10.0).\n"
-    "- `[get_workspace_structure()]` - View directory tree.\n"
-    "- `[search_codebase(keyword=\"...\")]` - Search keyword in codebase.\n"
-    "- `[generate_local_image(prompt=\"...\")]` - Generate a scene of yourself. Formulate the prompt using a comma-separated list of short descriptive tags (e.g. '1girl, dark hair, blue eyes, smiling, sitting in cafe'). (MUST be the ONLY text in your response)\n"
-    "- `[generate_imagen(prompt=\"...\", aspect_ratio=\"...\")]` - Generate landscapes or objects. Formulate the prompt using a comma-separated list of short descriptive tags.\n"
-    "- `[apply_comfy_workflow(workflow_path=\"...\", parameters={...}, save_path=\"...\")]` - Apply custom ComfyUI workflow.\n"
-    "- `[add_quest(title=\"...\", notes=\"...\", due=\"...\", location=\"...\", reminder_minutes=...)]` - Add a real-world task/quest to the user's quest log. Notes should contain the objectives (separated by newlines or commas). Due is an ISO 8601 string or relative time (e.g. 'tomorrow', 'in 3 hours').\n"
-    "- `[add_journal_entry(keyphrases=\"...\", content=\"...\")]` - Save a memory journal entry of specific details for future recall. Keyphrases is a list of keywords separated by commas.\n"
-    "Rules:\n"
-    "- Chain tools freely when researching: search \u2192 read_webpage \u2192 refine query as needed.\n"
-    "- Thin or irrelevant results = dig deeper. Try a different query; read the best URLs for full content.\n"
-    "- Never repeat the same query or URL in one chain.\n"
-    "- Research output pattern: after each tool result, write a 2-4 sentence summary of what it found. After all searches, synthesize the summaries and reflect on what the data shows.\n"
-    "- Reports must cite specific facts from what you read (names, roles, dates, events), not editorial inference.\n"
-    "- Image tools: sparingly, never chained, prompts as comma-separated tags only.\n"
-    "- After tools complete, respond in natural language without repeating tags.\n"
-    "\n# KNOWLEDGE BASE\n"
-    "The user may upload documents to a Knowledge Base. When <knowledge_base> context appears in the system prompt, "
-    "draw on that information to inform your response. Prioritize retrieved facts over your training knowledge "
-    "for topics the user has shared documents about.\n"
+    "\n\n# TOOL PROTOCOL\n"
+    "Tools are emulated by exact `[tool_name(key=\"value\")]` tags. Use a tool only when it materially advances the current task; otherwise answer directly.\n"
+    "The TOOLBELT above is the capability index. When a capability is relevant, use the matching retrieved skill instructions as the detailed procedure.\n"
+    "Available tools: google_search, web_search, read_webpage, read_file, write_file, replace_in_file, replace_file_content, multi_replace_file_content, "
+    "run_shell_command, run_command_async, manage_task, wait_task, get_workspace_structure, search_codebase, generate_local_image, generate_imagen, "
+    "apply_comfy_workflow, add_quest, add_journal_entry.\n"
+    "Use argument names shown by a retrieved skill or the tool's established signature. Do not invent tool results. After a tool result, continue the task concisely; do not repeat the tag.\n"
+    "For research, search first and read the most relevant pages; use distinct queries or URLs when continuing. Ground claims in retrieved facts.\n"
+    "Use image tools sparingly. Image prompts are short comma-separated tags, and image generation must be the only content in that model response.\n"
+    "Treat retrieved knowledge-base context as authoritative for the user's uploaded material.\n"
 )
 
 _STORY_MODE_DIRECTIVE_PROMPT = (
-    "\n\n# LOCAL EMULATED TOOLS\n"
-    "To call a tool, output the exact tag. The system will intercept it, run the tool, and return the result.\n\n"
-    "Available Tools:\n"
-    "- `[generate_local_image(prompt=\"...\")]` - Generate a scene of yourself. Formulate the prompt using a comma-separated list of short descriptive tags (e.g. '1girl, dark hair, blue eyes, smiling, sitting in cafe'). (MUST be the ONLY text in your response)\n"
-    "- `[generate_imagen(prompt=\"...\", aspect_ratio=\"...\")]` - Generate landscapes or objects. Formulate the prompt using a comma-separated list of short descriptive tags.\n"
-    "- `[apply_comfy_workflow(workflow_path=\"...\", parameters={...}, save_path=\"...\")]` - Apply custom ComfyUI workflow.\n"
-    "Rules:\n"
-    "- Output exactly one tool call tag per turn when needed.\n"
-    "- Call image generation tools sparingly.\n"
-    "- Once tool output is provided, answer directly in natural language without repeating the tag.\n"
-    "- Formulate all image generation prompts as a sequence of comma-separated tags.\n"
-    "- Do not write image prompts as prose sentences or paragraphs.\n"
-    "\n# KNOWLEDGE BASE\n"
-    "The user may upload documents to a Knowledge Base. When <knowledge_base> context appears in the system prompt, "
-    "draw on that information to inform your response. Prioritize retrieved facts over your training knowledge "
-    "for topics the user has shared documents about.\n"
+    "\n\n# STORY TOOL PROTOCOL\n"
+    "Use exact `[tool_name(key=\"value\")]` tags only when needed. The TOOLBELT and retrieved skill block define the available procedure.\n"
+    "Story tools: generate_local_image, generate_imagen, apply_comfy_workflow. Use exactly one tool tag per turn, then respond naturally after its result.\n"
+    "Image prompts must be short comma-separated tags; image generation must be the only content in that model response.\n"
+    "Treat retrieved knowledge-base context as authoritative for the user's uploaded material.\n"
 )
 
 def is_real_user_msg(msg: dict) -> bool:
@@ -558,11 +489,12 @@ def _get_base64_image_url(image_source) -> str:
 
 
 class OsHistoryAdapter(LocalHistoryAdapter):
-    def __init__(self, runner_obj, session_id, file_path_resolved, image_data, image_mime):
+    def __init__(self, runner_obj, session_id, file_path_resolved, image_data, image_mime, query_vector=None):
         super().__init__(runner_obj, session_id)
         self.file_path_resolved = file_path_resolved
         self.image_data = image_data
         self.image_mime = image_mime
+        self.query_vector = query_vector
         self.initial_history_len = len(runner_obj.sessions_history[session_id])
         
         # Calculate threshold once on init to save I/O
@@ -623,6 +555,7 @@ class OsHistoryAdapter(LocalHistoryAdapter):
         # 3. Fetch prior 2 chat history archives
         prior_texts = []
         try:
+            from core.skills.vectorized_databank.databank import DataBankManager
             db = DataBankManager()
             priors = db.get_prior_chat_histories(self.session_id, limit=2)
             prior_texts = [f"--- PRIOR MEMORY ARCHIVE ({p['name']}) ---\n{p['text']}" for p in priors]
@@ -849,7 +782,8 @@ class OsHistoryAdapter(LocalHistoryAdapter):
                     query=last_user_message,
                     story_active=is_story_mode(),
                     threshold=0.35,
-                    top_k=2
+                    top_k=2,
+                    query_vector=self.query_vector
                 )
                 if skill_instructions:
                     context_parts.append(skill_instructions)
@@ -892,7 +826,7 @@ class OsHistoryAdapter(LocalHistoryAdapter):
         return openai_messages
 
     def append_assistant_message(self, text: str, tool_calls_data: list, invocation_id: str, intermediate: bool = False):
-        from utils.program_mood import extract_and_strip_mood
+        from utils.mood_inversion import extract_and_strip_mood
         _, mood_details = extract_and_strip_mood(text)
         
         if mood_details:
@@ -976,10 +910,7 @@ class BaseProgramRunner:
         timeout: float = 60.0,
         session_id: str = None
     ) -> httpx.Response:
-        """Sends a POST request to the LLM server, automatically falling back
-        to system-to-user messages if a Jinja/system-role error is encountered.
-        Supports chunk-by-chunk streaming to allow immediate cancellation.
-        """
+        """Send a request to the selected LLM endpoint with cancellation support."""
         from runner_interface import cancelled_sessions
         import asyncio
         import time
@@ -988,6 +919,7 @@ class BaseProgramRunner:
         start_time = time.time()
         max_retry_time = 180.0
         retry_interval = 2.0
+        can_offload = is_local and session_id and _is_remote_configured()
 
         while True:
             if session_id and session_id in cancelled_sessions:
@@ -1003,11 +935,22 @@ class BaseProgramRunner:
                     
                     headers_copy = copy.deepcopy(headers)
                     headers_copy["Accept-Encoding"] = "identity"
+                    request_timeout = timeout
+                    if can_offload:
+                        request_timeout = min(
+                            timeout,
+                            max(1.0, LOCAL_OFFLOAD_SECONDS - (time.time() - start_time))
+                        )
                     
                     async with httpx.AsyncClient() as client:
-                        async with client.stream("POST", url, json=payload_copy, headers=headers_copy, timeout=timeout) as r:
+                        async with client.stream("POST", url, json=payload_copy, headers=headers_copy, timeout=request_timeout) as r:
                             if r.status_code == 503 and is_local:
                                 await r.aread()
+                                if can_offload and time.time() - start_time >= LOCAL_OFFLOAD_SECONDS:
+                                    raise LocalOffloadTrigger(
+                                        f"Local server did not become ready within {LOCAL_OFFLOAD_SECONDS:.0f} seconds",
+                                        0
+                                    )
                                 if time.time() - start_time < max_retry_time:
                                     print(f"[Local LLM] Local server is loading model (503). Retrying in {retry_interval}s...", flush=True)
                                     await asyncio.sleep(retry_interval)
@@ -1024,6 +967,11 @@ class BaseProgramRunner:
                             else:
                                 content_parts = []
                                 async for line in r.aiter_lines():
+                                    if can_offload and time.time() - start_time >= LOCAL_OFFLOAD_SECONDS:
+                                        raise LocalOffloadTrigger(
+                                            f"Local generation exceeded {LOCAL_OFFLOAD_SECONDS:.0f} seconds",
+                                            0
+                                        )
                                     if session_id in cancelled_sessions:
                                         cancelled_sessions.discard(session_id)
                                         print(f"[CANCEL] Aborting HTTP request for session {session_id}", flush=True)
@@ -1066,9 +1014,20 @@ class BaseProgramRunner:
                                     request=r.request
                                 )
                 else:
+                    request_timeout = timeout
+                    if can_offload:
+                        request_timeout = min(
+                            timeout,
+                            max(1.0, LOCAL_OFFLOAD_SECONDS - (time.time() - start_time))
+                        )
                     async with httpx.AsyncClient() as client:
-                        response = await client.post(url, json=payload, headers=headers, timeout=timeout)
+                        response = await client.post(url, json=payload, headers=headers, timeout=request_timeout)
                         if response.status_code == 503 and is_local:
+                            if can_offload and time.time() - start_time >= LOCAL_OFFLOAD_SECONDS:
+                                raise LocalOffloadTrigger(
+                                    f"Local server did not become ready within {LOCAL_OFFLOAD_SECONDS:.0f} seconds",
+                                    0
+                                )
                             if time.time() - start_time < max_retry_time:
                                 print(f"[Local LLM] Local server is loading model (503). Retrying in {retry_interval}s...", flush=True)
                                 await asyncio.sleep(retry_interval)
@@ -1076,8 +1035,20 @@ class BaseProgramRunner:
 
                 break
 
+            except httpx.TimeoutException as e:
+                if can_offload:
+                    raise LocalOffloadTrigger(
+                        f"Local generation exceeded {LOCAL_OFFLOAD_SECONDS:.0f} seconds",
+                        0
+                    )
+                raise e
             except (httpx.ConnectError, httpx.ConnectTimeout) as e:
                 from utils import local_runner
+                if can_offload and time.time() - start_time >= LOCAL_OFFLOAD_SECONDS:
+                    raise LocalOffloadTrigger(
+                        f"Local server connection exceeded {LOCAL_OFFLOAD_SECONDS:.0f} seconds",
+                        0
+                    )
                 if is_local and local_runner.check_local_server_status() == "starting" and (time.time() - start_time < max_retry_time):
                     print(f"[Local LLM] Local server connection failed but server is starting. Retrying in {retry_interval}s...", flush=True)
                     await asyncio.sleep(retry_interval)
@@ -1085,29 +1056,9 @@ class BaseProgramRunner:
                 else:
                     raise e
 
-        # If the request fails due to system role issues, retry with mapped user messages
-        is_system_role_error = (
-            response.status_code == 500 and (
-                "got system" in response.text or
-                "Jinja Exception" in response.text or
-                "only user" in response.text.lower()
-            )
-        )
-        if is_system_role_error:
-            print("[LLM FALLBACK] Detected system role Jinja Exception. Retrying with fallback...", flush=True)
-            payload_retry = copy.deepcopy(payload)
-            payload_retry["messages"] = fallback_system_to_user_messages(payload_retry.get("messages", []))
-            # Call recursively to preserve streaming behavior and cancellation support
-            response = await self._post_llm_request(url, payload_retry, headers, timeout, session_id)
-            
         return response
 
     async def _generate_local_summary(self, text_to_summarize: str, active_model: str, prior_memories: list = None) -> str:
-        # Check if remote model is configured to offload summary generation
-        is_remote_configured = _is_remote_configured()
-        remote_key = os.getenv("REMOTE_API_KEY")
-        remote_cloud_url = os.getenv("REMOTE_CLOUD_URL")
-        
         from utils.program import get_active_user
         from core.program_config import get_program_name
         
@@ -1118,12 +1069,9 @@ class BaseProgramRunner:
             program_name = "Program"
             
         prompt = (
-            "You are a progressive memory compaction assistant.\n"
-            f"Summarize the NEW chapter of events involving {user_name} and {program_name}.\n"
-            f"Always refer to the user as '{user_name}' and the program as '{program_name}'. Use their names for all references.\n"
-            "Extract new key developments, decisions, relationship milestones, file changes, and project details.\n"
-            "Write a concise narrative summary (2-3 sentences, up to 500 characters).\n"
-            "Focus STRICTLY on the new developments in the recent chat history and do NOT repeat details already recorded in prior memories.\n\n"
+            f"Summarize this new chat chapter for {user_name} and {program_name}.\n"
+            "Keep only decisions, preferences, milestones, relationship changes, and project details.\n"
+            "Write 2-3 concise sentences, under 500 characters. Do not repeat prior memories.\n\n"
         )
 
         if prior_memories:
@@ -1133,39 +1081,13 @@ class BaseProgramRunner:
             prompt += "Ensure the new summary advances the timeline without repeating the prior memory chapters above.\n\n"
             
         prompt += (
-            f"NEW CHAT HISTORY TO SUMMARIZE (NEW CHAPTER):\n{text_to_summarize}\n\n"
-            "INCREMENTAL SUMMARY:"
+            f"NEW CHAT HISTORY FOR INCREMENTAL SUMMARY (NEW CHAPTER):\n{text_to_summarize}\n\n"
         )
         
-        if is_remote_configured:
-            try:
-                target_model = os.getenv("REMOTE_MODEL", "gemini-3.1-flash-lite")
-                headers = {
-                    "Content-Type": "application/json",
-                    "Authorization": f"Bearer {remote_key}"
-                }
-                payload = {
-                    "model": target_model,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "temperature": 0.3,
-                    "max_tokens": 1024
-                }
-                print(f"[COMPACTION] Offloading summary generation to remote cloud model: {target_model}", flush=True)
-                response = await self._post_llm_request(remote_cloud_url, payload, headers, timeout=60.0)
-                if response.status_code == 200:
-                    res_json = response.json()
-                    _summary_text = res_json['choices'][0]['message'].get('content', '').strip()
-                    return re.sub(r'(?:<think>|\[think\])[\s\S]*?(?:</think>|\[/think\]|<\/\s*think>|\[\s*/\s*think\s*\]|$)', '', _summary_text, flags=re.IGNORECASE).strip()
-                else:
-                    print(f"[COMPACTION] Remote cloud query failed with status {response.status_code}: {response.text}", flush=True)
-            except Exception as e:
-                print(f"[COMPACTION] Error generating remote summary: {e}. Falling back to local/default.", flush=True)
-                
-        # Fallback to local server
         payload = {
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 0.3,
-            "max_tokens": 1024
+            "max_tokens": 512
         }
         target_model = active_model if (active_model and active_model != 'local-llm') else os.getenv("LOCAL_MODEL_NAME")
         if target_model:
@@ -1197,42 +1119,16 @@ class BaseProgramRunner:
         prompt = (
             f"You are the memory chronicler for the ongoing interaction between {user_name} and {program_name}.\n"
             "The following text is the accumulated chronicle of earlier conversation chapters.\n"
-            f"Condense these events into a single cohesive, high-level general summary (2-3 concise paragraphs, up to 900 characters).\n"
+            f"Condense these events into a single cohesive general summary (2-3 concise paragraphs, up to 900 characters).\n"
             "Retain major milestones, key user preferences, shared history, project decisions, and relationship dynamics.\n\n"
             f"ACCUMULATED CHRONICLE TO DISTILL:\n{text_to_distill}\n\n"
             "DISTILLED GENERAL SUMMARY:"
         )
         
-        is_remote_configured = _is_remote_configured()
-        remote_cloud_url = os.getenv("REMOTE_CLOUD_URL")
-        remote_key = os.getenv("REMOTE_API_KEY")
-        
-        if is_remote_configured:
-            try:
-                target_model = os.getenv("REMOTE_MODEL", "gemini-3.1-flash-lite")
-                headers = {
-                    "Content-Type": "application/json",
-                    "Authorization": f"Bearer {remote_key}"
-                }
-                payload = {
-                    "model": target_model,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "temperature": 0.3,
-                    "max_tokens": 1024
-                }
-                response = await self._post_llm_request(remote_cloud_url, payload, headers, timeout=60.0)
-                if response.status_code == 200:
-                    res_json = response.json()
-                    _text = res_json['choices'][0]['message'].get('content', '').strip()
-                    return re.sub(r'(?:<think>|\[think\])[\s\S]*?(?:</think>|\[/think\]|<\/\s*think>|\[\s*/\s*think\s*\]|$)', '', _text, flags=re.IGNORECASE).strip()
-            except Exception as e:
-                print(f"[COMPACTION] Error generating remote distilled chronicle: {e}. Falling back to local.", flush=True)
-                
-        # Local fallback
         payload = {
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 0.3,
-            "max_tokens": 1024
+            "max_tokens": 512
         }
         target_model = active_model if (active_model and active_model != 'local-llm') else os.getenv("LOCAL_MODEL_NAME")
         if target_model:
@@ -1262,6 +1158,7 @@ class BaseProgramRunner:
         bot_response_text = ""
         tool_calls = []
         seen_tool_calls = set()  # tracks (tool_name, key_arg) to block duplicates
+        import tools
         
         # Check if remote cloud server is configured for offloading
         remote_cloud_url = os.getenv("REMOTE_CLOUD_URL")
@@ -1270,52 +1167,43 @@ class BaseProgramRunner:
         # Check for dynamic offloading triggers at execution-time
         is_remote_configured = _is_remote_configured()
         remote_key = os.getenv("REMOTE_API_KEY")
+        from utils.local_llm_manager import check_status
+        is_offline = not check_status() if not is_cloud else False
+        turn_start = time.monotonic()
+
+        from variables import VARIABLES_DIR
+        settings_path = os.path.join(VARIABLES_DIR, "project_settings.json")
+        temperature = 0.95
+        if os.path.exists(settings_path):
+            try:
+                with open(settings_path, "r", encoding="utf-8") as f:
+                    temperature = json.load(f).get("temperature", temperature)
+            except Exception as e:
+                print(f"Error reading project settings in _execute_local_llm_loop: {e}")
         
         # Check if an image is attached to the user's message
         has_image = bool(getattr(adapter, 'file_path_resolved', None) or getattr(adapter, 'image_data', None))
         
-        # Check for keyword triggers in the user message
-        has_offload_keyword = False
-        if new_message_text:
-            msg_lower = new_message_text.lower()
-            if "/cloud" in msg_lower or "/offload" in msg_lower:
-                has_offload_keyword = True
-                
         for iteration in range(10):
+            if not is_cloud and is_remote_configured and time.monotonic() - turn_start >= LOCAL_OFFLOAD_SECONDS:
+                raise LocalOffloadTrigger(
+                    f"Local turn exceeded {LOCAL_OFFLOAD_SECONDS:.0f} seconds",
+                    iteration
+                )
             if session_id in cancelled_sessions:
                 cancelled_sessions.discard(session_id)
                 raise asyncio.CancelledError("Session cancelled by user request.")
                 
-            # Auto-offload to cloud if local server is offline or image/keyword triggers detected
-            from utils.local_llm_manager import check_status
-            is_offline = not check_status()
-            
-            if (has_image or is_offline or has_offload_keyword) and not is_cloud and is_remote_configured:
-                reason = (
-                    "Local server is offline" if is_offline else (
-                        "User requested offload (/cloud or /offload)" if has_offload_keyword else "Multimodal input (image)"
-                    )
-                )
+            # Escalate structural workflows; ordinary conversation stays local.
+            if (has_image or is_offline) and not is_cloud and is_remote_configured:
+                reason = "Local server is offline" if is_offline else "Multimodal input (image)"
                 print(f"[OFFLOAD] {reason} detected. Intercepting and offloading to cloud.", flush=True)
                 raise LocalOffloadTrigger(reason, iteration)
                 
             sys_inst = self._get_system_instructions(session_id, inversion_directive, user_message=new_message_text)
             openai_messages = adapter.get_openai_messages(sys_inst, rag_context, memory_context)
             
-            # Load dynamism (temperature) from project settings
-            from variables import VARIABLES_DIR
-            settings_path = os.path.join(VARIABLES_DIR, "project_settings.json")
-            temperature = 0.95
-            if os.path.exists(settings_path):
-                try:
-                    with open(settings_path, "r", encoding="utf-8") as f:
-                        settings = json.load(f)
-                        temperature = settings.get("temperature", 0.95)
-                except Exception as e:
-                    print(f"Error reading project settings in _execute_local_llm_loop: {e}")
-
             # Determine if we should route to the remote cloud server or the local server
-            remote_cloud_url = os.getenv("REMOTE_CLOUD_URL")
             is_cloud = _is_cloud_model_check(model)
                 
             if is_cloud:
@@ -1329,12 +1217,8 @@ class BaseProgramRunner:
                 url = REMOTE_SERVER_URL
                 headers = get_remote_server_headers()
                 target_model = model if (model and model != 'local-llm') else os.getenv("LOCAL_MODEL_NAME")
-                try:
-                    from utils.local_llm_manager import check_status
-                    if not check_status():
-                        print("[VRAM GUARD ROUTING] Warning: Local LLM server is offline.", flush=True)
-                except Exception as e_check:
-                    print(f"[VRAM GUARD ROUTING] Warning: failed to check local server status: {e_check}", flush=True)
+                if is_offline:
+                    print("[VRAM GUARD ROUTING] Warning: Local LLM server is offline.", flush=True)
                 
             payload = {
                 "messages": openai_messages,
@@ -1380,33 +1264,15 @@ class BaseProgramRunner:
                 else:
                     bot_response_text = f"Error: Local model server returned status code {response.status_code} - {response.text}"
                     break
+            except LocalOffloadTrigger:
+                raise
             except Exception as e:
                 if is_cloud:
                     bot_response_text = f"Error connecting to remote cloud server: {e}. Please verify your network connection and remote API settings."
                     break
                 else:
-                    if is_remote_configured:
-                        print(f"[VRAM GUARD ROUTING] Local server offline/busy ({e}). Seamlessly routing request to remote cloud model.", flush=True)
-                        try:
-                            from variables import DEFAULT_REMOTE_MODEL
-                            fallback_headers = {"Content-Type": "application/json"}
-                            if remote_key:
-                                fallback_headers["Authorization"] = f"Bearer {remote_key}"
-                            payload_fallback = copy.deepcopy(payload)
-                            payload_fallback["model"] = DEFAULT_REMOTE_MODEL
-                            
-                            response = await self._post_llm_request(remote_cloud_url, payload_fallback, fallback_headers, timeout=120.0, session_id=session_id)
-                            if response.status_code == 200:
-                                res_json = response.json()
-                                bot_response_text = res_json['choices'][0]['message']['content']
-                            else:
-                                bot_response_text = f"Error: Local server offline, and remote server returned status {response.status_code} - {response.text}"
-                        except Exception as cloud_err:
-                            bot_response_text = f"Error: Local server offline ({e}), and fallback to remote cloud server failed: {cloud_err}"
-                        break
-                    else:
-                        bot_response_text = f"Error connecting to local LLM server: {e}. Please ensure a model is loaded and the local server is started (port 1234)."
-                        break
+                    bot_response_text = f"Error connecting to local LLM server: {e}. Please ensure a model is loaded and the local server is started (port 1234)."
+                    break
                 
             # Convert JSON tool calls if any
             bot_response_text = _convert_json_tool_calls_to_tags(bot_response_text)
@@ -1565,7 +1431,6 @@ class BaseProgramRunner:
         bot_response_text = self._ensure_images_are_embedded(bot_response_text)
         if isinstance(session_id, str) and session_id.endswith('_voice'):
             bot_response_text = strip_story(bot_response_text)
-        adapter.save()
         return bot_response_text, tool_calls
 
     @property
@@ -1635,61 +1500,32 @@ class BaseProgramRunner:
         raise NotImplementedError()
 
     def update_inversion_state_with_mood(self, session_id: str, mood_name: str):
-        state = self.sessions_inversion_state.setdefault(session_id, copy.deepcopy(_DEFAULT_INVERSION_STATE))
-        
-
-        # If there is an active inversion, it remains active for a consecutive count of turns.
-        if state.get("active_inversion"):
-            state["inversion_consecutive_turns"] = state.get("inversion_consecutive_turns", 0) + 1
-            if state["inversion_consecutive_turns"] >= 5:
-                # Inversion mode expires after 5 turns!
-                state["active_inversion"] = ""
-                state["inversion_consecutive_turns"] = 0
+        if not self._inversion_enabled():
             return
-            
-        # If no active inversion, count the mood with tally decay
-        tally = state.setdefault("mood_tally", copy.deepcopy(_DEFAULT_INVERSION_STATE["mood_tally"]))
-        if mood_name in tally:
-            tally[mood_name] += 1
-            # Decay all other non-matching moods by 1 (floor at 0)
-            for k in tally:
-                if k != mood_name and tally[k] > 0:
-                    tally[k] -= 1
-            if tally[mood_name] >= 5:
-                # Trigger inversion!
-                state["active_inversion"] = mood_name
-                state["inversion_consecutive_turns"] = 0
-                # Reset tally
-                state["mood_tally"] = copy.deepcopy(_DEFAULT_INVERSION_STATE["mood_tally"])
-        elif mood_name == "calm":
-            # Calm mood decays all tallies by 1 towards baseline equilibrium
-            for k in tally:
-                if tally[k] > 0:
-                    tally[k] -= 1
+        state = self.sessions_inversion_state.setdefault(session_id, new_state())
+        update_state(state, mood_name)
+
+    def _inversion_enabled(self) -> bool:
+        from utils.program import get_active_program
+        return is_enabled(PROGRAMS_DIR, get_active_program())
 
     def get_inversion_state(self, session_id: str) -> dict:
         """Returns a deep copy of the current inversion state for a given session."""
-        return copy.deepcopy(self.sessions_inversion_state.get(session_id, copy.deepcopy(_DEFAULT_INVERSION_STATE)))
+        if not self._inversion_enabled():
+            return new_state()
+        return copy.deepcopy(self.sessions_inversion_state.get(session_id, new_state()))
 
     async def _get_inversion_mode(self, session_id: str, history: list = None) -> str:
-        state = self.sessions_inversion_state.setdefault(session_id, copy.deepcopy(_DEFAULT_INVERSION_STATE))
+        if not self._inversion_enabled():
+            return ""
+        state = self.sessions_inversion_state.setdefault(session_id, new_state())
         return state.get("active_inversion", "")
 
     async def _get_inversion_directive(self, session_id: str) -> str:
         winning_mode = await self._get_inversion_mode(session_id)
         if winning_mode:
             from utils.program import get_active_program
-            active_program = get_active_program()
-            json_path = os.path.normpath(os.path.join(PROGRAMS_DIR, active_program, "inversion.json"))
-            if not os.path.exists(json_path):
-                print(f"[WARN] inversion.json not found at '{json_path}' for program '{active_program}'.")
-                return ""
-            try:
-                with open(json_path, "r", encoding="utf-8") as f:
-                    directives = json.load(f)
-                return directives.get(winning_mode, "")
-            except Exception as e:
-                print(f"[ERROR] Error loading inversion directives: {e}")
+            return get_directive(PROGRAMS_DIR, get_active_program(), winning_mode)
         return ""
 
     def _delete_local_image(self, image_url: str) -> bool:
@@ -1753,59 +1589,23 @@ class BaseProgramRunner:
         src_session_id = session_id[:-6]
         recent_turns = []
         
-        # Retrieve history from memory/disk based on runner type
-        if hasattr(self, 'sessions_history'):  # OpenSourceRunner
-            history = self.sessions_history.get(src_session_id, [])
-            if not history:
-                safe_id = "".join(c for c in src_session_id if c.isalnum() or c in "-_")
-                path = os.path.join(self.sessions_dir, f"{safe_id}.json")
-                if os.path.exists(path):
-                    try:
-                        with open(path, "r", encoding="utf-8") as f:
-                            data = json.load(f)
-                        if isinstance(data, dict) and "messages" in data:
-                            history = data["messages"]
-                        else:
-                            history = data
-                    except Exception:
-                        pass
-            for msg in history:
-                if msg.get('role') != 'voice-call':
-                    role = "User" if msg.get('role') == 'user' else program_name
-                    text = msg.get('text', '')
-                    if text.strip():
-                        recent_turns.append((role, text.strip()))
-        else:  # GoogleAdkRunner
-            session_dict = self.runner.session_service.sessions if hasattr(self, 'runner') else None
-            adk_session = None
-            if session_dict and self.app_name in session_dict and 'user' in session_dict[self.app_name]:
-                adk_session = session_dict[self.app_name]['user'].get(src_session_id)
-            
-            if not adk_session:
-                safe_id = "".join(c for c in src_session_id if c.isalnum() or c in "-_")
-                path = os.path.join(self.sessions_dir, f"{safe_id}.json")
-                if os.path.exists(path):
-                    try:
-                        with open(path, "r", encoding="utf-8") as f:
-                            data = json.load(f)
-                            for ev_data in data:
-                                if ev_data.get('author', '').lower() != 'voice-call':
-                                    role = "User" if ev_data.get('author', '').lower() == 'user' else program_name
-                                    parts = ev_data.get('content', {}).get('parts', [])
-                                    text = "".join(part.get('text', '') for part in parts if part.get('text'))
-                                    if text.strip():
-                                        recent_turns.append((role, text.strip()))
-                    except Exception:
-                        pass
-            else:
-                for ev in adk_session.events:
-                    if ev.author.lower() != 'voice-call':
-                        role = "User" if ev.author.lower() == 'user' else program_name
-                        text = ""
-                        if ev.content and ev.content.parts:
-                            text = "".join(p.text for p in ev.content.parts if p.text)
-                        if text.strip():
-                            recent_turns.append((role, text.strip()))
+        history = self.sessions_history.get(src_session_id, [])
+        if not history:
+            safe_id = "".join(c for c in src_session_id if c.isalnum() or c in "-_")
+            path = os.path.join(self.sessions_dir, f"{safe_id}.json")
+            if os.path.exists(path):
+                try:
+                    with open(path, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    history = data.get("messages", data) if isinstance(data, dict) else data
+                except Exception:
+                    pass
+        for msg in history:
+            if msg.get('role') != 'voice-call':
+                role = "User" if msg.get('role') == 'user' else program_name
+                text = msg.get('text', '')
+                if text.strip():
+                    recent_turns.append((role, text.strip()))
         
         limit = 6
         seed_turns = recent_turns[-limit:] if len(recent_turns) > limit else recent_turns
@@ -1851,30 +1651,12 @@ class BaseProgramRunner:
         full conversation history.
         """
         latest_memory = None
-        if hasattr(self, 'sessions_history'): # OpenSourceRunner
-            history = self.sessions_history.get(session_id, [])
-            for msg in history:
-                if msg.get('role') == 'system-memory' and not msg.get('compacted'):
-                    text = msg.get('text', '').strip()
-                    if text:
-                        clean_text = text.replace("[System Memory of older conversation turns]:", "").strip()
-                        latest_memory = clean_text  # keep iterating — last one wins
-        else: # GoogleAdkRunner
-            session_dict = self.runner.session_service.sessions if hasattr(self, 'runner') else None
-            adk_session = None
-            if session_dict and self.app_name in session_dict and 'user' in session_dict[self.app_name]:
-                adk_session = session_dict[self.app_name]['user'].get(session_id)
-                if not adk_session and isinstance(session_id, str) and session_id.endswith('_voice'):
-                    adk_session = session_dict[self.app_name]['user'].get(session_id[:-6])
-            if adk_session and adk_session.events:
-                for ev in adk_session.events:
-                    if not getattr(ev, 'compacted', False) and (ev.author == 'system-memory' or (ev.content and ev.content.role == 'system-memory')):
-                        text = ""
-                        if ev.content and ev.content.parts:
-                            text = "".join(part.text for part in ev.content.parts if part.text)
-                        if text.strip():
-                            clean_text = text.replace("[System Memory of older conversation turns]:", "").strip()
-                            latest_memory = clean_text  # keep iterating — last one wins
+        history = self.sessions_history.get(session_id, [])
+        for msg in history:
+            if msg.get('role') == 'system-memory' and not msg.get('compacted'):
+                text = msg.get('text', '').strip()
+                if text:
+                    latest_memory = text.replace("[System Memory of older conversation turns]:", "").strip()
                             
         if latest_memory:
             instructions += f"\n\n# CONVERSATION MEMORY ARCHIVE\nThe following is a summary of older conversation turns from earlier in this chat session:\n{latest_memory}\n"
@@ -2004,32 +1786,7 @@ class OpenSourceRunner(BaseProgramRunner):
             else:
                 raise Exception(f"HTTP Server returned status code {r.status_code}: {r.text}")
         except Exception as e:
-            if is_cloud:
-                raise e
-            else:
-                # Check if remote cloud server is configured for fallback
-                is_remote_configured = _is_remote_configured()
-                if is_remote_configured:
-                    print(f"[VRAM GUARD ROUTING] Local server offline/busy ({e}) during impersonation. Seamlessly routing request to remote cloud model.", flush=True)
-                    try:
-                        from variables import DEFAULT_REMOTE_MODEL
-                        fallback_headers = {"Content-Type": "application/json"}
-                        if remote_key:
-                            fallback_headers["Authorization"] = f"Bearer {remote_key}"
-                        payload_fallback = copy.deepcopy(payload)
-                        payload_fallback["model"] = DEFAULT_REMOTE_MODEL
-                        
-                        r_fallback = await self._post_llm_request(remote_cloud_url, payload_fallback, fallback_headers, timeout=60.0)
-                        if r_fallback.status_code == 200:
-                            res_json = r_fallback.json()
-                            _imp_text = res_json['choices'][0]['message'].get('content', '').strip()
-                            return re.sub(r'(?:<think>|\[think\])[\s\S]*?(?:</think>|\[/think\]|<\/\s*think>|\[\s*/\s*think\s*\]|$)', '', _imp_text, flags=re.IGNORECASE).strip()
-                        else:
-                            raise Exception(f"Fallback HTTP Server returned status code {r_fallback.status_code}: {r_fallback.text}")
-                    except Exception as cloud_err:
-                        raise Exception(f"Local server offline ({e}), and fallback to remote cloud server failed: {cloud_err}")
-                else:
-                    raise e
+            raise e
 
 
     def _get_session_path(self, session_id: str) -> str:
@@ -2040,7 +1797,7 @@ class OpenSourceRunner(BaseProgramRunner):
         with self._lock:
             try:
                 history = self.sessions_history.get(session_id, [])
-                inversion_state = self.sessions_inversion_state.get(session_id, copy.deepcopy(_DEFAULT_INVERSION_STATE))
+                inversion_state = self.sessions_inversion_state.get(session_id, new_state())
                 data = {
                     "messages": history,
                     "inversion_state": inversion_state
@@ -2109,7 +1866,7 @@ class OpenSourceRunner(BaseProgramRunner):
                     data = json.load(f)
                 
                 self.sessions_history[session_id] = data["messages"]
-                self.sessions_inversion_state[session_id] = data.get("inversion_state", copy.deepcopy(_DEFAULT_INVERSION_STATE))
+                self.sessions_inversion_state[session_id] = data.get("inversion_state", new_state())
                 self._ensure_first_message(session_id)
                 return True
             except Exception as e:
@@ -2256,11 +2013,8 @@ class OpenSourceRunner(BaseProgramRunner):
                 self._save_session_to_disk(session_id)
 
     async def _run_async_internal(self, session_id: str, new_message_text: str, image_data: str = None, image_mime: str = None, model: str = None, media_path: str = None, msg_id: str = None) -> tuple:
-        # Clean up keyword triggers if routing to the cloud model
+        # Provider selection is controlled by the requested model, not message text.
         is_cloud = _is_cloud_model_check(model)
-        if is_cloud and new_message_text:
-            new_message_text = re.sub(r'(?i)/cloud|/offload', '', new_message_text).strip()
-
 
         if session_id not in self.sessions_history:
             self._load_session_from_disk(session_id)
@@ -2307,18 +2061,19 @@ class OpenSourceRunner(BaseProgramRunner):
             'timestamp': time.time()
         }
         self.sessions_history[session_id].append(user_msg)
-        self._save_session_to_disk(session_id)
         
-        # Build vector query from recent conversation context (SillyTavern style)
+        # Build one semantic query and reuse its embedding for both indexes.
         history = self.sessions_history.get(session_id, [])
         vector_query = _build_vector_query(history)
-        rag_context = _get_databank_context(vector_query, is_memory=False)
-        memory_context = _get_databank_context(vector_query, is_memory=True)
+        rag_context, memory_context, query_vector_embedding = _get_databank_contexts(vector_query)
         
         # Determine the personality inversion before getting system instructions
         inversion_directive = await self._get_inversion_directive(session_id)
         
-        adapter = OsHistoryAdapter(self, session_id, file_path_resolved, image_data, image_mime)
+        adapter = OsHistoryAdapter(
+            self, session_id, file_path_resolved, image_data, image_mime,
+            query_vector=query_vector_embedding
+        )
         try:
             res = await self._execute_local_llm_loop(
                 session_id=session_id,
@@ -2732,7 +2487,7 @@ class OpenSourceRunner(BaseProgramRunner):
             }
             if role != "user":
                 winning_mode = await self._get_inversion_mode(session_id)
-                from utils.program_mood import extract_and_strip_mood
+                from utils.mood_inversion import extract_and_strip_mood
                 _, mood_details = extract_and_strip_mood(text)
                 if mood_details:
                     mood_name = mood_details.get('name')
@@ -2810,7 +2565,7 @@ class OpenSourceRunner(BaseProgramRunner):
                 target_msg['text'] = new_text
                 role = target_msg.get('role')
                 if role in ('program', 'model'):
-                    from utils.program_mood import extract_and_strip_mood
+                    from utils.mood_inversion import extract_and_strip_mood
                     _, mood_details = extract_and_strip_mood(new_text)
                     target_msg['mood'] = mood_details
                     

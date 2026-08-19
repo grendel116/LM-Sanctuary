@@ -176,7 +176,8 @@ def _keyword_match(query: str, record: dict) -> bool:
 
 
 def retrieve_skill_instructions(query: str, story_active: bool = False,
-                                 threshold: float = 0.35, top_k: int = 2) -> str:
+                                 threshold: float = 0.35, top_k: int = 2,
+                                 query_vector=None) -> str:
     """Retrieves full instruction blocks for matched skills.
 
     Uses a hybrid keyword + vector approach (same pattern as journals.py):
@@ -190,6 +191,7 @@ def retrieve_skill_instructions(query: str, story_active: bool = False,
         story_active: Whether narration/story mode is enabled.
         threshold: Minimum cosine similarity score for vector matched skills.
         top_k: Maximum number of vector matched skills to include.
+        query_vector: Optional precomputed embedding for this query.
 
     Returns:
         Formatted instruction text with the MANDATORY TASK PROTOCOLS header,
@@ -229,8 +231,9 @@ def retrieve_skill_instructions(query: str, story_active: bool = False,
     if vector_candidates and len(matched_blocks) < top_k:
         try:
             from core.skills.vectorized_databank.databank import get_embedding_model
-            model = get_embedding_model()
-            query_vector = model.encode(query)
+            if query_vector is None:
+                model = get_embedding_model()
+                query_vector = model.encode(query)
             query_norm = np.linalg.norm(query_vector)
 
             if query_norm > 0:

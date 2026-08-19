@@ -171,6 +171,17 @@ def load_temperature():
     return 0.95
 
 
+def remote_configuration():
+    """Return the configured remote endpoint only when both values are usable."""
+    api_key = os.getenv("REMOTE_API_KEY", "").strip()
+    cloud_url = os.getenv("REMOTE_CLOUD_URL", "").strip()
+    configured = bool(
+        api_key and api_key != "your_remote_api_key_here" and
+        cloud_url and cloud_url != "your_remote_cloud_url_here"
+    )
+    return configured, api_key, cloud_url
+
+
 def find_image_sidecar_json(image_filename, active_program):
     """Locate the sidecar .json for an image, scanning active then all programs."""
     for folder in ('portraits', 'media'):
@@ -212,8 +223,48 @@ def extract_mood(chat_history):
             if mood:
                 return mood
             break
-    from utils.program_mood import analyze_emotional_state
+    from utils.mood_inversion import analyze_emotional_state
     return analyze_emotional_state("")
+
+
+def prepare_generation_request(session_id, use_imagen=False, is_voice_call=False):
+    """Reset per-session tool state before a generation request."""
+    import tools
+    tools.current_session_id.set(session_id)
+    tools.current_use_imagen.set(use_imagen)
+    with tools.session_tool_calls_lock:
+        tools.session_tool_calls[session_id] = []
+
+    from runner_interface import cancelled_sessions, voice_call_sessions
+    cancelled_sessions.discard(session_id)
+    if is_voice_call:
+        voice_call_sessions.add(session_id)
+
+
+def build_generation_response(response_text, tool_calls, session_id, user_msg_id, program_msg_id, started_at):
+    """Build the common response payload returned by chat and edit routes."""
+    response_text = sanitize_response(response_text, session_id, program_msg_id)
+    chat_history = asyncio.run(runner.get_history(session_id))
+    inversion_mode = asyncio.run(runner._get_inversion_mode(session_id, history=chat_history))
+
+    program_timestamp = None
+    if program_msg_id:
+        for message in reversed(chat_history):
+            if message.get('id') == program_msg_id:
+                program_timestamp = message.get('timestamp')
+                break
+
+    return jsonify({
+        'response': response_text,
+        'tool_calls': tool_calls,
+        'state': extract_mood(chat_history),
+        'inversion_active': inversion_mode,
+        'inversion_state': runner.get_inversion_state(session_id),
+        'timestamp': program_timestamp or time.time(),
+        'duration': round(time.time() - started_at, 1),
+        'user_msg_id': user_msg_id,
+        'program_msg_id': program_msg_id
+    })
 
 
 # --- SECURE OPTIONAL AUTHENTICATION DECORATOR ---
@@ -734,17 +785,11 @@ def chat():
     selected_model = request.json.get('model')
     is_voice_call = request.json.get('is_voice_call', False)
 
-    import tools
-    tools.current_session_id.set(session_id)
-    tools.current_use_imagen.set(request.json.get('use_imagen', False))
-    with tools.session_tool_calls_lock:
-        tools.session_tool_calls[session_id] = []
-
-    from runner_interface import cancelled_sessions, voice_call_sessions
-    cancelled_sessions.discard(session_id)
-    if is_voice_call:
-        voice_call_sessions.add(session_id)
-        
+    prepare_generation_request(
+        session_id,
+        use_imagen=request.json.get('use_imagen', False),
+        is_voice_call=is_voice_call
+    )
     start_time = time.time()
 
     try:
@@ -760,34 +805,10 @@ def chat():
                 msg_id=msg_id
             )
         )
-        duration = round(time.time() - start_time, 1)
-        
-        # Apply banned words filter to output response
-        response_text = sanitize_response(response_text, session_id, program_msg_id)
-
-        chat_history = asyncio.run(runner.get_history(session_id))
-        state_info = extract_mood(chat_history)
-        inversion_mode = asyncio.run(runner._get_inversion_mode(session_id, history=chat_history))
-        
-        # Align timestamp with stored program message
-        program_timestamp = None
-        if program_msg_id:
-            for msg in reversed(chat_history):
-                if msg.get('id') == program_msg_id:
-                    program_timestamp = msg.get('timestamp')
-                    break
-            
-        return jsonify({
-            'response': response_text,
-            'tool_calls': tool_calls,
-            'state': state_info,
-            'inversion_active': inversion_mode,
-            'inversion_state': runner.get_inversion_state(session_id),
-            'timestamp': program_timestamp or time.time(),
-            'duration': duration,
-            'user_msg_id': user_msg_id,
-            'program_msg_id': program_msg_id
-        })
+        return build_generation_response(
+            response_text, tool_calls, session_id, user_msg_id,
+            program_msg_id, start_time
+        )
     except asyncio.CancelledError:
         print(f"[CANCEL] Chat generation cancelled for session {session_id}")
         asyncio.run(runner.append_message_to_session(session_id, 'program', '*(Generation cancelled)*'))
@@ -819,14 +840,10 @@ def edit():
     selected_model = request.json.get('model')
     force_offload = request.json.get('force_offload', False)
 
-    import tools
-    tools.current_session_id.set(session_id)
-    tools.current_use_imagen.set(request.json.get('use_imagen', False))
-    with tools.session_tool_calls_lock:
-        tools.session_tool_calls[session_id] = []
-
-    from runner_interface import cancelled_sessions
-    cancelled_sessions.discard(session_id)
+    prepare_generation_request(
+        session_id,
+        use_imagen=request.json.get('use_imagen', False)
+    )
     start_time = time.time()
 
     try:
@@ -839,34 +856,10 @@ def edit():
                 force_offload=force_offload
             )
         )
-        duration = round(time.time() - start_time, 1)
-        
-        # Apply banned words filter to output response
-        response_text = sanitize_response(response_text, session_id, program_msg_id)
-
-        chat_history = asyncio.run(runner.get_history(session_id))
-        state_info = extract_mood(chat_history)
-        inversion_mode = asyncio.run(runner._get_inversion_mode(session_id, history=chat_history))
-
-        # Align timestamp with stored program message
-        program_timestamp = None
-        if program_msg_id:
-            for msg in reversed(chat_history):
-                if msg.get('id') == program_msg_id:
-                    program_timestamp = msg.get('timestamp')
-                    break
-
-        return jsonify({
-            'response': response_text,
-            'tool_calls': tool_calls,
-            'state': state_info,
-            'inversion_active': inversion_mode,
-            'inversion_state': runner.get_inversion_state(session_id),
-            'timestamp': program_timestamp or time.time(),
-            'duration': duration,
-            'user_msg_id': user_msg_id,
-            'program_msg_id': program_msg_id
-        })
+        return build_generation_response(
+            response_text, tool_calls, session_id, user_msg_id,
+            program_msg_id, start_time
+        )
     except asyncio.CancelledError:
         print(f"[CANCEL] Edit generation cancelled for session {session_id}")
         asyncio.run(runner.append_message_to_session(session_id, 'program', '*(Generation cancelled)*'))
@@ -1423,16 +1416,8 @@ from utils.models import fetch_local_models
 @app.route('/models', methods=['GET'])
 @requires_auth
 def get_models():
-    # Determine the active runner backend
-    runner_backend = os.getenv("RUNNER_BACKEND", "opensource").lower()
-    
     # Check if Remote API key and Cloud URL are validly configured
-    remote_key = os.getenv("REMOTE_API_KEY")
-    remote_cloud_url = os.getenv("REMOTE_CLOUD_URL")
-    is_remote_configured = bool(
-        remote_key and remote_key.strip() and remote_key != "your_remote_api_key_here" and
-        remote_cloud_url and remote_cloud_url.strip() and remote_cloud_url != "your_remote_cloud_url_here"
-    )
+    is_remote_configured, remote_key, remote_cloud_url = remote_configuration()
     
     from utils.local_llm_manager import check_status, check_installed
     is_local_online = check_status()
@@ -1654,8 +1639,8 @@ def save_generation_params():
         with open(settings_path, "w", encoding="utf-8") as f:
             json.dump(settings, f, indent=2, ensure_ascii=False)
             
-        # Re-initialize runner to apply the configuration dynamically
-        init_runner()
+        # Reload configuration and runner state together.
+        reload_program_state()
         
         return jsonify({"status": "success", "settings": settings})
     except Exception as e:
@@ -1716,11 +1701,8 @@ def save_config():
                 lines.append(f"REMOTE_MODEL={remote_model}\n")
             os.environ["REMOTE_MODEL"] = remote_model
             
-        # Re-initialize the runner backend dynamically
-        init_runner()
-        
-        # Clear runner sessions history to reload character instructions
-        runner.sessions_history.clear()
+        # Reload configuration and runner state together.
+        reload_program_state()
                 
         # Clean up legacy GCP/Project ID lines to avoid bloat
         lines = [l for l in lines if not l.strip().startswith('PROJECT_ID=')]
@@ -3011,12 +2993,7 @@ def generate_character_theme(main_color, accent_color_a=None, accent_color_b=Non
 def generate_character_json(name, description, personality, scenario, first_mes, model):
     """Ask the LLM to produce chara_card_v3-compatible fields for a new program."""
     import os, json
-    remote_key = os.getenv("REMOTE_API_KEY")
-    remote_cloud_url = os.getenv("REMOTE_CLOUD_URL")
-    is_remote_configured = bool(
-        remote_key and remote_key.strip() and remote_key != "your_remote_api_key_here" and
-        remote_cloud_url and remote_cloud_url.strip() and remote_cloud_url != "your_remote_cloud_url_here"
-    )
+    is_remote_configured, remote_key, remote_cloud_url = remote_configuration()
 
     prompt = f"""Design a SillyTavern chara_card_v3 character profile from the description below.
 
@@ -3389,12 +3366,7 @@ _last_broadcast_state = {}
 def _get_current_status():
     """Build the combined connection status payload."""
     from utils import local_llm_manager, comfy_manager
-    remote_key = os.getenv("REMOTE_API_KEY")
-    remote_cloud_url = os.getenv("REMOTE_CLOUD_URL")
-    is_remote_configured = bool(
-        remote_key and remote_key.strip() and remote_key != "your_remote_api_key_here" and
-        remote_cloud_url and remote_cloud_url.strip() and remote_cloud_url != "your_remote_cloud_url_here"
-    )
+    is_remote_configured, remote_key, remote_cloud_url = remote_configuration()
     
     # Load temperature dynamically
     temperature = 0.95
