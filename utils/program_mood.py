@@ -32,15 +32,9 @@ def analyze_sentiment_with_llm(text: str) -> dict:
     # Prompt instructing the LLM to classify the emotional state and intensity
     system_instruction = (
         "You are an emotional analysis subagent. Analyze the emotional state of the program message. "
-        "Classify it into one of these strict categories:\n"
-        "- intimate (warm, affectionate, blushy, loving, or tender)\n"
-        "- excited (playful, high-energy, cheerful, or giggly)\n"
-        "- intense (sharp, determined, or highly serious/grave)\n"
-        "- sad (concerned, sorrowful, apologetic, or heavy-hearted)\n"
-        "- analytical (technical, logical, code inspecting, or problem solving)\n"
-        "- focused (methodical, task oriented, concise, or executing steps)\n"
-        "- calm (thoughtful, neutral, serene, or does not clearly fit the above)\n\n"
-        "Also, determine the emotional intensity on a scale from 0.0 (very calm/mild) to 1.0 (extremely intense/high-energy).\n\n"
+        "Classify it into one of these categories:\n"
+        "intimate, excited, intense, sad, analytical, focused or calm\n\n"
+        "Determine the emotional intensity on a scale from 0.0 to 1.0.\n\n"
         "Respond ONLY with a valid JSON object matching this structure:\n"
         "{\n"
         '  "name": "intimate" | "excited" | "intense" | "sad" | "analytical" | "focused" | "calm",\n'
@@ -58,13 +52,15 @@ def analyze_sentiment_with_llm(text: str) -> dict:
                     {"role": "user", "content": text}
                 ],
                 "temperature": 0.1,
+                "max_tokens": 60,  # Limits generation length directly
                 "response_format": {"type": "json_object"}
             }
             headers = {
                 "Content-Type": "application/json",
                 "Authorization": f"Bearer {api_key}"
             }
-            response = requests.post(remote_cloud_url, json=payload, headers=headers, timeout=10)
+            # (5 seconds to connect, 25 seconds to complete reading)
+            response = requests.post(remote_cloud_url, json=payload, headers=headers, timeout=(5, 25))
             if response.status_code == 200:
                 res_data = response.json()
                 content_str = res_data['choices'][0]['message']['content']
@@ -74,7 +70,7 @@ def analyze_sentiment_with_llm(text: str) -> dict:
                 else:
                     classification_json = json.loads(content_str)
         except Exception as e:
-            print(f"[ERROR] Remote sentiment classification failed: {e}")
+            print(f"[ERROR] Remote sentiment subagent failed: {e}")
             
     if not classification_json:
         # Fall back to local LLM server
@@ -109,7 +105,7 @@ def analyze_sentiment_with_llm(text: str) -> dict:
                 else:
                     classification_json = json.loads(content_str)
         except Exception as e:
-            print(f"[ERROR] Local model sentiment classification failed: {e}")
+            print(f"[ERROR] Local model sentiment subagent failed: {e}")
             
     # Parse results and set default values if everything failed
     mood_name = "calm"

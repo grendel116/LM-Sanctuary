@@ -115,8 +115,8 @@ def load_static_instructions() -> str:
     # Full skill instructions are vector-retrieved per turn in runner_interface.py
     try:
         from core.skill_retriever import get_toolbelt_block
-        narration_active = is_narration_mode()
-        toolbelt = get_toolbelt_block(narration_active)
+        story_active = is_story_mode()
+        toolbelt = get_toolbelt_block(story_active)
         if toolbelt:
             instruction_content += "\n\n" + toolbelt
     except Exception as e:
@@ -193,10 +193,10 @@ def load_user_instructions() -> str:
         )
         return f"\n\n# USER PROFILE & RELATIONSHIP CONTEXT\n{fallback_msg}"
 
-def is_narration_mode() -> bool:
-    """Checks if narration mode (Story Mode) is enabled in global project settings."""
+def is_story_mode() -> bool:
+    """Checks if story mode (Story Mode) is enabled in global project settings."""
     from utils.program import _load_settings
-    return _load_settings().get("narration_mode", False)
+    return _load_settings().get("story_mode", False)
 
 inversion_directive = ""
 
@@ -209,9 +209,9 @@ def get_compiled_instructions() -> str:
     global inversion_directive
     base = replace_placeholders(load_static_instructions() + load_user_instructions())
     
-    narration_mode = is_narration_mode()
+    story_mode = is_story_mode()
 
-    if narration_mode:
+    if story_mode:
         global_formatting = (
             "\n\n# MESSAGE FORMAT (MANDATORY)\n"
             "- Use separate lines and clear paragraphs for narration and dialogue.\n"

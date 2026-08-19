@@ -3434,7 +3434,7 @@ async function openProgramProfileModal(programId) {
     
     // Clear inputs
     document.getElementById('comp-name').value = '';
-    document.getElementById('comp-narration-mode').checked = false;
+    document.getElementById('comp-story-mode').checked = false;
     document.getElementById('comp-backstory').value = '';
     document.getElementById('comp-directives').value = '';
     document.getElementById('comp-post-history-instructions').value = '';
@@ -3460,7 +3460,7 @@ async function openProgramProfileModal(programId) {
         document.getElementById('comp-directives').value = data.system_prompt || '';
         document.getElementById('comp-post-history-instructions').value = data.post_history_instructions || '';
         document.getElementById('comp-tts-voice').value = data.tts_voice || 'af_heart';
-        document.getElementById('comp-narration-mode').checked = data.narration_mode || false;
+        document.getElementById('comp-story-mode').checked = data.story_mode || false;
         
         // Image prompts from extensions.sanctuary
         const sanctuary = (data.extensions || {}).sanctuary || {};
@@ -3720,7 +3720,7 @@ async function saveProgramProfile() {
     const payload = {
         program_id: targetProgramId,
         name: newName,
-        narration_mode: document.getElementById('comp-narration-mode').checked,
+        story_mode: document.getElementById('comp-story-mode').checked,
         tts_voice: document.getElementById('comp-tts-voice').value,
         description: document.getElementById('comp-backstory').value.trim(),
         personality: document.getElementById('comp-personality-type').value.trim(),
