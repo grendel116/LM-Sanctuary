@@ -2643,7 +2643,7 @@ def get_program_profile():
         settings = _load_settings()
         program_voices = settings.get('program_voices', {})
         card_data['tts_voice'] = program_voices.get(program_id, settings.get('tts_voice', 'af_heart'))
-        card_data['narration_mode'] = settings.get('narration_mode', False)
+        card_data['story_mode'] = settings.get('story_mode', False)
 
 
         return jsonify(card_data)
@@ -2666,15 +2666,15 @@ def save_program_profile():
 
         # Extract sidecars before writing card
         tts_voice = incoming.pop('tts_voice', None)
-        narration_mode = incoming.pop('narration_mode', None)
+        story_mode = incoming.pop('story_mode', None)
         incoming.pop('program_id', None)
 
         if tts_voice:
             set_tts_voice_for_program(program_id, tts_voice)
 
-        if narration_mode is not None:
+        if story_mode is not None:
             settings = _load_settings()
-            settings['narration_mode'] = bool(narration_mode)
+            settings['story_mode'] = bool(story_mode)
             _save_settings(settings)
 
         # Load existing card to preserve spec envelope and any fields not sent by UI

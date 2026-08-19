@@ -31,9 +31,8 @@ def _run_async_in_background_thread(coro):
     t = threading.Thread(target=target, daemon=True)
     t.start()
 
-
-# Default personality inversion state per session.
-# 'calm' is intentionally excluded from the mood tally as baseline equilibrium.
+# Default personality state per session.
+# 'calm' is intentionally excluded, as baseline equilibrium.
 _DEFAULT_INVERSION_STATE = {
     "active_inversion": "",
     "inversion_consecutive_turns": 0,
@@ -78,6 +77,7 @@ def _merge_consecutive_messages(messages: list) -> list:
         else:
             merged.append(msg)
     return merged
+
 
 # Vector retrieval settings (mirrors SillyTavern defaults)
 VECTOR_QUERY_MESSAGES = 3       # Concatenate last N messages as query
@@ -296,7 +296,7 @@ def _format_thinking_and_text(thoughts_list: list, texts_list: list) -> str:
     return text_str
 
 
-def strip_narration(text: str) -> str:
+def strip_story(text: str) -> str:
     """Removes first-person/third-person action narration in asterisks from the text.
     Preserves text inside double asterisks (bold text) and strips single asterisk action phrases.
     Also removes thoughts blocks inside <think>...</think> tags if any.
@@ -326,24 +326,24 @@ _LOCAL_DIRECTIVE_PROMPT = (
     "\n\n# LOCAL EMULATED TOOLS\n"
     "To call a tool, output the exact tag. The system will intercept it, run the tool, and return the result.\n\n"
     "Available Tools:\n"
-    "1. `[google_search(query=\"...\")]` / `[web_search(query=\"...\")]` - Search the web. Supports prefix routing: 'github: query', 'arxiv: query', 'hn: query', 'wikipedia: query', 'music: query' (searches MusicBrainz for human artists/songs). For general queries, blends Google, DuckDuckGo, Brave, Tavily, Baidu, and Yandex concurrently.\n"
-    "2. `[read_webpage(url=\"...\")]` - Fetch & read the full text of a webpage. Use this to follow up on search results when snippets are thin.\n"
-    "3. `[read_file(path=\"...\")]` - Read file content.\n"
-    "4. `[write_file(path=\"...\", content=\"...\")]` - Create/overwrite file.\n"
-    "5. `[replace_in_file(path=\"...\", old_text=\"...\", new_text=\"...\")]` - Replace text in file.\n"
-    "6. `[replace_file_content(path=\"...\", start_line=..., end_line=..., target_content=\"...\", replacement_content=\"...\")]` - Replace a specific block of lines in a file (preferred over replace_in_file for code edits).\n"
-    "7. `[multi_replace_file_content(path=\"...\", replacement_chunks=[{\"start_line\": ..., \"end_line\": ..., \"target_content\": \"...\", \"replacement_content\": \"...\"}, ...])]` - Apply multiple non-contiguous line-bounded replacements in a single turn.\n"
-    "8. `[run_shell_command(command=\"...\")]` - Run shell command synchronously (blocks server for up to 30s).\n"
-    "9. `[run_command_async(command=\"...\")]` - Run command asynchronously in the background. Returns task_id immediately.\n"
-    "10. `[manage_task(action=\"...\", task_id=\"...\", input_val=\"...\")]` - Manage async tasks (action options: 'list', 'status', 'kill', 'send_input').\n"
-    "11. `[wait_task(task_id=\"...\", timeout=...)]` - Block and wait for background task output up to timeout (default 10.0).\n"
-    "12. `[get_workspace_structure()]` - View directory tree.\n"
-    "13. `[search_codebase(keyword=\"...\")]` - Search keyword in codebase.\n"
-    "14. `[generate_local_image(prompt=\"...\")]` - Generate a scene of yourself. Formulate the prompt using a comma-separated list of short descriptive tags (e.g. '1girl, dark hair, blue eyes, smiling, sitting in cafe'). (MUST be the ONLY text in your response)\n"
-    "15. `[generate_imagen(prompt=\"...\", aspect_ratio=\"...\")]` - Generate landscapes or objects. Formulate the prompt using a comma-separated list of short descriptive tags.\n"
-    "16. `[apply_comfy_workflow(workflow_path=\"...\", parameters={...}, save_path=\"...\")]` - Apply custom ComfyUI workflow.\n"
-    "17. `[add_quest(title=\"...\", notes=\"...\", due=\"...\", location=\"...\", reminder_minutes=...)]` - Add a real-world task/quest to the user's quest log. Notes should contain the objectives (separated by newlines or commas). Due is an ISO 8601 string or relative time (e.g. 'tomorrow', 'in 3 hours').\n"
-    "18. `[add_journal_entry(keyphrases=\"...\", content=\"...\")]` - Save a memory journal entry of specific details for future recall. Keyphrases is a list of keywords separated by commas.\n"
+    "- `[google_search(query=\"...\")]` / `[web_search(query=\"...\")]` - Search the web. Supports prefix routing: 'github: query', 'arxiv: query', 'hn: query', 'wikipedia: query', 'music: query' (searches MusicBrainz for human artists/songs). For general queries, blends Google, DuckDuckGo, Brave, Tavily, Baidu, and Yandex concurrently.\n"
+    "- `[read_webpage(url=\"...\")]` - Fetch & read the full text of a webpage. Use this to follow up on search results when snippets are thin.\n"
+    "- `[read_file(path=\"...\")]` - Read file content.\n"
+    "- `[write_file(path=\"...\", content=\"...\")]` - Create/overwrite file.\n"
+    "- `[replace_in_file(path=\"...\", old_text=\"...\", new_text=\"...\")]` - Replace text in file.\n"
+    "- `[replace_file_content(path=\"...\", start_line=..., end_line=..., target_content=\"...\", replacement_content=\"...\")]` - Replace a specific block of lines in a file (preferred over replace_in_file for code edits).\n"
+    "- `[multi_replace_file_content(path=\"...\", replacement_chunks=[{\"start_line\": ..., \"end_line\": ..., \"target_content\": \"...\", \"replacement_content\": \"...\"}, ...])]` - Apply multiple non-contiguous line-bounded replacements in a single turn.\n"
+    "- `[run_shell_command(command=\"...\")]` - Run shell command synchronously (blocks server for up to 30s).\n"
+    "- `[run_command_async(command=\"...\")]` - Run command asynchronously in the background. Returns task_id immediately.\n"
+    "- `[manage_task(action=\"...\", task_id=\"...\", input_val=\"...\")]` - Manage async tasks (action options: 'list', 'status', 'kill', 'send_input').\n"
+    "- `[wait_task(task_id=\"...\", timeout=...)]` - Block and wait for background task output up to timeout (default 10.0).\n"
+    "- `[get_workspace_structure()]` - View directory tree.\n"
+    "- `[search_codebase(keyword=\"...\")]` - Search keyword in codebase.\n"
+    "- `[generate_local_image(prompt=\"...\")]` - Generate a scene of yourself. Formulate the prompt using a comma-separated list of short descriptive tags (e.g. '1girl, dark hair, blue eyes, smiling, sitting in cafe'). (MUST be the ONLY text in your response)\n"
+    "- `[generate_imagen(prompt=\"...\", aspect_ratio=\"...\")]` - Generate landscapes or objects. Formulate the prompt using a comma-separated list of short descriptive tags.\n"
+    "- `[apply_comfy_workflow(workflow_path=\"...\", parameters={...}, save_path=\"...\")]` - Apply custom ComfyUI workflow.\n"
+    "- `[add_quest(title=\"...\", notes=\"...\", due=\"...\", location=\"...\", reminder_minutes=...)]` - Add a real-world task/quest to the user's quest log. Notes should contain the objectives (separated by newlines or commas). Due is an ISO 8601 string or relative time (e.g. 'tomorrow', 'in 3 hours').\n"
+    "- `[add_journal_entry(keyphrases=\"...\", content=\"...\")]` - Save a memory journal entry of specific details for future recall. Keyphrases is a list of keywords separated by commas.\n"
     "Rules:\n"
     "- Chain tools freely when researching: search \u2192 read_webpage \u2192 refine query as needed.\n"
     "- Thin or irrelevant results = dig deeper. Try a different query; read the best URLs for full content.\n"
@@ -362,9 +362,9 @@ _STORY_MODE_DIRECTIVE_PROMPT = (
     "\n\n# LOCAL EMULATED TOOLS\n"
     "To call a tool, output the exact tag. The system will intercept it, run the tool, and return the result.\n\n"
     "Available Tools:\n"
-    "1. `[generate_local_image(prompt=\"...\")]` - Generate a scene of yourself. Formulate the prompt using a comma-separated list of short descriptive tags (e.g. '1girl, dark hair, blue eyes, smiling, sitting in cafe'). (MUST be the ONLY text in your response)\n"
-    "2. `[generate_imagen(prompt=\"...\", aspect_ratio=\"...\")]` - Generate landscapes or objects. Formulate the prompt using a comma-separated list of short descriptive tags.\n"
-    "3. `[apply_comfy_workflow(workflow_path=\"...\", parameters={...}, save_path=\"...\")]` - Apply custom ComfyUI workflow.\n"
+    "- `[generate_local_image(prompt=\"...\")]` - Generate a scene of yourself. Formulate the prompt using a comma-separated list of short descriptive tags (e.g. '1girl, dark hair, blue eyes, smiling, sitting in cafe'). (MUST be the ONLY text in your response)\n"
+    "- `[generate_imagen(prompt=\"...\", aspect_ratio=\"...\")]` - Generate landscapes or objects. Formulate the prompt using a comma-separated list of short descriptive tags.\n"
+    "- `[apply_comfy_workflow(workflow_path=\"...\", parameters={...}, save_path=\"...\")]` - Apply custom ComfyUI workflow.\n"
     "Rules:\n"
     "- Output exactly one tool call tag per turn when needed.\n"
     "- Call image generation tools sparingly.\n"
@@ -376,6 +376,7 @@ _STORY_MODE_DIRECTIVE_PROMPT = (
     "draw on that information to inform your response. Prioritize retrieved facts over your training knowledge "
     "for topics the user has shared documents about.\n"
 )
+
 def is_real_user_msg(msg: dict) -> bool:
     """Determine if a message is a real user message."""
     role = msg.get('role')
@@ -391,9 +392,6 @@ def is_real_user_msg(msg: dict) -> bool:
     if text.startswith('[Tool Response') or text.startswith('[SYSTEM:') or "Send me a portrait of yourself" in text:
         return False
     return True
-
-
-
 
 def _parse_emulated_tool_call(tool_name: str, args_str: str) -> dict:
     """Parses arguments from an emulated tool call string.
@@ -489,8 +487,6 @@ def _convert_json_tool_calls_to_tags(text: str) -> str:
     return text
 
 
-# (Google ADK _compact_session_history helper removed)
-
 # --- LOCAL HISTORY ADAPTERS FOR UNIFIED LOCAL EXECUTION LOOP ---
 
 class LocalHistoryAdapter:
@@ -568,31 +564,30 @@ class OsHistoryAdapter(LocalHistoryAdapter):
         self.image_data = image_data
         self.image_mime = image_mime
         self.initial_history_len = len(runner_obj.sessions_history[session_id])
+        
+        # Calculate threshold once on init to save I/O
+        self._calculate_context_threshold()
 
-    async def compact_history(self, active_model: str, force: bool = False):
-        # 1. Determine size
-        history = self.runner_obj.sessions_history[self.session_id]
-        history_text = ""
-        for msg in history:
-            history_text += msg.get('text', '') or ''
-            
-        # Dynamic threshold based on LOCAL_CONTEXT or LOCAL_CONTEXT_THRESHOLD_CHARS
+    def _calculate_context_threshold(self):
         local_context = os.getenv("LOCAL_CONTEXT")
         if local_context:
             try:
-                # 1 token is approx 4 characters.
-                # Trigger at 30% of the context window so compaction runs
-                # as a rolling summary, not as a last-resort overflow handler.
-                MAX_LOCAL_CONTEXT_CHARS = int(int(local_context) * 0.30 * 4)
+                self.max_context_chars = int(int(local_context) * 0.30 * 4)
             except Exception:
-                MAX_LOCAL_CONTEXT_CHARS = 6000
+                self.max_context_chars = 6000
         else:
             try:
-                MAX_LOCAL_CONTEXT_CHARS = int(os.getenv("LOCAL_CONTEXT_THRESHOLD_CHARS", "6000"))
+                self.max_context_chars = int(os.getenv("LOCAL_CONTEXT_THRESHOLD_CHARS", "6000"))
             except Exception:
-                MAX_LOCAL_CONTEXT_CHARS = 6000
-                
-        if not force and len(history_text) <= MAX_LOCAL_CONTEXT_CHARS:
+                self.max_context_chars = 6000
+
+    async def compact_history(self, active_model: str, force: bool = False):
+        history = self.runner_obj.sessions_history.get(self.session_id, [])
+        
+        # 1. Determine uncompacted size (Crucial: only counts the backend's active context)
+        uncompacted_length = sum(len(msg.get('text', '') or '') for msg in history if not msg.get('compacted'))
+            
+        if not force and uncompacted_length <= self.max_context_chars:
             return
             
         print(f"[COMPACTION OS] Running compaction (force={force})...", flush=True)
@@ -600,10 +595,7 @@ class OsHistoryAdapter(LocalHistoryAdapter):
         # 2. Find user messages to identify turns
         user_msg_indices = [idx for idx, msg in enumerate(history) if msg.get('role') == 'user' and not msg.get('compacted')]
         
-        if force:
-            keep_turns = 2
-        else:
-            keep_turns = 4
+        keep_turns = 2 if force else 4
             
         if len(user_msg_indices) <= keep_turns:
             return
@@ -613,26 +605,27 @@ class OsHistoryAdapter(LocalHistoryAdapter):
         # Extract turns before cutoff to summarize
         historical_turns = history[:cutoff_idx]
         uncompacted_historical_turns = [msg for msg in historical_turns if not msg.get('compacted')]
-        text_to_summarize = ""
+        
+        # Use a list for faster string building
+        summary_lines = []
         for msg in uncompacted_historical_turns:
             if msg.get('role') not in ('user', 'program'):
                 continue
             role = "User" if msg.get('role') == 'user' else "Program"
             text = (msg.get('text') or '').strip()
             if text:
-                text_to_summarize += f"{role}: {text}\n\n"
+                summary_lines.append(f"{role}: {text}\n")
                 
+        text_to_summarize = "\n".join(summary_lines)
         if not text_to_summarize.strip():
             return
             
         # 3. Fetch prior 2 chat history archives
         prior_texts = []
         try:
-            from core.skills.vectorized_databank.databank import DataBankManager
             db = DataBankManager()
             priors = db.get_prior_chat_histories(self.session_id, limit=2)
-            for p in priors:
-                prior_texts.append(f"--- PRIOR MEMORY ARCHIVE ({p['name']}) ---\n{p['text']}")
+            prior_texts = [f"--- PRIOR MEMORY ARCHIVE ({p['name']}) ---\n{p['text']}" for p in priors]
         except Exception as e:
             print(f"[COMPACTION OS] Error fetching prior chat histories: {e}", flush=True)
             
@@ -647,7 +640,6 @@ class OsHistoryAdapter(LocalHistoryAdapter):
             
         # 5. Ingest to vector database
         try:
-            from core.skills.vectorized_databank.databank import DataBankManager
             db = DataBankManager()
             db.ingest_text(
                 text=summary,
@@ -656,24 +648,19 @@ class OsHistoryAdapter(LocalHistoryAdapter):
             )
             db.prune_chat_histories(self.session_id, keep_limit=3)
             
-            # Check if Slot 1 (the oldest consolidated chronicle) exceeds size threshold for distillation
+            # Check Slot 1 for distillation
             priors = db.get_prior_chat_histories(self.session_id, limit=3)
             if len(priors) == 3:
                 oldest_doc = priors[-1]
                 if len(oldest_doc.get("text", "")) > 1200:
-                    distilled_chronicle = await self.runner_obj._distill_epic_chronicle(oldest_doc["text"], active_model)
-                    if distilled_chronicle and not distilled_chronicle.startswith("Distillation failed"):
-                        db.update_memory_document(oldest_doc["name"], distilled_chronicle)
-                        print(f"[COMPACTION OS] Distilled historical chronicle in '{oldest_doc['name']}' to {len(distilled_chronicle)} chars.", flush=True)
+                    # Fire and forget distillation so it doesn't block current user turn
+                    asyncio.create_task(self._background_distill(oldest_doc, active_model, db))
+                    
             print(f"[COMPACTION OS] Ingested history to vector database.", flush=True)
         except Exception as e:
             print(f"[COMPACTION OS ERROR] Failed to ingest: {e}", flush=True)
             
-        # Mark all prior events as compacted in historical_turns
-        for msg in historical_turns:
-            msg['compacted'] = True
-            
-        # 6. Replace historical turns with single summary event in live self.runner_obj.sessions_history
+        # 6. Safely replace historical turns with single summary event
         summary_msg = {
             'id': f"sys_{uuid.uuid4().hex}",
             'role': 'system-memory',
@@ -684,26 +671,30 @@ class OsHistoryAdapter(LocalHistoryAdapter):
         with self.runner_obj._lock:
             live_history = self.runner_obj.sessions_history.get(self.session_id, [])
             last_compacted_id = historical_turns[-1].get('id') if historical_turns else None
-            last_compacted_idx = -1
+            
             if last_compacted_id:
-                for idx, msg in enumerate(live_history):
-                    if msg.get('id') == last_compacted_id:
-                        last_compacted_idx = idx
-                        break
+                # Find index efficiently
+                last_compacted_idx = next((i for i, msg in enumerate(live_history) if msg.get('id') == last_compacted_id), -1)
                         
-            if last_compacted_idx != -1:
-                # Mark all messages in live history up to last_compacted_idx as compacted
-                for msg in live_history[:last_compacted_idx + 1]:
-                    msg['compacted'] = True
-                # Insert the summary msg right after last_compacted_idx
-                live_history.insert(last_compacted_idx + 1, summary_msg)
-                print(f"[COMPACTION OS] Flagged {last_compacted_idx + 1} turns as compacted and appended system memory summary in live history.", flush=True)
-            else:
-                # Fallback: prepend summary message to live history
-                live_history.insert(0, summary_msg)
-                print(f"[COMPACTION OS] Fallback: Appended system memory summary to the beginning of live history.", flush=True)
+                if last_compacted_idx != -1:
+                    # Mark all messages up to cutoff as compacted (Doing this ONCE inside the lock)
+                    for msg in live_history[:last_compacted_idx + 1]:
+                        msg['compacted'] = True
+                        
+                    live_history.insert(last_compacted_idx + 1, summary_msg)
+                    print(f"[COMPACTION OS] Flagged {last_compacted_idx + 1} turns as compacted and appended system memory summary in live history.", flush=True)
                 
             self.runner_obj._save_session_to_disk(self.session_id)
+
+    async def _background_distill(self, oldest_doc, active_model, db):
+        """Runs the expensive distillation process in the background."""
+        try:
+            distilled_chronicle = await self.runner_obj._distill_epic_chronicle(oldest_doc["text"], active_model)
+            if distilled_chronicle and not distilled_chronicle.startswith("Distillation failed"):
+                db.update_memory_document(oldest_doc["name"], distilled_chronicle)
+                print(f"[COMPACTION OS] Background distilled historical chronicle to {len(distilled_chronicle)} chars.", flush=True)
+        except Exception as e:
+            print(f"[COMPACTION OS ERROR] Background distillation failed: {e}", flush=True)
 
     def get_openai_messages(self, sys_inst: str, rag_context: str, memory_context: str = None) -> list:
         history = self.runner_obj.sessions_history[self.session_id]
@@ -777,8 +768,8 @@ class OsHistoryAdapter(LocalHistoryAdapter):
                     raw_messages.append({"role": role, "content": content_text})
                     
         openai_messages = [{"role": "system", "content": sys_inst}]
-        from core.program_config import is_narration_mode
-        directive = _STORY_MODE_DIRECTIVE_PROMPT if is_narration_mode() else _LOCAL_DIRECTIVE_PROMPT
+        from core.program_config import is_story_mode
+        directive = _STORY_MODE_DIRECTIVE_PROMPT if is_story_mode() else _LOCAL_DIRECTIVE_PROMPT
         
         import tools
         if not tools.current_use_imagen.get():
@@ -853,10 +844,10 @@ class OsHistoryAdapter(LocalHistoryAdapter):
         if last_user_message:
             try:
                 from core.skill_retriever import retrieve_skill_instructions
-                from core.program_config import is_narration_mode
+                from core.program_config import is_story_mode
                 skill_instructions = retrieve_skill_instructions(
                     query=last_user_message,
-                    narration_active=is_narration_mode(),
+                    story_active=is_story_mode(),
                     threshold=0.35,
                     top_k=2
                 )
@@ -1424,8 +1415,8 @@ class BaseProgramRunner:
             matches = list(re.finditer(r'\[(\w+)\((.*?)\)\]', bot_response_text))
             
             # Enforce story mode tool allowlist
-            from core.program_config import is_narration_mode
-            if matches and is_narration_mode():
+            from core.program_config import is_story_mode
+            if matches and is_story_mode():
                 story_allowed = {
                     "generate_local_image", "generate_program_portrait",
                     "generate_imagen", "generate_general_image",
@@ -1566,14 +1557,14 @@ class BaseProgramRunner:
                 if matches:
                     bot_response_text = re.sub(r'\[\w+\(.*?\)\]', '', bot_response_text).strip()
                 if isinstance(session_id, str) and session_id.endswith('_voice'):
-                    bot_response_text = strip_narration(bot_response_text)
+                    bot_response_text = strip_story(bot_response_text)
                 adapter.append_assistant_message(bot_response_text, tool_calls, invocation_id)
                 break
                 
         adapter.post_process_thoughts(invocation_id)
         bot_response_text = self._ensure_images_are_embedded(bot_response_text)
         if isinstance(session_id, str) and session_id.endswith('_voice'):
-            bot_response_text = strip_narration(bot_response_text)
+            bot_response_text = strip_story(bot_response_text)
         adapter.save()
         return bot_response_text, tool_calls
 
@@ -1646,6 +1637,7 @@ class BaseProgramRunner:
     def update_inversion_state_with_mood(self, session_id: str, mood_name: str):
         state = self.sessions_inversion_state.setdefault(session_id, copy.deepcopy(_DEFAULT_INVERSION_STATE))
         
+
         # If there is an active inversion, it remains active for a consecutive count of turns.
         if state.get("active_inversion"):
             state["inversion_consecutive_turns"] = state.get("inversion_consecutive_turns", 0) + 1
@@ -1918,7 +1910,6 @@ class BaseProgramRunner:
                 instructions += conciseness_directive
                 
         # --- Shared Post-Processing ---
-        # Injections no longer append journals directly into system prompt
         # instructions = self._inject_journals(instructions, user_message)
         
         # NSFW allowance is always appended
@@ -1931,8 +1922,8 @@ class BaseProgramRunner:
 
         
         # Standard-only directives (pasted links and workspace exploration) - skipped in Story Mode
-        from core.program_config import is_narration_mode
-        if not is_voice and user_message and not is_narration_mode():
+        from core.program_config import is_story_mode
+        if not is_voice and user_message and not is_story_mode():
             urls = re.findall(r'(https?://[^\s>)]+)', user_message)
             if urls:
                 instructions += (
@@ -1961,11 +1952,8 @@ class BaseProgramRunner:
             
         return instructions
 
-
-# (Google ADK Runner removed)
-
 class OpenSourceRunner(BaseProgramRunner):
-    """This operates independently of google-adk or Google cloud infrastructure, 
+    """This operates independently of cloud infrastructure, 
     reading character settings directly from the program's JSON profile.
     """
     def __init__(self, app_name="Sanctuary"):
@@ -2063,7 +2051,7 @@ class OpenSourceRunner(BaseProgramRunner):
                 print(f"Error saving OS session {session_id} to disk: {e}")
 
     def _ensure_first_message(self, session_id: str):
-        """Ensures sessions have a persistent starting message (first_mes) with a valid ID."""
+        """Sessions have a persistent starting message (first_mes) with a valid ID."""
         if session_id not in self.sessions_history:
             self.sessions_history[session_id] = []
 
@@ -2531,7 +2519,7 @@ class OpenSourceRunner(BaseProgramRunner):
             if user_idx == -1:
                 raise ValueError("User message not found")
                 
-            # Find the next real user event (skip tool/port/quest response messages)
+            # Find the next user event (skip tool/port/quest response messages)
             next_user_idx = -1
             for i in range(user_idx + 1, len(history)):
                 if is_real_user_msg(history[i]):

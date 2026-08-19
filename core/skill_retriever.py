@@ -129,11 +129,11 @@ def _get_skill_registry() -> list:
     return _skill_cache
 
 
-def get_toolbelt_block(narration_active: bool = False) -> str:
+def get_toolbelt_block(story_active: bool = False) -> str:
     """Builds the compact toolbelt string listing all available skill summaries.
 
-    Respects narration mode filtering (only portrait_generation, memory_journaling,
-    and vectorized_databank are permitted in narration mode).
+    Respects story mode filtering (only portrait_generation, memory_journaling,
+    and vectorized_databank are permitted in story mode).
 
     Returns a formatted toolbelt block ready for system prompt injection.
     """
@@ -142,7 +142,7 @@ def get_toolbelt_block(narration_active: bool = False) -> str:
 
     lines = []
     for record in registry:
-        if narration_active and record["name"] not in story_mode_allowed:
+        if story_active and record["name"] not in story_mode_allowed:
             continue
         summary = record.get("summary", "")
         if summary:
@@ -175,7 +175,7 @@ def _keyword_match(query: str, record: dict) -> bool:
     return False
 
 
-def retrieve_skill_instructions(query: str, narration_active: bool = False,
+def retrieve_skill_instructions(query: str, story_active: bool = False,
                                  threshold: float = 0.35, top_k: int = 2) -> str:
     """Retrieves full instruction blocks for matched skills.
 
@@ -187,7 +187,7 @@ def retrieve_skill_instructions(query: str, narration_active: bool = False,
 
     Args:
         query: The user's message or conversation context to match against.
-        narration_active: Whether narration/story mode is enabled.
+        story_active: Whether narration/story mode is enabled.
         threshold: Minimum cosine similarity score for vector matched skills.
         top_k: Maximum number of vector matched skills to include.
 
@@ -207,7 +207,7 @@ def retrieve_skill_instructions(query: str, narration_active: bool = False,
     vector_candidates = []
 
     for record in registry:
-        if narration_active and record["name"] not in story_mode_allowed:
+        if story_active and record["name"] not in story_mode_allowed:
             continue
 
         if record["retrieval"] == "always":
