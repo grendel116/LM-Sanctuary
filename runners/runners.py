@@ -36,6 +36,7 @@ from variables import (
 # Global State
 cancelled_sessions: set[str] = set()
 voice_call_sessions: set[str] = set()
+project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def _is_cloud_model_check(model: str) -> bool:
@@ -533,7 +534,7 @@ class BaseProgramRunner:
     @property
     def sessions_dir(self) -> str:
         active_program = get_active_program()
-        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "core", "programs", active_program, "sessions")
+        path = os.path.join(project_root, "core", "programs", active_program, "sessions")
         os.makedirs(path, exist_ok=True)
         return path
 
@@ -1082,7 +1083,7 @@ class OpenSourceRunner(BaseProgramRunner):
         if media_path and media_path.startswith("/images/"):
             try:
                 rel_path = media_path[len("/images/") :]
-                local_file_path = os.path.normpath(os.path.join("core", "programs", get_active_program(), rel_path))
+                local_file_path = os.path.normpath(os.path.join(project_root, "core", "programs", get_active_program(), rel_path))
                 if os.path.exists(local_file_path):
                     mime_type, _ = mimetypes.guess_type(local_file_path)
                     if mime_type and mime_type.startswith("image/"):
@@ -1233,7 +1234,7 @@ class OpenSourceRunner(BaseProgramRunner):
                 self._save_session_to_disk(session_id)
 
             memories_path = os.path.join(
-                os.path.dirname(os.path.abspath(__file__)), "core", "programs", get_active_program(), "memories.json"
+                project_root, "core", "programs", get_active_program(), "memories.json"
             )
             deleted_from_db = False
 
