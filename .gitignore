@@ -41,7 +41,7 @@ core/programs/*/journals.json
 core/programs/*/memories.json
 core/programs/*/quest_log.json
 core/programs/*/lorebooks/
-!core/programs/sebile/lorebooks/
+!core/programs/sebile/lorebooks/anarchist_theory.json
 core/embeddings.pkl
 temp_uploads/
 
