@@ -849,7 +849,7 @@ def web_search(query: str) -> str:
         """Calls a fast model to synthesize raw results into a clean research report."""
         remote_api_key = os.getenv("REMOTE_API_KEY", "").strip()
         if not remote_api_key or remote_api_key == "your_remote_api_key_here":
-            # No API key — fall back to raw formatted snippets
+            # No API key — return to raw formatted snippets
             lines = []
             for r in results[:10]:
                 lines.append(f"Title: {r['title']}\nURL: {r['url']}\nSource: {r['source']}\nSnippet: {r['content']}")
