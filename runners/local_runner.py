@@ -122,7 +122,7 @@ def start_local_server(model_key):
         
     # Check if server is running and has this model loaded
     if is_online is True:
-        from utils.models import fetch_local_models
+        from models.models import fetch_local_models
         loaded = fetch_local_models()
         if loaded:
             target_base = os.path.basename(model_path).lower()

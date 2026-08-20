@@ -47,7 +47,9 @@ temp_uploads/
 
 
 # Local model weights
-models/
+models/*
+!models/__init__.py
+!models/models.py
 
 # TTS Speech Model weights and synthesized audio cache
 core/skills/speech_generation/speech_model/*.onnx

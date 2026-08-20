@@ -85,7 +85,7 @@ def track_tool_activity(func):
 
 def get_project_folders() -> list:
     try:
-        from utils.program import get_active_program
+        from runners.program import get_active_program
         active_prog = get_active_program()
     except Exception:
         active_prog = "sebile"
@@ -1323,7 +1323,7 @@ def apply_comfy_workflow(workflow_path: str, parameters: dict, save_path: str, s
             raise Exception("Did not receive a prompt ID from ComfyUI")
 
         # Poll history endpoint for output
-        from runner_interface import cancelled_sessions
+        from runners.runners import cancelled_sessions
         for _ in range(300):
             # Honour session cancellation — stop polling and kill the ComfyUI job
             if session_id and session_id in cancelled_sessions:
@@ -1354,7 +1354,7 @@ def apply_comfy_workflow(workflow_path: str, parameters: dict, save_path: str, s
                                     
                                     # Delete the file from ComfyUI's folder to avoid accumulation
                                     try:
-                                        from utils.comfy_manager import COMFYUI_DIR
+                                        from adapters.comfy_manager import COMFYUI_DIR
                                         img_type = img.get("type", "temp")
                                         comfy_file = os.path.normpath(os.path.join(COMFYUI_DIR, img_type, img.get("subfolder", ""), filename))
                                         if os.path.exists(comfy_file):
@@ -1389,7 +1389,7 @@ def generate_local_image(prompt: str) -> str:
     import json
     
     def get_install_instructions(reason: str) -> str:
-        from utils.comfy_manager import check_comfy_running
+        from adapters.comfy_manager import check_comfy_running
         status = check_comfy_running()
         if status == "starting" or "ConnectionRefusedError" in reason or "10061" in reason:
             return (
@@ -1426,7 +1426,7 @@ def generate_local_image(prompt: str) -> str:
         )
 
     base_dir = os.path.dirname(os.path.abspath(__file__))
-    from utils.program import get_active_program
+    from runners.program import get_active_program
     active_program = get_active_program()
     
     workflow_env_path = os.getenv("COMFYUI_IMAGE_WORKFLOW", "core/skills/portrait_generation/ImageWorkflow.json")
@@ -1602,7 +1602,7 @@ def generate_imagen(prompt: str, aspect_ratio: str = '1:1') -> str:
         if not image_bytes:
             return "Error: Unable to generate image with available Imagen models."
 
-        from utils.program import get_active_program
+        from runners.program import get_active_program
         active_program = get_active_program()
         media_dir = os.path.normpath(os.path.join(base_dir, "core", "programs", active_program, "media"))
         os.makedirs(media_dir, exist_ok=True)
@@ -1653,7 +1653,7 @@ def generate_video_from_image(image_path: str, prompt: str) -> str:
     import requests
     
     base_dir = os.path.dirname(os.path.abspath(__file__))
-    from utils.program import get_active_program
+    from runners.program import get_active_program
     active_program = get_active_program()
     
     workflow_env_path = os.getenv("COMFYUI_VIDEO_WORKFLOW", "core/skills/portrait_generation/VideoWorkflow.json")
@@ -1667,7 +1667,7 @@ def generate_video_from_image(image_path: str, prompt: str) -> str:
         
     # Copy and resize source image to ComfyUI's input directory using PIL
     from variables import COMFYUI_SERVER_URL
-    from utils.comfy_manager import COMFYUI_DIR
+    from adapters.comfy_manager import COMFYUI_DIR
     from PIL import Image
     comfy_input_dir = os.path.normpath(os.path.join(COMFYUI_DIR, "input"))
     os.makedirs(comfy_input_dir, exist_ok=True)
@@ -1738,12 +1738,12 @@ def generate_video_from_image(image_path: str, prompt: str) -> str:
     import json
     
     # Ensure ComfyUI server is running
-    from utils.comfy_manager import check_comfy_running
+    from adapters.comfy_manager import check_comfy_running
     if not check_comfy_running(force_refresh=True):
         raise Exception("ComfyUI server is offline. Please start the ComfyUI engine manually from the settings panel.")
             
     # Run dependency resolution inline to ensure missing custom nodes or models are downloaded/installed
-    from utils.comfy_manager import _resolver_worker, resolution_status
+    from adapters.comfy_manager import _resolver_worker, resolution_status
     print("[COMFY VIDEO] Checking and resolving workflow dependencies inline...")
     _resolver_worker(json.dumps(populated_workflow))
     if resolution_status.get("status") == "failed":
@@ -1818,7 +1818,7 @@ def generate_video_from_image(image_path: str, prompt: str) -> str:
                             
                     # 2. If no output media found in outputs, scan ComfyUI temp folder for civitai videos
                     if not completed_filename:
-                        from utils.comfy_manager import COMFYUI_DIR
+                        from adapters.comfy_manager import COMFYUI_DIR
                         temp_dir = os.path.normpath(os.path.join(COMFYUI_DIR, "temp"))
                         if os.path.exists(temp_dir):
                             newest_file = None
@@ -2229,7 +2229,7 @@ def add_quest(title: str, notes: str, due: str = None, location: str = "", remin
         
         # Resolve quest log path under the active program directory
         base_dir = os.path.dirname(os.path.abspath(__file__))
-        from utils.program import get_active_program
+        from runners.program import get_active_program
         active_program = get_active_program()
         program_dir = os.path.normpath(os.path.join(base_dir, "core", "programs", active_program))
         QUEST_LOG_PATH = os.path.join(program_dir, "quest_log.json")
@@ -2321,8 +2321,8 @@ def add_journal_entry(keyphrases: str, content: str) -> str:
         content: The specific, important detail or memory to record (up to 300 characters).
     """
     try:
-        from utils.journals import add_journal_entry as add_entry
-        from utils.program import get_active_program
+        from core.journals import add_journal_entry as add_entry
+        from runners.program import get_active_program
         active_prog = get_active_program()
         entry = add_entry(keyphrases, content, active_prog)
         return f"Successfully saved memory journal entry: {entry.get('content')}"
@@ -2340,7 +2340,7 @@ def cite_scripture(tradition: str = "all", topic: str = "") -> str:
     """
     import json
     import numpy as np
-    from utils.program import get_active_program
+    from runners.program import get_active_program
     
     base_dir = os.path.dirname(os.path.abspath(__file__))
     active_program = get_active_program()

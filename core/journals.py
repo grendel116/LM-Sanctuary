@@ -3,7 +3,7 @@ import json
 import uuid
 import time
 import re
-from utils.program import get_active_program
+from runners.program import get_active_program
 from variables import PROGRAMS_DIR
 
 def _get_journals_path(program_id: str = None) -> str:

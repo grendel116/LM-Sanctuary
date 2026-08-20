@@ -8,6 +8,8 @@ import traceback
 import threading
 import uuid
 
+from adapters import comfy_manager
+
 # Automate copying of default .env configuration if it doesn't exist
 base_dir = os.path.dirname(os.path.abspath(__file__))
 env_path = os.path.join(base_dir, '.env')
@@ -23,7 +25,7 @@ if not os.path.exists(env_path):
 from flask import Flask, render_template, request, jsonify, send_file, send_from_directory, Response, make_response
 import asyncio
 from functools import wraps
-from runner_interface import OpenSourceRunner
+from runners.runners import OpenSourceRunner
 
 # Load environment variables
 from dotenv import load_dotenv
@@ -54,7 +56,7 @@ def start_prewarm_on_first_request():
 @app.before_request
 def check_program_change():
     global _cached_active_program, _cached_active_user
-    from utils.program import get_active_program, get_active_user
+    from runners.program import get_active_program, get_active_user
     current_program = get_active_program()
     current_user = get_active_user()
             
@@ -100,7 +102,7 @@ def add_cache_control_headers(response):
 
 # Initialize active program and active user cache
 try:
-    from utils.program import get_active_program, get_active_user
+    from runners.program import get_active_program, get_active_user
     _cached_active_program = get_active_program()
     _cached_active_user = get_active_user()
 except Exception as e:
@@ -113,14 +115,14 @@ def prewarm_caches():
         
     try:
         # Prewarm local models list
-        from utils.models import fetch_local_models
+        from models.models import fetch_local_models
         fetch_local_models(force_refresh=True)
     except Exception as e:
         print(f"Error prewarming local models: {e}")
         
     try:
         # Prewarm server status
-        from utils.local_llm_manager import check_status, check_installed
+        from adapters.local_llm_manager import check_status, check_installed
         llm_already_online = check_status(force_refresh=True)
         check_installed()
     except Exception as e:
@@ -206,7 +208,7 @@ def find_image_sidecar_json(image_filename, active_program):
 
 def sanitize_response(response_text, session_id, program_msg_id):
     """Apply banned words filter and update persisted message if sanitized."""
-    from utils.banned_words import sanitize_text
+    from core.banned_words import sanitize_text
     sanitized = sanitize_text(response_text)
     if sanitized != response_text:
         print(f"[BANNED WORDS] Sanitized response in session {session_id}")
@@ -223,19 +225,19 @@ def extract_mood(chat_history):
             if mood:
                 return mood
             break
-    from utils.mood_inversion import analyze_emotional_state
+    from core.mood_inversion import analyze_emotional_state
     return analyze_emotional_state("")
 
 
 def prepare_generation_request(session_id, use_imagen=False, is_voice_call=False):
     """Reset per-session tool state before a generation request."""
-    import tools
+    import tools.tools as tools
     tools.current_session_id.set(session_id)
     tools.current_use_imagen.set(use_imagen)
     with tools.session_tool_calls_lock:
         tools.session_tool_calls[session_id] = []
 
-    from runner_interface import cancelled_sessions, voice_call_sessions
+    from runners.runners import cancelled_sessions, voice_call_sessions
     cancelled_sessions.discard(session_id)
     if is_voice_call:
         voice_call_sessions.add(session_id)
@@ -310,7 +312,7 @@ def index():
     active_program = os.getenv("ACTIVE_PROGRAM", "sebile")
     theme = load_theme(active_program)
 
-    from utils.program import get_active_user
+    from runners.program import get_active_user
     active_user = get_active_user()
     if os.getenv("AUTH_USER") and request.authorization and active_user == "builder":
         # If Basic Auth is active, default active user to authenticated user
@@ -351,7 +353,7 @@ def app_icon():
 
 @app.route('/profile.png')
 def profile_png():
-    from utils.program import get_active_program
+    from runners.program import get_active_program
     active_program = get_active_program()
     path_png = os.path.join('core', 'programs', active_program, 'portraits', 'profile.png')
     if os.path.exists(path_png):
@@ -386,7 +388,7 @@ def program_profile_png(program_id):
 def save_profile_picture():
     try:
         from variables import PROGRAMS_DIR
-        from utils.program import get_active_program
+        from runners.program import get_active_program
         import base64
         import re
         
@@ -422,7 +424,7 @@ def crop_profile_picture():
     """Server-side crop: receives source image path and crop coordinates, uses PIL to crop and resize."""
     try:
         from variables import PROGRAMS_DIR
-        from utils.program import get_active_program
+        from runners.program import get_active_program
         from PIL import Image
         
         data = request.get_json(silent=True) or {}
@@ -504,7 +506,7 @@ def get_image_prompt():
         
     try:
         import json
-        from utils.program import get_active_program
+        from runners.program import get_active_program
         active_program = get_active_program()
         
         if image_url.startswith('/images/'):
@@ -536,7 +538,7 @@ def proactive_action():
     try:
         import os
         import json
-        from utils.program import get_active_program
+        from runners.program import get_active_program
         from variables import PROGRAMS_DIR
         
         active_program = get_active_program()
@@ -563,7 +565,7 @@ def proactive_action():
                     print(f"Error reading program config for proactive action: {ex}")
                     
         # Get active user profile
-        from utils.program import get_active_user
+        from runners.program import get_active_user
         active_user = get_active_user()
         user_display_name = active_user.replace("_", " ").title()
 
@@ -613,7 +615,7 @@ You must return a valid JSON object matching the following schema:
 """
 
         # Call the LLM
-        from utils.models import is_local_model
+        from models.models import is_local_model
         is_local = is_local_model(selected_model) if selected_model else True
         raw_response = None
         
@@ -827,7 +829,7 @@ def chat():
         print(f"Error occurred in chat: {e}")
         return jsonify({'error': str(e)}), 500
     finally:
-        from runner_interface import cancelled_sessions, voice_call_sessions
+        from runners.runners import cancelled_sessions, voice_call_sessions
         cancelled_sessions.discard(session_id)
         voice_call_sessions.discard(session_id)
 
@@ -876,7 +878,7 @@ def edit():
         print(f"Error occurred during edit: {e}")
         return jsonify({'error': str(e)}), 500
     finally:
-        from runner_interface import cancelled_sessions
+        from runners.runners import cancelled_sessions
         cancelled_sessions.discard(session_id)
 
 def generate_impersonated_message(session_id, user_profile, model):
@@ -923,7 +925,7 @@ def generate_user_message():
         # Fallback to active user profile file
         try:
             from variables import USER_PROFILES_DIR
-            from utils.program import get_active_user
+            from runners.program import get_active_user
             active_user = get_active_user()
             profile_path = os.path.join(USER_PROFILES_DIR, f"{active_user}.md")
             if os.path.exists(profile_path):
@@ -987,13 +989,13 @@ def continue_generation():
     session_id = request.json.get('session_id', 'default')
     model = request.json.get('model')
     
-    import tools
+    import tools.tools as tools
     tools.current_session_id.set(session_id)
     tools.current_use_imagen.set(request.json.get('use_imagen', False))
     with tools.session_tool_calls_lock:
         tools.session_tool_calls[session_id] = []
 
-    from runner_interface import cancelled_sessions
+    from runners.runners import cancelled_sessions
     cancelled_sessions.discard(session_id)
     start_time = time.time()
     
@@ -1088,7 +1090,7 @@ def continue_generation():
         print(f"Error in continue_generation: {e}")
         return jsonify({'error': str(e)}), 500
     finally:
-        from runner_interface import cancelled_sessions
+        from runners.runners import cancelled_sessions
         cancelled_sessions.discard(session_id)
 
 
@@ -1144,7 +1146,7 @@ def regenerate_image():
         filename = os.path.basename(old_image_url)
         # 1. Try to find the prompt in the program sidecar JSON file (most reliable and clean)
         try:
-            from utils.program import get_active_program
+            from runners.program import get_active_program
             active_program = get_active_program()
             filename_only = os.path.basename(old_image_url)
             json_path = find_image_sidecar_json(filename_only, active_program)
@@ -1191,7 +1193,7 @@ def regenerate_image():
             return jsonify({'error': 'Original prompt not found. Unable to regenerate image.'}), 400
 
     try:
-        import tools
+        import tools.tools as tools
         tools.current_session_id.set(session_id)
         with tools.session_tool_calls_lock:
             tools.session_tool_calls[session_id] = []
@@ -1232,7 +1234,7 @@ active_generations = {}
 active_generations_lock = threading.Lock()
 
 def run_background_video_gen(task_id, session_id, image_url, local_path, prompt):
-    import tools
+    import tools.tools as tools
     import asyncio
     
     with active_generations_lock:
@@ -1277,7 +1279,7 @@ def animate_image():
         return jsonify({'error': 'Missing image_url'}), 400
         
     try:
-        from runner_interface import _get_safe_local_path
+        from runners.runners import _get_safe_local_path
         
         # Resolve to safe local path
         local_path = _get_safe_local_path(image_url)
@@ -1360,7 +1362,7 @@ def list_images():
 @app.route('/pending_tool_call', methods=['GET'])
 @requires_auth
 def get_pending_tool_call():
-    import tools
+    import tools.tools as tools
     pending = None
     for call_id, info in list(tools.pending_tool_calls.items()):
         if info['status'] == 'pending':
@@ -1382,7 +1384,7 @@ def get_pending_tool_call():
 @requires_auth
 def cancel_chat():
     session_id = request.json.get('session_id', 'default')
-    from runner_interface import cancelled_sessions
+    from runners.runners import cancelled_sessions
     cancelled_sessions.add(session_id)
     print(f"[CANCEL] Session cancellation requested: {session_id}", flush=True)
     return jsonify({'status': 'success'})
@@ -1391,7 +1393,7 @@ def cancel_chat():
 @requires_auth
 def get_session_tool_calls():
     session_id = request.args.get('session_id', 'default')
-    import tools
+    import tools.tools as tools
     with tools.session_tool_calls_lock:
         calls = tools.session_tool_calls.get(session_id, [])
         return jsonify({'tool_calls': list(calls)})
@@ -1399,7 +1401,7 @@ def get_session_tool_calls():
 @app.route('/approve_tool', methods=['POST'])
 @requires_auth
 def approve_tool():
-    import tools
+    import tools.tools as tools
     call_id = request.json.get('call_id')
     status = request.json.get('status')
     
@@ -1411,7 +1413,7 @@ def approve_tool():
         return jsonify({'status': 'success'})
     return jsonify({'error': 'Tool call not found'}), 404
 
-from utils.models import fetch_local_models
+from models.models import fetch_local_models
 
 @app.route('/models', methods=['GET'])
 @requires_auth
@@ -1419,7 +1421,7 @@ def get_models():
     # Check if Remote API key and Cloud URL are validly configured
     is_remote_configured, remote_key, remote_cloud_url = remote_configuration()
     
-    from utils.local_llm_manager import check_status, check_installed
+    from adapters.local_llm_manager import check_status, check_installed
     is_local_online = check_status()
     
     # 1. Fetch dynamic local models (only actively loaded models in Local LLM server)
@@ -1453,7 +1455,7 @@ def project_settings():
     settings_path = os.path.join(VARIABLES_DIR, "project_settings.json")
     
     # Get active program
-    from utils.program import get_active_program
+    from runners.program import get_active_program
     active_prog = get_active_program()
     default_folder = os.path.normpath(os.path.join(os.getcwd(), 'core', 'programs', active_prog))
     
@@ -1899,8 +1901,8 @@ def databank_purge():
 @requires_auth
 def list_lorebooks_route():
     try:
-        from utils.program import get_active_program
-        from utils.lorebook import list_lorebooks
+        from runners.program import get_active_program
+        from core.lorebook import list_lorebooks
         from variables import PROGRAMS_DIR
         program_id = get_active_program()
         books = list_lorebooks(program_id, PROGRAMS_DIR)
@@ -1915,8 +1917,8 @@ def list_lorebooks_route():
 @requires_auth
 def import_lorebook_route():
     try:
-        from utils.program import get_active_program
-        from utils.lorebook import import_lorebook
+        from runners.program import get_active_program
+        from core.lorebook import import_lorebook
         from variables import PROGRAMS_DIR
         program_id = get_active_program()
         if 'file' not in request.files:
@@ -1935,7 +1937,7 @@ def import_lorebook_route():
 @requires_auth
 def export_lorebook_route(filename):
     try:
-        from utils.program import get_active_program
+        from runners.program import get_active_program
         from variables import PROGRAMS_DIR
         program_id = get_active_program()
         fpath = os.path.join(PROGRAMS_DIR, program_id, 'lorebooks', filename)
@@ -1955,8 +1957,8 @@ def export_lorebook_route(filename):
 @requires_auth
 def delete_lorebook_route(filename):
     try:
-        from utils.program import get_active_program
-        from utils.lorebook import delete_lorebook
+        from runners.program import get_active_program
+        from core.lorebook import delete_lorebook
         from variables import PROGRAMS_DIR
         program_id = get_active_program()
         deleted = delete_lorebook(program_id, filename, PROGRAMS_DIR)
@@ -1970,7 +1972,7 @@ def delete_lorebook_route(filename):
 def get_card_lorebook_entries():
     """Return entries from the embedded character_book in the active program card."""
     try:
-        from utils.program import get_active_program
+        from runners.program import get_active_program
         from variables import PROGRAMS_DIR
         program_id = get_active_program()
         card_path = os.path.join(PROGRAMS_DIR, program_id, f'{program_id}.json')
@@ -1992,7 +1994,7 @@ def get_card_lorebook_entries():
 def save_card_lorebook_entries():
     """Write updated entries back into character_book in the active program card."""
     try:
-        from utils.program import get_active_program
+        from runners.program import get_active_program
         from variables import PROGRAMS_DIR
         program_id = get_active_program()
         card_path = os.path.join(PROGRAMS_DIR, program_id, f'{program_id}.json')
@@ -2019,7 +2021,7 @@ def save_card_lorebook_entries():
 def get_lorebook_entries(filename):
     """Return the raw entry list for a lorebook file so the UI can render an editor."""
     try:
-        from utils.program import get_active_program
+        from runners.program import get_active_program
         from variables import PROGRAMS_DIR
         program_id = get_active_program()
         fpath = os.path.join(PROGRAMS_DIR, program_id, 'lorebooks', filename)
@@ -2041,7 +2043,7 @@ def get_lorebook_entries(filename):
 def save_lorebook_entries(filename):
     """Overwrite a lorebook file with updated entries from the editor."""
     try:
-        from utils.program import get_active_program
+        from runners.program import get_active_program
         from variables import PROGRAMS_DIR
         program_id = get_active_program()
         fpath = os.path.join(PROGRAMS_DIR, program_id, 'lorebooks', filename)
@@ -2066,7 +2068,7 @@ def save_lorebook_entries(filename):
 @requires_auth
 def get_program_memories():
     try:
-        from utils.program import get_active_program
+        from runners.program import get_active_program
         program_id = request.args.get('program_id') or get_active_program()
         
         db_dir = os.path.join(base_dir, "core", "programs", program_id)
@@ -2101,7 +2103,7 @@ def delete_memory():
 @requires_auth
 def list_quests():
     try:
-        from utils.program import get_active_program
+        from runners.program import get_active_program
         active_program = get_active_program()
         quests_path = os.path.join('core', 'programs', active_program, 'quest_log.json')
         
@@ -2121,7 +2123,7 @@ def list_quests():
 @requires_auth
 def delete_quest(quest_id):
     try:
-        from utils.program import get_active_program
+        from runners.program import get_active_program
         active_program = get_active_program()
         quests_path = os.path.join('core', 'programs', active_program, 'quest_log.json')
         
@@ -2141,7 +2143,7 @@ def delete_quest(quest_id):
 @requires_auth
 def complete_quest(quest_id):
     try:
-        from utils.program import get_active_program
+        from runners.program import get_active_program
         active_program = get_active_program()
         quests_path = os.path.join('core', 'programs', active_program, 'quest_log.json')
         quest_data = None
@@ -2182,7 +2184,7 @@ def complete_quest(quest_id):
 @requires_auth
 def download_quest(quest_id):
     try:
-        from utils.program import get_active_program
+        from runners.program import get_active_program
         active_program = get_active_program()
         quests_path = os.path.join('core', 'programs', active_program, 'quest_log.json')
         if not os.path.exists(quests_path):
@@ -2353,7 +2355,7 @@ def select_program():
         
         # Update active program settings
         try:
-            from utils.program import set_active_program
+            from runners.program import set_active_program
             set_active_program(program_id)
         except Exception as e:
             print(f"Error persisting ACTIVE_PROGRAM: {e}")
@@ -2445,7 +2447,7 @@ def delete_program():
             return jsonify({'error': f"Program '{program_id}' does not exist"}), 404
             
         # If the deleted program is currently active, switch to Sebile first
-        from utils.program import get_active_program, set_active_program
+        from runners.program import get_active_program, set_active_program
         active_program = get_active_program()
         is_active = (program_id == active_program)
         if is_active:
@@ -2551,7 +2553,7 @@ def rename_program():
             was_active = (program_id == active_program)
             
             # Update settings (active_program, folders, program_voices)
-            from utils.program import _load_settings, _save_settings
+            from runners.program import _load_settings, _save_settings
             settings = _load_settings()
             
             if was_active:
@@ -2605,7 +2607,7 @@ def rename_program():
 @requires_auth
 def get_program_profile():
     try:
-        from utils.program import get_active_program, _load_settings
+        from runners.program import get_active_program, _load_settings
         from variables import PROGRAMS_DIR
         import json
 
@@ -2638,7 +2640,7 @@ def get_program_profile():
 @requires_auth
 def save_program_profile():
     try:
-        from utils.program import get_active_program, set_tts_voice_for_program, _load_settings, _save_settings
+        from runners.program import get_active_program, set_tts_voice_for_program, _load_settings, _save_settings
         from variables import PROGRAMS_DIR
         import json
 
@@ -2695,8 +2697,8 @@ def save_program_profile():
 @requires_auth
 def get_program_journals():
     try:
-        from utils.program import get_active_program
-        from utils.journals import get_journal_entries
+        from runners.program import get_active_program
+        from core.journals import get_journal_entries
         
         program_id = request.args.get('program_id') or get_active_program()
         entries = get_journal_entries(program_id)
@@ -2709,8 +2711,8 @@ def get_program_journals():
 @requires_auth
 def save_program_journals():
     try:
-        from utils.program import get_active_program
-        from utils.journals import get_journal_entries, save_journal_entries, add_journal_entry
+        from runners.program import get_active_program
+        from core.journals import get_journal_entries, save_journal_entries, add_journal_entry
         
         data = request.get_json(silent=True) or {}
         entry_id = data.get('id')
@@ -2743,8 +2745,8 @@ def save_program_journals():
 @requires_auth
 def delete_program_journals():
     try:
-        from utils.program import get_active_program
-        from utils.journals import delete_journal_entry
+        from runners.program import get_active_program
+        from core.journals import delete_journal_entry
         
         data = request.get_json(silent=True) or {}
         entry_id = data.get('id')
@@ -2767,7 +2769,7 @@ def delete_program_journals():
 def list_user_profiles():
     try:
         from variables import USER_PROFILES_DIR
-        from utils.program import get_active_user
+        from runners.program import get_active_user
         if not os.path.exists(USER_PROFILES_DIR):
             os.makedirs(USER_PROFILES_DIR, exist_ok=True)
         
@@ -2816,7 +2818,7 @@ def select_user_profile():
             return jsonify({"error": "Missing profile_id"}), 400
         
         from variables import USER_PROFILES_DIR
-        from utils.program import set_active_user
+        from runners.program import set_active_user
         profile_path = os.path.join(USER_PROFILES_DIR, f"{profile_id}.md")
         if not os.path.exists(profile_path):
             return jsonify({"error": f"Profile '{profile_id}' does not exist"}), 404
@@ -2850,7 +2852,7 @@ def save_user_profile():
             return jsonify({"error": "Invalid profile name"}), 400
             
         from variables import USER_PROFILES_DIR
-        from utils.program import get_active_user
+        from runners.program import get_active_user
         if not os.path.exists(USER_PROFILES_DIR):
             os.makedirs(USER_PROFILES_DIR, exist_ok=True)
             
@@ -2883,7 +2885,7 @@ def delete_user_profile():
             return jsonify({"error": "Cannot delete the default 'builder' profile"}), 400
             
         from variables import USER_PROFILES_DIR
-        from utils.program import get_active_user, set_active_user
+        from runners.program import get_active_user, set_active_user
         profile_path = os.path.join(USER_PROFILES_DIR, f"{profile_id}.md")
         if not os.path.exists(profile_path):
             return jsonify({"error": f"Profile '{profile_id}' does not exist"}), 404
@@ -2930,7 +2932,7 @@ def rename_user_profile():
             return jsonify({"status": "success", "profile_id": new_profile_id})
             
         from variables import USER_PROFILES_DIR
-        from utils.program import get_active_user, set_active_user
+        from runners.program import get_active_user, set_active_user
         old_path = os.path.join(USER_PROFILES_DIR, f"{old_profile_id}.md")
         new_path = os.path.join(USER_PROFILES_DIR, f"{new_profile_id}.md")
         
@@ -3023,7 +3025,7 @@ Output a single JSON object with EXACTLY these keys:
 }}"""
 
     raw_response = None
-    from utils.models import is_local_model
+    from models.models import is_local_model
     use_local = is_local_model(model)
 
     if use_local:
@@ -3365,7 +3367,7 @@ _last_broadcast_state = {}
 
 def _get_current_status():
     """Build the combined connection status payload."""
-    from utils import local_llm_manager, comfy_manager
+    from adapters import local_llm_manager
     is_remote_configured, remote_key, remote_cloud_url = remote_configuration()
     
     # Load temperature dynamically
@@ -3464,11 +3466,11 @@ def sse_status_stream():
 
 
 # --- Headless Local LLM & Hugging Face Integration API ---
-from utils import local_llm_manager
-from utils import comfy_manager
+from adapters import local_llm_manager
+from adapters import comfy_manager
 
 # Wire SSE broadcast callbacks into both managers
-from utils import local_runner
+from runners import local_runner
 local_runner._on_status_change = broadcast_status
 comfy_manager._on_status_change = broadcast_status
 
@@ -3479,7 +3481,7 @@ def local_llm_status():
     online = local_llm_manager.check_status()
     loaded_models = []
     if online is True:
-        from utils.models import fetch_local_models
+        from models.models import fetch_local_models
         loaded_models = [m["value"] for m in fetch_local_models()]
     
     downloaded_models = local_llm_manager.list_local_models()
@@ -3609,7 +3611,7 @@ def comfy_resolve_workflow():
     if not workflow_json:
         try:
             from variables import PROGRAMS_DIR, COMFYUI_CHECKPOINT
-            from utils.program import get_active_program
+            from runners.program import get_active_program
             active_program = get_active_program()
             
             combined_workflow = {}
@@ -3671,7 +3673,7 @@ def comfy_resolve_workflow():
 @requires_auth
 def comfy_checkpoints():
     try:
-        from utils.comfy_manager import list_local_checkpoints
+        from adapters.comfy_manager import list_local_checkpoints
         checkpoints = list_local_checkpoints()
         active = os.getenv("COMFYUI_CHECKPOINT", "sd_xl_base_1.0.safetensors")
         return jsonify({
@@ -3717,7 +3719,7 @@ def comfy_search_checkpoints():
     query = request.args.get('query', '').strip()
     if not query:
         return jsonify({"results": []})
-    from utils.comfy_manager import search_huggingface_checkpoints
+    from adapters.comfy_manager import search_huggingface_checkpoints
     results = search_huggingface_checkpoints(query)
     return jsonify({"results": results})
 
@@ -3729,14 +3731,14 @@ def comfy_download_checkpoint():
     if not url or not filename:
         return jsonify({"error": "Missing url or filename"}), 400
         
-    from utils.comfy_manager import trigger_checkpoint_download
+    from adapters.comfy_manager import trigger_checkpoint_download
     success, message = trigger_checkpoint_download(url, filename)
     return jsonify({"success": success, "message": message})
 
 @app.route('/api/comfy/checkpoints/download_status', methods=['GET'])
 @requires_auth
 def comfy_checkpoint_download_status():
-    from utils.comfy_manager import checkpoint_download_status
+    from adapters.comfy_manager import checkpoint_download_status
     return jsonify(checkpoint_download_status)
 
 
