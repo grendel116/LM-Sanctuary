@@ -433,7 +433,7 @@ class BaseProgramRunner:
         sys_instructions = self._get_system_instructions(session_id, inversion_directive, user_message=new_message_text)
         messages = adapter.get_openai_messages(sys_instructions, rag_context, memory_context)
 
-        # --- STAGE 2: SINGLE PROCESSING PASS ---
+# --- STAGE 2: SINGLE PROCESSING PASS ---
         temperature = self._load_temperature_setting()
         is_cloud = _is_cloud_model_check(model)
         remote_configured = _is_remote_configured()
@@ -455,7 +455,30 @@ class BaseProgramRunner:
             response = await self._post_llm_request(url, payload, headers, timeout=120.0, session_id=session_id)
             bot_response_text = response.json()["choices"][0]["message"]["content"] if response.status_code == 200 else f"Error: {response.text}"
         except Exception as e:
-            bot_response_text = f"Error connecting to model server: {e}"
+            # --- REMOTE CLOUD BACKUP ---
+            if not is_cloud and remote_configured and os.getenv("REMOTE_CLOUD_URL"):
+                print(f"[LLM BACKUP] Local server failed ({e}). Switching to the cloud backup...", flush=True)
+                cloud_url = os.getenv("REMOTE_CLOUD_URL")
+                cloud_headers = {"Content-Type": "application/json", "Authorization": f"Bearer {os.getenv('REMOTE_API_KEY')}"}
+                
+                cloud_payload = {
+                    "messages": messages,
+                    "temperature": temperature,
+                    "max_tokens": 1024,
+                    "model": os.getenv("REMOTE_MODEL", "gemini-2.5-flash")
+                }
+                
+                try:
+                    response = await self._post_llm_request(cloud_url, cloud_payload, cloud_headers, timeout=60.0, session_id=session_id)
+                    if response.status_code == 200:
+                        bot_response_text = response.json()["choices"][0]["message"]["content"]
+                        target_model = cloud_payload["model"] # update tracked model for memory pipeline
+                    else:
+                        bot_response_text = f"Error: Local server failed and cloud backup returned status {response.status_code} - {response.text}"
+                except Exception as cloud_err:
+                    bot_response_text = f"Error connecting to local model server and cloud backup also failed: {cloud_err}"
+            else:
+                bot_response_text = f"Error connecting to model server: {e}"
 
         # --- STAGE 3: POST-PROCESSING (TOOLS, SUBAGENTS & CLEANUP) ---
         bot_response_text = self._sanitize_thinking_tags(bot_response_text)
