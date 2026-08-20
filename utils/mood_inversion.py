@@ -108,11 +108,15 @@ def analyze_sentiment_with_llm(text: str) -> dict:
         api_key and api_key != "your_remote_api_key_here" and
         remote_url and remote_url != "your_remote_cloud_url_here"
     )
+    
     system_instruction = (
-        "Classify the message mood. Return JSON only: "
-        '{"name":"calm|intimate|excited|intense|sad|analytical|focused",'
-        '"intensity":0.0}. Choose one mood and a 0-1 intensity.'
+        "Classify the message mood. Respond ONLY with a single-line valid JSON object matching this exact format: "
+        '{"name": "calm", "intensity": 0.5}. '
+        "Do not include markdowns, line breaks, or extra text. "
+        "Allowed names: calm, intimate, excited, intense, sad, analytical, focused."
     )
+
+    excerpt = _mood_excerpt(text)
 
     try:
         from variables import REMOTE_SERVER_URL, get_remote_server_headers
