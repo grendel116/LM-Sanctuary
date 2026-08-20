@@ -58,7 +58,7 @@ These are the things your companion can do on your computer. By default, before 
 ## CHAT FEATURES
 
 * **Interactive Voice Calls / Chat**: Speak with companions in real-time. Powering Kokoro ONNX voice generation, companion-specific voices, and call transcript saving.
-* **Procedural Journals & Memories**: Companions build dynamic memory structures (`memories.json`) and journal logs (`journals.json`), preserving context and relationships across sessions.
+* **Procedural Journals & Memories**: Companions build dynamic journal logs (`journals.json`), preserving context and relationships across sessions.
 * **Quest Log & Calendar Export**: Integrated quest system to track and display user objectives in the UI. Companions can assign quests (chores, habits, tasks) using the local `add_quest` tool. Each quest card provides a quick-action to export the task:
   * **Download ICS**: Download a standard `.ics` file containing a `VALARM` notification alert for native desktop/mobile task/calendar clients.
 * **Program Editing, Imports & Exports**: Edit companion profiles, import SillyTavern character cards (`.json`), import World Info lorebooks (`.json`), and export cards and lorebooks back to SillyTavern format.

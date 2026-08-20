@@ -30,24 +30,12 @@ class DataBankManager:
         
         os.makedirs(db_dir, exist_ok=True)
         self.db_path = os.path.join(db_dir, "databank.json")
-        self.memories_path = os.path.join(db_dir, "memories.json")
-        
-        # Migration from legacy journal.json to memories.json
-        legacy_journal_path = os.path.join(db_dir, "journal.json")
-        if os.path.exists(legacy_journal_path) and not os.path.exists(self.memories_path):
-            try:
-                os.rename(legacy_journal_path, self.memories_path)
-                print(f"[DATABANK MIGRATION] Renamed legacy {legacy_journal_path} to {self.memories_path}", flush=True)
-            except Exception as e:
-                print(f"[DATABANK MIGRATION ERROR] Failed to rename legacy journal: {e}", flush=True)
                 
         self._init_db()
 
     def _init_db(self):
         if not os.path.exists(self.db_path):
             self._save_data(self.db_path, {"documents": [], "chunks": []})
-        if not os.path.exists(self.memories_path):
-            self._save_data(self.memories_path, {"documents": [], "chunks": []})
 
     def _load_data(self, path):
         try:
@@ -69,13 +57,10 @@ class DataBankManager:
         """Parses HTML and extracts clean readable text, removing boilerplate markup."""
         soup = BeautifulSoup(html_content, 'html.parser')
         
-        # Remove script, style, header, footer, nav, and metadata elements
         for element in soup(["script", "style", "nav", "header", "footer", "form", "noscript", "aside"]):
             element.decompose()
             
         text = soup.get_text(separator=' ')
-        
-        # Consolidate whitespaces and empty lines
         lines = (line.strip() for line in text.splitlines())
         chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
         clean_text = '\n'.join(chunk for chunk in chunks if chunk)
@@ -110,7 +95,6 @@ class DataBankManager:
         if not text:
             return []
             
-        # Standard recursive character splitter simulation
         paragraphs = text.split('\n\n')
         chunks = []
         current_chunk = []
@@ -121,7 +105,6 @@ class DataBankManager:
             if not para:
                 continue
                 
-            # If a single paragraph is larger than the chunk size, split by lines or sentences
             if len(para) > chunk_size:
                 sentences = para.replace('. ', '.\n').split('\n')
                 for sent in sentences:
@@ -130,7 +113,6 @@ class DataBankManager:
                         continue
                     if current_length + len(sent) > chunk_size and current_chunk:
                         chunks.append(" ".join(current_chunk))
-                        # Keep last items for overlap
                         overlap_text = []
                         overlap_len = 0
                         for c in reversed(current_chunk):
@@ -146,7 +128,6 @@ class DataBankManager:
             else:
                 if current_length + len(para) > chunk_size and current_chunk:
                     chunks.append(" ".join(current_chunk))
-                    # Keep overlap
                     overlap_text = []
                     overlap_len = 0
                     for c in reversed(current_chunk):
@@ -165,8 +146,8 @@ class DataBankManager:
             
         return [c.strip() for c in chunks if c.strip()]
 
-    def ingest_text(self, text: str, name: str, source_type: str, doc_id: str = None) -> str:
-        """Chunks, embeds, and saves a text document to the local JSON files."""
+    def ingest_text(self, text: str, name: str, source_type: str = "file", doc_id: str = None) -> str:
+        """Chunks, embeds, and saves a text document to databank.json."""
         if not doc_id:
             import uuid
             doc_id = str(uuid.uuid4())
@@ -175,17 +156,11 @@ class DataBankManager:
         if not chunks:
             return doc_id
             
-        # Generate embeddings in batch
         model = get_embedding_model()
         vectors = model.encode(chunks)
         
-        # Decide which database file to use
-        is_chat_history = (source_type == 'chat_history')
-        path = self.memories_path if is_chat_history else self.db_path
+        data = self._load_data(self.db_path)
         
-        data = self._load_data(path)
-        
-        # Insert document reference
         data["documents"].append({
             "id": doc_id,
             "name": name,
@@ -194,7 +169,6 @@ class DataBankManager:
             "timestamp": time.time()
         })
         
-        # Insert chunk vectors
         for idx, (chunk_text, vector) in enumerate(zip(chunks, vectors)):
             data["chunks"].append({
                 "doc_id": doc_id,
@@ -203,12 +177,11 @@ class DataBankManager:
                 "vector": vector.tolist()
             })
             
-        self._save_data(path, data)
-        print(f"[Data Bank] Ingested document '{name}' ({len(chunks)} chunks) into {'journal' if is_chat_history else 'databank'}.")
+        self._save_data(self.db_path, data)
+        print(f"[Data Bank] Ingested document '{name}' ({len(chunks)} chunks) into databank.")
         return doc_id
 
     def ingest_file(self, file_path: str, original_filename: str) -> str:
-        """Parses file type, extracts text, and ingests it."""
         ext = os.path.splitext(original_filename)[1].lower()
         
         if ext in ['.txt', '.md', '.py']:
@@ -230,16 +203,14 @@ class DataBankManager:
             raise ValueError(f"Unsupported file format: {ext}")
 
     def ingest_url(self, url: str) -> str:
-        """Scrapes webpage URL and ingests it."""
         clean_text = self.scrape_url(url)
-        # Clean URL to get a readable name
         name = url.split("://")[-1].strip("/")
         if len(name) > 60:
             name = name[:57] + "..."
         return self.ingest_text(clean_text, name, "url")
 
     def list_documents(self) -> list:
-        """Lists all documents registered in databank.json (excluding chat history memory)."""
+        """Lists all documents registered in databank.json."""
         data = self._load_data(self.db_path)
         
         chunk_counts = {}
@@ -249,18 +220,16 @@ class DataBankManager:
             
         results = []
         for doc in data["documents"]:
-            if doc["source_type"] != 'chat_history':
-                doc_copy = doc.copy()
-                doc_copy["chunk_count"] = chunk_counts.get(doc["id"], 0)
-                results.append(doc_copy)
+            doc_copy = doc.copy()
+            doc_copy["chunk_count"] = chunk_counts.get(doc["id"], 0)
+            results.append(doc_copy)
                 
         results.sort(key=lambda x: x["timestamp"], reverse=True)
         return results
 
     def delete_document(self, doc_id: str) -> bool:
-        """Removes a document and all its chunks from the databank.json file."""
+        """Removes a document and all its chunks from databank.json."""
         data = self._load_data(self.db_path)
-        
         original_doc_count = len(data["documents"])
         
         data["documents"] = [d for d in data["documents"] if d["id"] != doc_id]
@@ -269,184 +238,14 @@ class DataBankManager:
         self._save_data(self.db_path, data)
         return len(data["documents"]) < original_doc_count
 
-    def delete_chat_history(self, session_id: str):
-        """Deletes all chat history archives associated with the session from memories.json."""
-        data = self._load_data(self.memories_path)
-        
-        prefix = f"chat_history_archive_{session_id}_"
-        doc_ids_to_delete = [
-            d["id"] for d in data["documents"] 
-            if d["source_type"] == 'chat_history' and d["name"].startswith(prefix)
-        ]
-        
-        if doc_ids_to_delete:
-            doc_ids_set = set(doc_ids_to_delete)
-            data["documents"] = [d for d in data["documents"] if d["id"] not in doc_ids_set]
-            data["chunks"] = [c for c in data["chunks"] if c["doc_id"] not in doc_ids_set]
-            self._save_data(self.memories_path, data)
-            
-        print(f"[Data Bank] Deleted {len(doc_ids_to_delete)} chat history archives for session '{session_id}' in memories.")
-
-    def update_memory_document(self, doc_name: str, new_text: str) -> bool:
-        """Re-chunks and re-embeds an existing memory document with distilled or updated text."""
-        data = self._load_data(self.memories_path)
-        matching_docs = [d for d in data.get("documents", []) if d.get("name") == doc_name and d.get("source_type") == 'chat_history']
-        if not matching_docs:
-            return False
-        doc = matching_docs[0]
-        doc_id = doc["id"]
-        
-        # Remove old chunks
-        data["chunks"] = [c for c in data.get("chunks", []) if c.get("doc_id") != doc_id]
-        
-        # Re-chunk and embed
-        model = get_embedding_model()
-        new_chunks = self.chunk_text(new_text)
-        if new_chunks:
-            vectors = model.encode(new_chunks)
-            for idx, (chunk_str, vec) in enumerate(zip(new_chunks, vectors)):
-                data["chunks"].append({
-                    "doc_id": doc_id,
-                    "chunk_index": idx,
-                    "text": chunk_str,
-                    "vector": vec.tolist() if hasattr(vec, 'tolist') else list(vec)
-                })
-        doc["size"] = len(new_text)
-        self._save_data(self.memories_path, data)
-        return True
-
-    def get_all_memories(self) -> list:
-        """Retrieves all chat history archives from memories.json, including their concatenated chunk text."""
-        data = self._load_data(self.memories_path)
-        
-        chat_docs = [
-            d for d in data.get("documents", [])
-            if d.get("source_type") == 'chat_history'
-        ]
-        
-        chat_docs.sort(key=lambda x: x.get("timestamp", 0), reverse=True)
-        
-        results = []
-        for doc in chat_docs:
-            doc_id = doc["id"]
-            doc_chunks = [c for c in data.get("chunks", []) if c.get("doc_id") == doc_id]
-            doc_chunks.sort(key=lambda x: x.get("chunk_index", 0))
-            
-            text = "\n".join(c["text"] for c in doc_chunks)
-            
-            name = doc.get("name", "")
-            session_id = "default"
-            if name.startswith("chat_history_archive_"):
-                parts = name[len("chat_history_archive_"):].split("_")
-                if len(parts) >= 2:
-                    session_id = "_".join(parts[:-1])
-            
-            results.append({
-                "id": doc_id,
-                "name": name,
-                "session_id": session_id,
-                "timestamp": doc.get("timestamp", 0),
-                "text": text
-            })
-            
-        return results
-
-    def get_prior_chat_histories(self, session_id: str = None, limit: int = 2) -> list:
-        """Retrieves prior chat histories globally from memories.json."""
-        data = self._load_data(self.memories_path)
-        
-        chat_docs = [
-            d for d in data.get("documents", [])
-            if d.get("source_type") == 'chat_history'
-        ]
-        
-        chat_docs.sort(key=lambda x: x.get("timestamp", 0), reverse=True)
-        target_docs = chat_docs[:limit]
-        
-        archives = []
-        for doc in target_docs:
-            doc_id = doc["id"]
-            doc_chunks = [c for c in data.get("chunks", []) if c.get("doc_id") == doc_id]
-            doc_chunks.sort(key=lambda x: x.get("chunk_index", 0))
-            
-            archives.append({
-                "name": doc["name"],
-                "text": "\n".join(c["text"] for c in doc_chunks)
-            })
-            
-        return archives
-
-    def prune_chat_histories(self, session_id: str = None, keep_limit: int = 3):
-        """Consolidates the oldest chat history archives when exceeding keep_limit so narrative history is preserved."""
-        data = self._load_data(self.memories_path)
-        
-        chat_docs = [
-            d for d in data.get("documents", [])
-            if d.get("source_type") == 'chat_history'
-        ]
-        
-        # Sort chronologically with oldest documents first
-        chat_docs.sort(key=lambda x: x.get("timestamp", 0))
-        
-        # Iteratively merge the two oldest documents until total documents match keep_limit
-        while len(chat_docs) > keep_limit:
-            doc_1 = chat_docs[0]
-            doc_2 = chat_docs[1]
-            
-            # Fetch text chunks of both documents
-            chunks_1 = [c["text"] for c in data.get("chunks", []) if c.get("doc_id") == doc_1["id"]]
-            chunks_2 = [c["text"] for c in data.get("chunks", []) if c.get("doc_id") == doc_2["id"]]
-            
-            text_1 = " ".join(chunks_1).strip()
-            text_2 = " ".join(chunks_2).strip()
-            merged_text = f"{text_1} {text_2}".strip()
-            
-            # Remove old chunks for both documents
-            to_remove_ids = {doc_1["id"], doc_2["id"]}
-            data["chunks"] = [c for c in data.get("chunks", []) if c.get("doc_id") not in to_remove_ids]
-            
-            # Re-chunk and embed the consolidated narrative text under doc_1
-            model = get_embedding_model()
-            merged_chunks = self.chunk_text(merged_text)
-            if merged_chunks:
-                vectors = model.encode(merged_chunks)
-                for idx, (chunk_str, vec) in enumerate(zip(merged_chunks, vectors)):
-                    data["chunks"].append({
-                        "doc_id": doc_1["id"],
-                        "chunk_index": idx,
-                        "text": chunk_str,
-                        "vector": vec.tolist() if hasattr(vec, 'tolist') else list(vec)
-                    })
-                    
-            # Update doc_1 size and preserve oldest timestamp
-            doc_1["size"] = len(merged_text)
-            
-            # Remove doc_2 from the document registry
-            data["documents"] = [d for d in data.get("documents", []) if d["id"] != doc_2["id"]]
-            
-            # Refresh sorted list
-            chat_docs = [
-                d for d in data.get("documents", [])
-                if d.get("source_type") == 'chat_history'
-            ]
-            chat_docs.sort(key=lambda x: x.get("timestamp", 0))
-            print(f"[Data Bank] Consolidated oldest archives '{doc_1['name']}' and '{doc_2['name']}' into single progressive memory chapter.")
-            
-        self._save_data(self.memories_path, data)
-
     def purge_all(self):
-        """Purges both databank.json and memories.json."""
+        """Purges databank.json."""
         self._save_data(self.db_path, {"documents": [], "chunks": []})
-        self._save_data(self.memories_path, {"documents": [], "chunks": []})
-        print("[Data Bank] Purged all documents and vectors from databank and memories.")
+        print("[Data Bank] Purged all documents and vectors from databank.")
 
-    def query(self, query_text: str, top_k: int = 5, score_threshold: float = 0.25, exclude_source_type: str = None, include_source_type: str = None, token_budget: int = None, query_vector=None) -> str:
-        """Queries the respective JSON vector index and returns clean contextual matching chunks."""
-        # Query memories.json for chat history, otherwise query databank.json
-        is_chat_history = (include_source_type == 'chat_history')
-        path = self.memories_path if is_chat_history else self.db_path
-        
-        data = self._load_data(path)
+    def query(self, query_text: str, top_k: int = 5, score_threshold: float = 0.25, exclude_source_type: str = None, token_budget: int = None, query_vector=None) -> str:
+        """Queries databank.json vector index and returns contextual matching chunks."""
+        data = self._load_data(self.db_path)
         
         if not data["chunks"]:
             return ""
@@ -460,19 +259,15 @@ class DataBankManager:
                 continue
             if exclude_source_type and doc["source_type"] == exclude_source_type:
                 continue
-            if include_source_type and doc["source_type"] != include_source_type:
-                continue
             filtered_chunks.append((doc["name"], chunk["text"], chunk["vector"]))
             
         if not filtered_chunks:
             return ""
             
-        # Reuse a per-turn embedding when both indexes are queried.
         if query_vector is None:
             model = get_embedding_model()
             query_vector = model.encode(query_text)
         
-        # Norm of query vector
         query_norm = np.linalg.norm(query_vector)
         if query_norm == 0:
             return ""
@@ -484,7 +279,6 @@ class DataBankManager:
             if chunk_norm == 0:
                 continue
                 
-            # Compute cosine similarity
             similarity = np.dot(query_vector, chunk_vector) / (query_norm * chunk_norm)
             
             if similarity >= score_threshold:
@@ -496,7 +290,6 @@ class DataBankManager:
         if not top_results:
             return ""
         
-        # Enforce token budget (approximate: 1 token ≈ 4 chars)
         if token_budget:
             budget_chars = token_budget * 4
             budgeted = []
@@ -509,18 +302,11 @@ class DataBankManager:
                 char_count += result_chars
             top_results = budgeted
         
-        # Diagnostic logging
         best_score = top_results[0][0] if top_results else 0
         best_source = top_results[0][1] if top_results else "none"
-        context_type = "memory" if is_chat_history else "knowledge"
-        print(f"[RAG] {context_type}: {len(top_results)} chunks retrieved (best: {best_score:.3f} from '{best_source}')", flush=True)
+        print(f"[RAG] knowledge: {len(top_results)} chunks retrieved (best: {best_score:.3f} from '{best_source}')", flush=True)
             
         formatted_context = []
-        if is_chat_history:
-            for score, doc_name, text in top_results:
-                formatted_context.append(text.strip())
-            return "\n\n---\n\n".join(formatted_context)
-        else:
-            for idx, (score, doc_name, text) in enumerate(top_results):
-                formatted_context.append(f"[{idx+1}] Source: {doc_name} (Similarity: {score:.2f})\n{text.strip()}")
-            return "\n\n".join(formatted_context)
+        for idx, (score, doc_name, text) in enumerate(top_results):
+            formatted_context.append(f"[{idx+1}] Source: {doc_name} (Similarity: {score:.2f})\n{text.strip()}")
+        return "\n\n".join(formatted_context)

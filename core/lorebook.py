@@ -155,11 +155,36 @@ def get_active_lore(
         (m.get("text") or "").lower() for m in scan_msgs[-max_depth:]
     )
 
-    # 4. Evaluate and sort
+    # 4. Evaluate and sort (Existing Keyword Triggers)
     triggered = sorted(
         [e for e in all_entries if _entry_triggers(e, scan_text)],
         key=lambda e: e["order"],
     )
+
+    # 5. Hybrid Semantic Fallback (If no keyword entries triggered, check vector similarity)
+    if not triggered and scan_text:
+        try:
+            from core.skills.vectorized_databank.databank import DataBankManager
+            db = DataBankManager()
+            
+            # Query the databank engine or use its internal similarity mechanism
+            # (Assuming query_text or a similar method returns relevant chunks with scores)
+            vector_results = db.query_text(scan_text, top_k=2) # Limit semantic fallback hits
+            
+            # Map search results back to lore entries if they match content
+            matched_contents = {res.get("text") for res in vector_results if res.get("score", 0.0) >= 0.30}
+            
+            for e in all_entries:
+                if e in triggered:
+                    continue
+                if e["content"] in matched_contents:
+                    triggered.append(e)
+                    
+            # Re-sort to maintain order rules if new items were appended
+            triggered.sort(key=lambda x: x["order"])
+            
+        except Exception as ex:
+            print(f"[lorebook] Vector fallback error: {ex}")
 
     before = [e["content"] for e in triggered if e["position"] == "before"]
     after  = [e["content"] for e in triggered if e["position"] == "after"]

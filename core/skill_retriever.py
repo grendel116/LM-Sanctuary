@@ -132,12 +132,12 @@ def _get_skill_registry() -> list:
 def get_toolbelt_block(story_active: bool = False) -> str:
     """Builds the compact toolbelt string listing all available skill summaries.
 
-    Respects story mode filtering (only portrait_generation, memory_journaling,
+    Respects story mode filtering (only portrait_generation, log_journaling,
     and vectorized_databank are permitted in story mode).
 
     Returns a formatted toolbelt block ready for system prompt injection.
     """
-    story_mode_allowed = {"portrait_generation", "memory_journaling", "vectorized_databank"}
+    story_mode_allowed = {"portrait_generation", "log_journaling", "vectorized_databank"}
     registry = _get_skill_registry()
 
     lines = []
@@ -200,7 +200,7 @@ def retrieve_skill_instructions(query: str, story_active: bool = False,
     if not query:
         return ""
 
-    story_mode_allowed = {"portrait_generation", "memory_journaling", "vectorized_databank"}
+    story_mode_allowed = {"portrait_generation", "log_journaling", "vectorized_databank"}
     registry = _get_skill_registry()
 
     always_blocks = []

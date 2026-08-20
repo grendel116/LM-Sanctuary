@@ -13,11 +13,9 @@ from runners.program import get_active_program
 
 # Constants
 VECTOR_QUERY_MESSAGES = 3
-VECTOR_TOP_K = 8
+VECTOR_TOP_K = 4
 VECTOR_SCORE_THRESHOLD = 0.25
 VECTOR_TOKEN_BUDGET = 2048
-VECTOR_MEMORY_TOP_K = 3
-VECTOR_MEMORY_THRESHOLD = 0.30
 
 TOOL_ALIASES = {
     "generate_program_portrait": "generate_local_image",
@@ -115,16 +113,16 @@ def _build_vector_query(history: list[dict], max_messages: int = VECTOR_QUERY_ME
     return " ".join(reversed(messages))
 
 
-def _get_databank_contexts(query_text: str) -> tuple[str, str, object]:
-    """Retrieve knowledge and archived memory using vector embeddings."""
+def _get_databank_contexts(query_text: str) -> tuple[str, object]:
+    """Retrieve knowledge and databank files using vector embeddings."""
     if not query_text:
-        return "", "", None
+        return "", None
 
     try:
         from core.skills.vectorized_databank.databank import DataBankManager, get_embedding_model
         db = DataBankManager()
-        if not db._load_data(db.db_path).get("chunks") and not db._load_data(db.memories_path).get("chunks"):
-            return "", "", None
+        if not db._load_data(db.db_path).get("chunks"):
+            return "", None
 
         query_vector = get_embedding_model().encode(query_text)
         rag_context = db.query(
@@ -135,18 +133,10 @@ def _get_databank_contexts(query_text: str) -> tuple[str, str, object]:
             token_budget=VECTOR_TOKEN_BUDGET,
             query_vector=query_vector,
         )
-        memory_context = db.query(
-            query_text,
-            top_k=VECTOR_MEMORY_TOP_K,
-            score_threshold=VECTOR_MEMORY_THRESHOLD,
-            include_source_type="chat_history",
-            token_budget=VECTOR_TOKEN_BUDGET,
-            query_vector=query_vector,
-        )
-        return rag_context, memory_context, query_vector
+        return rag_context, query_vector
     except Exception as e:
         print(f"Error querying data bank contexts: {e}")
-        return "", "", None
+        return "", None
 
 
 def _build_tool_calls_pair(tool_name: str, args: dict, output: str, idx: int | None = None) -> list[dict]:

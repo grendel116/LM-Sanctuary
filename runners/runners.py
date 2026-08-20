@@ -190,7 +190,7 @@ class BaseProgramRunner:
         prompt_parts = [
             f"Summarize this new chat chapter for {user_name} and {program_name}.",
             "Keep only decisions, preferences, milestones, relationship changes, and project details.",
-            "Write 2-3 concise sentences, under 500 characters. Do not repeat prior memories.\n",
+            "Write 2 concise sentences, under 300 characters. Do not repeat prior memories.\n", # Reduced limit to protect context budget
         ]
 
         if prior_memories:
@@ -219,7 +219,7 @@ class BaseProgramRunner:
         prompt = (
             f"You are the memory chronicler for the ongoing interaction between {user_name} and {program_name}.\n"
             "The following text is the accumulated chronicle of earlier conversation chapters.\n"
-            "Condense these events into a single cohesive general summary (2-3 concise paragraphs, up to 900 characters).\n"
+            "Condense these events into a single cohesive general summary (2 concise paragraphs, max 600 characters).\n" # Capped at 600 chars (~150 tokens)
             "Retain major milestones, key user preferences, shared history, project decisions, and relationship dynamics.\n\n"
             f"ACCUMULATED CHRONICLE TO DISTILL:\n{text_to_distill}\n\n"
             "DISTILLED GENERAL SUMMARY:"
@@ -425,15 +425,14 @@ class BaseProgramRunner:
         model: str,
         inversion_directive: str,
         rag_context: str,
-        memory_context: str,
         new_message_text: str,
         invocation_id: str,
     ) -> tuple[str, list]:
         # --- STAGE 1: LOCAL PREPROCESSING ---
         sys_instructions = self._get_system_instructions(session_id, inversion_directive, user_message=new_message_text)
-        messages = adapter.get_openai_messages(sys_instructions, rag_context, memory_context)
+        messages = adapter.get_openai_messages(sys_instructions, rag_context)
 
-# --- STAGE 2: SINGLE PROCESSING PASS ---
+        # --- STAGE 2: SINGLE PROCESSING PASS ---
         temperature = self._load_temperature_setting()
         is_cloud = _is_cloud_model_check(model)
         remote_configured = _is_remote_configured()
@@ -753,11 +752,15 @@ class BaseProgramRunner:
         epic = meta.get("epic_chronicle", "")
         chapters = meta.get("recent_chapters", [])
 
-        if epic:
-            instructions += f"\n\n# CORE CONVERSATION CHRONICLE\n{epic}\n"
+        # Enforce the limit of only the 2 most recent chapters
+        recent_two_chapters = chapters[-2:] if chapters else []
 
-        if chapters:
-            formatted_chapters = "\n".join(f"- {ch}" for ch in chapters)
+        if epic:
+            # Optional: ensure epic stays compact within your ~600 char limit
+            instructions += f"\n\n# CORE CONVERSATION CHRONICLE\n{epic.strip()}\n"
+
+        if recent_two_chapters:
+            formatted_chapters = "\n".join(f"- {ch.strip()}" for ch in recent_two_chapters)
             instructions += f"\n\n# RECENT CONVERSATION CHAPTERS\n{formatted_chapters}\n"
 
         return instructions
@@ -1140,7 +1143,7 @@ class OpenSourceRunner(BaseProgramRunner):
 
         history = self.sessions_history.get(session_id, [])
         vector_query = _build_vector_query(history)
-        rag_context, memory_context, query_vector_embedding = _get_databank_contexts(vector_query)
+        rag_context, query_vector_embedding = _get_databank_contexts(vector_query)
         inversion_directive = await self._get_inversion_directive(session_id)
 
         adapter = OsHistoryAdapter(
@@ -1153,7 +1156,6 @@ class OpenSourceRunner(BaseProgramRunner):
             model=model,
             inversion_directive=inversion_directive,
             rag_context=rag_context,
-            memory_context=memory_context,
             new_message_text=new_message_text,
             invocation_id="",
         )
@@ -1256,36 +1258,7 @@ class OpenSourceRunner(BaseProgramRunner):
             if marked_compacted:
                 self._save_session_to_disk(session_id)
 
-            memories_path = os.path.join(
-                project_root, "core", "programs", get_active_program(), "memories.json"
-            )
-            deleted_from_db = False
-
-            if os.path.exists(memories_path):
-                try:
-                    with open(memories_path, "r", encoding="utf-8") as f:
-                        m_data = json.load(f)
-
-                    prefix = f"chat_history_archive_{session_id}_"
-                    matching_ids = {
-                        doc.get("id")
-                        for doc in m_data.get("documents", [])
-                        if doc.get("source_type") == "chat_history"
-                        and doc.get("name", "").startswith(prefix)
-                        and abs(doc.get("timestamp", 0) - timestamp) < 10.0
-                    }
-
-                    if matching_ids:
-                        m_data["documents"] = [d for d in m_data.get("documents", []) if d.get("id") not in matching_ids]
-                        m_data["chunks"] = [c for c in m_data.get("chunks", []) if c.get("doc_id") not in matching_ids]
-                        with open(memories_path, "w", encoding="utf-8") as f:
-                            json.dump(m_data, f, indent=2, ensure_ascii=False)
-                        deleted_from_db = True
-                        print(f"[MEMORY DELETE] Deleted docs {matching_ids} from memories.json.", flush=True)
-                except Exception as e:
-                    print(f"[MEMORY DELETE ERROR] Failed to clean memories.json: {e}", flush=True)
-
-            return marked_compacted or deleted_from_db
+            return marked_compacted
 
     async def delete_turn(self, session_id: str, msg_id: str) -> bool:
         with self._lock:
