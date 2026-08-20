@@ -3,7 +3,7 @@ import requests
 import re
 import time
 import threading
-from utils import local_runner
+from runners import local_runner
 
 import json
 

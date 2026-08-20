@@ -62,7 +62,7 @@ class LocalSpeechProvider(BaseSpeechProvider):
         import soundfile as sf
         try:
             # Dynamically read TTS voice from project settings
-            from utils.program import get_tts_voice
+            from runners.program import get_tts_voice
             active_voice = get_tts_voice()
             
             # Generate speech samples

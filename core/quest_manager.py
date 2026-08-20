@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 # Resolve quest log path under the active program directory
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_ROOT)
-from utils.program import get_active_program
+from runners.program import get_active_program
 active_program = get_active_program()
 QUEST_LOG_PATH = os.path.join(PROJECT_ROOT, "core", "programs", active_program, "quest_log.json")
 

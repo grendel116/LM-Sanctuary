@@ -4,7 +4,7 @@ import os
 import re
 import shutil
 import sys
-from tools import (
+from tools.tools import (
     read_file, write_file, replace_in_file, run_shell_command, 
     get_workspace_structure, search_codebase, read_webpage, google_search,
     web_search, apply_comfy_workflow, generate_local_image, generate_imagen,
@@ -39,7 +39,7 @@ def _load_card_data(program_id: str) -> dict:
 
 def get_program_name() -> str:
     """Returns the active program's character name."""
-    from utils.program import get_active_program
+    from runners.program import get_active_program
     active_program = get_active_program()
     card = _load_card_data(active_program)
     # v3: data.name / legacy: name
@@ -49,7 +49,7 @@ def replace_placeholders(text: str) -> str:
     """Replaces {{user}} and {{char}} placeholders (case-insensitive) with their actual values."""
     if not text:
         return text
-    from utils.program import get_active_user
+    from runners.program import get_active_user
     user_name = get_active_user().replace("_", " ").title()
     try:
         comp_name = get_program_name()
@@ -62,7 +62,7 @@ def replace_placeholders(text: str) -> str:
 
 def get_program_greeting() -> str:
     """Returns the program's first message from the card, with a default fallback."""
-    from utils.program import get_active_program
+    from runners.program import get_active_program
     active_program = get_active_program()
     card = _load_card_data(active_program)
     # v3: data.first_mes / legacy: operation.example_message
@@ -100,7 +100,7 @@ def load_static_instructions() -> str:
     """Reads the active program's card and compiles it into a system prompt.
     Also appends all modular skill instructions.
     """
-    from utils.program import get_active_program
+    from runners.program import get_active_program
 
     base_dir = os.path.dirname(os.path.abspath(__file__))
     active_program = get_active_program()
@@ -112,7 +112,7 @@ def load_static_instructions() -> str:
         instruction_content = f"# NAME: {active_program.title()}\n"
             
     # Append compact toolbelt listing available capabilities
-    # Full skill instructions are vector-retrieved per turn in runner_interface.py
+    # Full skill instructions are vector-retrieved per turn in utils.py
     try:
         from core.skill_retriever import get_toolbelt_block
         story_active = is_story_mode()
@@ -153,7 +153,7 @@ def load_user_instructions() -> str:
     """Reads the active user profile configuration from variables/user_profiles/*.md 
     to set private relationship context.
     """
-    from utils.program import get_active_user
+    from runners.program import get_active_user
     active_profile = get_active_user()
 
     if not os.path.exists(USER_PROFILES_DIR):
@@ -194,7 +194,7 @@ def load_user_instructions() -> str:
 
 def is_story_mode() -> bool:
     """Checks if story mode (Story Mode) is enabled in global project settings."""
-    from utils.program import _load_settings
+    from runners.program import _load_settings
     return _load_settings().get("story_mode", False)
 
 inversion_directive = ""

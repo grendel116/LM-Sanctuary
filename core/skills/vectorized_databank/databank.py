@@ -24,7 +24,7 @@ class DataBankManager:
         if db_dir is None:
             # Go up 3 levels to get from core/skills/vectorized_databank to core
             base_core = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-            from utils.program import get_active_program
+            from runners.program import get_active_program
             active_program = get_active_program()
             db_dir = os.path.join(base_core, "programs", active_program)
         
