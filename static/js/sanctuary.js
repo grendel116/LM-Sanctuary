@@ -3768,16 +3768,12 @@ async function saveProgramProfile() {
 async function loadProgramJournals() {
     if (!currentEditingProgramId) return;
     const journalsContainer = document.getElementById('program-journals-list');
-    const memoriesContainer = document.getElementById('program-memories-list');
     if (journalsContainer) {
         journalsContainer.innerHTML = '<div style="color: var(--text-muted); font-size: 0.8rem; text-align: center; padding: 10px;">Loading journals...</div>';
     }
-    if (memoriesContainer) {
-        memoriesContainer.innerHTML = '<div style="color: var(--text-muted); font-size: 0.8rem; text-align: center; padding: 10px;">Loading memories...</div>';
-    }
     
     try {
-        // 1. Fetch Keyphrase-Triggered Journals
+        // Fetch Keyphrase-Triggered Journals
         const res = await fetch(`/api/programs/journals?program_id=${currentEditingProgramId}&t=${Date.now()}`);
         const data = await res.json();
         if (data.error) throw new Error(data.error);
@@ -3834,89 +3830,10 @@ async function loadProgramJournals() {
             }
         }
         
-        // 2. Fetch Chat Compaction Memories (from memories.json for this program)
-        if (memoriesContainer) {
-            memoriesContainer.innerHTML = '';
-            const memoriesRes = await fetch(`/api/programs/memories?program_id=${currentEditingProgramId}&t=${Date.now()}`);
-            const memoriesData = await memoriesRes.json();
-            
-            const memoryList = memoriesData.memories || [];
-            
-            if (memoryList.length === 0) {
-                memoriesContainer.innerHTML = '<div class="empty-state">No consolidated memories created for this program yet.</div>';
-            } else {
-                memoryList.forEach(msg => {
-                    // Clean up text
-                    let cleanText = msg.text || '';
-                    if (cleanText.startsWith('[System Memory of older conversation turns]:')) {
-                        cleanText = cleanText.replace('[System Memory of older conversation turns]:', '').trim();
-                    }
-                    
-                    const row = document.createElement('div');
-                    row.className = 'list-entry-row';
-                    
-                    const header = document.createElement('div');
-                    header.className = 'list-entry-header';
-                    
-                    const kps = document.createElement('span');
-                    kps.style.color = '#10b981';
-                    kps.style.fontWeight = '600';
-                    kps.style.fontSize = '0.72rem';
-                    kps.textContent = 'Auto-Compacted';
-                    header.appendChild(kps);
-                    
-                    // Right side container for timestamp and delete button
-                    const rightContainer = document.createElement('div');
-                    rightContainer.style.cssText = 'display: flex; align-items: center; gap: 8px;';
-                    
-                    if (msg.timestamp) {
-                        const tsSpan = document.createElement('span');
-                        tsSpan.style.cssText = 'color: var(--text-muted); font-size: 0.7rem;';
-                        const d = new Date(msg.timestamp * 1000);
-                        tsSpan.textContent = d.toLocaleString(undefined, {month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'});
-                        rightContainer.appendChild(tsSpan);
-                    }
-                    
-                    const deleteBtn = document.createElement('button');
-                    deleteBtn.className = 'action-icon-btn';
-                    deleteBtn.innerHTML = `
-                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-                            <polyline points="3 6 5 6 21 6"></polyline>
-                            <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
-                        </svg>
-                    `;
-                    deleteBtn.title = 'Delete Compacted Memory';
-                    deleteBtn.style.width = '26px';
-                    deleteBtn.style.height = '26px';
-                    deleteBtn.style.borderRadius = '6px';
-                    deleteBtn.style.flexShrink = '0';
-                    deleteBtn.onclick = () => deleteConsolidatedMemory(msg.session_id, msg.timestamp);
-                    rightContainer.appendChild(deleteBtn);
-                    
-                    header.appendChild(rightContainer);
-                    row.appendChild(header);
-                    
-                    const text = document.createElement('div');
-                    text.className = 'list-entry-content italic';
-                    let displayMem = cleanText;
-                    const userDisplayName = getUserDisplayName();
-                    const programDisplayName = activeProgramName || 'Program';
-                    displayMem = displayMem.replace(/\{\{user\}\}/gi, userDisplayName).replace(/\{\{char\}\}/gi, programDisplayName);
-                    text.textContent = displayMem;
-                    row.appendChild(text);
-                    
-                    memoriesContainer.appendChild(row);
-                });
-            }
-        }
-        
     } catch (e) {
         console.error("Error in loadProgramJournals:", e);
         if (journalsContainer) {
             journalsContainer.innerHTML = '<div style="color: #fca5a5; font-size: 0.75rem; text-align: center; padding: 10px;">Failed to load journals.</div>';
-        }
-        if (memoriesContainer) {
-            memoriesContainer.innerHTML = '<div style="color: #fca5a5; font-size: 0.75rem; text-align: center; padding: 10px;">Failed to load memories.</div>';
         }
     }
 }
