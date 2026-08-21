@@ -156,20 +156,39 @@ def _normalize_tool_name(tool_name: str) -> str:
 
 
 def _parse_emulated_tool_call(tool_name: str, args_str: str) -> dict:
-    """Parses tool call argument strings safely into dictionary structures."""
+    """Parses tool call argument strings safely into dictionary structures, 
+    handling multi-line code blocks and parameter aliases.
+    """
+    kwargs = {}
+    args = []
+
     try:
+        # Try standard AST parse first
         parsed = ast.parse(f"dummy({args_str})")
         call_node = parsed.body[0].value
         kwargs = {kw.arg: ast.literal_eval(kw.value) for kw in call_node.keywords}
         args = [ast.literal_eval(arg) for arg in call_node.args]
-        return {"args": args, "kwargs": kwargs}
     except Exception:
-        kv_pairs = re.findall(r'(\w+)\s*=\s*(["\'])(.*?)\2', args_str)
-        if kv_pairs:
-            return {"args": [], "kwargs": {k: v for k, _, v in kv_pairs}}
+        # Backup for multi-line / complex arguments (like code blocks)
+        # Matches key="value" or key="""value"""
+        pattern = re.compile(r'(\w+)\s*=\s*(?:("""|\'\'\'|["\']))([\s\S]*?)\2', re.DOTALL)
+        matches = pattern.findall(args_str)
+        
+        if matches:
+            for key, quote, val in matches:
+                kwargs[key] = val
+        else:
+            # Backup for single raw string argument
+            val = args_str.strip().strip("'\"")
+            if val:
+                args = [val]
 
-        val = args_str.strip().strip("'\"")
-        return {"args": [val] if val else [], "kwargs": {}}
+    # --- Parameter Alias Normalization ---
+    if tool_name == "write_file":
+        if "filename" in kwargs and "path" not in kwargs:
+            kwargs["path"] = kwargs.pop("filename")
+
+    return {"args": args, "kwargs": kwargs}
 
 
 def _execute_emulated_tool(tool_name: str, args_str: str) -> tuple[dict, str]:

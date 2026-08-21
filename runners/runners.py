@@ -501,7 +501,7 @@ class BaseProgramRunner:
         bot_response_text = self._sanitize_thinking_tags(bot_response_text)
         bot_response_text = _convert_json_tool_calls_to_tags(bot_response_text)
 
-        matches = list(re.finditer(r"\[(\w+)\((.*?)\)\]", bot_response_text))
+        matches = list(re.finditer(r"\[(\w+)\(([\s\S]*?)\)\]", bot_response_text))
         matches, bot_response_text = self._filter_story_mode_matches(matches, bot_response_text)
 
         tool_calls = []
@@ -517,7 +517,7 @@ class BaseProgramRunner:
             for idx, (t_name, t_args, t_output) in enumerate(results):
                 tool_calls.extend(_build_tool_calls_pair(t_name, t_args, t_output, idx))
 
-            bot_response_text = re.sub(r"\[\w+\(.*?\)\]", "", bot_response_text).strip()
+            bot_response_text = re.sub(r"\[\w+\([\s\S]*?\n?\)\]", "", bot_response_text, flags=re.DOTALL).strip()
             adapter.append_assistant_message(bot_response_text, tool_calls, invocation_id)
             adapter.append_tool_events(results, invocation_id)
 
