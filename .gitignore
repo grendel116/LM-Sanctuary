@@ -41,6 +41,8 @@ core/programs/*/journals.json
 core/programs/*/quest_log.json
 core/programs/*/lorebooks/
 !core/programs/sebile/lorebooks/anarchist_theory.json
+core/programs/*/scratch/
+!core/programs/sebile/scratch/exploitation_calc.py
 core/embeddings.pkl
 temp_uploads/
 
