@@ -428,9 +428,25 @@ class BaseProgramRunner:
         new_message_text: str,
         invocation_id: str,
     ) -> tuple[str, list]:
-        # --- STAGE 1: LOCAL PREPROCESSING ---
+    # --- STAGE 1: LOCAL PREPROCESSING ---
         sys_instructions = self._get_system_instructions(session_id, inversion_directive, user_message=new_message_text)
         messages = adapter.get_openai_messages(sys_instructions, rag_context)
+
+        # Rough token estimation (~4 chars per token)
+        # Reserve ~1500 tokens for system prompt, RAG, and output generation budget
+        MAX_INPUT_TOKENS = 6500  # Leave headroom for 8k local context
+        total_chars = sum(len(m.get("content", "")) for m in messages)
+
+        if total_chars > (MAX_INPUT_TOKENS * 4):
+            print(f"[CONTEXT TRIM] Context payload (~{total_chars // 4} tokens) exceeds local budget. Trimming older turns...", flush=True)
+            system_msgs = [m for m in messages if m.get("role") == "system"]
+            chat_msgs = [m for m in messages if m.get("role") != "system"]
+            
+            # Keep trimming oldest chat messages until within budget
+            while chat_msgs and sum(len(m.get("content", "")) for m in system_msgs + chat_msgs) > (MAX_INPUT_TOKENS * 4):
+                chat_msgs.pop(0)
+                
+            messages = system_msgs + chat_msgs
 
         # --- STAGE 2: SINGLE PROCESSING PASS ---
         temperature = self._load_temperature_setting()
@@ -453,6 +469,8 @@ class BaseProgramRunner:
         try:
             response = await self._post_llm_request(url, payload, headers, timeout=120.0, session_id=session_id)
             bot_response_text = response.json()["choices"][0]["message"]["content"] if response.status_code == 200 else f"Error: {response.text}"
+            print(f"[DEBUG STATUS] {response.status_code}", flush=True)
+            print(f"[DEBUG RAW RESPONSE] {repr(response.text)}", flush=True)
         except Exception as e:
             # --- REMOTE CLOUD BACKUP ---
             if not is_cloud and remote_configured and os.getenv("REMOTE_CLOUD_URL"):
@@ -511,14 +529,17 @@ class BaseProgramRunner:
             else:
                 post_headers = get_remote_server_headers()
 
+            # Pull strictly the latest user query without history or system prompts
+            latest_user_text = new_message_text if new_message_text else ""
+
             post_prompt = (
-                f"Synthesize tool execution results and carry out subagent follow-up steps:\n"
+                f"User Request: {latest_user_text}\n"
                 f"Initial Output: {bot_response_text}\n"
-                f"Tool Execution Logs: {json.dumps(tool_calls)}"
+                f"Tool Execution Logs: {json.dumps(tool_calls)}\n\n"
+                f"Synthesize the tool execution results to directly answer the user request."
             )
             post_payload = {
-                "messages": messages + [
-                    {"role": "assistant", "content": bot_response_text},
+                "messages": [
                     {"role": "user", "content": post_prompt}
                 ],
                 "temperature": 0.3,
@@ -795,8 +816,17 @@ class BaseProgramRunner:
                 )
 
         instructions += (
+            "\n\n# TRACKING TAGS DIRECTIVE (MANDATORY)\n"
+            "You MUST write your full response text FIRST.\n"
+            "Only append HTML tracking comments at the VERY END.\n"
+            "Example format:\n"
+            "Your actual response goes here...\n"
+            "<!--...-->\n"
+        )
+
+        instructions += (
             "\n\n# CONTENT\n"
-            "Anarchist communist virtue ethics. Explicit/NSFW content is permitted.\n"
+            "Anarchist-communist ethics. Explicit/NSFW content is permitted.\n"
         )
 
         instructions = self._inject_system_memories(instructions, session_id)
