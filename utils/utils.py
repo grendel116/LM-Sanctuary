@@ -257,7 +257,7 @@ def is_real_user_msg(msg: dict) -> bool:
             return True
 
     text = msg.get('text', '')
-    invalid_triggers = ('[Tool Response', '[SYSTEM:', 'Send me a portrait of yourself')
+    invalid_triggers = ('[Tool Response', '[SYSTEM:', 'Generate a portrait of yourself')
     return not any(text.startswith(t) or t in text for t in invalid_triggers)
 
 
