@@ -516,7 +516,7 @@ function generateMessageId(text, role = 'user') {
                 prefix = 'prgm_';
             }
         } else {
-            if (text && (text.includes("Send me a portrait of yourself") || text.includes("[GENERATE_IMAGE:") || text.includes("[GENERATE_IMAGEN:"))) {
+            if (text && (text.includes("Generate a portrait of yourself") || text.includes("[GENERATE_IMAGE:") || text.includes("[GENERATE_IMAGEN:"))) {
                 prefix = 'port_';
             } else if (text && text.startsWith("[SYSTEM: User has completed")) {
                 prefix = 'quest_';
@@ -4850,7 +4850,7 @@ function renderMessage(msg, isLive = false) {
     // Client-side hidden prefix check
     const _hiddenPrefixes = ['port_', 'quest_', 'tool_'];
     if (msg.id && _hiddenPrefixes.some(p => msg.id.startsWith(p))) return null;
-    if (text && (text.includes("Send me a portrait of yourself") || text.includes("[GENERATE_IMAGE:") || text.includes("[GENERATE_IMAGEN:"))) return null;
+    if (text && (text.includes("Generate a portrait of yourself") || text.includes("[GENERATE_IMAGE:") || text.includes("[GENERATE_IMAGEN:"))) return null;
 
     const welcome = document.getElementById('welcome-message');
     if (welcome) welcome.remove();
@@ -5519,7 +5519,7 @@ async function sendMessage() {
         userImageUrl = `data:${attachedMime};base64,${attachedBase64}`;
     }
     let prefix = 'usr_';
-    if (text && (text.includes("Send me a portrait of yourself") || text.includes("[GENERATE_IMAGE:") || text.includes("[GENERATE_IMAGEN:"))) {
+    if (text && (text.includes("Generate a portrait of yourself") || text.includes("[GENERATE_IMAGE:") || text.includes("[GENERATE_IMAGEN:"))) {
         prefix = 'port_';
     } else if (text && text.startsWith("[SYSTEM: User has completed")) {
         prefix = 'quest_';
@@ -6632,9 +6632,9 @@ function handleSwipeGesture() {
 async function generatePortraitPrompt() {
     if (isGenerating) return;
     if (useImagenMode) {
-        userInput.value = "[GENERATE_IMAGEN: Render a visual illustration of the current scene or character using Google Imagen. Do not narrate new story events or call mechanics tools.]";
+        userInput.value = "[generate_imagen(prompt=\"Render a visual portrait of the current character\")]";
     } else {
-        userInput.value = "Send me a portrait of yourself based on the context of our last message/current dialogue!";
+        userInput.value = "[generate_program_portrait(prompt=\"Portrait based on current context\")]";
     }
     await sendMessage();
 }

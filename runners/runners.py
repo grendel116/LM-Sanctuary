@@ -767,6 +767,7 @@ class BaseProgramRunner:
 
     def _get_system_instructions(self, session_id: str, inversion_directive: str = None, user_message: str = None) -> str:
         from core.program_config import get_program_name, is_story_mode
+        import re
 
         try:
             program_name = get_program_name()
@@ -822,6 +823,15 @@ class BaseProgramRunner:
 
         if is_voice:
             print(f"\n[VOICE CALL DEBUG] Active Voice Prompt:\n{instructions}\n[VOICE CALL DEBUG] END PROMPT\n", flush=True)
+
+        # Correctly indented portrait override directive
+        if user_message and any(k in user_message for k in ("Generate a portrait of yourself", "[GENERATE_IMAGEN:", "generate_program_portrait")):
+            instructions += (
+                "\n\n# IMMEDIATE PORTRAIT DIRECTIVE (CRITICAL OVERRIDE)\n"
+                "The user requested an image generation. You MUST output ONLY the tool call tag "
+                "`[generate_program_portrait(prompt=\"...\")]`. Do NOT write dialogue, story progression, "
+                "or narrative descriptions. Output NOTHING except the tool call."
+            )
 
         return instructions
 
@@ -1120,7 +1130,7 @@ class OpenSourceRunner(BaseProgramRunner):
         if not msg_id:
             if new_message_text.startswith("[SYSTEM: User has completed"):
                 prefix = "quest_"
-            elif any(k in new_message_text for k in ("Send me a portrait of yourself", "[GENERATE_IMAGE:", "[GENERATE_IMAGEN:")):
+            elif any(k in new_message_text for k in ("Generate a portrait of yourself", "[GENERATE_IMAGE:", "[GENERATE_IMAGEN:")):
                 prefix = "port_"
             elif new_message_text.startswith("[Tool Response from"):
                 prefix = "tool_"
@@ -1350,7 +1360,7 @@ class OpenSourceRunner(BaseProgramRunner):
 
                 if has_image and i > 0:
                     prev_msg = history[i - 1]
-                    if prev_msg.get("role") == "user" and "Send me a portrait of yourself" in (prev_msg.get("text") or ""):
+                    if prev_msg.get("role") == "user" and "Generate a portrait of yourself" in (prev_msg.get("text") or ""):
                         indices_to_delete.add(i - 1)
 
             for idx in sorted(indices_to_delete, reverse=True):
