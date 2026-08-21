@@ -1428,11 +1428,11 @@ def generate_local_image(prompt: str) -> str:
             "- **Request a Portrait**: Once the engine is online, ask the program to generate a portrait!"
         )
 
-    root_dir = os.path.dirname(os.path.abspath(__file__))
     from runners.program import get_active_program
     active_program = get_active_program()
     
     workflow_env_path = os.getenv("COMFYUI_IMAGE_WORKFLOW", "core/skills/portrait_generation/ImageWorkflow.json")
+    # Use the global root_dir (which points to the workspace root) instead of redefining it locally
     workflow_path = os.path.normpath(os.path.join(root_dir, workflow_env_path))
     
     if not os.path.exists(workflow_path):
