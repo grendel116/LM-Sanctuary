@@ -21,6 +21,9 @@ current_use_imagen = contextvars.ContextVar('current_use_imagen', default=False)
 session_tool_calls = {}
 session_tool_calls_lock = threading.Lock()
 
+tools_dir = os.path.dirname(os.path.abspath(__file__))
+root_dir = os.path.dirname(tools_dir)  # This correctly sets the root directory
+
 def track_tool_activity(func):
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
@@ -1425,12 +1428,12 @@ def generate_local_image(prompt: str) -> str:
             "- **Request a Portrait**: Once the engine is online, ask the program to generate a portrait!"
         )
 
-    base_dir = os.path.dirname(os.path.abspath(__file__))
+    root_dir = os.path.dirname(os.path.abspath(__file__))
     from runners.program import get_active_program
     active_program = get_active_program()
     
     workflow_env_path = os.getenv("COMFYUI_IMAGE_WORKFLOW", "core/skills/portrait_generation/ImageWorkflow.json")
-    workflow_path = os.path.normpath(os.path.join(base_dir, workflow_env_path))
+    workflow_path = os.path.normpath(os.path.join(root_dir, workflow_env_path))
     
     if not os.path.exists(workflow_path):
         return get_install_instructions(f"Workflow template not found at '{workflow_path}'")
@@ -1456,7 +1459,7 @@ def generate_local_image(prompt: str) -> str:
         
         import json
         program_json_path = os.path.normpath(os.path.join(
-            base_dir, "core", "programs", active_program, f"{active_program}.json"
+            root_dir, "core", "programs", active_program, f"{active_program}.json"
         ))
         if os.path.exists(program_json_path):
             try:
@@ -1493,7 +1496,7 @@ def generate_local_image(prompt: str) -> str:
 
         timestamp = int(time.time())
         local_filename = f"portrait_{timestamp}.png"
-        portraits_dir = os.path.normpath(os.path.join(base_dir, "core", "programs", active_program, "portraits"))
+        portraits_dir = os.path.normpath(os.path.join(root_dir, "core", "programs", active_program, "portraits"))
         local_path = os.path.join(portraits_dir, local_filename)
 
         result_path = apply_comfy_workflow(workflow_path, replacements, local_path, session_id=current_session_id.get())
@@ -1536,8 +1539,8 @@ def generate_imagen(prompt: str, aspect_ratio: str = '1:1') -> str:
     from dotenv import load_dotenv
 
     try:
-        base_dir = os.path.dirname(os.path.abspath(__file__))
-        load_dotenv(os.path.join(base_dir, ".env"))
+        root_dir = os.path.dirname(os.path.abspath(__file__))
+        load_dotenv(os.path.join(root_dir, ".env"))
 
         api_key = os.getenv("REMOTE_API_KEY")
         if not api_key:
@@ -1604,7 +1607,7 @@ def generate_imagen(prompt: str, aspect_ratio: str = '1:1') -> str:
 
         from runners.program import get_active_program
         active_program = get_active_program()
-        media_dir = os.path.normpath(os.path.join(base_dir, "core", "programs", active_program, "media"))
+        media_dir = os.path.normpath(os.path.join(root_dir, "core", "programs", active_program, "media"))
         os.makedirs(media_dir, exist_ok=True)
 
         timestamp = int(time.time())
@@ -1652,12 +1655,12 @@ def generate_video_from_image(image_path: str, prompt: str) -> str:
     import shutil
     import requests
     
-    base_dir = os.path.dirname(os.path.abspath(__file__))
+    root_dir = os.path.dirname(os.path.abspath(__file__))
     from runners.program import get_active_program
     active_program = get_active_program()
     
     workflow_env_path = os.getenv("COMFYUI_VIDEO_WORKFLOW", "core/skills/portrait_generation/VideoWorkflow.json")
-    workflow_path = os.path.normpath(os.path.join(base_dir, workflow_env_path))
+    workflow_path = os.path.normpath(os.path.join(root_dir, workflow_env_path))
     
     if not os.path.exists(workflow_path):
         raise Exception(f"Video workflow template not found at '{workflow_path}'")
@@ -2228,10 +2231,10 @@ def add_quest(title: str, notes: str, due: str = None, location: str = "", remin
         import re
         
         # Resolve quest log path under the active program directory
-        base_dir = os.path.dirname(os.path.abspath(__file__))
+        root_dir = os.path.dirname(os.path.abspath(__file__))
         from runners.program import get_active_program
         active_program = get_active_program()
-        program_dir = os.path.normpath(os.path.join(base_dir, "core", "programs", active_program))
+        program_dir = os.path.normpath(os.path.join(root_dir, "core", "programs", active_program))
         QUEST_LOG_PATH = os.path.join(program_dir, "quest_log.json")
         
         # Load existing quests
@@ -2342,9 +2345,9 @@ def cite_scripture(tradition: str = "all", topic: str = "") -> str:
     import numpy as np
     from runners.program import get_active_program
     
-    base_dir = os.path.dirname(os.path.abspath(__file__))
+    root_dir = os.path.dirname(os.path.abspath(__file__))
     active_program = get_active_program()
-    scriptures_path = os.path.join(base_dir, "core", "programs", active_program, "scriptures.json")
+    scriptures_path = os.path.join(root_dir, "core", "programs", active_program, "scriptures.json")
     
     if not os.path.exists(scriptures_path):
         return "Scripture knowledge base not found. Run the scripture ingestion script to set up the local scripture store."
