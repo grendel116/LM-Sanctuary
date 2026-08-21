@@ -3782,7 +3782,7 @@ async function loadProgramJournals() {
         if (journalsContainer) {
             journalsContainer.innerHTML = '';
             if (entries.length === 0) {
-                journalsContainer.innerHTML = '<div class="empty-state">No memory journals saved for this program yet.</div>';
+                journalsContainer.innerHTML = '<div class="empty-state">No log journals saved for this program yet.</div>';
             } else {
                 entries.forEach(e => {
                     const row = document.createElement('div');
@@ -4166,6 +4166,9 @@ async function resetSession() {
 /* ==========================================================================
    IX. 8. MESSAGE RENDERING & POST-PROCESSING
    ========================================================================== */
+
+let currentPlayingBtn = null;
+let currentAudio = null;
 
 // --- toggleAutoSpeak ---
 function toggleAutoSpeak() {
@@ -7562,7 +7565,7 @@ function switchDataBankTab(tab) {
 
     const descriptors = {
         upload: "Upload files (TXT, MD, HTML, PDF) or scrape web page URLs to ingest them into the program's vectorized memory database.",
-        memories: "Manage keyword-triggered memory journals and long-term conversation compactions.",
+        memories: "Manage keyword-triggered log journals and long-term conversation compactions.",
         lorebooks: "Import and manage interactive lorebooks and World Info files (.json) for dynamic context insertion."
     };
 
