@@ -430,7 +430,7 @@ header {
     border: 1px solid rgba(255, 255, 255, 0.25);
     box-shadow: 0 0 6px var(--dot-glow, rgba(147, 112, 219, 0.4));
     transition: transform 0.2s ease, box-shadow 0.2s ease;
-    cursor: help;
+    cursor: pointer;
 }
 
 .mood-trail-dot:hover {
@@ -843,7 +843,6 @@ header {
     color: #f59e0b;
     font-size: 18px;
     font-weight: 900;
-    cursor: help;
     flex-shrink: 0;
     z-index: 10;
     animation: quick-ping 0.8s forwards cubic-bezier(0.16, 1, 0.3, 1);

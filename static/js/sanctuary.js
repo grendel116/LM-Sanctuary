@@ -437,7 +437,7 @@ function showMoodStatusPopup() {
             </div>
 
             <div class="mood-trail-container">
-                <span class="mood-trail-label">Recent Resonance (Last 5):</span>
+                <span class="mood-trail-label">Recent Moods:</span>
                 <div class="mood-trail-dots">
                     ${dotsHtml}
                 </div>
@@ -1728,7 +1728,7 @@ function updateHeartState(state, activeInversion, inversionState, msgId = null, 
     // Add dynamic description to title tooltips
     const name = activeProgramName || "Program";
     const meta = MOOD_META[state.name] || MOOD_META.calm;
-    let title = `${name}'s Encoded Heart: ${meta.label}`;
+    let title = `${name}'s Mood: ${meta.label}`;
     if (resolvedInversion) {
         const invMeta = MOOD_META[resolvedInversion] || { label: resolvedInversion };
         title += ` • Inversion Active: ${invMeta.label || resolvedInversion}`;
