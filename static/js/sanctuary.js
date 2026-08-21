@@ -4850,10 +4850,17 @@ function renderMessage(msg, isLive = false) {
     const role = msg.role;
     const text = msg.text || '';
 
-    // Client-side hidden prefix check
+// Client-side hidden prefix check
     const _hiddenPrefixes = ['port_', 'quest_', 'tool_'];
     if (msg.id && _hiddenPrefixes.some(p => msg.id.startsWith(p))) return null;
-    if (text && (text.includes("Generate a portrait of yourself") || text.includes("[GENERATE_IMAGE:") || text.includes("[GENERATE_IMAGEN:"))) return null;
+    
+    if (text && (
+        text.includes("Generate a portrait of yourself") || 
+        text.includes("[GENERATE_IMAGE:") || 
+        text.includes("[GENERATE_IMAGEN:") ||
+        text.includes("[generate_program_portrait") ||
+        text.includes("(Generation stopped)")
+    )) return null;
 
     const welcome = document.getElementById('welcome-message');
     if (welcome) welcome.remove();

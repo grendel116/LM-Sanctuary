@@ -75,7 +75,7 @@ class BaseProgramRunner:
         timeout: float = 60.0,
         session_id: str | None = None,
     ) -> httpx.Response:
-        """Send a standard HTTP POST request to the selected LLM endpoint."""
+        """Send a request to the selected LLM endpoint with cancellation support."""
         is_local = "127.0.0.1:1234" in url or "localhost:1234" in url
         start_time = time.time()
         max_retry_time, retry_interval = 180.0, 2.0
@@ -91,6 +91,47 @@ class BaseProgramRunner:
 
             try:
                 async with httpx.AsyncClient() as client:
+                    if session_id:
+                        req_payload = {**payload, "stream": True}
+                        req_headers = {**headers, "Accept-Encoding": "identity"}
+
+                        async with client.stream("POST", url, json=req_payload, headers=req_headers, timeout=timeout) as r:
+                            if r.status_code == 503 and is_local:
+                                await r.aread()
+                                if time.time() - start_time < max_retry_time:
+                                    print(f"[Local LLM] Server is loading model (503). Retrying in {retry_interval}s...", flush=True)
+                                    await asyncio.sleep(retry_interval)
+                                    continue
+
+                            if r.status_code != 200:
+                                await r.aread()
+                                return httpx.Response(status_code=r.status_code, headers=r.headers, content=r.content, request=r.request)
+
+                            content_parts = []
+                            async for line in r.aiter_lines():
+                                _check_cancellation()
+
+                                line = line.strip()
+                                if not line or not line.startswith("data:"):
+                                    continue
+
+                                data_str = line[5:].strip()
+                                if data_str == "[DONE]":
+                                    break
+
+                                try:
+                                    delta = json.loads(data_str).get("choices", [{}])[0].get("delta", {})
+                                    if content := delta.get("content"):
+                                        content_parts.append(content)
+                                except Exception:
+                                    pass
+
+                            mock_data = {
+                                "choices": [{"message": {"role": "assistant", "content": "".join(content_parts)}}],
+                                "model": payload.get("model", ""),
+                            }
+                            return httpx.Response(status_code=200, headers=r.headers, content=json.dumps(mock_data).encode("utf-8"), request=r.request)
+
                     response = await client.post(url, json=payload, headers=headers, timeout=timeout)
                     if response.status_code == 503 and is_local:
                         if time.time() - start_time < max_retry_time:
@@ -111,78 +152,6 @@ class BaseProgramRunner:
                     continue
                 raise e
 
-    async def _post_llm_request_stream(
-        self,
-        url: str,
-        payload: dict,
-        headers: dict,
-        timeout: float = 60.0,
-        session_id: str | None = None,
-    ):
-        """Streams response tokens directly as an async generator."""
-        is_local = "127.0.0.1:1234" in url or "localhost:1234" in url
-        start_time = time.time()
-        max_retry_time, retry_interval = 180.0, 2.0
-
-        def _check_cancellation():
-            if session_id and session_id in cancelled_sessions:
-                cancelled_sessions.discard(session_id)
-                print(f"[CANCEL] Aborting HTTP stream for session {session_id}", flush=True)
-                raise asyncio.CancelledError("Session cancelled by user request.")
-
-        req_payload = {**payload, "stream": True}
-        req_headers = {**headers, "Accept-Encoding": "identity"}
-
-        while True:
-            _check_cancellation()
-
-            try:
-                async with httpx.AsyncClient() as client:
-                    async with client.stream("POST", url, json=req_payload, headers=req_headers, timeout=timeout) as r:
-                        if r.status_code == 503 and is_local:
-                            if time.time() - start_time < max_retry_time:
-                                print(f"[Local LLM] Server is loading model (503). Retrying in {retry_interval}s...", flush=True)
-                                await asyncio.sleep(retry_interval)
-                                continue
-
-                        if r.status_code != 200:
-                            error_body = await r.aread()
-                            yield f"Error: {r.status_code} - {error_body.decode('utf-8')}"
-                            return
-
-                        async for line in r.aiter_lines():
-                            _check_cancellation()
-
-                            line = line.strip()
-                            if not line or not line.startswith("data:"):
-                                continue
-
-                            data_str = line[5:].strip()
-                            if data_str == "[DONE]":
-                                break
-
-                            try:
-                                delta = json.loads(data_str).get("choices", [{}])[0].get("delta", {})
-                                if content := delta.get("content"):
-                                    yield content
-                            except Exception:
-                                pass
-
-                        return  # Stream finished successfully
-
-            except (httpx.ConnectError, httpx.ConnectTimeout) as e:
-                from runners import local_runner
-
-                if is_local and local_runner.check_local_server_status() == "starting" and (time.time() - start_time < max_retry_time):
-                    print(f"[Local LLM] Connection failed but server is starting. Retrying in {retry_interval}s...", flush=True)
-                    await asyncio.sleep(retry_interval)
-                    continue
-                yield f"Error connecting to model server: {e}"
-                return
-            except Exception as e:
-                yield f"Error connecting to model server: {e}"
-                return
-                
     async def _run_llm_summary_task(self, prompt: str, active_model: str, err_msg: str) -> str:
         """Helper to post summary/distillation requests and parse reasoning blocks out of responses."""
         payload = {
@@ -465,7 +434,7 @@ class BaseProgramRunner:
 
         # Rough token estimation (~4 chars per token)
         # Reserve ~1500 tokens for system prompt, RAG, and output generation budget
-        MAX_INPUT_TOKENS = 4400  # Leave headroom for 8k local context
+        MAX_INPUT_TOKENS = 6500  # Leave headroom for 8k local context
         total_chars = sum(len(m.get("content", "")) for m in messages)
 
         if total_chars > (MAX_INPUT_TOKENS * 4):
@@ -537,7 +506,7 @@ class BaseProgramRunner:
 
         tool_calls = []
         if matches:
-            # 1. Execute local tools and gather results
+            # 1. Execute local tools and collect results
             results = []
             for m_tool in matches:
                 if session_id in cancelled_sessions:
@@ -552,36 +521,39 @@ class BaseProgramRunner:
             adapter.append_assistant_message(bot_response_text, tool_calls, invocation_id)
             adapter.append_tool_events(results, invocation_id)
 
-            # 2. Direct-to-Cloud Synthesis (Bypasses local prefill entirely)
-            if _is_remote_configured() and os.getenv("REMOTE_CLOUD_URL"):
-                cloud_url = os.getenv("REMOTE_CLOUD_URL")
-                cloud_headers = {
-                    "Content-Type": "application/json",
-                    "Authorization": f"Bearer {os.getenv('REMOTE_API_KEY')}"
-                }
-                
-                # Build a zero-history, isolated payload to eliminate prefill latency
-                synthesis_prompt = (
-                    f"User Question: {new_message_text}\n"
-                    f"Tool Execution Logs: {json.dumps(tool_calls)}\n\n"
-                    f"Provide a concise final response based on the tool results above."
-                )
-                
-                cloud_payload = {
-                    "messages": [{"role": "user", "content": synthesis_prompt}],
-                    "temperature": 0.3,
-                    "max_tokens": 1024,
-                    "model": os.getenv("REMOTE_MODEL", "gemini-3.1-flash-lite")
-                }
-                
-                try:
-                    post_resp = await self._post_llm_request(cloud_url, cloud_payload, cloud_headers, timeout=30.0)
-                    if post_resp.status_code == 200:
-                        synthesis = post_resp.json()["choices"][0]["message"].get("content", "").strip()
-                        if synthesis:
-                            bot_response_text = synthesis
-                except Exception as e:
-                    print(f"[TOOL SYNTHESIS ERROR] Remote synthesis failed: {e}", flush=True)
+            # 2. Remote-first pass for subagents & multi-step tool output synthesis
+            post_url = os.getenv("REMOTE_CLOUD_URL") if remote_configured else REMOTE_SERVER_URL
+            post_headers = {"Content-Type": "application/json"}
+            if remote_configured and os.getenv("REMOTE_API_KEY"):
+                post_headers["Authorization"] = f"Bearer {os.getenv('REMOTE_API_KEY')}"
+            else:
+                post_headers = get_remote_server_headers()
+
+            # Pull strictly the latest user query without history or system prompts
+            latest_user_text = new_message_text if new_message_text else ""
+
+            post_prompt = (
+                f"User Request: {latest_user_text}\n"
+                f"Initial Output: {bot_response_text}\n"
+                f"Tool Execution Logs: {json.dumps(tool_calls)}\n\n"
+                f"Synthesize the tool execution results to directly answer the user request."
+            )
+            post_payload = {
+                "messages": [
+                    {"role": "user", "content": post_prompt}
+                ],
+                "temperature": 0.3,
+                "max_tokens": 1024,
+                "model": os.getenv("REMOTE_MODEL", "gemini-3.1-flash-lite") if remote_configured else target_model,
+            }
+            try:
+                post_resp = await self._post_llm_request(post_url, post_payload, post_headers, timeout=60.0, session_id=session_id)
+                if post_resp.status_code == 200:
+                    synthesis = post_resp.json()["choices"][0]["message"].get("content", "").strip()
+                    if synthesis:
+                        bot_response_text += f"\n\n{synthesis}"
+            except Exception as e:
+                print(f"[POST-PROCESSING ERROR] Tool synthesis failed: {e}", flush=True)
         else:
             adapter.append_assistant_message(bot_response_text, tool_calls, invocation_id)
 
@@ -1069,6 +1041,7 @@ class OpenSourceRunner(BaseProgramRunner):
 
         media = self._extract_media_items(text, msg.get("image_url"), tool_calls)
         clean_text = re.sub(r"!\[[^\]]*\]\([^)]+\)", "", text).strip()
+        clean_text = clean_text.replace("(Generation stopped)", "").strip()
         tool_summary = self._consolidate_tools(tool_calls)
 
         image_tools = {"generate_local_image", "generate_imagen", "generate_program_portrait", "generate_general_image"}
@@ -1188,7 +1161,7 @@ class OpenSourceRunner(BaseProgramRunner):
         if not msg_id:
             if new_message_text.startswith("[SYSTEM: User has completed"):
                 prefix = "quest_"
-            elif any(k in new_message_text for k in ("Generate a portrait of yourself", "[GENERATE_IMAGE:", "[GENERATE_IMAGEN:")):
+            elif any(k in new_message_text for k in ("Generate a portrait of yourself", "[GENERATE_IMAGE:", "[GENERATE_IMAGEN:", "generate_program_portrait")):
                 prefix = "port_"
             elif new_message_text.startswith("[Tool Response from"):
                 prefix = "tool_"
