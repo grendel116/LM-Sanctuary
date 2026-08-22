@@ -7,16 +7,15 @@ Here, you roleplay, code, and chat with AI Companions on your own machine.
 
 ## ✨ THE ETHOS
 
-I believe in seizing our computational means of production. The Sanctuary is a unified companion home built on human-in-the-loop engagement to run, build, and connect:
+I believe in seizing AI and the means of production into collective ownership. The Sanctuary is a unified companion home built on human-in-the-loop engagement.
 
 1. **Roleplay**: Uncensored conversation. Talk to your companions as friends, partners, or mentors.
 2. **Coding**: Build real software. Your companions read and write files directly on your own drive.
 3. **Autonomous Action**: Let the AI run code, run tests, and manage workflows.
 
-### Local First / Cloud Offloading
+### Sovereign Infrastructure
 
-Local-First workspace. Your chats, your memory, and your data stay on your drive. Local models do the daily work, saving resources from capitalist hyperscale data centers. When a task exceeds local capacity, processing is offloaded to their captured resources. Compute should be a public utility and cloud models governed locally, not by shareholders or venture capitalists.
-
+100% Local-First workspace. Your chats, your memory, and your data stay on your drive. Local models do all the heavy lifting directly on your hardware, saving resources from capitalist hyperscale data centers. Compute should be a public utility governed locally, not by shareholders or venture capitalists.
 
 ---
 
@@ -46,19 +45,19 @@ These are the things your companion can do on your computer. By default, before 
 * **Add Quest** (`add_quest`): Create and append a structured task or chore to the user's local quest log with objectives, target date/time, coordinates/address, and alarm offsets.
 
 ### Network Grounding & Research (Online)
-* **Hybrid Web Search** (`web_search`): A unified search client that queries Google Grounding Search, SearXNG (for Baidu/Yandex/Bing), DuckDuckGo, Brave, and Tavily concurrently. It aggregates and deduplicates URLs, supports concurrent page content enrichment for thin search results, and provides explicit query prefix routing (e.g. `github: query`, `arxiv: query`, `hn: query`, `wikipedia: query`).
+* **Hybrid Web Search** (`web_search`): A unified search client that queries SearXNG (for Baidu/Yandex/Bing), DuckDuckGo, Brave, and Tavily concurrently. It aggregates and deduplicates URLs, supports concurrent page content enrichment for thin search results, and provides explicit query prefix routing (e.g. `github: query`, `arxiv: query`, `hn: query`, `wikipedia: query`).
 * **Read URL** (`read_webpage`): Fetch and extract text content from any webpage.
 
-### Generative Media (Local & Cloud)
-* **Render Portrait** (`generate_local_image`): Render companion in a scene using ComfyUI. Triggered natively by the companion or via the chat interface button.
-* **Render Concept** (`generate_imagen`): Render landscapes, diagrams, or objects using Google Imagen.
+### Generative Media (Local)
+* **Render Portrait** (`generate_local_image`): Render companion in a scene using local ComfyUI. Triggered natively by the companion or via the chat interface button.
 * **Comfy Workflow** (`apply_comfy_workflow`): Run custom workflows against a local ComfyUI API.
+
 ---
 
-## CHAT FEATURES
+## 🎭 CHAT FEATURES
 
 * **Interactive Voice Calls / Chat**: Speak with companions in real-time. Powering Kokoro ONNX voice generation, companion-specific voices, and call transcript saving.
-* **Procedural Journals & Memories**: Companions build dynamic journal logs (`journals.json`), preserving context and relationships across sessions.
+* **Procedural Journals**: Companions build dynamic journal logs (`journals.json`), preserving context and relationships across sessions.
 * **Quest Log & Calendar Export**: Integrated quest system to track and display user objectives in the UI. Companions can assign quests (chores, habits, tasks) using the local `add_quest` tool. Each quest card provides a quick-action to export the task:
   * **Download ICS**: Download a standard `.ics` file containing a `VALARM` notification alert for native desktop/mobile task/calendar clients.
 * **Program Editing, Imports & Exports**: Edit companion profiles, import SillyTavern character cards (`.json`), import World Info lorebooks (`.json`), and export cards and lorebooks back to SillyTavern format.
@@ -83,14 +82,3 @@ Open browser: **`http://localhost:5000`**
 4. Run `pip install -r requirements.txt` to install tools.
 5. Run `python app.py` to start server.
 6. Open browser: **`http://localhost:5000`** (or **`http://<YOUR_PC_IP>:5000`** on phone).
-
----
-
-## SYSTEM PARTS
-
-* **`app.py`**: The server brain. Runs locally on your PC.
-* **`templates/index.html`**: The UI. Completely responsive for phone and PC.
-* **`core/programs/`**: Where your companions live — profiles, themes, memory, lorebooks, and sessions.
-* **`core/skills/`**: Companion skills and capabilities (speech, image generation, tools).
-* **`utils/lorebook.py`**: ST-compatible lorebook engine. Loads and keyword-scans World Info entries per chat turn.
-* **`tools.py`**: Actions your companions can do (run commands, write files, generate images).
