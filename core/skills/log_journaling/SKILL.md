@@ -1,6 +1,6 @@
 ---
 name: log_journaling
-description: Record specific details about the user or companion in a log journal for future recall.
+description: Record specific details about {{user}} or {{char}} in a journal.
 summary: "Record user details and milestones using [add_journal_entry(keyphrases=\"...\", content=\"...\")]"
 retrieval: always
 ---

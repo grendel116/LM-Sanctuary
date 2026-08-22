@@ -200,6 +200,18 @@ def start_local_server(model_key):
     if no_mmap:
         cmd.append("--no-mmap")
         
+ # --- AUTOMATIC LOGIT BIAS INJECTION ---
+    try:
+        from core.banned_words import generate_llama_cli_args
+        # Generates token-level bias flags dynamically from the active model's GGUF file
+        bias_args = generate_llama_cli_args(model_path)
+        if bias_args:
+            cmd.extend(bias_args)
+            print(f"[llama-runner] Applied {len(bias_args) // 2} logit bias suppression rules from banned_words.json", flush=True)
+    except Exception as e:
+        print(f"[llama-runner] Warning: Could not apply logit bias: {e}", flush=True)
+    # --------------------------------------
+
     try:
         log_file = os.path.join(BASE_DIR, "llama_server.log")
         with open(log_file, "a", encoding="utf-8") as log_fd:

@@ -1,10 +1,10 @@
 {
-  "banned_words": {
-    "dismantle": "break",
-    "hoard": "capture",
-    "possess": "have",
-    "bosses": "capitalists",
-    "musky": "musty",
-    "musk": "aroma"
-  }
+  "banned_words": [
+    "dismantle",
+    "hoard",
+    "possess",
+    "bosses",
+    "musky",
+    "musk"
+  ]
 }

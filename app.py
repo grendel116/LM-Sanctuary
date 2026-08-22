@@ -206,17 +206,6 @@ def find_image_sidecar_json(image_filename, active_program):
     return None
 
 
-def sanitize_response(response_text, session_id, program_msg_id):
-    """Apply banned words filter and update persisted message if sanitized."""
-    from core.banned_words import sanitize_text
-    sanitized = sanitize_text(response_text)
-    if sanitized != response_text:
-        print(f"[BANNED WORDS] Sanitized response in session {session_id}")
-        if program_msg_id:
-            asyncio.run(runner.update_message_text(session_id, program_msg_id, sanitized))
-    return sanitized
-
-
 def extract_mood(chat_history):
     """Extract mood from the latest program message, with neutral fallback."""
     for msg in reversed(chat_history):
@@ -241,6 +230,13 @@ def prepare_generation_request(session_id, use_imagen=False, is_voice_call=False
     cancelled_sessions.discard(session_id)
     if is_voice_call:
         voice_call_sessions.add(session_id)
+
+def sanitize_response(response_text: str, session_id: str, program_msg_id: str) -> str:
+    """Cleans or processes the generated response text before sending it to the client."""
+    if not response_text:
+        return ""
+    # Add any necessary text cleaning or pass-through logic here
+    return response_text
 
 
 def build_generation_response(response_text, tool_calls, session_id, user_msg_id, program_msg_id, started_at):

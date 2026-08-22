@@ -1,53 +1,70 @@
 import sys
 import os
 import json
-import re
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from variables import BANNED_WORDS_FILE
 
-def load_banned_words() -> dict:
-    """Loads the dictionary of banned words and their replacements."""
+# Set your preferred default logit bias penalty here (-2.0 allows literal use, suppresses tropes)
+DEFAULT_BIAS_WEIGHT = -2.0
+
+def load_banned_words() -> list[str]:
+    """Loads the list of banned words from banned_words.json."""
     if not os.path.exists(BANNED_WORDS_FILE):
-        print(f"[BANNED WORDS] Warning: {BANNED_WORDS_FILE} not found. Returning empty dictionary.")
-        return {}
+        return []
     try:
         with open(BANNED_WORDS_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
-            return data.get("banned_words", {})
+            banned = data.get("banned_words", [])
+            if isinstance(banned, dict):
+                return list(banned.keys())
+            return list(banned)
     except Exception as e:
         print(f"[BANNED WORDS] Error loading {BANNED_WORDS_FILE}: {e}")
-        return {}
+        return []
 
-
-def match_case(word: str, replacement: str) -> str:
-    """Helper to match the casing of the original word to the replacement."""
-    if word.isupper():
-        return replacement.upper()
-    if word.istitle():
-        return replacement.capitalize()
-    return replacement.lower()
-
-def sanitize_text(text: str) -> str:
-    """Scans and replaces banned words in text while preserving casing."""
-    if not text:
-        return text
+def generate_llama_cli_args(gguf_path: str, bias_weight: float = None) -> list[str]:
+    """
+    Generates CLI argument list for llama-server. 
+    Uses llama_cpp python bindings to tokenize accurately if available.
+    """
+    if bias_weight is None:
+        bias_weight = DEFAULT_BIAS_WEIGHT
         
-    banned_map = load_banned_words()
+    words = load_banned_words()
+    if not words or not os.path.isfile(gguf_path):
+        return []
+
+    token_ids = set()
     
-    # Sort keys by length descending to replace plurals/longer words first
-    sorted_words = sorted(banned_map.keys(), key=len, reverse=True)
-    
-    for word in sorted_words:
-        replacement = banned_map[word]
-        # Match word boundaries to prevent replacing parts of larger words (e.g., 'ghostly' should still match 'ghost' if desired, but boundary check prevents unintended matches)
-        pattern = re.compile(rf'\b{re.escape(word)}\b', re.IGNORECASE)
+    try:
+        # Try using llama_cpp library to tokenize the banned words directly from the model file
+        from llama_cpp import Llama
+        # Initialize a lightweight read just for tokenization mapping
+        # (vocab_only=True avoids loading weights into VRAM)
+        llm = Llama(model_path=gguf_path, vocab_only=True, verbose=False)
         
-        def replace_match(match):
-            original = match.group(0)
-            return match_case(original, replacement)
-            
-        text = pattern.sub(replace_match, text)
+        for word in words:
+            clean_word = word.strip()
+            if not clean_word:
+                continue
+            # Tokenize variants (with/without leading spaces and capitalization)
+            variants = [clean_word, f" {clean_word}", clean_word.capitalize(), f" {clean_word.capitalize()}"]
+            for variant in variants:
+                ids = llm.tokenize(variant.encode("utf-8"), add_special=False)
+                for t_id in ids:
+                    token_ids.add(int(t_id))
         
-    return text
+        # Clean up instance to free memory immediately
+        del llm
+        
+    except (ImportError, Exception) as e:
+        print(f"[BANNED WORDS] Notice: Could not tokenize via llama_cpp ({e}). Skipping dynamic logit bias.", flush=True)
+        return []
+
+    cli_args = []
+    for token_id in token_ids:
+        cli_args.extend(["--logit-bias", f"{token_id}{bias_weight}"])
+        
+    return cli_args
