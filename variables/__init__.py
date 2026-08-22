@@ -32,11 +32,12 @@ DISABLED_THINKING = {
     "reasoning_budget": 0
 }
 
-def is_thinking_enabled(is_cloud: bool) -> bool:
+def is_thinking_enabled() -> bool:
+    """Checks if thinking/reasoning tags are enabled via environment settings."""
     env_val = os.getenv("THINKING_ENABLED")
     if env_val is not None:
         return env_val.lower() in ("true", "1", "yes")
-    return True if is_cloud else False
+    return False  # Default for local models
 
 # Dynamically derive models URL from REMOTE_SERVER_URL
 try:

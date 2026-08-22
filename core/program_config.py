@@ -7,7 +7,7 @@ import sys
 from tools.tools import (
     read_file, write_file, replace_in_file, run_shell_command, 
     get_workspace_structure, search_codebase, read_webpage, google_search,
-    web_search, apply_comfy_workflow, generate_local_image, generate_imagen,
+    web_search, apply_comfy_workflow, generate_local_image,
     replace_file_content, multi_replace_file_content, run_command_async,
     manage_task, wait_task
 )
@@ -18,8 +18,7 @@ if PARENT_DIR not in sys.path:
     sys.path.insert(0, PARENT_DIR)
 
 from variables import (
-    USER_MD_FILE, DEFAULT_REMOTE_MODEL, PROGRAMS_DIR, 
-    USER_PROFILES_DIR
+    USER_MD_FILE, PROGRAMS_DIR, USER_PROFILES_DIR
 )
 
 # --- SYSTEM CONTEXT COMPILER ---

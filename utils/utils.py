@@ -68,13 +68,6 @@ def _run_async_in_background_thread(coro):
     threading.Thread(target=target, daemon=True).start()
 
 
-def _is_remote_configured() -> bool:
-    """Checks if valid remote cloud configuration environment variables are present."""
-    key = os.getenv("REMOTE_API_KEY", "").strip()
-    url = os.getenv("REMOTE_CLOUD_URL", "").strip()
-    return bool(key and url)
-
-
 def _merge_consecutive_messages(messages: list[dict]) -> list[dict]:
     """Combines consecutive messages with the same role into a single message."""
     if not messages:

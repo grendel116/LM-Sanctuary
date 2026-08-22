@@ -173,28 +173,26 @@ def start_local_server(model_key):
     gpu_layers = os.getenv("LOCAL_GPU_LAYERS", "99")
     flash_attn = os.getenv("LOCAL_FLASH_ATTN", "true").lower() == "true"
     no_mmap = os.getenv("LOCAL_NO_MMAP", "false").lower() == "true"
-    
-    # Read the batch sizes defined in your .env file
     batch_size = os.getenv("LOCAL_BATCH_SIZE", "2048")
     ubatch_size = os.getenv("LOCAL_UBATCH_SIZE", "2048")
     
     cmd = [
-        SERVER_EXE,
-        "-m", model_path,
-        "-c", context_size,
-        "--port", "1234",
-        "--host", "127.0.0.1",
-        "-ngl", gpu_layers,
-        "-np", "1",
-        "-b", batch_size,          # High total batch size for rapid prompt ingest
-        "-ub", ubatch_size,        # High micro-batch size for GPU execution parallelism
-        "--cache-reuse", "256",    # Enables prompt caching for repeated prefix context
-        "--fit", "off"
-    ]
-    # Removed "--no-warmup" from the base command list so GPU memory initializes on launch
+            SERVER_EXE,
+            "-m", model_path,
+            "-c", context_size,
+            "-b", batch_size,
+            "-ub", ubatch_size,
+            "--port", "1234",
+            "--host", "127.0.0.1",
+            "-ngl", gpu_layers,
+            "-np", "1",
+            "-fa", "on",
+            "--no-warmup",
+            "--fit", "off"
+        ]
 
     from variables import is_thinking_enabled
-    if not is_thinking_enabled(is_cloud=False):
+    if not is_thinking_enabled():
         cmd.extend(["--reasoning", "off", "--reasoning-budget", "0"])
 
     if flash_attn:

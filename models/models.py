@@ -38,7 +38,7 @@ def fetch_local_models(force_refresh=False) -> list:
         else:
             print(f"[Local LLM] Native models listing offline: {e}")
 
-    # Fallback to standard OpenAI compatibility endpoint /v1/models
+    # Backup to standard OpenAI compatibility endpoint /v1/models
     try:
         response = requests.get(LOCAL_MODELS_URL, timeout=0.2)
         response.raise_for_status()
@@ -68,17 +68,5 @@ def fetch_local_models(force_refresh=False) -> list:
         return []
 
 def is_local_model(model: str) -> bool:
-    """Determines if a model is local by checking name format, env vars, or active list."""
-    if not model:
-        return False
-    m_norm = model.replace('\\', '/').strip().lower()
-    local_env = os.getenv("LOCAL_MODEL_NAME", "").replace('\\', '/').strip().lower()
-    if m_norm in ("local-llm", local_env) or m_norm.endswith(".gguf") or m_norm.endswith(".bin"):
-        return True
-    try:
-        loaded_models = fetch_local_models()
-        return any(m_norm == m["value"].replace('\\', '/').strip().lower() for m in loaded_models)
-    except Exception:
-        pass
-    return False
-
+    """Always treats model execution as local without external dependency checks."""
+    return True

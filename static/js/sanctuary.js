@@ -1078,7 +1078,6 @@ async function startLocalLLM(btn) {
         btn.disabled = true;
         btn.innerHTML = `<span class="animate-spin" style="display: inline-block; width: 14px; height: 14px; border: 2px solid currentColor; border-top-color: transparent; border-radius: 50%; margin-right: 8px; vertical-align: middle;"></span>Starting...`;
     }
-    // Optimistic UI state
     connectionStatus.local_online = 'starting';
     updateConnectionModalStatus();
     if (document.getElementById('onboarding-container')) {
@@ -1086,14 +1085,18 @@ async function startLocalLLM(btn) {
     }
     try {
         const res = await fetch('/api/local_llm/start', { method: 'POST' });
+        if (!res.ok) {
+            throw new Error(`Server returned status ${res.status}`);
+        }
         const data = await res.json();
         if (!data.success) {
             connectionStatus.local_online = false;
             showCustomAlert("Failed to Start", data.message);
         }
     } catch (e) {
+        console.error("startLocalLLM Error:", e);
         connectionStatus.local_online = false;
-        showCustomAlert("Error", "Failed to initiate server start.");
+        showCustomAlert("Error", e.message || "Failed to initiate server start.");
     } finally {
         _localStarting = false;
         updateConnectionModalStatus();

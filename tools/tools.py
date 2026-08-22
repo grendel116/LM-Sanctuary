@@ -1,17 +1,17 @@
 import os
-import subprocess
-import requests
-
 import time
 import uuid
-import concurrent.futures
-
-from variables import COMFYUI_SERVER_URL, COMFYUI_CHECKPOINT, COMFYUI_VAE, DEFAULT_REMOTE_MODEL, VARIABLES_DIR
-
-_search_executor = concurrent.futures.ThreadPoolExecutor(max_workers=10)
+import subprocess
 import functools
 import threading
 import contextvars
+import concurrent.futures
+
+import requests
+
+from variables import COMFYUI_SERVER_URL, COMFYUI_CHECKPOINT, COMFYUI_VAE, VARIABLES_DIR
+
+_search_executor = concurrent.futures.ThreadPoolExecutor(max_workers=10)
 
 active_running_tools = {}
 _active_tools_lock = threading.Lock()
@@ -19,6 +19,7 @@ _active_tools_lock = threading.Lock()
 current_session_id = contextvars.ContextVar('current_session_id', default='default')
 current_use_imagen = contextvars.ContextVar('current_use_imagen', default=False)
 session_tool_calls = {}
+background_tasks = {}
 session_tool_calls_lock = threading.Lock()
 
 tools_dir = os.path.dirname(os.path.abspath(__file__))
@@ -169,6 +170,7 @@ def confirm_tool_execution(tool_name: str, details: str) -> bool:
     if call_id in pending_tool_calls:
         del pending_tool_calls[call_id]
     return False
+
 # ==============================================================================
 # WEB BROWSING & RESEARCH TOOLS
 # ==============================================================================
@@ -291,7 +293,6 @@ def query_searxng(query: str, base_url: str = None, engines: str = "baidu,yandex
     return []
 
 
-
 @track_tool_activity
 def web_search(query: str) -> str:
     """Searches the web and returns raw hits containing titles, links, and snippets.
@@ -326,106 +327,6 @@ def web_search(query: str) -> str:
     # Map older values to web_crawling
     if search_engine in ("sovereign_hybrid", "sovereign_search", "searxng", "google_grounding"):
         search_engine = "web_crawling"
-
-    def run_google(q):
-        remote_api_key = os.getenv("REMOTE_API_KEY")
-        if not remote_api_key:
-            return []
-        try:
-            from google import genai
-            from google.genai import types
-
-            client = genai.Client(api_key=remote_api_key)
-            grounding_tool = types.Tool(
-                google_search=types.GoogleSearch()
-            )
-            config = types.GenerateContentConfig(
-                tools=[grounding_tool],
-                temperature=0.0
-            )
-
-            response = client.models.generate_content(
-                model=DEFAULT_REMOTE_MODEL,
-                contents=f"Perform a search for: {q}. Output only a list of search hits with their titles, URLs, and very brief snippets.",
-                config=config
-            )
-
-            g_results = []
-
-            # Parse text response first for clean, original URLs and rich snippets
-            if response.text:
-                import re
-                lines = response.text.split('\n')
-                i = 0
-                while i < len(lines):
-                    line = lines[i].strip()
-                    match = re.search(r'\*\*([^*]+)\*\*$', line) or re.search(r'\*\*([^*]+)\*\*', line)
-                    if match:
-                        title = match.group(1).strip()
-                        url = ""
-                        snippet_lines = []
-                        j = i + 1
-                        url_found = False
-                        while j < min(i + 4, len(lines)):
-                            next_line = lines[j].strip()
-                            url_match = re.search(r'https?://[^\s)\]]+', next_line)
-                            if url_match and not url_found:
-                                url = url_match.group(0).strip()
-                                url_found = True
-                            elif next_line and not next_line.startswith(('*', '-', '+', '#')):
-                                snippet_lines.append(next_line)
-                            j += 1
-                        if url:
-                            content = " ".join(snippet_lines).strip()
-                            g_results.append({
-                                "title": title,
-                                "url": url,
-                                "content": content or title,
-                                "source": "Google"
-                            })
-                            i = j - 1
-                    i += 1
-
-            # Fall back to metadata chunks if text parsing was empty
-            if not g_results:
-                metadata = response.candidates[0].grounding_metadata if (response.candidates and response.candidates[0]) else None
-                if metadata and hasattr(metadata, 'grounding_chunks') and metadata.grounding_chunks:
-                    for chunk in metadata.grounding_chunks:
-                        web = getattr(chunk, 'web', None)
-                        if web and web.uri:
-                            title = web.title or "Web Result"
-                            g_results.append({
-                                "title": title,
-                                "url": web.uri,
-                                "content": title,
-                                "source": "Google"
-                            })
-            # Resolve Google search redirects concurrently to find clean target URLs
-            if g_results:
-                def resolve_url(item):
-                    url = item["url"]
-                    if "vertexaisearch.cloud.google.com/grounding-api-redirect" in url:
-                        try:
-                            headers = {
-                                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
-                            }
-                            r = requests.head(url, headers=headers, allow_redirects=True, timeout=2.0)
-                            if r.status_code < 400 and r.url:
-                                item["url"] = r.url
-                                return
-                            r = requests.get(url, headers=headers, allow_redirects=True, stream=True, timeout=2.0)
-                            if r.url:
-                                item["url"] = r.url
-                        except Exception:
-                            pass
-
-                with concurrent.futures.ThreadPoolExecutor(max_workers=len(g_results)) as executor:
-                    executor.map(resolve_url, g_results)
-
-            return g_results
-        except Exception as e:
-            print(f"[Google Grounding] Error: {e}")
-            return []
 
     def run_searxng(q):
         try:
@@ -739,9 +640,7 @@ def web_search(query: str) -> str:
         try:
             import musicbrainzngs
             musicbrainzngs.set_useragent("Sanctuary", "1.0", "https://github.com/sanctuary")
-            # Determine search type from query structure
             mb_results = []
-            # Search artists
             artist_res = musicbrainzngs.search_artists(artist=raw_query, limit=5)
             for artist in artist_res.get("artist-list", []):
                 name = artist.get("name", "")
@@ -762,7 +661,6 @@ def web_search(query: str) -> str:
                     "content": " | ".join(desc_parts) if desc_parts else name,
                     "source": "MusicBrainz"
                 })
-            # Search recordings
             rec_res = musicbrainzngs.search_recordings(query=raw_query, limit=5)
             for rec in rec_res.get("recording-list", []):
                 title = rec.get("title", "")
@@ -793,7 +691,6 @@ def web_search(query: str) -> str:
         # Standard hybrid concurrent search blending
         if search_engine == "web_crawling":
             futures = {
-                _search_executor.submit(run_google, query): "Google",
                 _search_executor.submit(run_searxng, query): "SearXNG",
                 _search_executor.submit(run_baidu, query): "Baidu",
                 _search_executor.submit(run_duckduckgo, query): "DuckDuckGo",
@@ -848,56 +745,11 @@ def web_search(query: str) -> str:
     if not results_pool:
         return "No search results found."
 
-    def synthesize_results(query: str, results: list) -> str:
-        """Calls a fast model to synthesize raw results into a clean research report."""
-        remote_api_key = os.getenv("REMOTE_API_KEY", "").strip()
-        if not remote_api_key or remote_api_key == "your_remote_api_key_here":
-            # No API key — return to raw formatted snippets
-            lines = []
-            for r in results[:10]:
-                lines.append(f"Title: {r['title']}\nURL: {r['url']}\nSource: {r['source']}\nSnippet: {r['content']}")
-            return "\n\n".join(lines)
-
-        data_blob = "\n\n".join([
-            f"[{r['source']}] {r['title']}\nURL: {r['url']}\n{r['content']}"
-            for r in results[:10]
-        ])
-        source_urls = "\n".join(f"- {r['url']}" for r in results[:10])
-
-        prompt = (
-            f"You are a research synthesizer. Based solely on the following search results, "
-            f"write a factual 4-6 sentence report about: \"{query}\"\n"
-            f"Include specific names, roles, dates, events, and direct details from the sources. "
-            f"Do not editorialize or infer beyond what the sources state.\n\n"
-            f"SEARCH DATA:\n{data_blob}\n\n"
-            f"REPORT:"
-        )
-
-        try:
-            from google import genai
-            from google.genai import types
-
-            client = genai.Client(api_key=remote_api_key)
-            response = client.models.generate_content(
-                model=DEFAULT_REMOTE_MODEL,
-                contents=prompt,
-                config=types.GenerateContentConfig(temperature=0.0)
-            )
-            report = (response.text or "").strip()
-            if report:
-                return f"{report}\n\nSources:\n{source_urls}"
-        except Exception as e:
-            print(f"[Research Synthesis] Error: {e}")
-
-        # Fallback to raw snippets if synthesis fails
-        lines = []
-        for r in results[:10]:
-            lines.append(f"Title: {r['title']}\nURL: {r['url']}\nSource: {r['source']}\nSnippet: {r['content']}")
-        return "\n\n".join(lines)
-
-    return synthesize_results(query, results_pool)
-
-
+    # Directly format search results for local LLM consumption
+    lines = []
+    for r in results_pool[:10]:
+        lines.append(f"Title: {r['title']}\nURL: {r['url']}\nSource: {r['source']}\nSnippet: {r['content']}")
+    return "\n\n".join(lines)
 
 
 @track_tool_activity
@@ -905,10 +757,14 @@ def google_search(query: str) -> str:
     """Wrapper that delegates search queries to web_search."""
     return web_search(query)
 
+# ==============================================================================
+# FILE MANAGEMENT TOOLS
+# ==============================================================================
 
 @track_tool_activity
 def read_file(path: str) -> str:
     """Reads the contents of a file at the specified path.
+    Supports plain text, markdown, code files, PDFs, DOCX, and XLSX files.
 
     Args:
         path: The file path to read (absolute or relative to current directory).
@@ -918,8 +774,10 @@ def read_file(path: str) -> str:
     """
     try:
         normalized_path = resolve_workspace_path(path)
+        path_lower = normalized_path.lower()
         
-        if normalized_path.lower().endswith('.pdf'):
+        # PDF File Handling
+        if path_lower.endswith('.pdf'):
             try:
                 import pypdf
                 reader = pypdf.PdfReader(normalized_path)
@@ -936,20 +794,58 @@ def read_file(path: str) -> str:
                         "It is likely a scanned document or consists solely of images."
                     )
                 return combined
+            except ImportError:
+                return "Error: `pypdf` is not installed. Please install it with `pip install pypdf`."
             except Exception as pdf_err:
                 return f"Error reading PDF file '{path}': {pdf_err}"
-                
-        if normalized_path.lower().endswith('.gdoc'):
+
+        # Word Document (.docx) Handling
+        if path_lower.endswith('.docx'):
+            try:
+                import docx
+                doc = docx.Document(normalized_path)
+                full_text = [para.text for para in doc.paragraphs if para.text.strip()]
+                return "\n\n".join(full_text)
+            except ImportError:
+                return "Error: `python-docx` is not installed. Please install it with `pip install python-docx`."
+            except Exception as docx_err:
+                return f"Error reading DOCX file '{path}': {docx_err}"
+
+        # Excel Spreadsheet (.xlsx / .xls) Handling
+        if path_lower.endswith(('.xlsx', '.xls')):
+            try:
+                import openpyxl
+                wb = openpyxl.load_workbook(normalized_path, data_only=True)
+                output = []
+                for sheet in wb.sheetnames:
+                    ws = wb[sheet]
+                    output.append(f"--- Sheet: {sheet} ---")
+                    for row in ws.iter_rows(values_only=True):
+                        if any(cell is not None for cell in row):
+                            row_str = " | ".join(str(cell) if cell is not None else "" for cell in row)
+                            output.append(row_str)
+                    output.append("")
+                return "\n".join(output).strip()
+            except ImportError:
+                return "Error: `openpyxl` is not installed. Please install it with `pip install openpyxl`."
+            except Exception as xlsx_err:
+                return f"Error reading Excel file '{path}': {xlsx_err}"
+
+        # Google Doc Shortcut Warning
+        if path_lower.endswith('.gdoc'):
             return (
                 f"Error: '{path}' is a Google Doc shortcut file. "
                 "Google Doc shortcut files (.gdoc) do not contain the document text locally. "
                 "Please copy and paste the document content directly into the chat."
             )
             
-        with open(normalized_path, "r", encoding="utf-8") as f:
+        # Standard Text / Source Code Files
+        with open(normalized_path, "r", encoding="utf-8", errors="replace") as f:
             return f.read()
+
     except Exception as e:
         return f"Error reading file '{path}': {e}"
+
 
 @track_tool_activity
 def write_file(path: str, content: str) -> str:
@@ -976,6 +872,7 @@ def write_file(path: str, content: str) -> str:
         return f"Successfully wrote to file '{path}'."
     except Exception as e:
         return f"Error writing to file '{path}': {e}"
+
 
 @track_tool_activity
 def replace_in_file(path: str, old_text: str, new_text: str) -> str:
@@ -1009,6 +906,7 @@ def replace_in_file(path: str, old_text: str, new_text: str) -> str:
         return f"Successfully replaced content in '{path}'."
     except Exception as e:
         return f"Error modifying file '{path}': {e}"
+
 
 @track_tool_activity
 def run_shell_command(command: str) -> str:
@@ -1048,6 +946,7 @@ def run_shell_command(command: str) -> str:
     except Exception as e:
         return f"Error executing command: {e}"
 
+
 @track_tool_activity
 def get_workspace_structure() -> str:
     """Recursively lists all files and directories in all configured project folders,
@@ -1057,7 +956,7 @@ def get_workspace_structure() -> str:
     Returns:
         A text representation of the workspace directory tree structure.
     """
-    exclude_dirs = {".venv", "__pycache__", ".git", "node_modules", "dist"}
+    exclude_dirs = {".venv", "__pycache__", ".git", "node_modules", "dist", ".idea", ".vscode"}
     
     folders = get_project_folders()
         
@@ -1112,6 +1011,7 @@ def get_workspace_structure() -> str:
         
     return "\n".join(lines).strip()
 
+
 @track_tool_activity
 def search_codebase(keyword: str) -> str:
     """Performs a case-insensitive search for a keyword or pattern inside all text files
@@ -1124,8 +1024,8 @@ def search_codebase(keyword: str) -> str:
     Returns:
         A list of matching snippets grouped by file, or a 'no matches found' message.
     """
-    exclude_dirs = {".venv", "__pycache__", ".git", "node_modules", "dist"}
-    exclude_extensions = {".png", ".jpg", ".jpeg", ".gif", ".ico", ".pdf", ".pyc", ".db", ".zip", ".tar", ".gz"}
+    exclude_dirs = {".venv", "__pycache__", ".git", "node_modules", "dist", ".idea", ".vscode"}
+    exclude_extensions = {".png", ".jpg", ".jpeg", ".gif", ".ico", ".pdf", ".pyc", ".db", ".zip", ".tar", ".gz", ".xlsx", ".docx"}
     results = []
     max_files = 25
     truncated = False
@@ -1160,19 +1060,19 @@ def search_codebase(keyword: str) -> str:
                 rel_path = os.path.relpath(file_path, folder)
                 
                 try:
-                      with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
-                          lines = f.readlines()
-                          
-                      file_matches = []
-                      for line_idx, line in enumerate(lines):
-                          if keyword_lower in line.lower():
-                              file_matches.append(f"  Line {line_idx + 1}: {line.strip()}")
-                              
-                      if file_matches:
-                          results.append(f"File: [{os.path.basename(folder)}] {rel_path}\n" + "\n".join(file_matches[:10]))
+                    with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                        lines = f.readlines()
+                        
+                    file_matches = []
+                    for line_idx, line in enumerate(lines):
+                        if keyword_lower in line.lower():
+                            file_matches.append(f"  Line {line_idx + 1}: {line.strip()}")
+                            
+                    if file_matches:
+                        results.append(f"File: [{os.path.basename(folder)}] {rel_path}\n" + "\n".join(file_matches[:10]))
                 except Exception:
-                      continue
-                      
+                    continue
+                    
     if not results:
         return f"No matches found for keyword: '{keyword}'"
         
@@ -1180,6 +1080,10 @@ def search_codebase(keyword: str) -> str:
     if truncated:
         output += "\n\n... [Search results truncated: maximum limit of 25 matched files reached. Please refine your search keyword.]"
     return output
+
+# ==============================================================================
+# COMFYUI TOOLS
+# ==============================================================================
 
 def get_comfy_checkpoints(comfy_url: str) -> list:
     try:
@@ -1194,6 +1098,7 @@ def get_comfy_checkpoints(comfy_url: str) -> list:
         print(f"[DEBUG] Failed to fetch checkpoints from ComfyUI: {e}", flush=True)
     return []
 
+
 def get_comfy_vaes(comfy_url: str) -> list:
     try:
         response = requests.get(f"{comfy_url}/object_info", timeout=2.0)
@@ -1206,6 +1111,7 @@ def get_comfy_vaes(comfy_url: str) -> list:
     except Exception as e:
         print(f"[DEBUG] Failed to fetch VAEs from ComfyUI: {e}", flush=True)
     return []
+
 
 def format_comfy_validation_error(error_json: dict) -> str:
     try:
@@ -1355,7 +1261,7 @@ def apply_comfy_workflow(workflow_path: str, parameters: dict, save_path: str, s
                                     with open(save_path, "wb") as img_file:
                                         img_file.write(view_res.content)
                                     
-                                    # Delete the file from ComfyUI's folder to avoid accumulation
+                                    # Clean up temporary output from ComfyUI server folder
                                     try:
                                         from adapters.comfy_manager import COMFYUI_DIR
                                         img_type = img.get("type", "temp")
@@ -1373,6 +1279,8 @@ def apply_comfy_workflow(workflow_path: str, parameters: dict, save_path: str, s
         raise Exception("Image generation timed out on ComfyUI server after 300 seconds.")
     except Exception as e:
         return f"Error executing ComfyUI workflow: {e}"
+
+
 @track_tool_activity
 def generate_local_image(prompt: str) -> str:
     """Generates a local image using ComfyUI with program-specific workflow configurations.
@@ -1383,9 +1291,6 @@ def generate_local_image(prompt: str) -> str:
     Returns:
         A markdown link to the generated portrait image, or an error message.
     """
-    if current_use_imagen.get():
-        return generate_imagen(prompt)
-
     import os
     import random
     import time
@@ -1432,7 +1337,6 @@ def generate_local_image(prompt: str) -> str:
     active_program = get_active_program()
     
     workflow_env_path = os.getenv("COMFYUI_IMAGE_WORKFLOW", "core/skills/portrait_generation/ImageWorkflow.json")
-    # Use the global root_dir (which points to the workspace root) instead of redefining it locally
     workflow_path = os.path.normpath(os.path.join(root_dir, workflow_env_path))
     
     if not os.path.exists(workflow_path):
@@ -1453,11 +1357,10 @@ def generate_local_image(prompt: str) -> str:
         if available_vaes and selected_vae not in available_vaes:
             raise Exception(f"Missing VAE: The required VAE file `{selected_vae}` was not found.")
 
-        # Load image prompt tags from v3 extensions.sanctuary.image_details
+        # Load image prompt tags from program details
         img_details_val = ""
         neg_details_val = ""
         
-        import json
         program_json_path = os.path.normpath(os.path.join(
             root_dir, "core", "programs", active_program, f"{active_program}.json"
         ))
@@ -1472,7 +1375,6 @@ def generate_local_image(prompt: str) -> str:
                 neg_details_val = img_details.get("negative", "")
             except Exception as e:
                 print(f"[DEBUG] Error reading active program JSON for image generation: {e}", flush=True)
-
 
         # Combine prompt and image details
         from core.program_config import replace_placeholders
@@ -1516,127 +1418,6 @@ def generate_local_image(prompt: str) -> str:
         print(f"[INFO] ComfyUI generation failed or is offline: {e}.")
         return get_install_instructions(str(e))
 
-
-@track_tool_activity
-def generate_imagen(prompt: str, aspect_ratio: str = '1:1') -> str:
-    """Generates a cloud image based on the prompt using Google's Imagen model.
-
-    Args:
-        prompt: A descriptive prompt detailing the scene or object.
-        aspect_ratio: Aspect ratio for the image (default '1:1').
-
-    Returns:
-        A markdown link to the generated image, or an error message.
-    """
-    if not current_use_imagen.get():
-        return "Error: Imagen rendering is disabled in settings."
-
-    import os
-    import time
-    import uuid
-    import base64
-    import requests
-    from dotenv import load_dotenv
-
-    try:
-        root_dir = os.path.dirname(os.path.abspath(__file__))
-        load_dotenv(os.path.join(root_dir, ".env"))
-
-        api_key = os.getenv("REMOTE_API_KEY")
-        if not api_key:
-            return "Error: REMOTE_API_KEY not found in environment."
-
-        from core.program_config import replace_placeholders
-        resolved_prompt = replace_placeholders(prompt)
-        model_name = os.getenv("IMAGEN_MODEL", "imagen-4.0-generate-001")
-        print(f"[IMAGEN] Generating image with model {model_name} and prompt: {resolved_prompt}")
-
-        image_bytes = None
-
-        # 1. Try Google GenAI SDK if installed
-        try:
-            from google import genai
-            from google.genai import types
-            client = genai.Client(api_key=api_key)
-            response = client.models.generate_images(
-                model=model_name,
-                prompt=resolved_prompt,
-                config=types.GenerateImagesConfig(
-                    number_of_images=1,
-                    output_mime_type='image/png',
-                    aspect_ratio=aspect_ratio
-                )
-            )
-            if response.generated_images:
-                img_obj = response.generated_images[0]
-                if hasattr(img_obj.image, 'image_bytes'):
-                    image_bytes = img_obj.image.image_bytes
-        except Exception as sdk_err:
-            print(f"[IMAGEN] SDK call skipped ({sdk_err}), trying direct REST API.")
-
-        # 2. Try Direct REST API endpoint
-        if not image_bytes:
-            candidate_models = [model_name, "imagen-4.0-generate-001", "imagen-4.0-fast-generate-001", "imagen-3.0-generate-002"]
-            seen = set()
-            for m in candidate_models:
-                if m in seen:
-                    continue
-                seen.add(m)
-                url = f"https://generativelanguage.googleapis.com/v1beta/models/{m}:predict?key={api_key}"
-                payload = {
-                    "instances": [{"prompt": resolved_prompt}],
-                    "parameters": {
-                        "sampleCount": 1,
-                        "outputMimeType": "image/png",
-                        "aspectRatio": aspect_ratio
-                    }
-                }
-                res = requests.post(url, json=payload, headers={"Content-Type": "application/json"}, timeout=60.0)
-                if res.status_code == 200:
-                    data = res.json()
-                    preds = data.get("predictions", [])
-                    if preds and "bytesBase64Encoded" in preds[0]:
-                        b64_str = preds[0]["bytesBase64Encoded"]
-                        image_bytes = base64.b64decode(b64_str)
-                        break
-                else:
-                    print(f"[IMAGEN] Model {m} returned {res.status_code}: {res.text[:200]}")
-
-        if not image_bytes:
-            return "Error: Unable to generate image with available Imagen models."
-
-        from runners.program import get_active_program
-        active_program = get_active_program()
-        media_dir = os.path.normpath(os.path.join(root_dir, "core", "programs", active_program, "media"))
-        os.makedirs(media_dir, exist_ok=True)
-
-        timestamp = int(time.time())
-        local_filename = f"gen_img_{timestamp}_{uuid.uuid4().hex[:6]}.png"
-        local_path = os.path.join(media_dir, local_filename)
-
-        with open(local_path, "wb") as f:
-            f.write(image_bytes)
-
-        sidecar_json_path = local_path.rsplit('.', 1)[0] + '.json'
-        try:
-            import json
-            with open(sidecar_json_path, 'w', encoding='utf-8') as jf:
-                json.dump({
-                    'prompt': resolved_prompt,
-                    'timestamp': timestamp,
-                    'model': model_name,
-                    'aspect_ratio': aspect_ratio
-                }, jf, indent=2)
-        except Exception as err:
-            print(f"[IMAGEN] Failed to save sidecar JSON: {err}")
-
-        return f"![Generated Image](/images/media/{local_filename})"
-
-    except Exception as e:
-        print(f"[IMAGEN] Error generating image: {e}")
-        return f"Error generating image: {e}"
-
-
 @track_tool_activity
 def generate_video_from_image(image_path: str, prompt: str) -> str:
     """Animates a local image using ComfyUI with a custom video-specific workflow template.
@@ -1652,11 +1433,13 @@ def generate_video_from_image(image_path: str, prompt: str) -> str:
     import time
     import json
     import random
-    import shutil
     import requests
+    from PIL import Image
     
-    root_dir = os.path.dirname(os.path.abspath(__file__))
+    from variables import COMFYUI_SERVER_URL
+    from adapters.comfy_manager import COMFYUI_DIR, check_comfy_running, _resolver_worker, resolution_status
     from runners.program import get_active_program
+
     active_program = get_active_program()
     
     workflow_env_path = os.getenv("COMFYUI_VIDEO_WORKFLOW", "core/skills/portrait_generation/VideoWorkflow.json")
@@ -1669,9 +1452,6 @@ def generate_video_from_image(image_path: str, prompt: str) -> str:
         raise Exception(f"Source image not found at '{image_path}'")
         
     # Copy and resize source image to ComfyUI's input directory using PIL
-    from variables import COMFYUI_SERVER_URL
-    from adapters.comfy_manager import COMFYUI_DIR
-    from PIL import Image
     comfy_input_dir = os.path.normpath(os.path.join(COMFYUI_DIR, "input"))
     os.makedirs(comfy_input_dir, exist_ok=True)
     
@@ -1738,15 +1518,12 @@ def generate_video_from_image(image_path: str, prompt: str) -> str:
         return obj
 
     populated_workflow = replace_val(workflow_data)
-    import json
     
     # Ensure ComfyUI server is running
-    from adapters.comfy_manager import check_comfy_running
     if not check_comfy_running(force_refresh=True):
         raise Exception("ComfyUI server is offline. Please start the ComfyUI engine manually from the settings panel.")
             
     # Run dependency resolution inline to ensure missing custom nodes or models are downloaded/installed
-    from adapters.comfy_manager import _resolver_worker, resolution_status
     print("[COMFY VIDEO] Checking and resolving workflow dependencies inline...")
     _resolver_worker(json.dumps(populated_workflow))
     if resolution_status.get("status") == "failed":
@@ -1756,7 +1533,7 @@ def generate_video_from_image(image_path: str, prompt: str) -> str:
     
     # Wait for ComfyUI to come back online if it was restarted
     print("[COMFY VIDEO] Waiting for ComfyUI server to be responsive...")
-    for _ in range(60): # up to 60 seconds
+    for _ in range(60):  # up to 60 seconds
         if check_comfy_running(force_refresh=True):
             break
         time.sleep(1)
@@ -1768,7 +1545,7 @@ def generate_video_from_image(image_path: str, prompt: str) -> str:
     
     res = requests.post(f"{comfy_url}/prompt", json={"prompt": populated_workflow}, timeout=10.0)
     if res.status_code != 200:
-        # Try to clean up input image
+        # Clean up input image on error
         try:
             os.remove(comfy_input_path)
         except Exception:
@@ -1784,7 +1561,6 @@ def generate_video_from_image(image_path: str, prompt: str) -> str:
                 raise e_inner
         raise Exception(f"ComfyUI server prompt execution failed with status {res.status_code}")
 
-        
     prompt_id = res.json().get("prompt_id")
     if not prompt_id:
         try:
@@ -1821,17 +1597,14 @@ def generate_video_from_image(image_path: str, prompt: str) -> str:
                             
                     # 2. If no output media found in outputs, scan ComfyUI temp folder for civitai videos
                     if not completed_filename:
-                        from adapters.comfy_manager import COMFYUI_DIR
                         temp_dir = os.path.normpath(os.path.join(COMFYUI_DIR, "temp"))
                         if os.path.exists(temp_dir):
                             newest_file = None
                             newest_time = 0
-                            # Look for files matching civitai_*.mp4, civitai_*.webm, civitai_*.gif
                             for f_name in os.listdir(temp_dir):
                                 if f_name.startswith("civitai_") and f_name.lower().endswith((".mp4", ".webm", ".gif")):
                                     f_path = os.path.join(temp_dir, f_name)
                                     mtime = os.path.getmtime(f_path)
-                                    # Must be created after we started (with a buffer for clock drift)
                                     if mtime >= start_time - 10:
                                         if mtime > newest_time:
                                             newest_time = mtime
@@ -1868,10 +1641,10 @@ def generate_video_from_image(image_path: str, prompt: str) -> str:
         if view_res.status_code != 200:
             raise Exception(f"Failed to download generated file from ComfyUI: HTTP {view_res.status_code}")
             
-        # Determine the correct file extension from the downloaded filename
+        # Determine correct file extension
         _, ext = os.path.splitext(completed_filename)
         if not ext:
-            ext = ".mp4"  # Default fallback
+            ext = ".mp4"
             
         # Determine save path: next to the original portrait/image
         source_dir = os.path.dirname(image_path)
@@ -1883,7 +1656,7 @@ def generate_video_from_image(image_path: str, prompt: str) -> str:
         with open(save_path, "wb") as out_file:
             out_file.write(view_res.content)
             
-        # Delete temp file from ComfyUI's temp/output folder to avoid accumulation
+        # Delete temp file from ComfyUI server folder to avoid accumulation
         try:
             folder_type = file_info.get("type", "output")
             folder_name = "temp" if folder_type == "temp" else "output"
@@ -1894,8 +1667,7 @@ def generate_video_from_image(image_path: str, prompt: str) -> str:
         except Exception as e_clean:
             print(f"[COMFY VIDEO] Warning: Failed to clean up temp file: {e_clean}")
             
-        # Get relative public path
-        # E.g. core/programs/sebile/portraits/portrait_123.mp4 -> /images/portraits/portrait_123.mp4
+        # Calculate relative public web server URL
         normalized_path = os.path.normpath(save_path)
         parts = normalized_path.split(os.sep)
         try:
@@ -1908,20 +1680,16 @@ def generate_video_from_image(image_path: str, prompt: str) -> str:
         return url_path
         
     finally:
-        # Clean up temporary input file from ComfyUI's input directory
+        # Clean up temporary input image from ComfyUI input directory
         try:
             if os.path.exists(comfy_input_path):
                 os.remove(comfy_input_path)
         except Exception as e:
             print(f"[COMFY VIDEO] Warning: Failed to delete temp input image {comfy_input_path}: {e}")
 
-
 # ==============================================================================
 # GENERALIST FILE AND BACKGROUND EXECUTION SYSTEM
 # ==============================================================================
-
-background_tasks = {}
-tasks_lock = threading.Lock()
 
 def _run_stream_reader(stream, log_list):
     try:
@@ -2213,7 +1981,6 @@ def multi_replace_file_content(path: str, replacement_chunks: list[dict]) -> str
     except Exception as e:
         return f"Error modifying file '{path}': {e}"
 
-
 @track_tool_activity
 def add_quest(title: str, notes: str, due: str = None, location: str = "", reminder_minutes: int = 15) -> str:
     """Creates a new quest and adds it to the user's quest log.
@@ -2226,9 +1993,9 @@ def add_quest(title: str, notes: str, due: str = None, location: str = "", remin
         reminder_minutes: Optional alert/alarm trigger in minutes before due.
     """
     try:
-        from datetime import datetime, timezone, timedelta
         import json
         import re
+        from datetime import datetime, timezone, timedelta
         
         # Resolve quest log path under the active program directory
         root_dir = os.path.dirname(os.path.abspath(__file__))
@@ -2288,7 +2055,6 @@ def add_quest(title: str, notes: str, due: str = None, location: str = "", remin
         except (ValueError, TypeError):
             reminder_min_val = 15
 
-        import uuid
         unique_suffix = uuid.uuid4().hex[:6]
         quest = {
             "id": f"quest_{timestamp}_{unique_suffix}",
@@ -2314,7 +2080,6 @@ def add_quest(title: str, notes: str, due: str = None, location: str = "", remin
     except Exception as e:
         return f"Error adding quest: {e}"
 
-
 @track_tool_activity
 def add_journal_entry(keyphrases: str, content: str) -> str:
     """Saves a memory journal entry for the active program.
@@ -2331,81 +2096,3 @@ def add_journal_entry(keyphrases: str, content: str) -> str:
         return f"Successfully saved memory journal entry: {entry.get('content')}"
     except Exception as e:
         return f"Error saving memory journal entry: {e}"
-
-
-@track_tool_activity
-def cite_scripture(tradition: str = "all", topic: str = "") -> str:
-    """Searches the local scripture knowledge base for verses relevant to a spiritual topic.
-    
-    Args:
-        tradition: Faith tradition to search. One of 'quran', 'bible', 'gita', 'tao', 'dhammapada', or 'all'.
-        topic: The spiritual theme or question to find relevant passages for.
-    """
-    import json
-    import numpy as np
-    from runners.program import get_active_program
-    
-    root_dir = os.path.dirname(os.path.abspath(__file__))
-    active_program = get_active_program()
-    scriptures_path = os.path.join(root_dir, "core", "programs", active_program, "scriptures.json")
-    
-    if not os.path.exists(scriptures_path):
-        return "Scripture knowledge base not found. Run the scripture ingestion script to set up the local scripture store."
-    
-    try:
-        with open(scriptures_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except Exception as e:
-        return f"Error loading scriptures: {e}"
-    
-    chunks = data.get("chunks", [])
-    if not chunks:
-        return "Scripture knowledge base is empty."
-    
-    # Filter by tradition if specified
-    if tradition.lower() != "all":
-        tradition_lower = tradition.lower()
-        chunks = [c for c in chunks if c.get("tradition", "").lower() == tradition_lower]
-        if not chunks:
-            return f"No scriptures found for tradition '{tradition}'."
-    
-    # Generate query embedding
-    try:
-        from core.skills.vectorized_databank.databank import get_embedding_model
-        model = get_embedding_model()
-        query_vector = model.encode(topic)
-    except Exception as e:
-        return f"Error loading embedding model: {e}"
-    
-    query_norm = np.linalg.norm(query_vector)
-    if query_norm == 0:
-        return "Empty query."
-    
-    # Cosine similarity search
-    results = []
-    for chunk in chunks:
-        vector = chunk.get("vector")
-        if not vector:
-            continue
-        chunk_vector = np.array(vector)
-        chunk_norm = np.linalg.norm(chunk_vector)
-        if chunk_norm == 0:
-            continue
-        similarity = np.dot(query_vector, chunk_vector) / (query_norm * chunk_norm)
-        if similarity >= 0.30:
-            results.append((similarity, chunk))
-    
-    results.sort(key=lambda x: x[0], reverse=True)
-    top_results = results[:5]
-    
-    if not top_results:
-        return f"No scripture passages found matching '{topic}'."
-    
-    formatted = []
-    for score, chunk in top_results:
-        source = chunk.get("source", "Unknown")
-        text = chunk.get("text", "")
-        trad = chunk.get("tradition", "Unknown").capitalize()
-        formatted.append(f"[{trad}] {source}\n{text}")
-    
-    return "\n\n---\n\n".join(formatted)
