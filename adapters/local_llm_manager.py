@@ -3,7 +3,7 @@ import requests
 import re
 import time
 import threading
-from runners import local_runner
+from runners import local_server
 
 import json
 
@@ -13,16 +13,16 @@ _local_models_list_cache_time = 0.0
 
 
 def get_server_path(): return "llama-server"
-def check_installed(): return os.path.exists(local_runner.SERVER_EXE)
+def check_installed(): return os.path.exists(local_server.SERVER_EXE)
 def install_server():
-    success = local_runner.download_llama_server()
+    success = local_server.download_llama_server()
     if success:
         return True, "llama-server successfully installed."
     return False, "Failed to download llama-server."
-def check_status(force_refresh=False): return local_runner.check_local_server_status()
+def check_status(force_refresh=False): return local_server.check_local_server_status()
 def start_server():
     model_name = os.getenv("LOCAL_MODEL_NAME", "")
-    if not local_runner.resolve_model_path(model_name):
+    if not local_server.resolve_model_path(model_name):
         downloaded = list_local_models()
         if downloaded:
             model_name = downloaded[0]
@@ -40,9 +40,9 @@ def start_server():
                     with open(env_path, 'w', encoding='utf-8') as f: f.writelines(lines)
                 os.environ["LOCAL_MODEL_NAME"] = model_name
             except Exception: pass
-    return local_runner.start_local_server(model_name)
+    return local_server.start_local_server(model_name)
 def stop_server():
-    return local_runner.stop_local_server()
+    return local_server.stop_local_server()
 
 def extract_quantization_tag(filename):
     tags = ["IQ1_M", "IQ1_S", "IQ2_XXS", "IQ2_XS", "IQ2_S", "IQ2_M", "Q2_K_S", "Q2_K", "IQ3_XXS", "IQ3_XS", "Q3_K_S", "IQ3_S", "IQ3_M", "Q3_K_M", "Q3_K_L", "IQ4_XS", "IQ4_NL", "Q4_0", "Q4_1", "Q4_K_M", "Q4_K_S", "Q5_0", "Q5_1", "Q5_K_M", "Q5_K_S", "Q6_K", "Q8_0", "F16", "BF16", "FP16"]
@@ -174,7 +174,7 @@ def list_local_models(force_refresh=False):
     return _local_models_list_cached
 
 def load_local_model(model_name):
-    success, msg = local_runner.start_local_server(model_name)
+    success, msg = local_server.start_local_server(model_name)
     if success:
         try:
             env_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), '.env')
@@ -193,10 +193,10 @@ def load_local_model(model_name):
     return success, msg
 
 def unload_local_model(model_name=None):
-    return local_runner.stop_local_server()
+    return local_server.stop_local_server()
 
 def delete_local_model(model_key):
-    target_path = local_runner.resolve_model_path(model_key)
+    target_path = local_server.resolve_model_path(model_key)
     if not target_path or not os.path.exists(target_path):
         return False, "Model file does not exist."
     user_profile = os.environ.get("USERPROFILE") or os.path.expanduser("~")

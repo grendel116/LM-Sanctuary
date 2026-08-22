@@ -140,9 +140,9 @@ class BaseProgramRunner:
             except httpx.TimeoutException:
                 raise
             except (httpx.ConnectError, httpx.ConnectTimeout) as e:
-                from runners import local_runner
+                from runners import local_server
 
-                if local_runner.check_local_server_status() == "starting" and (time.time() - start_time < max_retry_time):
+                if local_server.check_local_server_status() == "starting" and (time.time() - start_time < max_retry_time):
                     print(f"[Local LLM] Connection failed but server is starting. Retrying in {retry_interval}s...", flush=True)
                     await asyncio.sleep(retry_interval)
                     continue

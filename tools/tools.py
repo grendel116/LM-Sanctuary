@@ -1232,7 +1232,7 @@ def apply_comfy_workflow(workflow_path: str, parameters: dict, save_path: str, s
             raise Exception("Did not receive a prompt ID from ComfyUI")
 
         # Poll history endpoint for output
-        from runners.runners import cancelled_sessions
+        from runners.runner import cancelled_sessions
         for _ in range(300):
             # Honour session cancellation — stop polling and kill the ComfyUI job
             if session_id and session_id in cancelled_sessions:

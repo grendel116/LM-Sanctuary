@@ -25,7 +25,7 @@ if not os.path.exists(env_path):
 from flask import Flask, render_template, request, jsonify, send_file, send_from_directory, Response, make_response
 import asyncio
 from functools import wraps
-from runners.runners import OpenSourceRunner
+from runners.runner import OpenSourceRunner
 
 # Load environment variables
 from dotenv import load_dotenv
@@ -237,7 +237,7 @@ def prepare_generation_request(session_id, use_imagen=False, is_voice_call=False
     with tools.session_tool_calls_lock:
         tools.session_tool_calls[session_id] = []
 
-    from runners.runners import cancelled_sessions, voice_call_sessions
+    from runners.runner import cancelled_sessions, voice_call_sessions
     cancelled_sessions.discard(session_id)
     if is_voice_call:
         voice_call_sessions.add(session_id)
@@ -829,7 +829,7 @@ def chat():
         print(f"Error occurred in chat: {e}")
         return jsonify({'error': str(e)}), 500
     finally:
-        from runners.runners import cancelled_sessions, voice_call_sessions
+        from runners.runner import cancelled_sessions, voice_call_sessions
         cancelled_sessions.discard(session_id)
         voice_call_sessions.discard(session_id)
 
@@ -878,7 +878,7 @@ def edit():
         print(f"Error occurred during edit: {e}")
         return jsonify({'error': str(e)}), 500
     finally:
-        from runners.runners import cancelled_sessions
+        from runners.runner import cancelled_sessions
         cancelled_sessions.discard(session_id)
 
 def generate_impersonated_message(session_id, user_profile, model):
@@ -995,7 +995,7 @@ def continue_generation():
     with tools.session_tool_calls_lock:
         tools.session_tool_calls[session_id] = []
 
-    from runners.runners import cancelled_sessions
+    from runners.runner import cancelled_sessions
     cancelled_sessions.discard(session_id)
     start_time = time.time()
     
@@ -1090,7 +1090,7 @@ def continue_generation():
         print(f"Error in continue_generation: {e}")
         return jsonify({'error': str(e)}), 500
     finally:
-        from runners.runners import cancelled_sessions
+        from runners.runner import cancelled_sessions
         cancelled_sessions.discard(session_id)
 
 
@@ -1279,7 +1279,7 @@ def animate_image():
         return jsonify({'error': 'Missing image_url'}), 400
         
     try:
-        from runners.runners import _get_safe_local_path
+        from runners.runner import _get_safe_local_path
         
         # Resolve to safe local path
         local_path = _get_safe_local_path(image_url)
@@ -1384,7 +1384,7 @@ def get_pending_tool_call():
 @requires_auth
 def cancel_chat():
     session_id = request.json.get('session_id', 'default')
-    from runners.runners import cancelled_sessions
+    from runners.runner import cancelled_sessions
     cancelled_sessions.add(session_id)
     print(f"[CANCEL] Session cancellation requested: {session_id}", flush=True)
     return jsonify({'status': 'success'})
@@ -3470,8 +3470,8 @@ from adapters import local_llm_manager
 from adapters import comfy_manager
 
 # Wire SSE broadcast callbacks into both managers
-from runners import local_runner
-local_runner._on_status_change = broadcast_status
+from runners import local_server
+local_server._on_status_change = broadcast_status
 comfy_manager._on_status_change = broadcast_status
 
 @app.route('/api/local_llm/status', methods=['GET'])
