@@ -443,22 +443,24 @@ class BaseProgramRunner:
             messages = system_msgs + chat_msgs
 
         # --- STAGE 2: LOCAL PROCESSING PASS ---
+        from core.program_config import is_story_mode  # Import the story mode check
+
         temperature = self._load_temperature_setting()
         url = LOCAL_SERVER_URL
         headers = get_local_server_headers()
         target_model = model if (model and model != "local-llm") else os.getenv("LOCAL_MODEL_NAME")
 
-        payload = {"messages": messages, "temperature": temperature, "max_tokens": 1024}
+        # Dynamically restrict output tokens based on whether story mode is active for this session
+        story_active = is_story_mode(session_id) if "session_id" in is_story_mode.__code__.co_varnames else is_story_mode()
+        max_tokens_limit = 1024 if story_active else 200  # ~200 tokens keeps normal mode concise
+
+        payload = {
+            "messages": messages, 
+            "temperature": temperature, 
+            "max_tokens": max_tokens_limit
+        }
         if target_model:
             payload["model"] = target_model
-
-        try:
-            response = await self._post_llm_request(url, payload, headers, timeout=120.0, session_id=session_id)
-            bot_response_text = response.json()["choices"][0]["message"]["content"] if response.status_code == 200 else f"Error: {response.text}"
-            print(f"[DEBUG STATUS] {response.status_code}", flush=True)
-            print(f"[DEBUG RAW RESPONSE] {repr(response.text)}", flush=True)
-        except Exception as e:
-            bot_response_text = f"Error connecting to local model server: {e}"
 
         # --- STAGE 3: POST-PROCESSING (TOOLS & CLEANUP) ---
         bot_response_text = self._sanitize_thinking_tags(bot_response_text)
@@ -510,46 +512,259 @@ class BaseProgramRunner:
         return path
 
     async def get_history(self, session_id: str) -> list:
-        raise NotImplementedError()
-
+        """Returns the message history for a given session."""
+        return self.sessions_history.get(session_id, [])
+    
     async def run_async(self, session_id: str, new_message_text: str, image_data: str = None, image_mime: str = None, model: str = None, media_path: str = None, msg_id: str = None) -> tuple:
-        raise NotImplementedError()
+            """Main execution entry point for handling user input and running the LLM loop."""
+            # Ensure session history is loaded
+            if session_id not in self.sessions_history:
+                self._load_session_from_disk(session_id)
+
+            # Append user message to history
+            with self._lock:
+                user_msg = {
+                    "id": msg_id or f"usr_{uuid.uuid4().hex}",
+                    "role": "user",
+                    "text": new_message_text,
+                    "timestamp": time.time(),
+                }
+                if image_data:
+                    user_msg["image_data"] = image_data
+                    user_msg["image_mime"] = image_mime
+                if media_path:
+                    user_msg["media_path"] = media_path
+                self.sessions_history[session_id].append(user_msg)
+                self._save_session_to_disk(session_id)
+
+            # Get adapter and run the generation loop
+            adapter = self._get_session_adapter(session_id)
+            inversion_directive = await self._get_inversion_directive(session_id)
+            rag_context = "" # Fetch RAG context if applicable in your app
+            
+            return await self._execute_local_llm_loop(
+                session_id=session_id,
+                adapter=adapter,
+                model=model,
+                inversion_directive=inversion_directive,
+                rag_context=rag_context,
+                new_message_text=new_message_text,
+                invocation_id=user_msg["id"]
+            )
 
     async def edit_turn(self, session_id: str, msg_id: str, new_text: str = None, model: str = None) -> tuple:
-        raise NotImplementedError()
+        """Edits an existing turn, truncates subsequent history, and re-runs generation."""
+        if session_id not in self.sessions_history:
+            return "", []
+
+        history = self.sessions_history[session_id]
+        target_idx = -1
+        
+        # Find the index of the message being edited
+        for idx, msg in enumerate(history):
+            if msg.get("id") == msg_id:
+                target_idx = idx
+                break
+
+        if target_idx == -1:
+            return "", []
+
+        with self._lock:
+            # Update the message text if provided
+            if new_text is not None:
+                history[target_idx]["text"] = new_text
+            
+            # Truncate all history after this turn so the model can regenerate fresh responses
+            self.sessions_history[session_id] = history[:target_idx + 1]
+            self._save_session_to_disk(session_id)
+
+        # Re-run the LLM loop from this point
+        edited_msg = history[target_idx]["text"]
+        adapter = self._get_session_adapter(session_id)
+        inversion_directive = await self._get_inversion_directive(session_id)
+        
+        return await self._execute_local_llm_loop(
+            session_id=session_id,
+            adapter=adapter,
+            model=model,
+            inversion_directive=inversion_directive,
+            rag_context="",
+            new_message_text=edited_msg,
+            invocation_id=msg_id
+        )
 
     async def reset_session(self, session_id: str):
-        raise NotImplementedError()
+        """Clears the history for a session."""
+        with self._lock:
+            self.sessions_history[session_id] = []
+            self._save_session_to_disk(session_id)
 
     async def delete_turn(self, session_id: str, msg_id: str) -> bool:
-        raise NotImplementedError()
+        """Deletes a specific turn/message from history by its ID."""
+        return await self.delete_message_at(session_id, msg_id)
 
     async def delete_image_from_session(self, session_id: str, image_url: str) -> bool:
-        raise NotImplementedError()
+        """Deletes an image reference from session history and cleans up disk files."""
+        if session_id not in self.sessions_history:
+            return False
+
+        deleted_file = self._delete_local_image(image_url)
+        with self._lock:
+            for msg in self.sessions_history[session_id]:
+                if msg.get("image_url") == image_url or image_url in msg.get("text", ""):
+                    msg.pop("image_url", None)
+                    # Clean markdown image references if present
+                    msg["text"] = msg["text"].replace(f"![]({image_url})", "").replace(image_url, "")
+            self._save_session_to_disk(session_id)
+            
+        return deleted_file
 
     async def replace_image_in_session(self, session_id: str, old_image_url: str, new_image_url: str) -> bool:
-        raise NotImplementedError()
+        """Replaces an image reference in history."""
+        if session_id not in self.sessions_history:
+            return False
+
+        with self._lock:
+            for msg in self.sessions_history[session_id]:
+                if msg.get("image_url") == old_image_url:
+                    msg["image_url"] = new_image_url
+                if old_image_url in msg.get("text", ""):
+                    msg["text"] = msg["text"].replace(old_image_url, new_image_url)
+            self._save_session_to_disk(session_id)
+            return True
 
     async def replace_image_with_video_in_session(self, session_id: str, old_image_url: str, new_video_url: str) -> bool:
-        raise NotImplementedError()
+        """Swaps an image reference with a video reference in history."""
+        if session_id not in self.sessions_history:
+            return False
+
+        with self._lock:
+            for msg in self.sessions_history[session_id]:
+                if msg.get("image_url") == old_image_url:
+                    msg.pop("image_url", None)
+                    msg["video_url"] = new_video_url
+                if old_image_url in msg.get("text", ""):
+                    msg["text"] = msg["text"].replace(old_image_url, new_video_url)
+            self._save_session_to_disk(session_id)
+            return True
 
     async def append_message_to_session(self, session_id: str, role: str, text: str) -> bool:
-        raise NotImplementedError()
+        """Appends a new raw message to the session history."""
+        if session_id not in self.sessions_history:
+            self.sessions_history[session_id] = []
+
+        with self._lock:
+            msg = {
+                "id": f"msg_{uuid.uuid4().hex}",
+                "role": role,
+                "text": text,
+                "timestamp": time.time(),
+            }
+            self.sessions_history[session_id].append(msg)
+            self._save_session_to_disk(session_id)
+            return True()
 
     async def append_voice_call(self, session_id: str, transcript: str, timestamp: float = None, start_time: float = None) -> bool:
-        raise NotImplementedError()
+        """Appends a voice call transcript entry to the session history."""
+        if session_id not in self.sessions_history:
+            self.sessions_history[session_id] = []
 
-    async def clone_history(self, src_id: str, dest_id: str, messages: list) -> bool:
-        raise NotImplementedError()
+        with self._lock:
+            voice_msg = {
+                "id": f"voice_{uuid.uuid4().hex}",
+                "role": "voice-call",
+                "text": transcript,
+                "timestamp": timestamp or time.time(),
+                "start_time": start_time or time.time()
+            }
+            self.sessions_history[session_id].append(voice_msg)
+            self._save_session_to_disk(session_id)
+            return True
+
+    async def clone_history(self, src_id: str, dest_id: str, messages: list = None) -> bool:
+        """Clones message history from a source session to a destination session."""
+        with self._lock:
+            if messages is not None:
+                # If explicit messages are provided, clone those
+                self.sessions_history[dest_id] = copy.deepcopy(messages)
+            elif src_id in self.sessions_history:
+                # Otherwise, duplicate from the existing source session
+                self.sessions_history[dest_id] = copy.deepcopy(self.sessions_history[src_id])
+            else:
+                return False
+
+            self._save_session_to_disk(dest_id)
+            return True
 
     async def delete_system_memory(self, session_id: str, timestamp: float) -> bool:
-        raise NotImplementedError()
+        """Deletes a system memory node from history matching a specific timestamp."""
+        if session_id not in self.sessions_history:
+            return False
+
+        history = self.sessions_history[session_id]
+        initial_len = len(history)
+
+        with self._lock:
+            # Filter out system memory entries matching the timestamp (within a small tolerance)
+            self.sessions_history[session_id] = [
+                msg for msg in history 
+                if not (msg.get("role") == "system-memory" and abs(msg.get("timestamp", 0) - timestamp) < 1.0)
+            ]
+
+            if len(self.sessions_history[session_id]) < initial_len:
+                self._save_session_to_disk(session_id)
+                return True
+
+        return False
 
     async def update_message_text(self, session_id: str, msg_id: str, new_text: str) -> bool:
-        raise NotImplementedError()
+        """Finds a message by its ID and updates its text with fallback checks."""
+        # Ensure session is loaded in memory
+        if session_id not in self.sessions_history:
+            self._load_session_from_disk(session_id)
+            
+        if session_id not in self.sessions_history:
+            print(f"[UPDATE MESSAGE] Session {session_id} not found in history.", flush=True)
+            return False
+
+        history = self.sessions_history[session_id]
+        updated = False
+        
+        with self._lock:
+            for msg in history:
+                # Check exact match or if msg_id matches part of a compound ID
+                current_id = msg.get("id", "")
+                if current_id == msg_id or msg_id in current_id:
+                    msg["text"] = new_text
+                    updated = True
+                    break
+            
+            if updated:
+                self._save_session_to_disk(session_id)
+                print(f"[UPDATE MESSAGE] Successfully updated message {msg_id}", flush=True)
+                return True
+                
+        # Debugging helper: print available IDs if it fails to match
+        print(f"[UPDATE MESSAGE] Failed to find message ID '{msg_id}'. Available IDs in session:", [m.get("id") for m in history], flush=True)
+        return False
 
     async def delete_message_at(self, session_id: str, msg_id: str) -> bool:
-        raise NotImplementedError()
+        """Deletes a specific message by its ID from session history."""
+        if session_id not in self.sessions_history:
+            return False
+
+        history = self.sessions_history[session_id]
+        initial_len = len(history)
+        
+        with self._lock:
+            # Filter out the message matching msg_id
+            self.sessions_history[session_id] = [msg for msg in history if msg.get("id") != msg_id]
+            
+            if len(self.sessions_history[session_id]) < initial_len:
+                self._save_session_to_disk(session_id)
+                return True
+                
+        return False
 
     def _inversion_enabled(self) -> bool:
         return is_enabled(PROGRAMS_DIR, get_active_program())

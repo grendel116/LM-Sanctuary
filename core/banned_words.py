@@ -39,24 +39,19 @@ def generate_llama_cli_args(gguf_path: str, bias_weight: float = None) -> list[s
     token_ids = set()
     
     try:
-        # Try using llama_cpp library to tokenize the banned words directly from the model file
         from llama_cpp import Llama
-        # Initialize a lightweight read just for tokenization mapping
-        # (vocab_only=True avoids loading weights into VRAM)
         llm = Llama(model_path=gguf_path, vocab_only=True, verbose=False)
         
         for word in words:
             clean_word = word.strip()
             if not clean_word:
                 continue
-            # Tokenize variants (with/without leading spaces and capitalization)
             variants = [clean_word, f" {clean_word}", clean_word.capitalize(), f" {clean_word.capitalize()}"]
             for variant in variants:
                 ids = llm.tokenize(variant.encode("utf-8"), add_special=False)
                 for t_id in ids:
                     token_ids.add(int(t_id))
         
-        # Clean up instance to free memory immediately
         del llm
         
     except (ImportError, Exception) as e:
@@ -65,6 +60,10 @@ def generate_llama_cli_args(gguf_path: str, bias_weight: float = None) -> list[s
 
     cli_args = []
     for token_id in token_ids:
-        cli_args.extend(["--logit-bias", f"{token_id}{bias_weight}"])
+        # Format explicitly: if bias_weight is negative, it already includes the '-' sign.
+        # e.g., token_id=15043, bias_weight=-5.0 -> "15043-5.0"
+        # Using an explicit sign check ensures proper parsing if weights are ever positive.
+        sign_str = "" if bias_weight < 0 else "+"
+        cli_args.extend(["--logit-bias", f"{token_id}{sign_str}{bias_weight}"])
         
     return cli_args

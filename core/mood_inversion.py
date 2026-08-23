@@ -6,6 +6,8 @@ import os
 import re
 import requests
 
+from variables.settings import LOCAL_SERVER_URL, get_local_server_headers
+
 DEFAULT_MOOD_NAMES = (
     "intimate",
     "excited",
@@ -30,7 +32,6 @@ MOOD_COLORS = {
     "analytical": {"color": "#60a5fa", "glow": "rgba(96, 165, 250, 0.85)"},
     "focused": {"color": "#9370db", "glow": "rgba(147, 112, 219, 0.9)"},
 }
-
 
 def new_state() -> dict:
     return copy.deepcopy(DEFAULT_INVERSION_STATE)

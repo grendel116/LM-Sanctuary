@@ -20,6 +20,18 @@ REMOTE_SERVER_URL = os.getenv("REMOTE_SERVER_URL", "http://127.0.0.1:1234/v1/cha
 REMOTE_API_KEY = os.getenv("REMOTE_API_KEY")
 REMOTE_CLOUD_URL = os.getenv("REMOTE_CLOUD_URL")
 
+import os
+
+# Ensure it pulls from the environment (with a sensible local fallback if needed)
+LOCAL_SERVER_URL = os.getenv("LOCAL_SERVER_URL", "http://localhost:8080")
+
+# If you also need the headers function referenced in the traceback:
+def get_local_server_headers():
+    return {
+        "Content-Type": "application/json",
+        # Add any other required headers or API keys here if needed
+    }
+
 def get_remote_server_headers():
     headers = {"Content-Type": "application/json"}
     if REMOTE_API_KEY:

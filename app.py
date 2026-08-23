@@ -930,7 +930,9 @@ def update_message():
         else:
             return jsonify({'error': 'Message not found'}), 404
     except Exception as e:
+        import traceback
         print(f"Error updating message text: {e}")
+        traceback.print_exc()  # This will print the exact line causing the 500 error in your terminal
         return jsonify({'error': str(e)}), 500
 
 @app.route('/delete', methods=['POST'])
