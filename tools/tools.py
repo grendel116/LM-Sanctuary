@@ -1280,7 +1280,6 @@ def apply_comfy_workflow(workflow_path: str, parameters: dict, save_path: str, s
     except Exception as e:
         return f"Error executing ComfyUI workflow: {e}"
 
-
 @track_tool_activity
 def generate_local_image(prompt: str) -> str:
     """Generates a local image using ComfyUI with program-specific workflow configurations.
@@ -1295,6 +1294,7 @@ def generate_local_image(prompt: str) -> str:
     import random
     import time
     import json
+    import requests
     
     def get_install_instructions(reason: str) -> str:
         from adapters.comfy_manager import check_comfy_running
@@ -1345,17 +1345,29 @@ def generate_local_image(prompt: str) -> str:
     comfy_url = COMFYUI_SERVER_URL
 
     try:
-        # Resolve checkpoint dynamically
+        # OPTIMIZATION: Query object_info once instead of calling separate functions that double HTTP payload latency
         selected_checkpoint = COMFYUI_CHECKPOINT
-        available_checkpoints = get_comfy_checkpoints(comfy_url)
-        if available_checkpoints and selected_checkpoint not in available_checkpoints:
-            raise Exception(f"Missing Checkpoint: The required model checkpoint `{selected_checkpoint}` was not found.")
-
-        # Resolve VAE dynamically
         selected_vae = COMFYUI_VAE
-        available_vaes = get_comfy_vaes(comfy_url)
-        if available_vaes and selected_vae not in available_vaes:
-            raise Exception(f"Missing VAE: The required VAE file `{selected_vae}` was not found.")
+        try:
+            info_res = requests.get(f"{comfy_url}/object_info", timeout=2.0)
+            if info_res.status_code == 200:
+                object_data = info_res.json()
+                
+                # Check Checkpoint
+                ckpt_loader = object_data.get("CheckpointLoaderSimple", {})
+                avail_ckpts = ckpt_loader.get("input", {}).get("required", {}).get("ckpt_name", [[]])[0]
+                if isinstance(avail_ckpts, list) and avail_ckpts and selected_checkpoint not in avail_ckpts:
+                    raise Exception(f"Missing Checkpoint: The required model checkpoint `{selected_checkpoint}` was not found.")
+
+                # Check VAE
+                vae_loader = object_data.get("VAELoader", {})
+                avail_vaes = vae_loader.get("input", {}).get("required", {}).get("vae_name", [[]])[0]
+                if isinstance(avail_vaes, list) and avail_vaes and selected_vae not in avail_vaes:
+                    raise Exception(f"Missing VAE: The required VAE file `{selected_vae}` was not found.")
+        except Exception as e:
+            if "Missing Checkpoint" in str(e) or "Missing VAE" in str(e):
+                raise e
+            print(f"[DEBUG] Could not query object_info from ComfyUI: {e}", flush=True)
 
         # Load image prompt tags from program details
         img_details_val = ""
@@ -1413,7 +1425,9 @@ def generate_local_image(prompt: str) -> str:
         except Exception as je:
             print(f"Error saving sidecar json: {je}")
 
-        return f"![Portrait](/images/portraits/{local_filename})"
+        # Return Markdown image tag with cache-busting version parameter
+        return f"![Portrait](/images/portraits/{local_filename}?v={timestamp})"
+
     except Exception as e:
         print(f"[INFO] ComfyUI generation failed or is offline: {e}.")
         return get_install_instructions(str(e))

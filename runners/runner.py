@@ -302,7 +302,6 @@ class BaseProgramRunner:
         story_allowed = {
             "generate_local_image",
             "generate_program_portrait",
-            "generate_imagen",
             "generate_general_image",
             "apply_comfy_workflow",
             "add_journal_entry",
@@ -450,7 +449,6 @@ class BaseProgramRunner:
         headers = get_local_server_headers()
         target_model = model if (model and model != "local-llm") else os.getenv("LOCAL_MODEL_NAME")
 
-        # Dynamically restrict output tokens based on whether story mode is active for this session
         story_active = is_story_mode(session_id) if "session_id" in is_story_mode.__code__.co_varnames else is_story_mode()
         max_tokens_limit = 1024 if story_active else 200  # ~200 tokens keeps normal mode concise
 
@@ -461,6 +459,18 @@ class BaseProgramRunner:
         }
         if target_model:
             payload["model"] = target_model
+
+        try:
+            response = await self._post_llm_request(url, payload, headers, timeout=120.0, session_id=session_id)
+            if response.status_code == 200:
+                bot_response_text = response.json()["choices"][0]["message"]["content"]
+            else:
+                bot_response_text = f"Error: {response.text}"
+            print(f"[DEBUG STATUS] {response.status_code}", flush=True)
+            print(f"[DEBUG RAW RESPONSE] {repr(response.text)}", flush=True)
+        except Exception as e:
+            bot_response_text = f"Error connecting to local model server: {e}"
+            print(f"[LLM ERROR] {bot_response_text}", flush=True)
 
         # --- STAGE 3: POST-PROCESSING (TOOLS & CLEANUP) ---
         bot_response_text = self._sanitize_thinking_tags(bot_response_text)
@@ -1169,7 +1179,6 @@ class OpenSourceRunner(BaseProgramRunner):
 
             image_tools = {
                 "generate_local_image",
-                "generate_imagen",
                 "generate_program_portrait",
                 "generate_general_image",
             }
@@ -1296,7 +1305,6 @@ class OpenSourceRunner(BaseProgramRunner):
                     for k in (
                         "Generate a portrait of yourself",
                         "[GENERATE_IMAGE:",
-                        "[GENERATE_IMAGEN:",
                         "generate_program_portrait",
                     )
                 ):
