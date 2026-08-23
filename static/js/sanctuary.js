@@ -6220,35 +6220,11 @@ async function loadServerImages() {
     try {
         const response = await fetch(`/list_images?t=${Date.now()}`);
         const data = await response.json();
+        
         if (data.images) {
             serverImages = data.images;
-            
-            // INJECT LATEST IMAGE INTO CHAT
-            if (serverImages.length > 0) {
-                const latestImg = serverImages[serverImages.length - 1];
-                const relPath = getRelativePath(latestImg);
-                
-                const messageBubbles = document.querySelectorAll('.message-row .message');
-                if (messageBubbles.length > 0) {
-                    const lastBubble = messageBubbles[messageBubbles.length - 1];
-                    const textContent = lastBubble.textContent.trim();
-                    const existingImg = lastBubble.querySelector('img:not(.avatar)');
-                    
-                    // Only append if it's an image message and doesn't have an image element yet
-                    if (textContent.startsWith('img_') && !existingImg) {
-                        const imgElem = document.createElement('img');
-                        imgElem.src = `${relPath}?v=${Date.now()}`;
-                        imgElem.alt = "Portrait";
-                        imgElem.style.maxWidth = "100%";
-                        imgElem.style.borderRadius = "12px";
-                        imgElem.style.marginTop = "10px";
-                        imgElem.style.cursor = "pointer";
-                        imgElem.onclick = () => expandImage(relPath);
-                        lastBubble.appendChild(imgElem);
-                    }
-                }
-            }
         }
+        
         if (typeof pollQueueStatus === 'function') {
             pollQueueStatus();
         }
