@@ -11,11 +11,13 @@ from variables.settings import LOCAL_SERVER_URL, get_local_server_headers
 DEFAULT_MOOD_NAMES = (
     "intimate",
     "excited",
+    "calm",
     "intense",
     "sad",
     "analytical",
     "focused",
 )
+
 DEFAULT_INVERSION_STATE = {
     "active_inversion": "",
     "inversion_consecutive_turns": 0,
@@ -88,28 +90,27 @@ def get_directive(programs_dir: str, program_id: str, mood_name: str) -> str:
         return ""
 
 
-def _mood_excerpt(text: str, edge_tokens: int = 24) -> str:
-    """Keep the opening context and emotional landing of a message."""
+def _mood_excerpt(text: str, total_tokens: int = 48) -> str:
+    """Sample opening, middle, and ending context for sentiment analysis."""
     tokens = re.findall(r"\S+", text)
-    if len(tokens) <= edge_tokens * 2:
+    if len(tokens) <= total_tokens:
         return " ".join(tokens)
-    opening = " ".join(tokens[:edge_tokens])
-    ending = " ".join(tokens[-edge_tokens:])
-    return f"[opening] {opening} [ending] {ending}"
+    
+    chunk = total_tokens // 3
+    mid_idx = len(tokens) // 2
+    
+    opening = " ".join(tokens[:chunk])
+    middle = " ".join(tokens[mid_idx - (chunk // 2) : mid_idx + (chunk // 2)])
+    ending = " ".join(tokens[-chunk:])
+    
+    return f"[opening] {opening} [middle] {middle} [ending] {ending}"
 
 
 def analyze_sentiment_with_llm(text: str) -> dict:
-    """Classify mood as bounded UI metadata, not a second conversation."""
+    """Classify mood as bounded UI metadata."""
     if not text:
         return mood_details("calm", 0.0)
 
-    api_key = os.getenv("REMOTE_API_KEY", "").strip()
-    remote_url = os.getenv("REMOTE_CLOUD_URL", "").strip()
-    remote_configured = bool(
-        api_key and api_key != "your_remote_api_key_here" and
-        remote_url and remote_url != "your_remote_cloud_url_here"
-    )
-    
     system_instruction = (
         "Classify the message mood. Respond ONLY with a single-line valid JSON object matching this exact format: "
         '{"name": "calm", "intensity": 0.5}. '
@@ -120,10 +121,20 @@ def analyze_sentiment_with_llm(text: str) -> dict:
     excerpt = _mood_excerpt(text)
 
     try:
-        endpoint = LOCAL_SERVER_URL
+        # Fetch configurations directly from environment variables
+        base_endpoint = os.getenv("LOCAL_SERVER_URL", "http://127.0.0.1:1234/v1/chat/completions").rstrip("/")
+        model_name = os.getenv("LOCAL_MODEL_NAME", "default-model")
+
+        endpoint = (
+            base_endpoint
+            if "/v1/chat/completions" in base_endpoint
+            else f"{base_endpoint}/v1/chat/completions"
+        )
+
         headers = get_local_server_headers()
-        
+
         payload = {
+            "model": model_name,
             "messages": [
                 {"role": "system", "content": system_instruction},
                 {"role": "user", "content": excerpt},
@@ -132,22 +143,27 @@ def analyze_sentiment_with_llm(text: str) -> dict:
             "max_tokens": 32,
             "response_format": {"type": "json_object"},
         }
-        
-        target_model = os.getenv("LOCAL_MODEL_NAME")
-        if target_model:
-            payload["model"] = target_model
 
-        response = requests.post(endpoint, json=payload, headers=headers, timeout=(2, 4))
-        if response.status_code == 200:
-            content = response.json()["choices"][0]["message"]["content"]
-            match = re.search(r"\{.*\}", content, re.DOTALL)
-            result = json.loads(match.group(0) if match else content)
-            name = str(result.get("name", "calm")).lower().strip()
-            intensity = float(result.get("intensity", 0.5))
-            if name in DEFAULT_MOOD_NAMES + ("calm",):
-                return mood_details(name, intensity)
-    except Exception as exc:
-        print(f"[MOOD] Fast classification unavailable: {exc}")
+        # Increased timeout tuple to allow large GGUF model processing (2s connect, 15s read)
+        response = requests.post(
+            endpoint, json=payload, headers=headers, timeout=(2, 15)
+        )
+        response.raise_for_status()
+
+        content = response.json()["choices"][0]["message"]["content"]
+        match = re.search(r"\{.*\}", content, re.DOTALL)
+        raw_json = match.group(0) if match else content
+        result = json.loads(raw_json)
+
+        name = str(result.get("name", "calm")).lower().strip()
+        intensity = float(result.get("intensity", 0.5))
+
+        allowed_moods = set(DEFAULT_MOOD_NAMES) | {"calm"}
+        if name in allowed_moods:
+            return mood_details(name, intensity)
+
+    except Exception as e:
+        print(f"[MOOD] Sentiment classification failed: {e}")
 
     return mood_details("calm", 0.5)
 

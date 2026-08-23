@@ -55,13 +55,13 @@ class BaseProgramRunner:
         self.app_name = app_name
         self.sessions_history: dict = {}
         self.sessions_inversion_state: dict = {}
-        self.sessions_memory_state: dict = {}  # Tracks buffers, chapters, and epic chronicles
+        self.sessions_memory_state: dict = {}  # Tracks chapters and epic chronicles
 
     def _get_memory_meta(self, session_id: str) -> dict:
         """Helper to ensure session memory state exists."""
         return self.sessions_memory_state.setdefault(
             session_id,
-            {"unsummarized_buffer": [], "recent_chapters": [], "epic_chronicle": ""}
+            {"recent_chapters": [], "epic_chronicle": ""}
         )
 
     async def _post_llm_request(
@@ -228,49 +228,59 @@ class BaseProgramRunner:
         )
 
     async def _process_memory_pipeline(self, session_id: str, active_model: str, user_text: str, assistant_text: str):
-        """Asynchronous post-turn worker handling Step 2 (Chapters) and Step 3 (Epic & RAG)."""
-        meta = self._get_memory_meta(session_id)
-        buffer = meta["unsummarized_buffer"]
+            """Asynchronous post-turn worker handling Step 2 (Chapters) and Step 3 (Epic & RAG)."""
+            meta = self._get_memory_meta(session_id)
+            history = self.sessions_history.get(session_id, [])
 
-        # 1. Append exchange to buffer
-        buffer.append({"user": user_text, "assistant": assistant_text})
+            # Filter to user and assistant messages only
+            dialogue_messages = [
+                msg for msg in history 
+                if msg.get("role") in ("user", "assistant")
+            ]
+            
+            turn_count = len(dialogue_messages) // 2
 
-        # 2. STEP 2 TRIGGER: Every 12 turns, generate a mid-term Chapter Summary
-        if len(buffer) >= 12:
-            formatted_turns = "\n".join(
-                f"User: {turn['user']}\nAssistant: {turn['assistant']}" for turn in buffer
-            )
-            chapter_summary = await self._generate_local_summary(
-                text_to_summarize=formatted_turns,
-                active_model=active_model,
-                prior_memories=meta["recent_chapters"]
-            )
-
-            meta["recent_chapters"].append(chapter_summary)
-            buffer.clear()
-
-            # 3. STEP 3 TRIGGER: Every 5 chapters, distill Epic Chronicle & offload to Vector DB
-            if len(meta["recent_chapters"]) >= 5:
-                all_chapters_text = "\n\n".join(meta["recent_chapters"])
+            # Trigger summary every 12 full turns using trimmed history
+            if turn_count > 0 and turn_count % 12 == 0:
+                # Take the last 24 dialogue entries (12 full turns)
+                recent_turns = dialogue_messages[-24:]
                 
-                meta["epic_chronicle"] = await self._distill_epic_chronicle(
-                    text_to_distill=all_chapters_text,
-                    active_model=active_model
+                # Format and truncate long messages if needed to fit context limits
+                formatted_turns = "\n".join(
+                    f"{msg['role'].capitalize()}: {msg['content'][:1000]}" 
+                    for msg in recent_turns
                 )
 
-                try:
-                    from core.skills.vectorized_databank.databank import DataBankManager
-                    db = DataBankManager()
-                    for idx, ch in enumerate(meta["recent_chapters"]):
-                        db.add_document(
-                            text=ch,
-                            source_type="chapter_memory",
-                            metadata={"session_id": session_id, "chapter_index": idx}
-                        )
-                except Exception as e:
-                    print(f"[MEMORY PIPELINE] Error offloading chapters to Vector DB: {e}", flush=True)
+                chapter_summary = await self._generate_local_summary(
+                    text_to_summarize=formatted_turns,
+                    active_model=active_model,
+                    prior_memories=meta["recent_chapters"]
+                )
 
-                meta["recent_chapters"].clear()
+                meta["recent_chapters"].append(chapter_summary)
+
+                # STEP 3 TRIGGER: Every 5 chapters, distill Epic Chronicle & offload to Vector DB
+                if len(meta["recent_chapters"]) >= 5:
+                    all_chapters_text = "\n\n".join(meta["recent_chapters"])
+                    
+                    meta["epic_chronicle"] = await self._distill_epic_chronicle(
+                        text_to_distill=all_chapters_text,
+                        active_model=active_model
+                    )
+
+                    try:
+                        from core.skills.vectorized_databank.databank import DataBankManager
+                        db = DataBankManager()
+                        for idx, ch in enumerate(meta["recent_chapters"]):
+                            db.add_document(
+                                text=ch,
+                                source_type="chapter_memory",
+                                metadata={"session_id": session_id, "chapter_index": idx}
+                            )
+                    except Exception as e:
+                        print(f"[MEMORY PIPELINE] Error offloading chapters to Vector DB: {e}", flush=True)
+
+                    meta["recent_chapters"].clear()
 
     def _load_temperature_setting(self, default_temp: float = 0.95) -> float:
         from variables.settings import VARIABLES_DIR
@@ -1056,39 +1066,41 @@ class OpenSourceRunner(BaseProgramRunner):
         def _save_session_to_disk(self, session_id: str):
             with self._lock:
                 try:
+                    # Retrieve memory state cleanly without legacy keys
+                    memory_meta = self._get_memory_meta(session_id)
+                    memory_meta.pop("unsummarized_buffer", None)  # Safety cleanup for old state dicts
+
                     data = {
                         "messages": self.sessions_history.get(session_id, []),
                         "inversion_state": self.sessions_inversion_state.get(session_id, new_state()),
-                        "memory_state": self.sessions_memory_state.get(
-                            session_id,
-                            {"unsummarized_buffer": [], "recent_chapters": [], "epic_chronicle": ""},
-                        ),
+                        "memory_state": memory_meta,
                     }
                     with open(self._get_session_path(session_id), "w", encoding="utf-8") as f:
                         json.dump(data, f, indent=2, ensure_ascii=False)
                 except Exception as e:
                     print(f"Error saving OS session {session_id} to disk: {e}")
 
-        def _load_session_from_disk(self, session_id: str) -> bool:
-            with self._lock:
-                path = self._get_session_path(session_id)
-                if not os.path.exists(path):
-                    return False
-                try:
-                    with open(path, "r", encoding="utf-8") as f:
-                        data = json.load(f)
+        def _load_session_from_disk(self, session_id: str):
+            path = self._get_session_path(session_id)
+            if not os.path.exists(path):
+                return
 
-                    self.sessions_history[session_id] = data.get("messages", [])
-                    self.sessions_inversion_state[session_id] = data.get("inversion_state", new_state())
-                    self.sessions_memory_state[session_id] = data.get(
-                        "memory_state",
-                        {"unsummarized_buffer": [], "recent_chapters": [], "epic_chronicle": ""},
-                    )
-                    self._ensure_first_message(session_id)
-                    return True
-                except Exception as e:
-                    print(f"Error loading OS session {session_id} from disk: {e}")
-                    return False
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    
+                self.sessions_history[session_id] = data.get("messages", [])
+                self.sessions_inversion_state[session_id] = data.get("inversion_state", new_state())
+                
+                memory_state = data.get("memory_state", {})
+                # Strip legacy unsummarized_buffer if loading an older default.json
+                memory_state.pop("unsummarized_buffer", None)
+                memory_state.setdefault("recent_chapters", [])
+                memory_state.setdefault("epic_chronicle", "")
+                
+                self.sessions_memory_state[session_id] = memory_state
+            except Exception as e:
+                print(f"Error loading session {session_id} from disk: {e}")
 
         def _ensure_first_message(self, session_id: str):
             history = self.sessions_history.setdefault(session_id, [])

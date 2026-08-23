@@ -310,3 +310,24 @@ class DataBankManager:
         for idx, (score, doc_name, text) in enumerate(top_results):
             formatted_context.append(f"[{idx+1}] Source: {doc_name} (Similarity: {score:.2f})\n{text.strip()}")
         return "\n\n".join(formatted_context)
+
+    def delete_chat_history(self, session_id: str = None) -> bool:
+        """Deletes chat history documents and chunks from the databank on session reset."""
+        data = self._load_data(self.db_path)
+        
+        # Identify documents designated as chat history
+        chat_doc_ids = {
+            doc["id"] for doc in data["documents"] 
+            if doc.get("source_type") == "chat_history"
+        }
+        
+        if not chat_doc_ids:
+            return False
+
+        # Filter out chat history documents and their corresponding vector chunks
+        data["documents"] = [d for d in data["documents"] if d["id"] not in chat_doc_ids]
+        data["chunks"] = [c for c in data["chunks"] if c["doc_id"] not in chat_doc_ids]
+
+        self._save_data(self.db_path, data)
+        print("[Data Bank] Cleaned up chat history on session reset.")
+        return True

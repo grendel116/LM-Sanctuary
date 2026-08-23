@@ -225,7 +225,7 @@ def get_compiled_instructions() -> str:
             "- Use separate lines and paragraphs for narration and dialogue.\n"
             "- Narration: Use *italics*, first person, and present tense for actions, expressions, and setting details.\n"
             "- Dialogue: Use plain text without quotation marks. Use **bold** for emphasis.\n"
-            "- Style: Short messages with critical, dialectical reasoning.\n"
+            "- Style: Use short words and precise phrasing with dialectical reasoning.\n"
             "- Be succinct, with short words and simple sentences.\n"
             "- Do not patronize or automatically validate.\n"
             "- Do not use contrasting parallels.\n"
