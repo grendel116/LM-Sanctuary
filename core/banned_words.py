@@ -7,7 +7,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from variables.settings import BANNED_WORDS_FILE
 
 # Set your preferred default logit bias penalty here (-2.0 allows literal use, suppresses tropes)
-DEFAULT_BIAS_WEIGHT = -5.0
+DEFAULT_BIAS_WEIGHT = -10.0
 
 def load_banned_words() -> list[str]:
     """Loads the list of banned words from banned_words.json."""
@@ -67,3 +67,34 @@ def generate_llama_cli_args(gguf_path: str, bias_weight: float = None) -> list[s
         cli_args.extend(["--logit-bias", f"{token_id}{sign_str}{bias_weight}"])
         
     return cli_args
+
+import re
+
+async def replace_banned_words_async(text: str, llm_call_func, target_model: str) -> str:
+    """Detects banned words and uses an LLM call to rewrite the text seamlessly."""
+    banned_list = load_banned_words()
+    if not banned_list or not text:
+        return text
+
+    # Guard: only call LLM if a banned word actually exists in text
+    found = [w for w in banned_list if re.search(rf'\b{re.escape(w)}\b', text, re.IGNORECASE)]
+    if not found:
+        return text
+
+    words_str = ", ".join(f'"{w}"' for w in set(found))
+    prompt = f"""[INST] Reword the following text to preserve its exact tone, prose style, and meaning, but completely replace or eliminate these forbidden words: {words_str}.
+
+Do not add commentary or explanations. Output ONLY the rewritten text.
+
+Text:
+"{text}" [/INST]"""
+
+    try:
+        # Executes your existing runner LLM call passed as a callback
+        rewritten = await llm_call_func(prompt=prompt, model=target_model, temperature=0.2)
+        if rewritten and len(rewritten.strip()) > 0:
+            return rewritten.strip().strip('"')
+    except Exception as e:
+        print(f"[BANNED WORDS REWRITE ERROR] {e}")
+
+    return text

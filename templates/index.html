@@ -578,6 +578,7 @@
         </div>
     </div>
 
+    <!-- Connection Settings -->
   <div id="connection-modal" class="modal" onclick="closeConnectionModal()">
         <div id="connection-modal-card" class="modal-card" style="max-width: 980px; width: 95%; text-align: left; align-items: stretch; max-height: 85vh; display: flex; flex-direction: column; transition: max-width 0.25s ease;" onclick="event.stopPropagation()">
             <span class="close-modal-btn" onclick="closeConnectionModal()">&times;</span>
@@ -613,7 +614,7 @@
                         </div>
                     </div>
                     
-                    <div class="settings-grid" style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px; margin-bottom: 15px;">
+                    <div class="settings-grid" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 15px; margin-bottom: 15px;">
                         <!-- Local Panel -->
                         <div class="onboarding-option-box local-box" id="modal-local-box-container">
                             <div class="option-header">

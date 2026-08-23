@@ -482,10 +482,31 @@ class BaseProgramRunner:
             bot_response_text = f"Error connecting to local model server: {e}"
             print(f"[LLM ERROR] {bot_response_text}", flush=True)
 
+        from core.banned_words import replace_banned_words_async  # Adjust import path if needed
+
         # --- STAGE 3: POST-PROCESSING (TOOLS & CLEANUP) ---
         bot_response_text = self._sanitize_thinking_tags(bot_response_text)
-        bot_response_text = _convert_json_tool_calls_to_tags(bot_response_text)
+        
+        # --- BANNED WORDS SYNONYM PASS ---
+        async def _llm_rewrite_wrapper(prompt: str, model_name: str) -> str:
+            rw_payload = {
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0.2,
+                "max_tokens": 512
+            }
+            if model_name:
+                rw_payload["model"] = model_name
+            
+            res = await self._post_llm_request(url, rw_payload, headers, timeout=30.0, session_id=session_id)
+            if res.status_code == 200:
+                return res.json()["choices"][0]["message"]["content"]
+            return ""
 
+        bot_response_text = await replace_banned_words_async(
+            text=bot_response_text,
+            llm_call_func=_llm_rewrite_wrapper,
+            target_model=target_model
+        )
         matches = list(re.finditer(r"\[(\w+)\(([\s\S]*?)\)\]", bot_response_text))
         matches, bot_response_text = self._filter_story_mode_matches(matches, bot_response_text)
 
