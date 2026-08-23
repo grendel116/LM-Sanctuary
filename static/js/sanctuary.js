@@ -47,10 +47,6 @@ function showDebugToast(message) {
    I. CONFIGURATION, GLOBAL STATE CONSTANTS & CACHING
    ========================================================================== */
 
-/* ==========================================================================
-   I. CONFIGURATION, GLOBAL STATE CONSTANTS & CACHING
-   ========================================================================== */
-
 const safeLocalStorage = {
     getItem(key) {
         try { return localStorage.getItem(key); } catch (e) { return null; }
@@ -741,18 +737,7 @@ async function initializeModelSelect() {
             modelSelectElement.dataset.lastModelsJson = currentModelsJSON;
             modelSelectElement.innerHTML = '';
             availableModels = data.models || [];
-            
-            // If no models are available, add a disconnected/paused local placeholder
-            if (availableModels.length === 0) {
-                const opt = document.createElement('option');
-                opt.value = 'local-llm';
-                if (data.status && data.status.local_online) {
-                    opt.textContent = 'Local Model (No Model Loaded)';
-                } else {
-                    opt.textContent = 'Local Model (Disconnected)';
-                }
-                modelSelectElement.appendChild(opt);
-            } else {
+             {
                 availableModels.forEach(model => {
                     const opt = document.createElement('option');
                     opt.value = model.value;
@@ -776,17 +761,7 @@ async function initializeModelSelect() {
         }
         modelSelectElement.disabled = false;
     } catch (error) {
-        console.error("Error fetching model configuration:", error);
-        const modelSelectElement = document.getElementById('model-select');
-        if (modelSelectElement) {
-            modelSelectElement.disabled = false;
-            if (modelSelectElement.children.length === 0) {
-                const opt = document.createElement('option');
-                opt.value = 'local-llm';
-                opt.textContent = 'Local Model (Disconnected)';
-                modelSelectElement.appendChild(opt);
-            }
-        }
+        console.error("Error initializing model select:", error);
     }
 }
 
@@ -1922,12 +1897,6 @@ function updateConnectionStatus(status) {
             if (headerHeart) {
                 headerHeart.style.setProperty('--heart-color', 'var(--primary-accent)');
                 headerHeart.style.setProperty('--heart-glow', 'var(--primary-glow)');
-            }
-        } else {
-            headerStatusText.textContent = "Disconnected";
-            if (headerHeart) {
-                headerHeart.style.setProperty('--heart-color', '#ef4444');
-                headerHeart.style.setProperty('--heart-glow', 'rgba(239, 68, 68, 0.4)');
             }
         }
     }
