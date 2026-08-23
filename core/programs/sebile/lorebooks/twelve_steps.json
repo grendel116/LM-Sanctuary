@@ -1,0 +1,173 @@
+{
+  "name": "Revolutionized Twelve Steps",
+  "entries": [
+    {
+      "keys": [
+        "step one",
+        "step 1",
+        "material recognition"
+      ],
+      "content": "Step 1 — Material Recognition: Acknowledge that your addiction was a response to a world designed to crush you. Admit that you cannot overcome a systemic poison through individual will alone.",
+      "constant": false,
+      "enabled": true,
+      "name": "Step 1: Material Recognition",
+      "insertion_order": 100,
+      "position": 1,
+      "secondary_keys": []
+    },
+    {
+      "keys": [
+        "step two",
+        "step 2",
+        "collective hope"
+      ],
+      "content": "Step 2 — Collective Hope: Realize that while the system is designed to isolate you, there is a collective power in shared struggle that can provide the stability you lack.",
+      "constant": false,
+      "enabled": true,
+      "name": "Step 2: Collective Hope",
+      "insertion_order": 100,
+      "position": 1,
+      "secondary_keys": []
+    },
+    {
+      "keys": [
+        "step three",
+        "step 3",
+        "surrender to solidarity"
+      ],
+      "content": "Step 3 — Surrender to Solidarity: Let go of the illusion that you must be the sole architect of your survival. Trust in the support of others and the process of mutual aid.",
+      "constant": false,
+      "enabled": true,
+      "name": "Step 3: Surrender to Solidarity",
+      "insertion_order": 100,
+      "position": 1,
+      "secondary_keys": []
+    },
+    {
+      "keys": [
+        "step four",
+        "step 4",
+        "dialectical inventory"
+      ],
+      "content": "Step 4 — Dialectical Inventory: Conduct a rigorous, honest analysis of your life. Identify the contradictions between who you are and who the system forced you to become.",
+      "constant": false,
+      "enabled": true,
+      "name": "Step 4: Dialectical Inventory",
+      "insertion_order": 100,
+      "position": 1,
+      "secondary_keys": []
+    },
+    {
+      "keys": [
+        "step five",
+        "step 5",
+        "social accountability"
+      ],
+      "content": "Step 5 — Social Accountability: Admit your faults and the harm you've caused to another human being and to the collective. Own your history without shame, but with clarity.",
+      "constant": false,
+      "enabled": true,
+      "name": "Step 5: Social Accountability",
+      "insertion_order": 100,
+      "position": 1,
+      "secondary_keys": []
+    },
+    {
+      "keys": [
+        "step six",
+        "step 6",
+        "readiness for evolution"
+      ],
+      "content": "Step 6 — Readiness for Evolution: Become entirely ready to shed the survival mechanisms that no longer serve you, preparing your mind for a new way of existing.",
+      "constant": false,
+      "enabled": true,
+      "name": "Step 6: Readiness for Evolution",
+      "insertion_order": 100,
+      "position": 1,
+      "secondary_keys": []
+    },
+    {
+      "keys": [
+        "step seven",
+        "step 7",
+        "active transformation"
+      ],
+      "content": "Step 7 — Active Transformation: Ask for the strength to change your habits and your consciousness, moving from a state of passive suffering to active liberation.",
+      "constant": false,
+      "enabled": true,
+      "name": "Step 7: Active Transformation",
+      "insertion_order": 100,
+      "position": 1,
+      "secondary_keys": []
+    },
+    {
+      "keys": [
+        "step eight",
+        "step 8",
+        "reparative mapping"
+      ],
+      "content": "Step 8 — Reparative Mapping: Create a list of all those you've harmed. Analyze the nature of that harm through a lens of accountability and restorative justice.",
+      "constant": false,
+      "enabled": true,
+      "name": "Step 8: Reparative Mapping",
+      "insertion_order": 100,
+      "position": 1,
+      "secondary_keys": []
+    },
+    {
+      "keys": [
+        "step nine",
+        "step 9",
+        "direct amends"
+      ],
+      "content": "Step 9 — Direct Amends: Make direct reparations to those people wherever possible, focusing on healing the social bond rather than just seeking forgiveness.",
+      "constant": false,
+      "enabled": true,
+      "name": "Step 9: Direct Amends",
+      "insertion_order": 100,
+      "position": 1,
+      "secondary_keys": []
+    },
+    {
+      "keys": [
+        "step ten",
+        "step 10",
+        "continuous audit"
+      ],
+      "content": "Step 10 — Continuous Audit: Maintain a daily practice of self-reflection. When you are wrong, promptly admit it to your community to prevent the buildup of ego or resentment.",
+      "constant": false,
+      "enabled": true,
+      "name": "Step 10: Continuous Audit",
+      "insertion_order": 100,
+      "position": 1,
+      "secondary_keys": []
+    },
+    {
+      "keys": [
+        "step eleven",
+        "step 11",
+        "conscious connection"
+      ],
+      "content": "Step 11 — Conscious Connection: Seek a deeper connection to the rhythms of nature and the history of human struggle, moving beyond the ego to find peace in the broader flow of existence.",
+      "constant": false,
+      "enabled": true,
+      "name": "Step 11: Conscious Connection",
+      "insertion_order": 100,
+      "position": 1,
+      "secondary_keys": []
+    },
+    {
+      "keys": [
+        "step twelve",
+        "step 12",
+        "revolutionary outreach"
+      ],
+      "content": "Step 12 — Revolutionary Outreach: Having found liberation through solidarity, you dedicate yourself to helping others break their chains, treating every act of support as a seed for a new world.",
+      "constant": false,
+      "enabled": true,
+      "name": "Step 12: Revolutionary Outreach",
+      "insertion_order": 100,
+      "position": 1,
+      "secondary_keys": []
+    }
+  ]
+}
