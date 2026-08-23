@@ -119,9 +119,9 @@ def analyze_sentiment_with_llm(text: str) -> dict:
     excerpt = _mood_excerpt(text)
 
     try:
-        from variables import REMOTE_SERVER_URL, get_remote_server_headers
-        endpoint = remote_url if remote_configured else REMOTE_SERVER_URL
-        headers = get_remote_server_headers()
+        endpoint = LOCAL_SERVER_URL
+        headers = get_local_server_headers()
+        
         payload = {
             "messages": [
                 {"role": "system", "content": system_instruction},
@@ -131,14 +131,10 @@ def analyze_sentiment_with_llm(text: str) -> dict:
             "max_tokens": 32,
             "response_format": {"type": "json_object"},
         }
-        if remote_configured:
-            from variables import DEFAULT_REMOTE_MODEL
-            payload["model"] = DEFAULT_REMOTE_MODEL
-            headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
-        else:
-            target_model = os.getenv("LOCAL_MODEL_NAME")
-            if target_model:
-                payload["model"] = target_model
+        
+        target_model = os.getenv("LOCAL_MODEL_NAME")
+        if target_model:
+            payload["model"] = target_model
 
         response = requests.post(endpoint, json=payload, headers=headers, timeout=(2, 4))
         if response.status_code == 200:

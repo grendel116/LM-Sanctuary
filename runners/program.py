@@ -8,7 +8,7 @@ if PARENT_DIR not in sys.path:
     sys.path.insert(0, PARENT_DIR)
 
 def _get_settings_path() -> str:
-    from variables import VARIABLES_DIR
+    from variables.settings import VARIABLES_DIR
     return os.path.normpath(os.path.join(VARIABLES_DIR, "project_settings.json"))
 
 def _load_settings() -> dict:

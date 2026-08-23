@@ -196,7 +196,7 @@ class OsHistoryAdapter(LocalHistoryAdapter):
         from core.program_config import is_story_mode, replace_placeholders
         from core.lorebook import get_active_lore
         from runners.program import get_active_program
-        from variables import PROGRAMS_DIR
+        from variables.settings import PROGRAMS_DIR
 
         history = self.runner_obj.sessions_history.get(self.session_id, [])
         filtered_history = [

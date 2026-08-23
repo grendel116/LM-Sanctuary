@@ -40,7 +40,7 @@ def get_local_server_headers():
     return headers
 
 # Internal variables import (cleaned of removed cloud/server items)
-from variables import (
+from variables.settings import (
     PROGRAMS_DIR,
 )
 
@@ -273,7 +273,7 @@ class BaseProgramRunner:
                 meta["recent_chapters"].clear()
 
     def _load_temperature_setting(self, default_temp: float = 0.95) -> float:
-        from variables import VARIABLES_DIR
+        from variables.settings import VARIABLES_DIR
 
         settings_path = os.path.join(VARIABLES_DIR, "project_settings.json")
         if os.path.exists(settings_path):
@@ -743,15 +743,6 @@ class BaseProgramRunner:
                 )
 
         instructions += (
-            "\n\n# TRACKING TAGS DIRECTIVE (MANDATORY)\n"
-            "You MUST write your full response text FIRST.\n"
-            "Only append HTML tracking comments at the VERY END.\n"
-            "Example format:\n"
-            "Your actual response goes here...\n"
-            "<!--...-->\n"
-        )
-
-        instructions += (
             "\n\n# CONTENT\n"
             "Anarchist-communist ethics. Explicit/NSFW content is permitted.\n"
         )
@@ -806,12 +797,8 @@ class OpenSourceRunner(BaseProgramRunner):
         async def generate_impersonation(
             self, prompt: str, system_instruction: str, model: str = None, temperature: float = 0.7
         ) -> str:
-            url = REMOTE_SERVER_URL
-            headers = {"Content-Type": "application/json"}
-
-            remote_key = os.getenv("REMOTE_API_KEY")
-            if remote_key:
-                headers["Authorization"] = f"Bearer {remote_key}"
+            url = LOCAL_SERVER_URL
+            headers = get_local_server_headers()
 
             target_model = model if (model and model != "local-llm") else os.getenv("LOCAL_MODEL_NAME")
 

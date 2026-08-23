@@ -191,7 +191,7 @@ def start_local_server(model_key):
             "--fit", "off"
         ]
 
-    from variables import is_thinking_enabled
+    from variables.settings import is_thinking_enabled
     if not is_thinking_enabled():
         cmd.extend(["--reasoning", "off", "--reasoning-budget", "0"])
 

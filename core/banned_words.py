@@ -4,10 +4,10 @@ import json
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from variables import BANNED_WORDS_FILE
+from variables.settings import BANNED_WORDS_FILE
 
 # Set your preferred default logit bias penalty here (-2.0 allows literal use, suppresses tropes)
-DEFAULT_BIAS_WEIGHT = -2.0
+DEFAULT_BIAS_WEIGHT = -5.0
 
 def load_banned_words() -> list[str]:
     """Loads the list of banned words from banned_words.json."""

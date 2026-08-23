@@ -9,7 +9,7 @@ import concurrent.futures
 
 import requests
 
-from variables import COMFYUI_SERVER_URL, COMFYUI_CHECKPOINT, COMFYUI_VAE, VARIABLES_DIR
+from variables.settings import COMFYUI_SERVER_URL, COMFYUI_CHECKPOINT, COMFYUI_VAE, VARIABLES_DIR
 
 _search_executor = concurrent.futures.ThreadPoolExecutor(max_workers=10)
 
@@ -1436,7 +1436,7 @@ def generate_video_from_image(image_path: str, prompt: str) -> str:
     import requests
     from PIL import Image
     
-    from variables import COMFYUI_SERVER_URL
+    from variables.settings import COMFYUI_SERVER_URL
     from adapters.comfy_manager import COMFYUI_DIR, check_comfy_running, _resolver_worker, resolution_status
     from runners.program import get_active_program
 

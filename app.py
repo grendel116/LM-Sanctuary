@@ -68,7 +68,7 @@ def check_program_change():
             _cached_active_program = current_program
             os.environ["ACTIVE_PROGRAM"] = current_program
             try:
-                from variables import PROGRAMS_DIR
+                from variables.settings import PROGRAMS_DIR
                 program_path = os.path.join(PROGRAMS_DIR, current_program)
                 if os.path.isdir(program_path):
                     # Setup portraits directory and perform migration from legacy folder if needed
@@ -162,7 +162,7 @@ def load_theme(program_id):
 
 def load_temperature():
     """Read temperature from project settings, defaulting to 0.95."""
-    from variables import VARIABLES_DIR
+    from variables.settings import VARIABLES_DIR
     settings_path = os.path.join(VARIABLES_DIR, "project_settings.json")
     if os.path.exists(settings_path):
         try:
@@ -193,7 +193,7 @@ def find_image_sidecar_json(image_filename, active_program):
         json_path = png_path.rsplit('.', 1)[0] + '.json'
         if os.path.exists(json_path):
             return json_path
-    from variables import PROGRAMS_DIR
+    from variables.settings import PROGRAMS_DIR
     if os.path.exists(PROGRAMS_DIR):
         for prog in os.listdir(PROGRAMS_DIR):
             for folder in ('portraits', 'media'):
@@ -383,7 +383,7 @@ def program_profile_png(program_id):
 @requires_auth
 def save_profile_picture():
     try:
-        from variables import PROGRAMS_DIR
+        from variables.settings import PROGRAMS_DIR
         from runners.program import get_active_program
         import base64
         import re
@@ -419,7 +419,7 @@ def save_profile_picture():
 def crop_profile_picture():
     """Server-side crop: receives source image path and crop coordinates, uses PIL to crop and resize."""
     try:
-        from variables import PROGRAMS_DIR
+        from variables.settings import PROGRAMS_DIR
         from runners.program import get_active_program
         from PIL import Image
         
@@ -535,7 +535,7 @@ def proactive_action():
         import os
         import json
         from runners.program import get_active_program
-        from variables import PROGRAMS_DIR
+        from variables.settings import PROGRAMS_DIR
         
         active_program = get_active_program()
         program_path = os.path.join(PROGRAMS_DIR, active_program)
@@ -611,57 +611,30 @@ You must return a valid JSON object matching the following schema:
 """
 
         # Call the LLM
-        from models.models import is_local_model
-        is_local = is_local_model(selected_model) if selected_model else True
         raw_response = None
         
-        if is_local:
-            import requests
-            from variables import REMOTE_SERVER_URL, get_remote_server_headers
-            target_model = selected_model if (selected_model and selected_model != 'local-llm') else os.getenv("LOCAL_MODEL_NAME")
-            payload = {
-                "messages": [{"role": "user", "content": prompt}],
-                "temperature": 0.7,
-                "max_tokens": 320
-            }
-            if target_model:
-                payload["model"] = target_model
-            try:
-                headers = get_remote_server_headers()
-                r = requests.post(REMOTE_SERVER_URL, json=payload, headers=headers, timeout=30.0)
-                if r.status_code == 200:
-                    raw_response = r.json()['choices'][0]['message']['content'].strip()
-            except Exception as e:
-                print(f"[PROACTIVE] Local LLM query failed: {e}")
-        else:
-            api_key = os.getenv("REMOTE_API_KEY")
-            remote_cloud_url = os.getenv("REMOTE_CLOUD_URL")
-            if api_key and remote_cloud_url:
-                import requests
-                target_model = selected_model if selected_model else os.getenv("REMOTE_MODEL", "gemini-3.1-flash-lite")
-                headers = {
-                    "Content-Type": "application/json",
-                    "Authorization": f"Bearer {api_key}"
-                }
-                payload = {
-                    "model": target_model,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "temperature": 0.7,
-                    "max_tokens": 320,
-                    "response_format": {"type": "json_object"},
-                    "thinking": {"type": "disabled"}
-                }
-                try:
-                    r = requests.post(remote_cloud_url, json=payload, headers=headers, timeout=30.0)
-                    if r.status_code == 200:
-                        raw_response = r.json()['choices'][0]['message']['content'].strip()
-                    else:
-                        print(f"[PROACTIVE] Remote cloud query failed with status {r.status_code}: {r.text}")
-                except Exception as e:
-                    print(f"[PROACTIVE] Remote cloud query failed: {e}")
-                    
-        if not raw_response:
-            return jsonify({'error': 'Failed to generate proactive response'}), 500
+        import requests
+        from variables.settings import LOCAL_SERVER_URL, get_local_server_headers
+        
+        target_model = selected_model if (selected_model and selected_model != 'local-llm') else os.getenv("LOCAL_MODEL_NAME")
+        payload = {
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.7,
+            "max_tokens": 320
+        }
+        if target_model:
+            payload["model"] = target_model
+            
+        try:
+            headers = get_local_server_headers()
+            r = requests.post(LOCAL_SERVER_URL, json=payload, headers=headers, timeout=30.0)
+            if r.status_code == 200:
+                raw_response = r.json()['choices'][0]['message']['content'].strip()
+        except Exception as e:
+            print(f"[PROACTIVE] Local LLM query failed: {e}")
+                        
+            if not raw_response:
+                return jsonify({'error': 'Failed to generate proactive response'}), 500
             
         # Parse output
         action_type = "thought"
@@ -920,7 +893,7 @@ def generate_user_message():
     if not user_profile:
         # Fallback to active user profile file
         try:
-            from variables import USER_PROFILES_DIR
+            from variables.settings import USER_PROFILES_DIR
             from runners.program import get_active_user
             active_user = get_active_user()
             profile_path = os.path.join(USER_PROFILES_DIR, f"{active_user}.md")
@@ -1446,7 +1419,7 @@ def get_models():
 @app.route('/api/project_settings', methods=['GET', 'POST'])
 @requires_auth
 def project_settings():
-    from variables import VARIABLES_DIR
+    from variables.settings import VARIABLES_DIR
     import json
     settings_path = os.path.join(VARIABLES_DIR, "project_settings.json")
     
@@ -1611,7 +1584,7 @@ def browse_folder():
 @requires_auth
 def save_generation_params():
     try:
-        from variables import VARIABLES_DIR
+        from variables.settings import VARIABLES_DIR
         settings_path = os.path.join(VARIABLES_DIR, "project_settings.json")
         
         data = request.get_json() or {}
@@ -1899,7 +1872,7 @@ def list_lorebooks_route():
     try:
         from runners.program import get_active_program
         from core.lorebook import list_lorebooks
-        from variables import PROGRAMS_DIR
+        from variables.settings import PROGRAMS_DIR
         program_id = get_active_program()
         books = list_lorebooks(program_id, PROGRAMS_DIR)
         for b in books:
@@ -1915,7 +1888,7 @@ def import_lorebook_route():
     try:
         from runners.program import get_active_program
         from core.lorebook import import_lorebook
-        from variables import PROGRAMS_DIR
+        from variables.settings import PROGRAMS_DIR
         program_id = get_active_program()
         if 'file' not in request.files:
             return jsonify({'error': 'No file provided'}), 400
@@ -1934,7 +1907,7 @@ def import_lorebook_route():
 def export_lorebook_route(filename):
     try:
         from runners.program import get_active_program
-        from variables import PROGRAMS_DIR
+        from variables.settings import PROGRAMS_DIR
         program_id = get_active_program()
         fpath = os.path.join(PROGRAMS_DIR, program_id, 'lorebooks', filename)
         if not os.path.exists(fpath):
@@ -1955,7 +1928,7 @@ def delete_lorebook_route(filename):
     try:
         from runners.program import get_active_program
         from core.lorebook import delete_lorebook
-        from variables import PROGRAMS_DIR
+        from variables.settings import PROGRAMS_DIR
         program_id = get_active_program()
         deleted = delete_lorebook(program_id, filename, PROGRAMS_DIR)
         return jsonify({'success': deleted})
@@ -1969,7 +1942,7 @@ def get_card_lorebook_entries():
     """Return entries from the embedded character_book in the active program card."""
     try:
         from runners.program import get_active_program
-        from variables import PROGRAMS_DIR
+        from variables.settings import PROGRAMS_DIR
         program_id = get_active_program()
         card_path = os.path.join(PROGRAMS_DIR, program_id, f'{program_id}.json')
         if not os.path.exists(card_path):
@@ -1991,7 +1964,7 @@ def save_card_lorebook_entries():
     """Write updated entries back into character_book in the active program card."""
     try:
         from runners.program import get_active_program
-        from variables import PROGRAMS_DIR
+        from variables.settings import PROGRAMS_DIR
         program_id = get_active_program()
         card_path = os.path.join(PROGRAMS_DIR, program_id, f'{program_id}.json')
         if not os.path.exists(card_path):
@@ -2018,7 +1991,7 @@ def get_lorebook_entries(filename):
     """Return the raw entry list for a lorebook file so the UI can render an editor."""
     try:
         from runners.program import get_active_program
-        from variables import PROGRAMS_DIR
+        from variables.settings import PROGRAMS_DIR
         program_id = get_active_program()
         fpath = os.path.join(PROGRAMS_DIR, program_id, 'lorebooks', filename)
         if not os.path.exists(fpath):
@@ -2040,7 +2013,7 @@ def save_lorebook_entries(filename):
     """Overwrite a lorebook file with updated entries from the editor."""
     try:
         from runners.program import get_active_program
-        from variables import PROGRAMS_DIR
+        from variables.settings import PROGRAMS_DIR
         program_id = get_active_program()
         fpath = os.path.join(PROGRAMS_DIR, program_id, 'lorebooks', filename)
         if not os.path.exists(fpath):
@@ -2285,7 +2258,7 @@ def list_sessions():
 def list_programs():
     try:
         active_program = os.getenv("ACTIVE_PROGRAM", "sebile")
-        from variables import PROGRAMS_DIR
+        from variables.settings import PROGRAMS_DIR
         programs_dir = PROGRAMS_DIR
         
         programs = []
@@ -2483,7 +2456,7 @@ def rename_program():
         if not new_id:
             return jsonify({'error': 'Invalid new name (must contain letters, numbers, or underscores)'}), 400
             
-        from variables import PROGRAMS_DIR
+        from variables.settings import PROGRAMS_DIR
         old_path = os.path.normpath(os.path.join(PROGRAMS_DIR, program_id))
         new_path = os.path.normpath(os.path.join(PROGRAMS_DIR, new_id))
         
@@ -2604,7 +2577,7 @@ def rename_program():
 def get_program_profile():
     try:
         from runners.program import get_active_program, _load_settings
-        from variables import PROGRAMS_DIR
+        from variables.settings import PROGRAMS_DIR
         import json
 
         program_id = request.args.get('program_id') or get_active_program()
@@ -2637,7 +2610,7 @@ def get_program_profile():
 def save_program_profile():
     try:
         from runners.program import get_active_program, set_tts_voice_for_program, _load_settings, _save_settings
-        from variables import PROGRAMS_DIR
+        from variables.settings import PROGRAMS_DIR
         import json
 
         incoming = request.get_json(silent=True) or {}
@@ -2764,7 +2737,7 @@ def delete_program_journals():
 @requires_auth
 def list_user_profiles():
     try:
-        from variables import USER_PROFILES_DIR
+        from variables.settings import USER_PROFILES_DIR
         from runners.program import get_active_user
         if not os.path.exists(USER_PROFILES_DIR):
             os.makedirs(USER_PROFILES_DIR, exist_ok=True)
@@ -2813,7 +2786,7 @@ def select_user_profile():
         if not profile_id:
             return jsonify({"error": "Missing profile_id"}), 400
         
-        from variables import USER_PROFILES_DIR
+        from variables.settings import USER_PROFILES_DIR
         from runners.program import set_active_user
         profile_path = os.path.join(USER_PROFILES_DIR, f"{profile_id}.md")
         if not os.path.exists(profile_path):
@@ -2847,7 +2820,7 @@ def save_user_profile():
         if not profile_id:
             return jsonify({"error": "Invalid profile name"}), 400
             
-        from variables import USER_PROFILES_DIR
+        from variables.settings import USER_PROFILES_DIR
         from runners.program import get_active_user
         if not os.path.exists(USER_PROFILES_DIR):
             os.makedirs(USER_PROFILES_DIR, exist_ok=True)
@@ -2880,7 +2853,7 @@ def delete_user_profile():
         if profile_id == "builder":
             return jsonify({"error": "Cannot delete the default 'builder' profile"}), 400
             
-        from variables import USER_PROFILES_DIR
+        from variables.settings import USER_PROFILES_DIR
         from runners.program import get_active_user, set_active_user
         profile_path = os.path.join(USER_PROFILES_DIR, f"{profile_id}.md")
         if not os.path.exists(profile_path):
@@ -2927,7 +2900,7 @@ def rename_user_profile():
         if old_profile_id == new_profile_id:
             return jsonify({"status": "success", "profile_id": new_profile_id})
             
-        from variables import USER_PROFILES_DIR
+        from variables.settings import USER_PROFILES_DIR
         from runners.program import get_active_user, set_active_user
         old_path = os.path.join(USER_PROFILES_DIR, f"{old_profile_id}.md")
         new_path = os.path.join(USER_PROFILES_DIR, f"{new_profile_id}.md")
@@ -3027,8 +3000,10 @@ Output a single JSON object with EXACTLY these keys:
     if use_local:
         try:
             import httpx
-            local_url = os.getenv("REMOTE_SERVER_URL", "http://127.0.0.1:1234/v1/chat/completions")
+            local_url = LOCAL_SERVER_URL
+            headers = get_local_server_headers()
             local_model = model if (model and model != 'local-llm') else os.getenv("LOCAL_MODEL_NAME", "local-llm")
+            
             payload = {
                 "model": local_model,
                 "messages": [
@@ -3038,40 +3013,20 @@ Output a single JSON object with EXACTLY these keys:
                 "temperature": 0.5,
                 "response_format": {"type": "json_object"}
             }
-            res = httpx.post(local_url, json=payload, headers={"Content-Type": "application/json"}, timeout=60.0)
+            
+            res = httpx.post(local_url, json=payload, headers=headers, timeout=60.0)
             if res.status_code == 200:
                 raw_response = res.json()['choices'][0]['message']['content'].strip()
         except Exception as e:
             print(f"Error calling local model for card generation: {e}")
-    else:
-        if is_remote_configured:
-            try:
-                import requests
-                from variables import DEFAULT_REMOTE_MODEL
-                target_model = model if model else DEFAULT_REMOTE_MODEL
-                headers = {"Content-Type": "application/json", "Authorization": f"Bearer {remote_key}"}
-                payload = {
-                    "model": target_model,
-                    "messages": [
-                        {"role": "system", "content": "You output valid JSON character cards."},
-                        {"role": "user", "content": prompt}
-                    ],
-                    "temperature": 0.5,
-                    "response_format": {"type": "json_object"}
-                }
-                res = requests.post(remote_cloud_url, json=payload, headers=headers, timeout=60.0)
-                if res.status_code == 200:
-                    raw_response = res.json()['choices'][0]['message']['content'].strip()
-            except Exception as e:
-                print(f"Error calling remote model for card generation: {e}")
 
-    parsed = {}
-    if raw_response:
-        try:
-            cleaned = raw_response.strip().lstrip('```json').lstrip('```').rstrip('```').strip()
-            parsed = json.loads(cleaned)
-        except Exception as e:
-            print(f"Failed to parse card JSON: {e}. Raw: {raw_response}")
+            parsed = {}
+            if raw_response:
+                try:
+                    cleaned = raw_response.strip().lstrip('```json').lstrip('```').rstrip('```').strip()
+                    parsed = json.loads(cleaned)
+                except Exception as e:
+                    print(f"Failed to parse card JSON: {e}. Raw: {raw_response}")
 
     # Build a chara_card_v3 dict. Helper keys _inversion and _colors are
     # popped by finalize_imported_program before writing to disk.
@@ -3369,7 +3324,7 @@ def _get_current_status():
     # Load temperature dynamically
     temperature = 0.95
     try:
-        from variables import VARIABLES_DIR
+        from variables.settings import VARIABLES_DIR
         settings_path = os.path.join(VARIABLES_DIR, "project_settings.json")
         if os.path.exists(settings_path):
             with open(settings_path, "r", encoding="utf-8") as f:
@@ -3606,7 +3561,7 @@ def comfy_resolve_workflow():
     workflow_json = request.json.get("workflow_json")
     if not workflow_json:
         try:
-            from variables import PROGRAMS_DIR, COMFYUI_CHECKPOINT
+            from variables.settings import PROGRAMS_DIR, COMFYUI_CHECKPOINT
             from runners.program import get_active_program
             active_program = get_active_program()
             

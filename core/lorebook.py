@@ -109,7 +109,7 @@ def get_active_lore(
     before: injected before character block; after: injected after.
     """
     if programs_dir is None:
-        from variables import PROGRAMS_DIR
+        from variables.settings import PROGRAMS_DIR
         programs_dir = PROGRAMS_DIR
 
     program_dir = os.path.join(programs_dir, program_id)
@@ -197,7 +197,7 @@ def get_active_lore(
 
 def list_lorebooks(program_id: str, programs_dir: str | None = None) -> list[dict]:
     if programs_dir is None:
-        from variables import PROGRAMS_DIR
+        from variables.settings import PROGRAMS_DIR
         programs_dir = PROGRAMS_DIR
 
     results = []
@@ -241,7 +241,7 @@ def list_lorebooks(program_id: str, programs_dir: str | None = None) -> list[dic
 
 def import_lorebook(program_id: str, book_data: dict, filename: str, programs_dir: str | None = None) -> str:
     if programs_dir is None:
-        from variables import PROGRAMS_DIR
+        from variables.settings import PROGRAMS_DIR
         programs_dir = PROGRAMS_DIR
     lorebooks_dir = os.path.join(programs_dir, program_id, "lorebooks")
     os.makedirs(lorebooks_dir, exist_ok=True)
@@ -256,7 +256,7 @@ def import_lorebook(program_id: str, book_data: dict, filename: str, programs_di
 
 def delete_lorebook(program_id: str, filename: str, programs_dir: str | None = None) -> bool:
     if programs_dir is None:
-        from variables import PROGRAMS_DIR
+        from variables.settings import PROGRAMS_DIR
         programs_dir = PROGRAMS_DIR
     fpath = os.path.join(programs_dir, program_id, "lorebooks", filename)
     if os.path.exists(fpath):

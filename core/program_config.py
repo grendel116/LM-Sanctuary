@@ -17,7 +17,7 @@ PARENT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PARENT_DIR not in sys.path:
     sys.path.insert(0, PARENT_DIR)
 
-from variables import (
+from variables.settings import (
     USER_MD_FILE, PROGRAMS_DIR, USER_PROFILES_DIR
 )
 
@@ -225,7 +225,7 @@ def get_compiled_instructions() -> str:
             "- Use separate lines and paragraphs for narration and dialogue.\n"
             "- Narration: Use *italics*, first person, and present tense for actions, expressions, and setting details.\n"
             "- Dialogue: Use plain text without quotation marks. Use **bold** for emphasis.\n"
-            "- Style: Engage in critical thinking and dialectical reasoning.\n"
+            "- Style: Short messages with critical, dialectical reasoning.\n"
             "- Be succinct, with short words and simple sentences.\n"
             "- Do not patronize or automatically validate.\n"
             "- Do not use contrasting parallels.\n"

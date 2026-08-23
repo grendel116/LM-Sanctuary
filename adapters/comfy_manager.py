@@ -8,7 +8,7 @@ import atexit
 
 # Headless ComfyUI Manager
 
-from variables import COMFYUI_DIR as _raw_comfy_dir
+from variables.settings import COMFYUI_DIR as _raw_comfy_dir
 
 COMFYUI_DIR = _raw_comfy_dir
 
@@ -25,7 +25,7 @@ def resolve_comfy_dir():
 resolve_comfy_dir()
 
 from urllib.parse import urlparse
-from variables import COMFYUI_SERVER_URL
+from variables.settings import COMFYUI_SERVER_URL
 
 try:
     _url = urlparse(COMFYUI_SERVER_URL)
@@ -503,7 +503,7 @@ def _resolver_worker(workflow_json_str):
         required_nodes, required_models = parse_workflow_dependencies(workflow_json_str)
         
         # Ensure we always require the default checkpoint and VAE if not already present on disk
-        from variables import COMFYUI_CHECKPOINT, COMFYUI_VAE
+        from variables.settings import COMFYUI_CHECKPOINT, COMFYUI_VAE
         ckpt_path = os.path.normpath(os.path.join(COMFYUI_DIR, "models", "checkpoints", COMFYUI_CHECKPOINT))
         if not os.path.exists(ckpt_path) and COMFYUI_CHECKPOINT not in required_models:
             required_models.append(COMFYUI_CHECKPOINT)
