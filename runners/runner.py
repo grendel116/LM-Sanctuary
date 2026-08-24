@@ -485,16 +485,9 @@ class BaseProgramRunner:
         from core.banned_words import replace_banned_words_async
 
         # --- STAGE 3: POST-PROCESSING (TOOLS & CLEANUP) ---
-        # Strip unwanted narrative / formatting prior to structure processing
         bot_response_text = self._sanitize_thinking_tags(bot_response_text)
 
-        # Sanitize text formatting before rewrite pass
-        bot_response_text = await replace_banned_words_async(
-            text=bot_response_text,
-            llm_call_func=_llm_rewrite_wrapper,
-            target_model=target_model
-        )        
-        # --- BANNED WORDS AND STRUCTURE REWRITE PASS ---
+        # Define wrapper before execution
         async def _llm_rewrite_wrapper(prompt: str, model: str = None, temperature: float = 0.0, **kwargs) -> str:
             rw_payload = {
                 "messages": [{"role": "user", "content": prompt}],
@@ -509,6 +502,7 @@ class BaseProgramRunner:
                 return res.json()["choices"][0]["message"]["content"].strip()
             return ""
 
+        # --- BANNED WORDS AND STRUCTURE REWRITE PASS ---
         bot_response_text = await replace_banned_words_async(
             text=bot_response_text,
             llm_call_func=_llm_rewrite_wrapper,
