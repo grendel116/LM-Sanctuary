@@ -488,14 +488,14 @@ class BaseProgramRunner:
         bot_response_text = self._sanitize_thinking_tags(bot_response_text)
         
         # --- BANNED WORDS SYNONYM PASS ---
-        async def _llm_rewrite_wrapper(prompt: str, model_name: str) -> str:
+        async def _llm_rewrite_wrapper(prompt: str, model: str, temperature: float = 0.2, **kwargs) -> str:
             rw_payload = {
                 "messages": [{"role": "user", "content": prompt}],
-                "temperature": 0.2,
+                "temperature": temperature,
                 "max_tokens": 512
             }
-            if model_name:
-                rw_payload["model"] = model_name
+            if model:
+                rw_payload["model"] = model
             
             res = await self._post_llm_request(url, rw_payload, headers, timeout=30.0, session_id=session_id)
             if res.status_code == 200:
