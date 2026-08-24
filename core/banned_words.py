@@ -12,7 +12,9 @@ from variables.settings import BANNED_WORDS_FILE
 DEFAULT_BIAS_WEIGHT = -10.0
 
 ANTITHESIS_PATTERN = re.compile(
-    r"\b(?:that's|it's|you're|there's|is|are)\s+not\b|\bnot\s+a\b|\baren't\b|\bisn't\b|\bthere's\s+no\b",
+    r"\b(?:it's|that's|this\s+is|this\s+isn't|it\s+isn't)\s+(?:just\s+)?not\b"
+    r"|\b(?:is|are|was|were)n't\s+(?:just\s+)?[^;,.!?]+[;,]?\s*(?:it's|it\s+is|this\s+is)\b"
+    r"|\bnot\s+a\s+[^;,.!?]+[;,]\s*(?:it's|it\s+is|this\s+is)\b",
     re.IGNORECASE
 )
 
