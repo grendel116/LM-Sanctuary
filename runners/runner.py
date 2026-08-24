@@ -492,12 +492,12 @@ class BaseProgramRunner:
             rw_payload = {
                 "messages": [{"role": "user", "content": prompt}],
                 "temperature": temperature,
-                "max_tokens": 512
+                "max_tokens": kwargs.get("max_tokens", 256)
             }
             if model:
                 rw_payload["model"] = model
-            
-            res = await self._post_llm_request(url, rw_payload, headers, timeout=30.0, session_id=session_id)
+
+            res = await self._post_llm_request(url, rw_payload, headers, timeout=10.0, session_id=session_id)
             if res.status_code == 200:
                 return res.json()["choices"][0]["message"]["content"].strip()
             return ""
@@ -507,7 +507,7 @@ class BaseProgramRunner:
             llm_call_func=_llm_rewrite_wrapper,
             target_model=target_model
         )
-        
+                
         matches = list(re.finditer(r"\[(\w+)\(([\s\S]*?)\)\]", bot_response_text))
         matches, bot_response_text = self._filter_story_mode_matches(matches, bot_response_text)
 

@@ -1,16 +1,24 @@
 import sys
 import os
 import json
+import re
+import asyncio
+from functools import lru_cache
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from variables.settings import BANNED_WORDS_FILE
 
-# Set your preferred default logit bias penalty here (-2.0 allows literal use, suppresses tropes)
 DEFAULT_BIAS_WEIGHT = -10.0
 
+ANTITHESIS_PATTERN = re.compile(
+    r"\b(?:that's|it's|you're|there's|is|are)\s+not\b|\bnot\s+a\b|\baren't\b|\bisn't\b|\bthere's\s+no\b",
+    re.IGNORECASE
+)
+
+@lru_cache(maxsize=1)
 def load_banned_words() -> list[str]:
-    """Loads the list of banned words from banned_words.json."""
+    """Loads and caches banned words from file."""
     if not os.path.exists(BANNED_WORDS_FILE):
         return []
     try:
@@ -24,11 +32,17 @@ def load_banned_words() -> list[str]:
         print(f"[BANNED WORDS] Error loading {BANNED_WORDS_FILE}: {e}")
         return []
 
+@lru_cache(maxsize=1)
+def get_banned_words_regex() -> re.Pattern | None:
+    """Builds pre-compiled regular expression for banned words."""
+    words = load_banned_words()
+    if not words:
+        return None
+    pattern = r"\b(?:" + "|".join(map(re.escape, words)) + r")\b"
+    return re.compile(pattern, re.IGNORECASE)
+
 def generate_llama_cli_args(gguf_path: str, bias_weight: float = None) -> list[str]:
-    """
-    Generates CLI argument list for llama-server. 
-    Uses llama_cpp python bindings to tokenize accurately if available.
-    """
+    """Generates CLI flags for llama-server logit bias."""
     if bias_weight is None:
         bias_weight = DEFAULT_BIAS_WEIGHT
         
@@ -37,11 +51,9 @@ def generate_llama_cli_args(gguf_path: str, bias_weight: float = None) -> list[s
         return []
 
     token_ids = set()
-    
     try:
         from llama_cpp import Llama
         llm = Llama(model_path=gguf_path, vocab_only=True, verbose=False)
-        
         for word in words:
             clean_word = word.strip()
             if not clean_word:
@@ -51,79 +63,79 @@ def generate_llama_cli_args(gguf_path: str, bias_weight: float = None) -> list[s
                 ids = llm.tokenize(variant.encode("utf-8"), add_special=False)
                 for t_id in ids:
                     token_ids.add(int(t_id))
-        
         del llm
-        
-    except (ImportError, Exception) as e:
-        print(f"[BANNED WORDS] Notice: Could not tokenize via llama_cpp ({e}). Skipping dynamic logit bias.", flush=True)
+    except Exception as e:
+        print(f"[BANNED WORDS] Notice: Tokenization skipped ({e}).", flush=True)
         return []
 
     cli_args = []
     for token_id in token_ids:
-        # Format explicitly: if bias_weight is negative, it already includes the '-' sign.
-        # e.g., token_id=15043, bias_weight=-5.0 -> "15043-5.0"
-        # Using an explicit sign check ensures proper parsing if weights are ever positive.
         sign_str = "" if bias_weight < 0 else "+"
         cli_args.extend(["--logit-bias", f"{token_id}{sign_str}{bias_weight}"])
-        
     return cli_args
 
 import re
 
-import re
-
-# Regex pattern matching contrastive/antithesis structures
+# Strict pattern for 'not X, [it's] Y' or 'not A; B' contrast structures
 ANTITHESIS_PATTERN = re.compile(
-    r"\b(?:that's|it's|you're|there's|is|are)\s+not\b|\bnot\s+a\b|\baren't\b|\bisn't\b|\bthere's\s+no\b",
+    r"\b(?:it's|that's|this\s+is)\s+not\s+[^;,.!?]+[;,]?\s*(?:it's|it\s+is|you're|there's)\b"
+    r"|\bnot\s+a\s+[^;,.!?]+[;,]\s*(?:it's|it\s+is|this\s+is)\b",
     re.IGNORECASE
 )
 
-async def replace_banned_words_async(text: str, llm_call_func, target_model: str) -> str:
-    """Detects banned words OR antithesis patterns and uses an LLM pass to rewrite the text."""
-    banned_list = load_banned_words()
-    if not text:
-        return text
+async def _rewrite_single_sentence(sentence: str, llm_call_func, target_model: str, banned_regex) -> str:
+    """Evaluates and rewrites individual sentences while retaining Markdown formatting."""
+    found_banned = set(banned_regex.findall(sentence)) if banned_regex else set()
+    has_antithesis = bool(ANTITHESIS_PATTERN.search(sentence))
 
-    # Check for banned words
-    found_banned = [w for w in banned_list if re.search(rf'\b{re.escape(w)}\b', text, re.IGNORECASE)] if banned_list else []
-    
-    # Check for antithesis structures
-    has_antithesis = bool(ANTITHESIS_PATTERN.search(text))
-
-    # Guard: Return early if neither issue exists
     if not found_banned and not has_antithesis:
-        return text
+        return sentence
 
-    # Construct strict rewriting instructions
     instructions = []
     if found_banned:
-        words_str = ", ".join(f'"{w}"' for w in set(found_banned))
-        instructions.append(f"- Eliminate or replace these forbidden words: {words_str}.")
+        words_str = ", ".join(f'"{w}"' for w in found_banned)
+        instructions.append(f"- Replace these forbidden words: {words_str}.")
     
     if has_antithesis:
-        instructions.append(
-            "- REMOVE ALL ANTITHESIS / CONTRAST PHRASING (e.g., 'not A, it is B', 'there is no X when Y', 'you aren't X; you're Y').\n"
-            "  Convert contrastive statements into direct, positive assertions.\n"
-            "  Example Bad: 'That's not a market; it's coercion.' -> Good: 'This system constitutes coercion.'"
-        )
+        instructions.append("- Convert 'not X, it is Y' contrast structures into direct, positive assertions.")
 
     rules_text = "\n".join(instructions)
-
-    prompt = f"""[INST] You are a prose editor. Rewrite the following text adhering strictly to these structural rules:
+    prompt = f"""[INST] Rewrite this single sentence adhering strictly to these rules:
 
 {rules_text}
 
-Preserve the original tone, intent, and meaning. Output ONLY the rewritten text without commentary.
+CRITICAL: Preserve ALL Markdown syntax, including asterisks for actions (*action*) and emphasis (**bold**). Output ONLY the direct rewritten sentence.
 
-Text:
-"{text}" [/INST]"""
+Sentence: "{sentence}" [/INST]"""
 
     try:
-        # Pass temperature 0.0 or low value to force strict rule compliance
-        rewritten = await llm_call_func(prompt=prompt, model=target_model, temperature=0.0)
+        max_tokens = max(64, int(len(sentence.split()) * 2))
+        rewritten = await llm_call_func(
+            prompt=prompt,
+            model=target_model,
+            temperature=0.0,
+            max_tokens=max_tokens
+        )
         if rewritten and len(rewritten.strip()) > 0:
             return rewritten.strip().strip('"')
     except Exception as e:
         print(f"[REWRITE ERROR] {e}")
 
-    return text
+    return sentence
+
+async def replace_banned_words_async(text: str, llm_call_func, target_model: str) -> str:
+    """Splits text into sentences and runs concurrent rewrites."""
+    if not text:
+        return text
+
+    banned_regex = get_banned_words_regex()
+    sentence_ending = re.compile(r'(?<=[.!?])\s+')
+    sentences = sentence_ending.split(text)
+
+    tasks = [
+        _rewrite_single_sentence(s, llm_call_func, target_model, banned_regex)
+        for s in sentences
+    ]
+    
+    rewritten_sentences = await asyncio.gather(*tasks)
+    return " ".join(rewritten_sentences)
