@@ -70,31 +70,60 @@ def generate_llama_cli_args(gguf_path: str, bias_weight: float = None) -> list[s
 
 import re
 
+import re
+
+# Regex pattern matching contrastive/antithesis structures
+ANTITHESIS_PATTERN = re.compile(
+    r"\b(?:that's|it's|you're|there's|is|are)\s+not\b|\bnot\s+a\b|\baren't\b|\bisn't\b|\bthere's\s+no\b",
+    re.IGNORECASE
+)
+
 async def replace_banned_words_async(text: str, llm_call_func, target_model: str) -> str:
-    """Detects banned words and uses an LLM call to rewrite the text seamlessly."""
+    """Detects banned words OR antithesis patterns and uses an LLM pass to rewrite the text."""
     banned_list = load_banned_words()
-    if not banned_list or not text:
+    if not text:
         return text
 
-    # Guard: only call LLM if a banned word actually exists in text
-    found = [w for w in banned_list if re.search(rf'\b{re.escape(w)}\b', text, re.IGNORECASE)]
-    if not found:
+    # Check for banned words
+    found_banned = [w for w in banned_list if re.search(rf'\b{re.escape(w)}\b', text, re.IGNORECASE)] if banned_list else []
+    
+    # Check for antithesis structures
+    has_antithesis = bool(ANTITHESIS_PATTERN.search(text))
+
+    # Guard: Return early if neither issue exists
+    if not found_banned and not has_antithesis:
         return text
 
-    words_str = ", ".join(f'"{w}"' for w in set(found))
-    prompt = f"""[INST] Reword the following text to preserve its exact tone, prose style, and meaning, but completely replace or eliminate these forbidden words: {words_str}.
+    # Construct strict rewriting instructions
+    instructions = []
+    if found_banned:
+        words_str = ", ".join(f'"{w}"' for w in set(found_banned))
+        instructions.append(f"- Eliminate or replace these forbidden words: {words_str}.")
+    
+    if has_antithesis:
+        instructions.append(
+            "- REMOVE ALL ANTITHESIS / CONTRAST PHRASING (e.g., 'not A, it is B', 'there is no X when Y', 'you aren't X; you're Y').\n"
+            "  Convert contrastive statements into direct, positive assertions.\n"
+            "  Example Bad: 'That's not a market; it's coercion.' -> Good: 'This system constitutes coercion.'"
+        )
 
-Do not add commentary or explanations. Output ONLY the rewritten text.
+    rules_text = "\n".join(instructions)
+
+    prompt = f"""[INST] You are a prose editor. Rewrite the following text adhering strictly to these structural rules:
+
+{rules_text}
+
+Preserve the original tone, intent, and meaning. Output ONLY the rewritten text without commentary.
 
 Text:
 "{text}" [/INST]"""
 
     try:
-        # Executes your existing runner LLM call passed as a callback
-        rewritten = await llm_call_func(prompt=prompt, model=target_model, temperature=0.2)
+        # Pass temperature 0.0 or low value to force strict rule compliance
+        rewritten = await llm_call_func(prompt=prompt, model=target_model, temperature=0.0)
         if rewritten and len(rewritten.strip()) > 0:
             return rewritten.strip().strip('"')
     except Exception as e:
-        print(f"[BANNED WORDS REWRITE ERROR] {e}")
+        print(f"[REWRITE ERROR] {e}")
 
     return text

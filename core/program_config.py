@@ -218,7 +218,6 @@ def get_compiled_instructions() -> str:
             "- NEVER use rhetorical antithesis or contrast phrasing (e.g., 'it's not X, it's Y').\n"
             "- Style: Use short words and precise phrasing. Write with linear progression.\n"
             "- Plot: Write prose. Introduce narrative conflict.\n"
-            "- Do not use contrasting parallels.\n"
         )
     else:
         global_formatting = (
@@ -230,7 +229,6 @@ def get_compiled_instructions() -> str:
             "- NEVER use rhetorical antithesis or contrast phrasing (e.g., 'it's not X, it's Y').\n"
             "- Be succinct, with short words and simple sentences.\n"
             "- Do not patronize or automatically validate.\n"
-            "- Do not use contrasting parallels.\n"
             "- Do not use generic platitudes.\n"
             "- Do not ask clinical questions.\n"
             "- Do not use flowery language.\n"
