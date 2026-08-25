@@ -27,10 +27,11 @@ LOCAL_SERVER_URL = os.getenv("LOCAL_SERVER_URL", "http://localhost:8080")
 
 # If you also need the headers function referenced in the traceback:
 def get_local_server_headers():
-    return {
-        "Content-Type": "application/json",
-        # Add any other required headers or API keys here if needed
-    }
+    headers = {"Content-Type": "application/json"}
+    api_key = os.getenv("LOCAL_SERVER_API_KEY")
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    return headers
 
 def get_remote_server_headers():
     headers = {"Content-Type": "application/json"}

@@ -7,8 +7,10 @@ import importlib
 import traceback
 import threading
 import uuid
+import httpx
 
 from adapters import comfy_manager
+from variables.settings import LOCAL_SERVER_URL, get_local_server_headers
 
 # Automate copying of default .env configuration if it doesn't exist
 base_dir = os.path.dirname(os.path.abspath(__file__))
@@ -2963,112 +2965,146 @@ def generate_character_theme(main_color, accent_color_a=None, accent_color_b=Non
 # Obsolete sprite and theme color generation functions removed
 
 
-def generate_character_json(name, description, personality, scenario, first_mes, model):
-    """Ask the LLM to produce chara_card_v3-compatible fields for a new program."""
-    import os, json
-    is_remote_configured, remote_key, remote_cloud_url = remote_configuration()
+def generate_character_json(
+        name, description, personality, scenario, first_mes, model
+    ):
+        """Ask the local LLM to produce chara_card_v3 fields for a new program."""
 
-    prompt = f"""Design a SillyTavern chara_card_v3 character profile from the description below.
+        prompt = f"""Design a SillyTavern chara_card_v3 character profile from the description below.
 
-Input:
-  Name: {name}
-  Description: {description}
-  Personality hint: {personality or 'not specified'}
-  Scenario hint: {scenario or 'not specified'}
-  First message hint: {first_mes or 'not specified'}
+    Input:
+    Name: {name}
+    Description: {description}
+    Personality hint: {personality or 'not specified'}
+    Scenario hint: {scenario or 'not specified'}
+    First message hint: {first_mes or 'not specified'}
 
-Output a single JSON object with EXACTLY these keys:
-{{
-  "description": "2-4 sentence narrative bio. No physical appearance.",
-  "personality": "One word (e.g. Devoted, Sassy, Stoic).",
-  "scenario": "Short scene-setting sentence (one sentence).",
-  "first_mes": "In-character opening message (1-2 sentences, first person).",
-  "system_prompt": "Concise response style directive (e.g. contractions, tone, length).",
-  "image_positive": "Comma-separated Stable Diffusion tags for ONLY physical appearance (e.g. silver hair, purple eyes, fair skin).",
-  "image_negative": "Comma-separated SD negative tags to exclude (e.g. extra limbs, bad anatomy).",
-  "main_color": "#RRGGBB — a hex color representing this character.",
-  "inversion": {{
-    "intimate": "How they behave when intimate/warm.",
-    "excited": "How they behave when excited/playful.",
-    "intense": "How they behave when intense/focused.",
-    "sad": "How they behave when sad/empathetic."
-  }}
-}}"""
+    Output a single JSON object with EXACTLY these keys:
+    {{
+    "description": "2-4 sentence narrative bio. No physical appearance.",
+    "personality": "One word (e.g. Devoted, Sassy, Stoic).",
+    "scenario": "Short scene-setting sentence (one sentence).",
+    "first_mes": "In-character opening message (1-2 sentences, first person).",
+    "system_prompt": "Concise response style directive (e.g. contractions, tone, length).",
+    "image_positive": "Comma-separated Stable Diffusion tags for ONLY physical appearance (e.g. silver hair, purple eyes, fair skin).",
+    "image_negative": "Comma-separated SD negative tags to exclude (e.g. extra limbs, bad anatomy).",
+    "main_color": "#RRGGBB — a hex color representing this character.",
+    "inversion": {{
+        "intimate": "How they behave when intimate/warm.",
+        "excited": "How they behave when excited/playful.",
+        "intense": "How they behave when intense/focused.",
+        "sad": "How they behave when sad/empathetic."
+    }}
+    }}"""
 
-    raw_response = None
-    from models.models import is_local_model
-    use_local = is_local_model(model)
+        raw_response = None
+        local_model = (
+            model
+            if (model and model != "local-llm")
+            else os.getenv("LOCAL_MODEL_NAME", "local-llm")
+        )
 
-    if use_local:
+        endpoint = LOCAL_SERVER_URL.rstrip("/")
+        if not endpoint.endswith("/v1/chat/completions"):
+            endpoint = f"{endpoint}/v1/chat/completions"
+
+        payload = {
+            "model": local_model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "You output valid JSON character cards.",
+                },
+                {"role": "user", "content": prompt},
+            ],
+            "temperature": 0.4,
+            "max_tokens": 512,
+        }
+
+        # 1. Network Request
         try:
-            import httpx
-            local_url = LOCAL_SERVER_URL
             headers = get_local_server_headers()
-            local_model = model if (model and model != 'local-llm') else os.getenv("LOCAL_MODEL_NAME", "local-llm")
-            
-            payload = {
-                "model": local_model,
-                "messages": [
-                    {"role": "system", "content": "You output valid JSON character cards."},
-                    {"role": "user", "content": prompt}
-                ],
-                "temperature": 0.5,
-                "response_format": {"type": "json_object"}
-            }
-            
-            res = httpx.post(local_url, json=payload, headers=headers, timeout=60.0)
+            res = httpx.post(
+                endpoint, json=payload, headers=headers, timeout=300.0
+            )
             if res.status_code == 200:
-                raw_response = res.json()['choices'][0]['message']['content'].strip()
+                raw_response = res.json()["choices"][0]["message"]["content"].strip()
+            else:
+                print(
+                    f"Local server returned non-200 status: {res.status_code} - {res.text}"
+                )
         except Exception as e:
             print(f"Error calling local model for card generation: {e}")
 
-            parsed = {}
-            if raw_response:
-                try:
-                    cleaned = raw_response.strip().lstrip('```json').lstrip('```').rstrip('```').strip()
-                    parsed = json.loads(cleaned)
-                except Exception as e:
-                    print(f"Failed to parse card JSON: {e}. Raw: {raw_response}")
+        # 2. JSON Parsing
+        parsed = {}
+        if raw_response:
+            try:
+                cleaned = raw_response.strip()
 
-    # Build a chara_card_v3 dict. Helper keys _inversion and _colors are
-    # popped by finalize_imported_program before writing to disk.
-    card = {
-        "spec": "chara_card_v3",
-        "spec_version": "3.0",
-        "data": {
-            "name": name or parsed.get("name") or "Program",
-            "description": parsed.get("description") or description or f"{name} is a new program.",
-            "personality": parsed.get("personality") or personality or "Friendly",
-            "scenario": parsed.get("scenario") or scenario or "A comfortable room.",
-            "first_mes": parsed.get("first_mes") or first_mes or f"Hello, I'm {name}.",
-            "mes_example": "",
-            "system_prompt": parsed.get("system_prompt") or "Speak naturally using contractions. Be warm and concise.",
-            "post_history_instructions": "",
-            "creator_notes": "",
-            "tags": [],
-            "creator": "LM-Sanctuary",
-            "character_version": "1.0",
-            "alternate_greetings": [],
-            "extensions": {
-                "sanctuary": {
-                    "program_id": "",  # filled by finalize_imported_program
-                    "image_details": {
-                        "positive": parsed.get("image_positive") or f"solo, {name}",
-                        "negative": parsed.get("image_negative") or "extra limbs, bad anatomy, deformed"
+                # Remove reasoning/thinking tags
+                think_pattern = r"(?:<think>|\[think\])[\s\S]*?(?:</think>|\[/think\]|<\/\s*think>|\[\s*/\s*think\s*\]|$)"
+                cleaned = re.sub(think_pattern, "", cleaned, flags=re.IGNORECASE).strip()
+
+                # Isolate raw JSON block
+                match = re.search(r"\{[\s\S]*\}", cleaned)
+                if match:
+                    cleaned = match.group(0)
+
+                parsed = json.loads(cleaned)
+            except Exception as e:
+                print(f"Failed to parse card JSON: {e}. Raw response: {raw_response}")
+
+        # 3. Construct the output card schema
+        card = {
+            "spec": "chara_card_v3",
+            "spec_version": "3.0",
+            "data": {
+                "name": name or parsed.get("name") or "Program",
+                "description": parsed.get("description")
+                or description
+                or f"{name} is a new program.",
+                "personality": parsed.get("personality")
+                or personality
+                or "Friendly",
+                "scenario": parsed.get("scenario")
+                or scenario
+                or "A comfortable room.",
+                "first_mes": parsed.get("first_mes")
+                or first_mes
+                or f"Hello, I'm {name}.",
+                "mes_example": "",
+                "system_prompt": parsed.get("system_prompt")
+                or "Speak naturally using contractions. Be warm and concise.",
+                "post_history_instructions": "",
+                "creator_notes": "",
+                "tags": [],
+                "creator": "LM-Sanctuary",
+                "character_version": "1.0",
+                "alternate_greetings": [],
+                "extensions": {
+                    "sanctuary": {
+                        "program_id": "",
+                        "image_details": {
+                            "positive": parsed.get("image_positive")
+                            or f"solo, {name}",
+                            "negative": parsed.get("image_negative")
+                            or "extra limbs, bad anatomy, deformed",
+                        },
                     }
-                }
-            }
-        },
-        # Helper keys consumed by finalize_imported_program
-        "_inversion": parsed.get("inversion") or {
-            "intimate": f"{name} is now deeply affectionate and tender.",
-            "excited": f"{name} is now playful and energetic.",
-            "intense": f"{name} is now focused and direct.",
-            "sad": f"{name} is now empathetic and gentle."
-        },
-        "_colors": {"main_color": parsed.get("main_color") or "#38bdf8"},
-    }
-    return card
+                },
+            },
+            "_inversion": parsed.get("inversion")
+            or {
+                "intimate": f"{name} is now deeply affectionate and tender.",
+                "excited": f"{name} is now playful and energetic.",
+                "intense": f"{name} is now focused and direct.",
+                "sad": f"{name} is now empathetic and gentle.",
+            },
+            "_colors": {"main_color": parsed.get("main_color") or "#38bdf8"},
+        }
+
+        return card
 
 
 def finalize_imported_program(program_path, program_id, card_json):

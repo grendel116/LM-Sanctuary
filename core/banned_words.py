@@ -115,7 +115,7 @@ Sentence: "{sentence}" [/INST]"""
         rewritten = await llm_call_func(
             prompt=prompt,
             model=target_model,
-            temperature=0.0,
+            temperature=0.4,
             max_tokens=max_tokens
         )
         if rewritten and len(rewritten.strip()) > 0:

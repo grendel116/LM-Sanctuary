@@ -11,6 +11,7 @@ import uuid
 import httpx
 from dotenv import load_dotenv
 
+from variables.settings import get_local_server_headers
 from adapters.history_adapters import LocalHistoryAdapter, OsHistoryAdapter
 from core.mood_inversion import get_directive, is_enabled, new_state, update_state
 from models.models import is_local_model
@@ -31,24 +32,6 @@ from utils.utils import (
 # Load environment configuration directly
 load_dotenv()
 LOCAL_SERVER_URL = os.environ.get("LOCAL_SERVER_URL")
-
-def get_local_server_headers():
-    headers = {"Content-Type": "application/json"}
-    api_key = os.getenv("LOCAL_SERVER_API_KEY")
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
-    return headers
-
-# Internal variables import (cleaned of removed cloud/server items)
-from variables.settings import (
-    PROGRAMS_DIR,
-)
-
-# Global State
-cancelled_sessions: set[str] = set()
-voice_call_sessions: set[str] = set()
-project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-
 
 class BaseProgramRunner:
     def __init__(self, app_name: str = "Sanctuary"):
@@ -437,22 +420,31 @@ class BaseProgramRunner:
         sys_instructions = self._get_system_instructions(session_id, inversion_directive, user_message=new_message_text)
         messages = adapter.get_openai_messages(sys_instructions, rag_context)
 
-        # Rough token estimation (~4 chars per token)
-        MAX_INPUT_TOKENS = 6500  # Reserve headroom for 8k local context
+        # Fast O(1) context trim calculation
+        MAX_INPUT_CHARS = 6500 * 4
         total_chars = sum(len(m.get("content", "")) for m in messages)
 
-        if total_chars > (MAX_INPUT_TOKENS * 4):
-            print(f"[CONTEXT TRIM] Context payload (~{total_chars // 4} tokens) exceeds local budget. Trimming older turns...", flush=True)
+        if total_chars > MAX_INPUT_CHARS:
+            print(f"[CONTEXT TRIM] Context payload exceeds local budget. Trimming older turns...", flush=True)
             system_msgs = [m for m in messages if m.get("role") == "system"]
             chat_msgs = [m for m in messages if m.get("role") != "system"]
             
-            while chat_msgs and sum(len(m.get("content", "")) for m in system_msgs + chat_msgs) > (MAX_INPUT_TOKENS * 4):
-                chat_msgs.pop(0)
-                
-            messages = system_msgs + chat_msgs
+            sys_len = sum(len(m.get("content", "")) for m in system_msgs)
+            budget_for_chat = MAX_INPUT_CHARS - sys_len
+
+            current_len = 0
+            trimmed_chat = []
+            for m in reversed(chat_msgs):
+                m_len = len(m.get("content", ""))
+                if current_len + m_len > budget_for_chat:
+                    break
+                trimmed_chat.append(m)
+                current_len += m_len
+            
+            messages = system_msgs + list(reversed(trimmed_chat))
 
         # --- STAGE 2: LOCAL PROCESSING PASS ---
-        from core.program_config import is_story_mode  # Import the story mode check
+        from core.program_config import is_story_mode
 
         temperature = self._load_temperature_setting()
         url = LOCAL_SERVER_URL
@@ -460,7 +452,7 @@ class BaseProgramRunner:
         target_model = model if (model and model != "local-llm") else os.getenv("LOCAL_MODEL_NAME")
 
         story_active = is_story_mode(session_id) if "session_id" in is_story_mode.__code__.co_varnames else is_story_mode()
-        max_tokens_limit = 1024 if story_active else 200  # ~200 tokens keeps normal mode concise
+        max_tokens_limit = 1024 if story_active else 200
 
         payload = {
             "messages": messages, 
@@ -487,7 +479,6 @@ class BaseProgramRunner:
         # --- STAGE 3: POST-PROCESSING (TOOLS & CLEANUP) ---
         bot_response_text = self._sanitize_thinking_tags(bot_response_text)
 
-        # Define wrapper before execution
         async def _llm_rewrite_wrapper(prompt: str, model: str = None, temperature: float = 0.0, **kwargs) -> str:
             rw_payload = {
                 "messages": [{"role": "user", "content": prompt}],

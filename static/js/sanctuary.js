@@ -3365,30 +3365,49 @@ async function deleteAssistant(assistantId, name) {
         "Delete Program",
         `Are you sure you want to permanently delete program <strong>${name}</strong>? This will remove all their configs, databank documents, and portraits.`,
         async () => {
+            let data;
             try {
                 const res = await fetch('/api/programs/delete', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ program_id: assistantId })
                 });
-                const data = await res.json();
-                if (data.status === 'success') {
-                    showCustomAlert("Deleted", `Program <strong>${name}</strong> has been deleted.`);
+
+                if (!res.ok) {
+                    const errData = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+                    showCustomAlert("Error", `Could not delete program: ${errData.error || res.statusText}`);
+                    return;
+                }
+
+                data = await res.json();
+            } catch (e) {
+                console.error("Error deleting assistant request:", e);
+                showCustomAlert("Error", "Could not connect to server to delete program.");
+                return;
+            }
+
+            // Post-deletion UI refresh isolated from the main delete catch block
+            if (data && data.status === 'success') {
+                showCustomAlert("Deleted", `Program <strong>${name}</strong> has been deleted.`);
+                
+                // Allow backend state reload to settle
+                await new Promise(resolve => setTimeout(resolve, 300));
+
+                try {
                     if (data.switched_to === 'sebile' || activeProgram === assistantId) {
                         selectAssistant('sebile');
                     } else {
                         const listRes = await fetch('/api/programs');
-                        const listData = await listRes.json();
-                        if (listData.programs) {
-                            renderProgramsList(listData.programs, listData.active);
+                        if (listRes.ok) {
+                            const listData = await listRes.json();
+                            if (listData.programs) {
+                                renderProgramsList(listData.programs, listData.active);
+                            }
                         }
                     }
-                } else {
-                    showCustomAlert("Error", `Could not delete program: ${data.error}`);
+                } catch (refreshErr) {
+                    console.error("Error refreshing program list after delete:", refreshErr);
                 }
-            } catch (e) {
-                console.error("Error deleting assistant:", e);
-                showCustomAlert("Error", "Could not connect to server to delete program.");
             }
         }
     );

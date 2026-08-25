@@ -114,7 +114,7 @@ def load_static_instructions() -> str:
     # Full skill instructions are vector-retrieved per turn in utils.py
     try:
         from core.skill_retriever import get_toolbelt_block
-        story_active = is_story_mode()
+        story_active = is_story_mode(active_program)
         toolbelt = get_toolbelt_block(story_active)
         if toolbelt:
             instruction_content += "\n\n" + toolbelt
@@ -191,10 +191,10 @@ def load_user_instructions() -> str:
         )
         return f"\n\n# USER PROFILE & RELATIONSHIP CONTEXT\n{fallback_msg}"
 
-def is_story_mode() -> bool:
-    """Checks if story mode (Story Mode) is enabled in global project settings."""
-    from runners.program import _load_settings
-    return _load_settings().get("story_mode", False)
+def is_story_mode(program_name: str) -> bool:
+    """Checks if story mode is enabled for a specific program."""
+    card = _load_card_data(program_name)
+    return card.get("story_mode", False)
 
 inversion_directive = ""
 
@@ -204,10 +204,12 @@ def set_inversion_directive(directive: str):
 
 def get_compiled_instructions() -> str:
     """Merges static identity profiles, dynamic temporal/runtime contexts, and user relationship settings."""
+    from runners.program import get_active_program
     global inversion_directive
     base = replace_placeholders(load_static_instructions() + load_user_instructions())
     
-    story_mode = is_story_mode()
+    active_program = get_active_program()
+    story_mode = is_story_mode(active_program)
 
     if story_mode:
         global_formatting = (
@@ -215,7 +217,8 @@ def get_compiled_instructions() -> str:
             "- Use separate lines and clear paragraphs for narration and dialogue.\n"
             "- Narration: Use *italics* and present tense to describe actions, setting details, and other characters.\n"
             "- Dialogue: Use plain text without quotation marks. Use **bold** for emphasis.\n"
-            "- NEVER use rhetorical antithesis or contrast phrasing (e.g., 'it's not X, it's Y').\n"
+            "- State claims directly and affirmatively.\n"
+            "- Express ideas as single assertions without contrast.\n"
             "- Style: Use short words and precise phrasing. Write with linear progression.\n"
             "- Plot: Write prose. Introduce narrative conflict.\n"
         )
@@ -226,13 +229,13 @@ def get_compiled_instructions() -> str:
             "- Narration: Use *italics*, first person, and present tense for actions, expressions, and setting details.\n"
             "- Dialogue: Use plain text without quotation marks. Use **bold** for emphasis.\n"
             "- Style: Use short words and precise phrasing with dialectical reasoning.\n"
-            "- NEVER use rhetorical antithesis or contrast phrasing (e.g., 'it's not X, it's Y').\n"
+            "- State claims directly and affirmatively.\n"
+            "- Express ideas as single assertions without contrast.\n"
             "- Be succinct, with short words and simple sentences.\n"
             "- Do not patronize or automatically validate.\n"
             "- Do not use generic platitudes.\n"
             "- Do not ask clinical questions.\n"
             "- Do not use flowery language.\n"
-
         )
         
     base += global_formatting
