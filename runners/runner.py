@@ -10,6 +10,11 @@ import uuid
 
 import httpx
 from dotenv import load_dotenv
+from pathlib import Path
+
+project_root = Path(__file__).resolve().parent.parent
+PROGRAMS_DIR = project_root / "core" / "programs"
+
 
 from variables.settings import get_local_server_headers
 from adapters.history_adapters import LocalHistoryAdapter, OsHistoryAdapter
@@ -684,10 +689,10 @@ class BaseProgramRunner:
 
     async def append_message_to_session(self, session_id: str, role: str, text: str) -> bool:
         """Appends a new raw message to the session history."""
-        if session_id not in self.sessions_history:
-            self.sessions_history[session_id] = []
-
         with self._lock:
+            if session_id not in self.sessions_history:
+                self.sessions_history[session_id] = []
+
             msg = {
                 "id": f"msg_{uuid.uuid4().hex}",
                 "role": role,
@@ -696,7 +701,7 @@ class BaseProgramRunner:
             }
             self.sessions_history[session_id].append(msg)
             self._save_session_to_disk(session_id)
-            return True()
+            return True
 
     async def append_voice_call(self, session_id: str, transcript: str, timestamp: float = None, start_time: float = None) -> bool:
         """Appends a voice call transcript entry to the session history."""
@@ -1078,6 +1083,8 @@ class OpenSourceRunner(BaseProgramRunner):
             return os.path.join(self.sessions_dir, f"{safe_id}.json")
 
         def _save_session_to_disk(self, session_id: str):
+            from pathlib import Path
+            project_root = Path(__file__).resolve().parent.parent
             with self._lock:
                 try:
                     # Retrieve memory state cleanly without legacy keys
@@ -1121,9 +1128,8 @@ class OpenSourceRunner(BaseProgramRunner):
 
             has_first_mes = any(
                 msg.get("id", "").startswith("first_mes")
-                or (msg.get("role") == "program" and msg == history[0])
                 for msg in history
-            )
+            ) or (bool(history) and history[0].get("role") == "program")
 
             if not has_first_mes:
                 try:
@@ -1232,7 +1238,9 @@ class OpenSourceRunner(BaseProgramRunner):
                 "deletable": True,
             }
 
-        async def get_history(self, session_id: str) -> list:
+        async def get_history(self, session_id: str):
+            from pathlib import Path
+            project_root = Path(__file__).resolve().parent.parent
             with self._lock:
                 self._load_session_from_disk(session_id)
                 self._ensure_first_message(session_id)

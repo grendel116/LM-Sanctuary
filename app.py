@@ -11,6 +11,9 @@ import httpx
 
 from adapters import comfy_manager
 from variables.settings import LOCAL_SERVER_URL, get_local_server_headers
+from pathlib import Path
+
+project_root = Path(__file__).resolve().parent.parent
 
 # Automate copying of default .env configuration if it doesn't exist
 base_dir = os.path.dirname(os.path.abspath(__file__))
@@ -677,12 +680,24 @@ You must return a valid JSON object matching the following schema:
 def history():
     session_id = request.args.get('session_id', 'default')
     try:
+        # Seed missing initial greeting before returning history
+        runner._ensure_first_message(session_id)
+
         async def fetch_history_data():
             hist = await runner.get_history(session_id)
             inv = await runner._get_inversion_mode(session_id, history=hist)
             return hist, inv
 
-        chat_history, inversion_mode = asyncio.run(fetch_history_data())
+        # Safe event loop resolution
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop and loop.is_running():
+            chat_history, inversion_mode = loop.run_until_complete(fetch_history_data())
+        else:
+            chat_history, inversion_mode = asyncio.run(fetch_history_data())
         
         state_info = extract_mood(chat_history)
         
