@@ -101,7 +101,7 @@ def match_journals(user_message: str, program_id: str = None) -> list:
     if matched:
         return [item[1] for item in matched[:3]]
     
-    # Semantic fallback: vector similarity when keyword matching finds nothing
+    # Semantic return: vector similarity when keyword matching finds nothing
     try:
         import numpy as np
         from core.skills.vectorized_databank.databank import get_embedding_model

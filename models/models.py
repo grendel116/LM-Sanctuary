@@ -5,7 +5,7 @@ import time
 
 # Ensure the parent directory is in sys.path so we can import variables package
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from variables.settings import LOCAL_MODELS_URL, DEFAULT_LOCAL_MODEL
+from variables.settings import LOCAL_MODELS_URL
 
 _local_models_cache = None
 _last_fetch_time = 0.0

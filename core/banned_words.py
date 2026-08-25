@@ -11,9 +11,9 @@ from variables.settings import BANNED_WORDS_FILE
 
 DEFAULT_BIAS_WEIGHT = -10.0
 
+# Strict pattern for 'not X, [it's] Y' or 'not A; B' contrast structures
 ANTITHESIS_PATTERN = re.compile(
-    r"\b(?:it's|that's|this\s+is|this\s+isn't|it\s+isn't)\s+(?:just\s+)?not\b"
-    r"|\b(?:is|are|was|were)n't\s+(?:just\s+)?[^;,.!?]+[;,]?\s*(?:it's|it\s+is|this\s+is)\b"
+    r"\b(?:it's|that's|this\s+is)\s+not\s+[^;,.!?]+[;,]?\s*(?:it's|it\s+is|you're|there's)\b"
     r"|\bnot\s+a\s+[^;,.!?]+[;,]\s*(?:it's|it\s+is|this\s+is)\b",
     re.IGNORECASE
 )
@@ -75,15 +75,6 @@ def generate_llama_cli_args(gguf_path: str, bias_weight: float = None) -> list[s
         sign_str = "" if bias_weight < 0 else "+"
         cli_args.extend(["--logit-bias", f"{token_id}{sign_str}{bias_weight}"])
     return cli_args
-
-import re
-
-# Strict pattern for 'not X, [it's] Y' or 'not A; B' contrast structures
-ANTITHESIS_PATTERN = re.compile(
-    r"\b(?:it's|that's|this\s+is)\s+not\s+[^;,.!?]+[;,]?\s*(?:it's|it\s+is|you're|there's)\b"
-    r"|\bnot\s+a\s+[^;,.!?]+[;,]\s*(?:it's|it\s+is|this\s+is)\b",
-    re.IGNORECASE
-)
 
 async def _rewrite_single_sentence(sentence: str, llm_call_func, target_model: str, banned_regex) -> str:
     """Evaluates and rewrites individual sentences while retaining Markdown formatting."""

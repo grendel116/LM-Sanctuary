@@ -6,7 +6,7 @@ import os
 import re
 import requests
 
-from variables.settings import LOCAL_SERVER_URL, get_local_server_headers
+from variables.settings import get_local_server_headers
 
 DEFAULT_MOOD_NAMES = (
     "intimate",

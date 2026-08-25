@@ -16,41 +16,7 @@ from utils.utils import (
 )
 
 
-def _get_base64_image_url(image_source: str | None) -> str | None:
-    """Resolves an image file path or URL into a base64 data URL."""
-    if not image_source:
-        return None
 
-    src_str = str(image_source)
-    if src_str.startswith("data:"):
-        return src_str
-
-    project_root = Path(__file__).resolve().parent.parent
-
-    if src_str.startswith("/images/"):
-        rel_path = src_str.removeprefix("/images/")
-        from runners.program import get_active_program
-        active_program = get_active_program()
-        local_path = project_root / "core" / "programs" / active_program / rel_path
-    else:
-        local_path = Path(src_str)
-        if not local_path.is_absolute():
-            local_path = project_root / local_path
-
-    local_path = local_path.resolve()
-
-    if not local_path.is_file():
-        print(f"[IMAGE RESOLVE] File not found: {local_path}")
-        return None
-
-    try:
-        mime_type, _ = mimetypes.guess_type(local_path)
-        mime_type = mime_type or "image/png"
-        b64_data = base64.b64encode(local_path.read_bytes()).decode("utf-8")
-        return f"data:{mime_type};base64,{b64_data}"
-    except Exception as e:
-        print(f"[IMAGE RESOLVE ERROR] Failed to encode {local_path}: {e}")
-        return None
 
 
 class LocalHistoryAdapter(ABC):

@@ -1,17 +1,9 @@
 import datetime
-import logging
 import os
 import re
 import shutil
 import sys
 from runners.program import get_active_program
-from tools.tools import (
-    read_file, write_file, replace_in_file, run_shell_command, 
-    get_workspace_structure, search_codebase, read_webpage, google_search,
-    web_search, apply_comfy_workflow, generate_local_image,
-    replace_file_content, multi_replace_file_content, run_command_async,
-    manage_task, wait_task
-)
 
 # Ensure the parent directory is in sys.path so we can import variables package
 PARENT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -100,9 +92,6 @@ def load_static_instructions() -> str:
     """Reads the active program's card and compiles it into a system prompt.
     Also appends all modular skill instructions.
     """
-    from runners.program import get_active_program
-
-    base_dir = os.path.dirname(os.path.abspath(__file__))
     active_program = get_active_program()
 
     card = _load_card_data(active_program)

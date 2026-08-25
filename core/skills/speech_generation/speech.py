@@ -2,7 +2,6 @@ import os
 import re
 import requests
 import base64
-import hashlib
 from dotenv import load_dotenv
 
 # Ensure environment is loaded
