@@ -93,6 +93,26 @@ class BaseProgramRunner:
 
                             if r.status_code != 200:
                                 await r.aread()
+                                if r.status_code == 500 and b"image input is not supported" in r.content:
+                                    print("[Local LLM] Vision not supported by server. Converting payload to Image Scan tags and retrying...", flush=True)
+                                    from utils.utils import scan_and_tag_image
+                                    new_msgs = []
+                                    for m in payload.get("messages", []):
+                                        c = m.get("content")
+                                        if isinstance(c, list):
+                                            t_parts = []
+                                            for item in c:
+                                                if item.get("type") == "text":
+                                                    t_parts.append(item.get("text", ""))
+                                                elif item.get("type") == "image_url":
+                                                    t_parts.append(scan_and_tag_image(item.get("image_url", {}).get("url")))
+                                            m_copy = dict(m)
+                                            m_copy["content"] = "\n\n".join(t_parts).strip()
+                                            new_msgs.append(m_copy)
+                                        else:
+                                            new_msgs.append(m)
+                                    payload["messages"] = new_msgs
+                                    continue
                                 return httpx.Response(status_code=r.status_code, headers=r.headers, content=r.content, request=r.request)
 
                             content_parts = []
@@ -126,6 +146,27 @@ class BaseProgramRunner:
                             print(f"[Local LLM] Server is loading model (503). Retrying in {retry_interval}s...", flush=True)
                             await asyncio.sleep(retry_interval)
                             continue
+
+                    if response.status_code == 500 and "image input is not supported" in response.text:
+                        print("[Local LLM] Vision not supported by server. Converting payload to Image Scan tags and retrying...", flush=True)
+                        from utils.utils import scan_and_tag_image
+                        new_msgs = []
+                        for m in payload.get("messages", []):
+                            c = m.get("content")
+                            if isinstance(c, list):
+                                t_parts = []
+                                for item in c:
+                                    if item.get("type") == "text":
+                                        t_parts.append(item.get("text", ""))
+                                    elif item.get("type") == "image_url":
+                                        t_parts.append(scan_and_tag_image(item.get("image_url", {}).get("url")))
+                                m_copy = dict(m)
+                                m_copy["content"] = "\n\n".join(t_parts).strip()
+                                new_msgs.append(m_copy)
+                            else:
+                                new_msgs.append(m)
+                        payload["messages"] = new_msgs
+                        continue
 
                     return response
 
@@ -1340,9 +1381,7 @@ class OpenSourceRunner(BaseProgramRunner):
                         os.path.join(project_root, "core", "programs", get_active_program(), rel_path)
                     )
                     if os.path.exists(local_file_path):
-                        mime_type, _ = mimetypes.guess_type(local_file_path)
-                        if mime_type and mime_type.startswith("image/"):
-                            file_path_resolved = local_file_path
+                        file_path_resolved = local_file_path
                 except Exception as e:
                     print(f"Error handling media_path in OpenSourceRunner: {e}")
 

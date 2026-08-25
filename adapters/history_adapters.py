@@ -239,19 +239,21 @@ class OsHistoryAdapter(LocalHistoryAdapter):
                     if self.image_data and self.image_mime
                     else self.file_path_resolved or msg.get("image_url")
                 )
-                b64_url = _get_base64_image_url(img_src)
-                if b64_url:
-                    raw_messages.append({
-                        "role": role,
-                        "content": [
-                            {"type": "text", "text": content_text},
-                            {"type": "image_url", "image_url": {"url": b64_url}},
-                        ],
-                    })
-                    continue
+                from utils.utils import scan_and_tag_image, extract_uploaded_file_content
+                scan_info = scan_and_tag_image(img_src)
+                doc_info = extract_uploaded_file_content(self.file_path_resolved) if self.file_path_resolved else ""
+
+                extra_parts = [p for p in (doc_info, scan_info) if p]
+                if extra_parts:
+                    content_text = f"{content_text}\n\n" + "\n\n".join(extra_parts)
+
+                raw_messages.append({"role": role, "content": content_text.strip()})
+                continue
 
             if msg.get("image_url"):
-                content_text = f"{content_text} (image: [Attached Image])".strip()
+                from utils.utils import scan_and_tag_image
+                scan_info = scan_and_tag_image(msg.get("image_url"))
+                content_text = f"{content_text}\n\n{scan_info}".strip()
             raw_messages.append({"role": role, "content": content_text})
 
         directive = _STORY_MODE_DIRECTIVE_PROMPT if is_story_mode() else _MAIN_DIRECTIVE_PROMPT

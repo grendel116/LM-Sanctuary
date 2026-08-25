@@ -312,3 +312,160 @@ def _convert_json_tool_calls_to_tags(text: str) -> str:
             return match.group(0)
 
     return json_block_pattern.sub(replace_match, text)
+
+
+def scan_and_tag_image(image_source: str | bytes | Path) -> str:
+    """Scans an image via Pillow to extract format, dimensions, color profile, and embedded metadata/tags."""
+    if not image_source:
+        return "[Image Scan: No image provided]"
+
+    import io
+    import base64
+    from pathlib import Path
+    from PIL import Image, ImageStat
+
+    filename = "Attached Image"
+    raw_bytes = None
+
+    try:
+        if isinstance(image_source, bytes):
+            raw_bytes = image_source
+        elif isinstance(image_source, (str, Path)):
+            src_str = str(image_source).strip()
+            if src_str.startswith("data:"):
+                # Handle base64 data URL
+                header, _, b64_data = src_str.partition(",")
+                raw_bytes = base64.b64decode(b64_data)
+                if "image/" in header:
+                    ext_part = header.split(";")[0].replace("data:image/", "")
+                    filename = f"uploaded_image.{ext_part}"
+            else:
+                p = Path(src_str)
+                if p.is_file():
+                    filename = p.name
+                    raw_bytes = p.read_bytes()
+                elif os.path.exists(src_str):
+                    p = Path(src_str)
+                    filename = p.name
+                    raw_bytes = p.read_bytes()
+
+        if not raw_bytes:
+            return f"[Image Scan: Could not locate image source '{image_source}']"
+
+        size_kb = round(len(raw_bytes) / 1024, 1)
+
+        with Image.open(io.BytesIO(raw_bytes)) as img:
+            img_format = img.format or "Unknown Format"
+            width, height = img.size
+            mode = img.mode
+
+            # Aspect ratio description
+            ratio = width / height if height > 0 else 1.0
+            if abs(ratio - 1.0) < 0.05:
+                aspect_desc = "1:1 Square"
+            elif ratio > 1.4:
+                aspect_desc = f"{width}:{height} Landscape"
+            elif ratio < 0.7:
+                aspect_desc = f"{width}:{height} Portrait"
+            else:
+                aspect_desc = f"{width}:{height}"
+
+            # Color profile & Brightness analysis
+            rgb_img = img.convert("RGB")
+            stat = ImageStat.Stat(rgb_img)
+            avg_r, avg_g, avg_b = stat.mean[:3]
+            brightness = round((avg_r * 0.299 + avg_g * 0.587 + avg_b * 0.114) / 2.55, 1)
+
+            # Color tone classification
+            color_tones = []
+            if brightness < 20:
+                color_tones.append("Very Dark / Shadows")
+            elif brightness > 80:
+                color_tones.append("Bright / High Key")
+
+            if avg_r > avg_g + 20 and avg_r > avg_b + 20:
+                color_tones.append("Warm Red / Orange")
+            elif avg_g > avg_r + 15 and avg_g > avg_b + 15:
+                color_tones.append("Green")
+            elif avg_b > avg_r + 15 and avg_b > avg_g + 15:
+                color_tones.append("Cool Blue / Cyan")
+            elif max(avg_r, avg_g, avg_b) - min(avg_r, avg_g, avg_b) < 15:
+                color_tones.append("Monochrome / Neutral Gray")
+            else:
+                color_tones.append("Balanced Color Palette")
+
+            tones_str = ", ".join(color_tones)
+
+            # Embedded PNG / EXIF metadata scanning
+            meta_info = []
+            if hasattr(img, "info") and isinstance(img.info, dict):
+                for key in ("parameters", "description", "title", "Software", "Comment", "prompt"):
+                    if val := img.info.get(key):
+                        if isinstance(val, str) and val.strip():
+                            clean_val = val.strip()[:300]
+                            meta_info.append(f"{key}: {clean_val}")
+
+            meta_str = ("\n- Embedded Metadata/Tags: " + " | ".join(meta_info)) if meta_info else ""
+
+            return (
+                f"[Image Scan & Tag Analysis]\n"
+                f"- File: {filename}\n"
+                f"- Format & Resolution: {img_format} ({mode}, {width}x{height} px, {aspect_desc}, {size_kb} KB)\n"
+                f"- Color Profile & Lighting: Dominant Tones ({tones_str}), Avg Brightness ({brightness}%){meta_str}"
+            )
+    except Exception as e:
+        return f"[Image Scan & Tag Analysis]\n- File: {filename}\n- Scan Status: Basic image file ({size_kb if 'size_kb' in locals() else 'N/A'} KB, parsing note: {e})"
+
+
+def extract_uploaded_file_content(file_path: str | Path, max_chars: int = 8000) -> str:
+    """Extracts text content or document summary from uploaded files (PDFs, text, code, CSVs)."""
+    if not file_path:
+        return ""
+
+    p = Path(file_path)
+    if not p.is_file():
+        return ""
+
+    filename = p.name
+    ext = p.suffix.lower()
+    file_size_kb = round(p.stat().st_size / 1024, 1)
+
+    # PDF Parsing
+    if ext == ".pdf":
+        try:
+            import pypdf
+            reader = pypdf.PdfReader(str(p))
+            num_pages = len(reader.pages)
+            extracted_pages = []
+            total_chars = 0
+            for idx, page in enumerate(reader.pages):
+                txt = page.extract_text() or ""
+                if txt.strip():
+                    extracted_pages.append(f"--- Page {idx + 1} ---\n{txt.strip()}")
+                    total_chars += len(txt)
+                if total_chars >= max_chars:
+                    break
+            content = "\n\n".join(extracted_pages)[:max_chars]
+            return (
+                f"[Attached Document: {filename} (PDF, {num_pages} pages, {file_size_kb} KB)]\n"
+                f"--- DOCUMENT CONTENT START ---\n{content}\n--- DOCUMENT CONTENT END ---"
+            )
+        except Exception as e:
+            return f"[Attached Document: {filename} (PDF, {file_size_kb} KB - PDF extraction note: {e})]"
+
+    # Text / Code / CSV / JSON / Markdown
+    text_extensions = {".txt", ".md", ".py", ".json", ".csv", ".log", ".html", ".css", ".js", ".ts", ".xml", ".yaml", ".yml", ".c", ".cpp", ".h", ".sh", ".bat", ".ini", ".cfg"}
+    if ext in text_extensions or ext.strip() == "":
+        try:
+            text_content = p.read_text(encoding="utf-8", errors="replace").strip()
+            if text_content:
+                snippet = text_content[:max_chars]
+                truncated_note = f"\n[... Truncated after {max_chars} chars ...]" if len(text_content) > max_chars else ""
+                return (
+                    f"[Attached File: {filename} ({ext.upper().lstrip('.')} File, {file_size_kb} KB)]\n"
+                    f"--- FILE CONTENT START ---\n{snippet}{truncated_note}\n--- FILE CONTENT END ---"
+                )
+        except Exception as e:
+            return f"[Attached File: {filename} ({file_size_kb} KB - Read note: {e})]"
+
+    return f"[Attached File: {filename} ({ext.upper().lstrip('.')} Binary File, {file_size_kb} KB)]"
