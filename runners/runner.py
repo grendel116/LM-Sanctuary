@@ -556,6 +556,8 @@ class BaseProgramRunner:
 
     async def get_history(self, session_id: str) -> list:
         """Returns the message history for a given session."""
+        if session_id not in self.sessions_history:
+            self._load_session_from_disk(session_id)
         return self.sessions_history.get(session_id, [])
     
     async def run_async(self, session_id: str, new_message_text: str, image_data: str = None, image_mime: str = None, model: str = None, media_path: str = None, msg_id: str = None) -> tuple:
@@ -736,7 +738,7 @@ class BaseProgramRunner:
             else:
                 return False
 
-            self._save_session_to_disk(dest_id)
+            self._save_session_to_disk(session_id)
             return True
 
     async def delete_system_memory(self, session_id: str, timestamp: float) -> bool:
@@ -821,11 +823,15 @@ class BaseProgramRunner:
     def get_inversion_state(self, session_id: str) -> dict:
         if not self._inversion_enabled():
             return new_state()
+        if session_id not in self.sessions_history:
+            self._load_session_from_disk(session_id)
         return copy.deepcopy(self.sessions_inversion_state.get(session_id, new_state()))
 
     async def _get_inversion_mode(self, session_id: str, history: list = None) -> str:
         if not self._inversion_enabled():
             return ""
+        if session_id not in self.sessions_history:
+            self._load_session_from_disk(session_id)
         state = self.sessions_inversion_state.setdefault(session_id, new_state())
         return state.get("active_inversion", "")
 
@@ -1087,17 +1093,20 @@ class OpenSourceRunner(BaseProgramRunner):
             return os.path.join(self.sessions_dir, f"{safe_id}.json")
 
         def _save_session_to_disk(self, session_id: str):
-            from pathlib import Path
-            project_root = Path(__file__).resolve().parent.parent
             with self._lock:
                 try:
-                    # Retrieve memory state cleanly without legacy keys
                     memory_meta = self._get_memory_meta(session_id)
-                    memory_meta.pop("unsummarized_buffer", None)  # Safety cleanup for old state dicts
+                    memory_meta.pop("unsummarized_buffer", None)
+
+                    # Ensure default factory or imported default function is used
+                    inversion_state = self.sessions_inversion_state.get(
+                        session_id, 
+                        self.new_state() if hasattr(self, "new_state") else {}
+                    )
 
                     data = {
                         "messages": self.sessions_history.get(session_id, []),
-                        "inversion_state": self.sessions_inversion_state.get(session_id, new_state()),
+                        "inversion_state": inversion_state,
                         "memory_state": memory_meta,
                     }
                     with open(self._get_session_path(session_id), "w", encoding="utf-8") as f:
@@ -1128,6 +1137,8 @@ class OpenSourceRunner(BaseProgramRunner):
                 print(f"Error loading session {session_id} from disk: {e}")
 
         def _ensure_first_message(self, session_id: str):
+            if session_id not in self.sessions_history:
+                self._load_session_from_disk(session_id)
             history = self.sessions_history.setdefault(session_id, [])
 
             has_first_mes = any(

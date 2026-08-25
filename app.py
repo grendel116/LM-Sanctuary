@@ -528,6 +528,39 @@ def get_image_prompt():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
+@app.route("/v1/chat/completions", methods=["POST"])
+@app.route("/chat/completions", methods=["POST"])
+def open_ai_chat_completions():
+    data = request.get_json(force=True) or {}
+    messages = data.get("messages", [])
+    
+    user_prompt = messages[-1].get("content", "") if messages else ""
+    session_id = data.get("user") or "vscode_session"
+
+    try:
+        response_text, tool_calls, user_msg_id, program_msg_id = asyncio.run(
+            runner.run_async(
+                session_id=session_id,
+                new_message_text=user_prompt
+            )
+        )
+    except Exception as e:
+        return jsonify({"error": {"message": str(e), "type": "server_error"}}), 500
+
+    return jsonify({
+        "id": f"chatcmpl-{program_msg_id or 'vscode'}",
+        "object": "chat.completion",
+        "created": 1700000000,
+        "model": data.get("model", "lm-sanctuary"),
+        "choices": [{
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": response_text
+            },
+            "finish_reason": "stop"
+        }]
+    })
 
 @app.route('/api/proactive_action', methods=['POST'])
 @requires_auth
