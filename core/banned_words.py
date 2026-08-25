@@ -62,7 +62,7 @@ def generate_llama_cli_args(gguf_path: str, bias_weight: float = None) -> list[s
                 continue
             variants = [clean_word, f" {clean_word}", clean_word.capitalize(), f" {clean_word.capitalize()}"]
             for variant in variants:
-                ids = llm.tokenize(variant.encode("utf-8"), add_special=False)
+                ids = llm.tokenize(variant.encode("utf-8"), add_bos=False)
                 for t_id in ids:
                     token_ids.add(int(t_id))
         del llm

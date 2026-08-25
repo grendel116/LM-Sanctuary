@@ -4,6 +4,7 @@ import os
 import re
 import shutil
 import sys
+from runners.program import get_active_program
 from tools.tools import (
     read_file, write_file, replace_in_file, run_shell_command, 
     get_workspace_structure, search_codebase, read_webpage, google_search,
@@ -191,8 +192,10 @@ def load_user_instructions() -> str:
         )
         return f"\n\n# USER PROFILE & RELATIONSHIP CONTEXT\n{fallback_msg}"
 
-def is_story_mode(program_name: str) -> bool:
+def is_story_mode(program_name: str = None) -> bool:
     """Checks if story mode is enabled for a specific program."""
+    if program_name is None:
+        program_name = get_active_program()
     card = _load_card_data(program_name)
     return card.get("story_mode", False)
 

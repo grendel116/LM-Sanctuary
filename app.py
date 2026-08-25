@@ -8,33 +8,32 @@ import traceback
 import threading
 import uuid
 import httpx
-
-from adapters import comfy_manager
-from variables.settings import LOCAL_SERVER_URL, get_local_server_headers
+import asyncio
 from pathlib import Path
+from functools import wraps
+from flask import Flask, render_template, request, jsonify, send_file, send_from_directory, Response, make_response
+from dotenv import load_dotenv
 
-project_root = Path(__file__).resolve().parent.parent
+# 1. Setup paths and load environment BEFORE importing application code
+base_dir = Path(__file__).resolve().parent
+project_root = base_dir.parent
+env_path = base_dir / '.env'
 
-# Automate copying of default .env configuration if it doesn't exist
-base_dir = os.path.dirname(os.path.abspath(__file__))
-env_path = os.path.join(base_dir, '.env')
-if not os.path.exists(env_path):
-    example_path = os.path.join(base_dir, '.env.example')
-    if os.path.exists(example_path):
+if not env_path.exists():
+    example_path = base_dir / '.env.example'
+    if example_path.exists():
         try:
             shutil.copy(example_path, env_path)
             print(f">>> Automatically copied {example_path} to {env_path}")
         except Exception as e:
             print(f"Error copying default .env configuration: {e}")
 
-from flask import Flask, render_template, request, jsonify, send_file, send_from_directory, Response, make_response
-import asyncio
-from functools import wraps
-from runners.runner import OpenSourceRunner
+load_dotenv(dotenv_path=env_path, override=True)
 
-# Load environment variables
-from dotenv import load_dotenv
-load_dotenv(override=True)
+# 2. Application imports (runs after environment variables are loaded)
+from adapters import comfy_manager
+from runners.runner import cancelled_sessions, voice_call_sessions, OpenSourceRunner
+from variables.settings import LOCAL_SERVER_URL, get_local_server_headers
 
 app = Flask(__name__)
 
@@ -2629,6 +2628,7 @@ def get_program_profile():
 def save_program_profile():
     try:
         from runners.program import get_active_program, set_tts_voice_for_program, _load_settings, _save_settings
+        from core.program_config import compile_instructions_from_card
         from variables.settings import PROGRAMS_DIR
         import json
 
@@ -2673,7 +2673,15 @@ def save_program_profile():
         with open(json_path, 'w', encoding='utf-8') as f:
             json.dump(card_to_write, f, indent=2, ensure_ascii=False)
 
-        reload_program_state()
+        # Hot-swap base instructions in-place if active program was edited
+        if program_id == get_active_program():
+            card_data = card_to_write.get('data', card_to_write)
+            new_instructions = compile_instructions_from_card(card_data)
+            
+            # Hot-swap without clearing runner.sessions_history
+            if hasattr(app, "runner") and app.runner:
+                app.runner.system_instructions = new_instructions
+
         return jsonify({'status': 'success'})
     except Exception as e:
         traceback.print_exc()

@@ -7,15 +7,19 @@ import re
 import threading
 import time
 import uuid
+from pathlib import Path
+
+# --- DEFINE GLOBALS FIRST BEFORE LOCAL IMPORTS ---
+cancelled_sessions = set()
+voice_call_sessions = set()
 
 import httpx
 from dotenv import load_dotenv
-from pathlib import Path
 
 project_root = Path(__file__).resolve().parent.parent
 PROGRAMS_DIR = project_root / "core" / "programs"
 
-
+# Local imports follow below...
 from variables.settings import get_local_server_headers
 from adapters.history_adapters import LocalHistoryAdapter, OsHistoryAdapter
 from core.mood_inversion import get_directive, is_enabled, new_state, update_state
@@ -291,10 +295,10 @@ class BaseProgramRunner:
         cleaned = re.sub(pattern, "", text, flags=re.IGNORECASE)
         return re.sub(r"<\|channel\|>|<channel\|>", "", cleaned, flags=re.IGNORECASE).strip()
 
-    def _filter_story_mode_matches(self, matches: list, text: str) -> tuple[list, str]:
+    def _filter_story_mode_matches(self, matches: list, text: str, program_name: str) -> tuple[list, str]:
         from core.program_config import is_story_mode
 
-        if not matches or not is_story_mode():
+        if not matches or not is_story_mode(program_name):
             return matches, text
 
         story_allowed = {
@@ -506,7 +510,7 @@ class BaseProgramRunner:
         )
                 
         matches = list(re.finditer(r"\[(\w+)\(([\s\S]*?)\)\]", bot_response_text))
-        matches, bot_response_text = self._filter_story_mode_matches(matches, bot_response_text)
+        matches, bot_response_text = self._filter_story_mode_matches(matches, bot_response_text, session_id)
 
         tool_calls = []
         if matches:
@@ -1003,7 +1007,7 @@ class BaseProgramRunner:
 
         instructions = self._inject_system_memories(instructions, session_id)
 
-        if not is_voice and user_message and not is_story_mode():
+        if not is_voice and user_message and not is_story_mode(program_name):
             if re.search(r'https?://[^\s>)]+', user_message):
                 instructions += (
                     "\n\n# PASTED LINK DIRECTIVE (MANDATORY)\n"
