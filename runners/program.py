@@ -7,25 +7,37 @@ PARENT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PARENT_DIR not in sys.path:
     sys.path.insert(0, PARENT_DIR)
 
+_settings_cache: dict | None = None
+_settings_mtime: float = 0.0
+
 def _get_settings_path() -> str:
     from variables.settings import VARIABLES_DIR
     return os.path.normpath(os.path.join(VARIABLES_DIR, "project_settings.json"))
 
 def _load_settings() -> dict:
+    global _settings_cache, _settings_mtime
     path = _get_settings_path()
     if os.path.exists(path):
         try:
+            mtime = os.path.getmtime(path)
+            if _settings_cache is not None and mtime == _settings_mtime:
+                return _settings_cache
             with open(path, "r", encoding="utf-8") as f:
-                return json.load(f)
+                _settings_cache = json.load(f)
+                _settings_mtime = mtime
+                return _settings_cache
         except Exception as e:
             print(f"Error loading project settings: {e}")
     return {}
 
 def _save_settings(settings: dict):
+    global _settings_cache, _settings_mtime
     path = _get_settings_path()
     try:
         with open(path, "w", encoding="utf-8") as f:
             json.dump(settings, f, indent=2, ensure_ascii=False)
+        _settings_cache = settings
+        _settings_mtime = os.path.getmtime(path)
     except Exception as e:
         print(f"Error saving project settings: {e}")
 

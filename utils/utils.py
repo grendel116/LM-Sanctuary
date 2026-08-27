@@ -52,6 +52,13 @@ THINK_TAG_PATTERN = re.compile(
     r'(?:</think>|\[/think\]|</thought>|\[/thought\]|<\|/thought\|>|<\|channel\|>|<channel\|>|<\/\s*think>|\[\s*/\s*think\s*\]|$)',
     re.IGNORECASE
 )
+CHANNEL_TAG_RE = re.compile(r'<\|channel\|>|<channel\|>', re.IGNORECASE)
+SINGLE_ASTERISK_RE = re.compile(r'(?<!\*)\*(?!\*)([\s\S]*?)(?<!\*)\*(?!\*)')
+STANDALONE_ASTERISK_RE = re.compile(r'(?<!\*)\*(?!\*)')
+MULTI_NEWLINE_RE = re.compile(r'\n\s*\n+')
+MULTI_SPACE_RE = re.compile(r' +')
+JSON_BLOCK_RE = re.compile(r'```(?:json)?\s*(\{[\s\S]*?\})\s*```|(\{[\s\S]*?\})', re.IGNORECASE)
+TOOL_ARG_RE = re.compile(r'(\w+)\s*=\s*(?:("""|\'\'\'|["\']))([\s\S]*?)\2', re.DOTALL)
 
 
 def _run_async_in_background_thread(coro):
@@ -163,9 +170,7 @@ def _parse_emulated_tool_call(tool_name: str, args_str: str) -> dict:
         args = [ast.literal_eval(arg) for arg in call_node.args]
     except Exception:
         # Backup for multi-line / complex arguments (like code blocks)
-        # Matches key="value" or key="""value"""
-        pattern = re.compile(r'(\w+)\s*=\s*(?:("""|\'\'\'|["\']))([\s\S]*?)\2', re.DOTALL)
-        matches = pattern.findall(args_str)
+        matches = TOOL_ARG_RE.findall(args_str)
         
         if matches:
             for key, quote, val in matches:
@@ -246,13 +251,13 @@ def strip_story(text: str) -> str:
         return ""
 
     text = THINK_TAG_PATTERN.sub('', text)
-    text = re.sub(r'<\|channel\|>|<channel\|>', '', text, flags=re.IGNORECASE)
+    text = CHANNEL_TAG_RE.sub('', text)
 
-    text = re.sub(r'(?<!\*)\*(?!\*)([\s\S]*?)(?<!\*)\*(?!\*)', '', text)
-    text = re.sub(r'(?<!\*)\*(?!\*)', '', text)
+    text = SINGLE_ASTERISK_RE.sub('', text)
+    text = STANDALONE_ASTERISK_RE.sub('', text)
 
-    text = re.sub(r'\n\s*\n+', '\n\n', text)
-    text = re.sub(r' +', ' ', text)
+    text = MULTI_NEWLINE_RE.sub('\n\n', text)
+    text = MULTI_SPACE_RE.sub(' ', text)
     return text.strip()
 
 
@@ -277,8 +282,6 @@ def _convert_json_tool_calls_to_tags(text: str) -> str:
     """Converts standard JSON tool call structures into internal [tool_name(args)] tag formats."""
     if not text or "action" not in text or "action_input" not in text:
         return text
-
-    json_block_pattern = re.compile(r'```(?:json)?\s*(\{[\s\S]*?\})\s*```|(\{[\s\S]*?\})', re.IGNORECASE)
 
     def replace_match(match: re.Match) -> str:
         block = match.group(1) or match.group(2)
@@ -307,11 +310,10 @@ def _convert_json_tool_calls_to_tags(text: str) -> str:
                 escaped = inp.replace('\\', '\\\\').replace('"', '\\"')
                 args_list.append(f'prompt="{escaped}"')
 
-            return f"[{norm_act}({', '.join(args_list)})]"
         except Exception:
             return match.group(0)
 
-    return json_block_pattern.sub(replace_match, text)
+    return JSON_BLOCK_RE.sub(replace_match, text)
 
 
 def scan_and_tag_image(image_source: str | bytes | Path) -> str:

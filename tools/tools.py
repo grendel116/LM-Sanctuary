@@ -62,22 +62,16 @@ def track_tool_activity(func):
             res = func(*args, **kwargs)
             duration = round(time.time() - start_time, 2)
             with session_tool_calls_lock:
-                if sess_id in session_tool_calls:
-                    for tc in session_tool_calls[sess_id]:
-                        if tc['id'] == call_id:
-                            tc['status'] = 'completed'
-                            tc['response'] = str(res)[:1000]
-                            tc['duration'] = duration
+                tool_call_info['status'] = 'completed'
+                tool_call_info['response'] = str(res)[:1000]
+                tool_call_info['duration'] = duration
             return res
         except Exception as e:
             duration = round(time.time() - start_time, 2)
             with session_tool_calls_lock:
-                if sess_id in session_tool_calls:
-                    for tc in session_tool_calls[sess_id]:
-                        if tc['id'] == call_id:
-                            tc['status'] = 'failed'
-                            tc['response'] = f"Error: {e}"
-                            tc['duration'] = duration
+                tool_call_info['status'] = 'failed'
+                tool_call_info['response'] = f"Error: {e}"
+                tool_call_info['duration'] = duration
             raise
         finally:
             with _active_tools_lock:
@@ -89,28 +83,25 @@ def track_tool_activity(func):
 
 def get_project_folders() -> list:
     try:
-        from runners.program import get_active_program
+        from runners.program import get_active_program, _load_settings
         active_prog = get_active_program()
+        settings = _load_settings()
     except Exception:
         active_prog = "sebile"
+        settings = {}
+
     default_folder = os.path.normpath(os.path.join(os.getcwd(), 'core', 'programs', active_prog))
-    
     folders = [default_folder]
     try:
-        import json
-        settings_path = os.path.join(VARIABLES_DIR, "project_settings.json")
-        if os.path.exists(settings_path):
-            with open(settings_path, "r", encoding="utf-8") as f:
-                settings = json.load(f)
-            loaded_folders = settings.get("folders", [])
-            if loaded_folders:
-                # Update first folder dynamically if it's the old workspace root or a program folder
-                first_folder = os.path.normpath(loaded_folders[0])
-                cwd = os.path.normpath(os.getcwd())
-                is_old_program_dir = ("core" in first_folder and "programs" in first_folder) or first_folder == cwd
-                if is_old_program_dir and first_folder != default_folder:
-                    loaded_folders[0] = default_folder
-                folders = loaded_folders
+        loaded_folders = settings.get("folders", [])
+        if loaded_folders:
+            # Update first folder dynamically if it's the old workspace root or a program folder
+            first_folder = os.path.normpath(loaded_folders[0])
+            cwd = os.path.normpath(os.getcwd())
+            is_old_program_dir = ("core" in first_folder and "programs" in first_folder) or first_folder == cwd
+            if is_old_program_dir and first_folder != default_folder:
+                loaded_folders[0] = default_folder
+            folders = loaded_folders
     except Exception:
         pass
     return folders
@@ -133,14 +124,11 @@ pending_tool_calls = {}
 
 def confirm_tool_execution(tool_name: str, details: str) -> bool:
     try:
-        import json
-        settings_path = os.path.join(VARIABLES_DIR, "project_settings.json")
-        if os.path.exists(settings_path):
-            with open(settings_path, "r", encoding="utf-8") as f:
-                settings = json.load(f)
-            if settings.get("security_preset") in ("auto", "turbo"):
-                print(f"[AUTO MODE] Auto-approving tool execution for '{tool_name}'", flush=True)
-                return True
+        from runners.program import _load_settings
+        settings = _load_settings()
+        if settings.get("security_preset") in ("auto", "turbo"):
+            print(f"[AUTO MODE] Auto-approving tool execution for '{tool_name}'", flush=True)
+            return True
     except Exception as e:
         print(f"Error checking security preset in confirm_tool_execution: {e}")
 
@@ -315,12 +303,10 @@ def web_search(query: str) -> str:
     search_engine = "web_crawling"
     searxng_url = ""
     try:
-        settings_path = os.path.join(VARIABLES_DIR, "project_settings.json")
-        if os.path.exists(settings_path):
-            with open(settings_path, "r", encoding="utf-8") as f:
-                settings = json.load(f)
-            search_engine = settings.get("search_engine", "web_crawling")
-            searxng_url = settings.get("searxng_url", "")
+        from runners.program import _load_settings
+        settings = _load_settings()
+        search_engine = settings.get("search_engine", "web_crawling")
+        searxng_url = settings.get("searxng_url", "")
     except Exception as e:
         print(f"Error loading search settings: {e}")
 

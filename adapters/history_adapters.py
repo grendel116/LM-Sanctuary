@@ -222,19 +222,20 @@ class OsHistoryAdapter(LocalHistoryAdapter):
                 content_text = f"{content_text}\n\n{scan_info}".strip()
             raw_messages.append({"role": role, "content": content_text})
 
-        directive = _STORY_MODE_DIRECTIVE_PROMPT if is_story_mode() else _MAIN_DIRECTIVE_PROMPT
+        active_prog = get_active_program()
+        story_active = is_story_mode(active_prog)
+
+        directive = _STORY_MODE_DIRECTIVE_PROMPT if story_active else _MAIN_DIRECTIVE_PROMPT
         if not tools.current_use_imagen.get():
             directive = "\n".join(line for line in directive.split("\n") if "generate_imagen" not in line)
 
         system_content = f"{sys_inst}{directive}"
-        active_prog = get_active_program()
 
         try:
             lore_before, lore_after = get_active_lore(active_prog, filtered_history)
-            if lore_before:
-                system_content = f"[WORLD INFO]\n{'\n\n'.join(lore_before)}\n[END WORLD INFO]\n\n" + system_content
-            if lore_after:
-                system_content += f"\n\n[WORLD INFO]\n{'\n\n'.join(lore_after)}\n[END WORLD INFO]"
+            all_lore = (lore_before or []) + (lore_after or [])
+            if all_lore:
+                system_content += f"\n\n[WORLD INFO]\n{'\n\n'.join(all_lore)}\n[END WORLD INFO]"
         except Exception as le:
             print(f"[lorebook] Injection error: {le}")
 

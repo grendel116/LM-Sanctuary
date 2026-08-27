@@ -70,11 +70,12 @@ def generate_llama_cli_args(gguf_path: str, bias_weight: float = None) -> list[s
         print(f"[BANNED WORDS] Notice: Tokenization skipped ({e}).", flush=True)
         return []
 
-    cli_args = []
-    for token_id in token_ids:
-        sign_str = "" if bias_weight < 0 else "+"
-        cli_args.extend(["--logit-bias", f"{token_id}{sign_str}{bias_weight}"])
-    return cli_args
+    if not token_ids:
+        return []
+
+    sign_str = "" if bias_weight < 0 else "+"
+    bias_str = ",".join(f"{t_id}{sign_str}{bias_weight}" for t_id in token_ids)
+    return ["--logit-bias", bias_str]
 
 async def _rewrite_single_sentence(sentence: str, llm_call_func, target_model: str, banned_regex) -> str:
     """Evaluates and rewrites individual sentences while retaining Markdown formatting."""

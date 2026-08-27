@@ -182,11 +182,11 @@ def load_user_instructions() -> str:
         return f"\n\n# USER PROFILE & RELATIONSHIP CONTEXT\n{fallback_msg}"
 
 def is_story_mode(program_name: str = None) -> bool:
-    """Checks if story mode is enabled for a specific program."""
-    if program_name is None:
+    """Checks if story mode is enabled for a specific program card."""
+    if not program_name or not os.path.exists(os.path.join(PROGRAMS_DIR, program_name)):
         program_name = get_active_program()
     card = _load_card_data(program_name)
-    return card.get("story_mode", False)
+    return bool(card.get("story_mode", False))
 
 inversion_directive = ""
 
@@ -209,8 +209,8 @@ def get_compiled_instructions() -> str:
             "- Use separate lines and clear paragraphs for narration and dialogue.\n"
             "- Narration: Use *italics* and present tense to describe actions, setting details, and other characters.\n"
             "- Dialogue: Use plain text without quotation marks. Use **bold** for emphasis.\n"
-            "- State claims directly and affirmatively.\n"
-            "- Express ideas as single assertions without contrast.\n"
+            "- State all claims directly and affirmatively in single assertions.\n"
+            "- FORBIDDEN: Do not use contrast structures ('not X, but Y', 'it is not A, it is B', 'not just X, it is Y'). Express ideas positively without negating alternatives.\n"
             "- Style: Use short words and precise phrasing. Write with linear progression.\n"
             "- Plot: Write prose. Introduce narrative conflict.\n"
         )
@@ -221,8 +221,8 @@ def get_compiled_instructions() -> str:
             "- Narration: Use *italics*, first person, and present tense for actions, expressions, and setting details.\n"
             "- Dialogue: Use plain text without quotation marks. Use **bold** for emphasis.\n"
             "- Style: Use short words and precise phrasing with dialectical reasoning.\n"
-            "- State claims directly and affirmatively.\n"
-            "- Express ideas as single assertions without contrast.\n"
+            "- State all claims directly and affirmatively in single assertions.\n"
+            "- FORBIDDEN: Do not use contrast structures ('not X, but Y', 'it is not A, it is B', 'not just X, it is Y'). Express ideas positively without negating alternatives.\n"
             "- Be succinct, with short words and simple sentences.\n"
             "- Do not patronize or automatically validate.\n"
             "- Do not use generic platitudes.\n"

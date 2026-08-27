@@ -311,6 +311,32 @@ class DataBankManager:
             formatted_context.append(f"[{idx+1}] Source: {doc_name} (Similarity: {score:.2f})\n{text.strip()}")
         return "\n\n".join(formatted_context)
 
+    def query_text(self, query_text: str, top_k: int = 5, score_threshold: float = 0.25) -> list[dict]:
+        """Queries databank vector index and returns a list of result dicts containing 'text' and 'score'."""
+        data = self._load_data(self.db_path)
+        if not data.get("chunks"):
+            return []
+
+        model = get_embedding_model()
+        query_vector = model.encode(query_text)
+        query_norm = np.linalg.norm(query_vector)
+        if query_norm == 0:
+            return []
+
+        results = []
+        for chunk in data.get("chunks", []):
+            chunk_vector = np.array(chunk["vector"])
+            chunk_norm = np.linalg.norm(chunk_vector)
+            if chunk_norm == 0:
+                continue
+
+            similarity = float(np.dot(query_vector, chunk_vector) / (query_norm * chunk_norm))
+            if similarity >= score_threshold:
+                results.append({"text": chunk["text"], "score": similarity})
+
+        results.sort(key=lambda x: x["score"], reverse=True)
+        return results[:top_k]
+
     def delete_chat_history(self, session_id: str = None) -> bool:
         """Deletes chat history documents and chunks from the databank on session reset."""
         data = self._load_data(self.db_path)

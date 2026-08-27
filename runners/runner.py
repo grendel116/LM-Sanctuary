@@ -1,7 +1,6 @@
 import asyncio
 import copy
 import json
-import mimetypes
 import os
 import re
 import threading
@@ -21,7 +20,7 @@ PROGRAMS_DIR = project_root / "core" / "programs"
 
 # Local imports follow below...
 from variables.settings import get_local_server_headers
-from adapters.history_adapters import LocalHistoryAdapter, OsHistoryAdapter
+from adapters.history_adapters import OsHistoryAdapter
 from core.mood_inversion import get_directive, is_enabled, new_state, update_state
 from models.models import is_local_model
 from runners.program import get_active_program
@@ -41,6 +40,69 @@ from utils.utils import (
 # Load environment configuration directly
 load_dotenv()
 LOCAL_SERVER_URL = os.environ.get("LOCAL_SERVER_URL")
+
+# --- PRE-COMPILED REGULAR EXPRESSIONS ---
+THINK_TAG_RE = re.compile(
+    r"(?:<think>|\[think\]|<thought>|\[thought\]|<\|thought\|>|<\|channel\|>thought|<channel\|>thought)"
+    r"[\s\S]*?"
+    r"(?:</think>|\[/think\]|</thought>|\[/thought\]|<\|thought\|>|<\|channel\|>|<channel\|>|<\/\s*think>|\[\s*/\s*think\s*\]|$)",
+    flags=re.IGNORECASE,
+)
+CHANNEL_TAG_RE = re.compile(r"<\|channel\|>|<channel\|>", flags=re.IGNORECASE)
+TOOL_TAG_RE = re.compile(r"\[(\w+)\(([\s\S]*?)\)\]")
+TOOL_TAG_STRIP_RE = re.compile(r"\[\w+\([\s\S]*?\n?\)\]", flags=re.DOTALL)
+IMAGE_EMBED_RE = re.compile(r"(?<!\!)(\[[^\]]*\]\(/images/(?:portraits|media)/[^)]+\))")
+RAW_IMAGE_PATH_RE = re.compile(
+    r"(?<![\([/])(/images/(?:portraits|media)/[a-zA-Z0-9_\-\.]+\.(?:png|jpg|jpeg|webp|gif|mp4))"
+)
+PASTED_LINK_RE = re.compile(r"https?://[^\s>)]+")
+
+# --- PERSISTENT HTTP CLIENT POOL ---
+_http_client: httpx.AsyncClient | None = None
+_http_client_loop: asyncio.AbstractEventLoop | None = None
+
+def get_http_client() -> httpx.AsyncClient:
+    global _http_client, _http_client_loop
+    try:
+        current_loop = asyncio.get_running_loop()
+    except RuntimeError:
+        current_loop = None
+
+    if (
+        _http_client is None
+        or _http_client.is_closed
+        or _http_client_loop != current_loop
+    ):
+        _http_client = httpx.AsyncClient(
+            limits=httpx.Limits(max_keepalive_connections=10, max_connections=20),
+            timeout=httpx.Timeout(60.0, connect=10.0),
+        )
+        _http_client_loop = current_loop
+    return _http_client
+
+def _trim_context_messages(messages: list[dict], max_chars: int = 26000) -> list[dict]:
+    """Fast context trimming calculation to remain within token/char budget."""
+    total_chars = sum(len(m.get("content") or "") for m in messages)
+    if total_chars <= max_chars:
+        return messages
+
+    print("[CONTEXT TRIM] Context payload exceeds local budget. Trimming older turns...", flush=True)
+    system_msgs = [m for m in messages if m.get("role") == "system"]
+    chat_msgs = [m for m in messages if m.get("role") != "system"]
+
+    sys_len = sum(len(m.get("content") or "") for m in system_msgs)
+    budget = max_chars - sys_len
+
+    current_len = 0
+    trimmed_chat = []
+    for m in reversed(chat_msgs):
+        m_len = len(m.get("content") or "")
+        if current_len + m_len > budget:
+            break
+        trimmed_chat.append(m)
+        current_len += m_len
+
+    return system_msgs + list(reversed(trimmed_chat))
 
 class BaseProgramRunner:
     def __init__(self, app_name: str = "Sanctuary"):
@@ -78,97 +140,97 @@ class BaseProgramRunner:
             _check_cancellation()
 
             try:
-                async with httpx.AsyncClient() as client:
-                    if session_id:
-                        req_payload = {**payload, "stream": True}
-                        req_headers = {**headers, "Accept-Encoding": "identity"}
+                client = get_http_client()
+                if session_id:
+                    req_payload = {**payload, "stream": True}
+                    req_headers = {**headers, "Accept-Encoding": "identity"}
 
-                        async with client.stream("POST", url, json=req_payload, headers=req_headers, timeout=timeout) as r:
-                            if r.status_code == 503:
-                                await r.aread()
-                                if time.time() - start_time < max_retry_time:
-                                    print(f"[Local LLM] Server is loading model (503). Retrying in {retry_interval}s...", flush=True)
-                                    await asyncio.sleep(retry_interval)
-                                    continue
+                    async with client.stream("POST", url, json=req_payload, headers=req_headers, timeout=timeout) as r:
+                        if r.status_code == 503:
+                            await r.aread()
+                            if time.time() - start_time < max_retry_time:
+                                print(f"[Local LLM] Server is loading model (503). Retrying in {retry_interval}s...", flush=True)
+                                await asyncio.sleep(retry_interval)
+                                continue
 
-                            if r.status_code != 200:
-                                await r.aread()
-                                if r.status_code == 500 and b"image input is not supported" in r.content:
-                                    print("[Local LLM] Vision not supported by server. Converting payload to Image Scan tags and retrying...", flush=True)
-                                    from utils.utils import scan_and_tag_image
-                                    new_msgs = []
-                                    for m in payload.get("messages", []):
-                                        c = m.get("content")
-                                        if isinstance(c, list):
-                                            t_parts = []
-                                            for item in c:
-                                                if item.get("type") == "text":
-                                                    t_parts.append(item.get("text", ""))
-                                                elif item.get("type") == "image_url":
-                                                    t_parts.append(scan_and_tag_image(item.get("image_url", {}).get("url")))
-                                            m_copy = dict(m)
-                                            m_copy["content"] = "\n\n".join(t_parts).strip()
-                                            new_msgs.append(m_copy)
-                                        else:
-                                            new_msgs.append(m)
-                                    payload["messages"] = new_msgs
-                                    continue
-                                return httpx.Response(status_code=r.status_code, headers=r.headers, content=r.content, request=r.request)
+                        if r.status_code != 200:
+                            await r.aread()
+                            if r.status_code == 500 and b"image input is not supported" in r.content:
+                                print("[Local LLM] Vision not supported by server. Converting payload to Image Scan tags and retrying...", flush=True)
+                                from utils.utils import scan_and_tag_image
+                                new_msgs = []
+                                for m in payload.get("messages", []):
+                                    c = m.get("content")
+                                    if isinstance(c, list):
+                                        t_parts = []
+                                        for item in c:
+                                            if item.get("type") == "text":
+                                                t_parts.append(item.get("text", ""))
+                                            elif item.get("type") == "image_url":
+                                                t_parts.append(scan_and_tag_image(item.get("image_url", {}).get("url")))
+                                        m_copy = dict(m)
+                                        m_copy["content"] = "\n\n".join(t_parts).strip()
+                                        new_msgs.append(m_copy)
+                                    else:
+                                        new_msgs.append(m)
+                                payload["messages"] = new_msgs
+                                continue
+                            return httpx.Response(status_code=r.status_code, headers=r.headers, content=r.content, request=r.request)
 
-                            content_parts = []
-                            async for line in r.aiter_lines():
-                                _check_cancellation()
+                        content_parts = []
+                        async for line in r.aiter_lines():
+                            _check_cancellation()
 
-                                line = line.strip()
-                                if not line or not line.startswith("data:"):
-                                    continue
+                            line = line.strip()
+                            if not line or not line.startswith("data:"):
+                                continue
 
-                                data_str = line[5:].strip()
-                                if data_str == "[DONE]":
-                                    break
+                            data_str = line[5:].strip()
+                            if data_str == "[DONE]":
+                                break
 
-                                try:
-                                    delta = json.loads(data_str).get("choices", [{}])[0].get("delta", {})
-                                    if content := delta.get("content"):
-                                        content_parts.append(content)
-                                except Exception:
-                                    pass
+                            try:
+                                delta = json.loads(data_str).get("choices", [{}])[0].get("delta", {})
+                                if content := delta.get("content"):
+                                    content_parts.append(content)
+                            except Exception:
+                                pass
 
-                            mock_data = {
-                                "choices": [{"message": {"role": "assistant", "content": "".join(content_parts)}}],
-                                "model": payload.get("model", ""),
-                            }
-                            return httpx.Response(status_code=200, headers=r.headers, content=json.dumps(mock_data).encode("utf-8"), request=r.request)
+                        mock_data = {
+                            "choices": [{"message": {"role": "assistant", "content": "".join(content_parts)}}],
+                            "model": payload.get("model", ""),
+                        }
+                        return httpx.Response(status_code=200, headers=r.headers, content=json.dumps(mock_data).encode("utf-8"), request=r.request)
 
-                    response = await client.post(url, json=payload, headers=headers, timeout=timeout)
-                    if response.status_code == 503:
-                        if time.time() - start_time < max_retry_time:
-                            print(f"[Local LLM] Server is loading model (503). Retrying in {retry_interval}s...", flush=True)
-                            await asyncio.sleep(retry_interval)
-                            continue
-
-                    if response.status_code == 500 and "image input is not supported" in response.text:
-                        print("[Local LLM] Vision not supported by server. Converting payload to Image Scan tags and retrying...", flush=True)
-                        from utils.utils import scan_and_tag_image
-                        new_msgs = []
-                        for m in payload.get("messages", []):
-                            c = m.get("content")
-                            if isinstance(c, list):
-                                t_parts = []
-                                for item in c:
-                                    if item.get("type") == "text":
-                                        t_parts.append(item.get("text", ""))
-                                    elif item.get("type") == "image_url":
-                                        t_parts.append(scan_and_tag_image(item.get("image_url", {}).get("url")))
-                                m_copy = dict(m)
-                                m_copy["content"] = "\n\n".join(t_parts).strip()
-                                new_msgs.append(m_copy)
-                            else:
-                                new_msgs.append(m)
-                        payload["messages"] = new_msgs
+                response = await client.post(url, json=payload, headers=headers, timeout=timeout)
+                if response.status_code == 503:
+                    if time.time() - start_time < max_retry_time:
+                        print(f"[Local LLM] Server is loading model (503). Retrying in {retry_interval}s...", flush=True)
+                        await asyncio.sleep(retry_interval)
                         continue
 
-                    return response
+                if response.status_code == 500 and "image input is not supported" in response.text:
+                    print("[Local LLM] Vision not supported by server. Converting payload to Image Scan tags and retrying...", flush=True)
+                    from utils.utils import scan_and_tag_image
+                    new_msgs = []
+                    for m in payload.get("messages", []):
+                        c = m.get("content")
+                        if isinstance(c, list):
+                            t_parts = []
+                            for item in c:
+                                if item.get("type") == "text":
+                                    t_parts.append(item.get("text", ""))
+                                elif item.get("type") == "image_url":
+                                    t_parts.append(scan_and_tag_image(item.get("image_url", {}).get("url")))
+                            m_copy = dict(m)
+                            m_copy["content"] = "\n\n".join(t_parts).strip()
+                            new_msgs.append(m_copy)
+                        else:
+                            new_msgs.append(m)
+                    payload["messages"] = new_msgs
+                    continue
+
+                return response
 
             except httpx.TimeoutException:
                 raise
@@ -197,8 +259,7 @@ class BaseProgramRunner:
             response = await self._post_llm_request(LOCAL_SERVER_URL, payload, get_local_server_headers(), timeout=60.0)
             if response.status_code == 200:
                 raw_text = response.json()["choices"][0]["message"].get("content", "").strip()
-                think_pattern = r"(?:<think>|\[think\])[\s\S]*?(?:</think>|\[/think\]|<\/\s*think>|\[\s*/\s*think\s*\]|$)"
-                return re.sub(think_pattern, "", raw_text, flags=re.IGNORECASE).strip()
+                return THINK_TAG_RE.sub("", raw_text).strip()
 
             print(f"Local server error: {response.status_code} - {response.text}", flush=True)
         except Exception as e:
@@ -280,7 +341,7 @@ class BaseProgramRunner:
                 
                 # Format and truncate long messages if needed to fit context limits
                 formatted_turns = "\n".join(
-                    f"{msg['role'].capitalize()}: {msg['content'][:1000]}" 
+                    f"{msg.get('role', 'user').capitalize()}: {(msg.get('text') or msg.get('content') or '')[:1000]}" 
                     for msg in recent_turns
                 )
 
@@ -328,13 +389,8 @@ class BaseProgramRunner:
         return default_temp
 
     def _sanitize_thinking_tags(self, text: str) -> str:
-        pattern = (
-            r"(?:<think>|\[think\]|<thought>|\[thought\]|<\|thought\|>|<\|channel\|>thought|<channel\|>thought)"
-            r"[\s\S]*?"
-            r"(?:</think>|\[/think\]|</thought>|\[/thought\]|<\|thought\|>|<\|channel\|>|<channel\|>|<\/\s*think>|\[\s*/\s*think\s*\]|$)"
-        )
-        cleaned = re.sub(pattern, "", text, flags=re.IGNORECASE)
-        return re.sub(r"<\|channel\|>|<channel\|>", "", cleaned, flags=re.IGNORECASE).strip()
+        cleaned = THINK_TAG_RE.sub("", text)
+        return CHANNEL_TAG_RE.sub("", cleaned).strip()
 
     def _filter_story_mode_matches(self, matches: list, text: str, program_name: str) -> tuple[list, str]:
         from core.program_config import is_story_mode
@@ -357,109 +413,10 @@ class BaseProgramRunner:
         filtered_matches = [m for m in matches if m.group(1) in story_allowed]
         return filtered_matches, text
 
-    async def _handle_image_tool_execution(
-        self, match, bot_response_text: str, adapter: LocalHistoryAdapter, invocation_id: str
-    ) -> tuple[str, list]:
-        tool_name = match.group(1)
-        args_str = match.group(2)
-
-        adapter.append_assistant_message(bot_response_text, [], invocation_id)
-        parsed_args, new_markdown = _execute_emulated_tool(tool_name, args_str)
-        normalized_name = _normalize_tool_name(tool_name)
-
-        original_tag = match.group(0)
-        image_succeeded = new_markdown.startswith("![") and new_markdown.endswith(")")
-
-        if image_succeeded:
-            bot_response_text = bot_response_text.replace(original_tag, new_markdown)
-        else:
-            bot_response_text = bot_response_text.replace(original_tag, f"*({new_markdown})*").strip()
-
-        resolved_args = (
-            parsed_args["kwargs"]
-            if parsed_args["kwargs"]
-            else {"prompt": parsed_args["args"][0] if parsed_args["args"] else ""}
-        )
-        t_calls = _build_tool_calls_pair(normalized_name, resolved_args, new_markdown)
-        call_id = t_calls[0]["id"]
-
-        adapter.append_image_tool_events(normalized_name, t_calls[0]["args"], new_markdown, call_id, invocation_id)
-
-        final_embedded_text = (
-            self._ensure_images_are_embedded(bot_response_text) if image_succeeded else bot_response_text
-        )
-        adapter.append_assistant_message(final_embedded_text, t_calls, invocation_id)
-
-        return final_embedded_text, t_calls
-
-    async def _handle_non_blocking_tools(
-        self, matches: list, bot_response_text: str, adapter: LocalHistoryAdapter, session_id: str, invocation_id: str
-    ) -> tuple[str, list]:
-        clean_response = bot_response_text
-        for m in matches:
-            clean_response = clean_response.replace(m.group(0), "")
-        clean_response = re.sub(r"[ \t]+", " ", clean_response)
-        clean_response = re.sub(r"\n{3,}", "\n\n", clean_response).strip()
-
-        results = []
-        for m_tool in matches:
-            if session_id in cancelled_sessions:
-                raise asyncio.CancelledError("Session cancelled by user request.")
-            parsed_args, output = _execute_emulated_tool(m_tool.group(1), m_tool.group(2))
-            results.append((_normalize_tool_name(m_tool.group(1)), parsed_args["kwargs"], output))
-
-        t_calls = []
-        for idx, (t_name, t_args, t_output) in enumerate(results):
-            t_calls.extend(_build_tool_calls_pair(t_name, t_args, t_output, idx))
-
-        adapter.append_assistant_message(clean_response, t_calls, invocation_id)
-        adapter.append_tool_events(results, invocation_id)
-        return clean_response, t_calls
-
-    async def _handle_sequential_tools(
-        self, matches: list, bot_response_text: str, seen_tool_calls: set, adapter: LocalHistoryAdapter, session_id: str, invocation_id: str
-    ) -> list:
-        first_match_start = min(m.start() for m in matches)
-        text_before = bot_response_text[:first_match_start].strip()
-
-        results = []
-        for m_tool in matches:
-            if session_id in cancelled_sessions:
-                raise asyncio.CancelledError("Session cancelled by user request.")
-
-            t_name = m_tool.group(1)
-            a_str = m_tool.group(2)
-            normalized_name = _normalize_tool_name(t_name)
-            parsed_args = _parse_emulated_tool_call(normalized_name, a_str)
-
-            key_arg = (
-                str(list(parsed_args["kwargs"].values())[0])
-                if parsed_args["kwargs"]
-                else (str(parsed_args["args"][0]) if parsed_args["args"] else "")
-            )
-            dedup_key = (normalized_name, key_arg)
-
-            if dedup_key in seen_tool_calls:
-                output = f"[Skipped: '{normalized_name}' with this input was already called. Use a different query or URL.]"
-                results.append((normalized_name, parsed_args["kwargs"], output))
-                continue
-
-            seen_tool_calls.add(dedup_key)
-            parsed_args, output = _execute_emulated_tool(t_name, a_str)
-            results.append((normalized_name, parsed_args["kwargs"], output))
-
-        t_calls = []
-        for idx, (t_name, t_args, t_output) in enumerate(results):
-            t_calls.extend(_build_tool_calls_pair(t_name, t_args, t_output, idx))
-
-        adapter.append_assistant_message(text_before, t_calls, invocation_id, intermediate=True)
-        adapter.append_tool_events(results, invocation_id)
-        return t_calls
-
     async def _execute_local_llm_loop(
         self,
         session_id: str,
-        adapter: LocalHistoryAdapter,
+        adapter: OsHistoryAdapter,
         model: str,
         inversion_directive: str,
         rag_context: str,
@@ -467,31 +424,11 @@ class BaseProgramRunner:
         invocation_id: str,
     ) -> tuple[str, list]:
         # --- STAGE 1: LOCAL PREPROCESSING ---
-        sys_instructions = self._get_system_instructions(session_id, inversion_directive, user_message=new_message_text)
+        sys_instructions = self._get_system_instructions(
+            session_id, inversion_directive, user_message=new_message_text
+        )
         messages = adapter.get_openai_messages(sys_instructions, rag_context)
-
-        # Fast O(1) context trim calculation
-        MAX_INPUT_CHARS = 6500 * 4
-        total_chars = sum(len(m.get("content", "")) for m in messages)
-
-        if total_chars > MAX_INPUT_CHARS:
-            print(f"[CONTEXT TRIM] Context payload exceeds local budget. Trimming older turns...", flush=True)
-            system_msgs = [m for m in messages if m.get("role") == "system"]
-            chat_msgs = [m for m in messages if m.get("role") != "system"]
-            
-            sys_len = sum(len(m.get("content", "")) for m in system_msgs)
-            budget_for_chat = MAX_INPUT_CHARS - sys_len
-
-            current_len = 0
-            trimmed_chat = []
-            for m in reversed(chat_msgs):
-                m_len = len(m.get("content", ""))
-                if current_len + m_len > budget_for_chat:
-                    break
-                trimmed_chat.append(m)
-                current_len += m_len
-            
-            messages = system_msgs + list(reversed(trimmed_chat))
+        messages = _trim_context_messages(messages, max_chars=26000)
 
         # --- STAGE 2: LOCAL PROCESSING PASS ---
         from core.program_config import is_story_mode
@@ -501,13 +438,15 @@ class BaseProgramRunner:
         headers = get_local_server_headers()
         target_model = model if (model and model != "local-llm") else os.getenv("LOCAL_MODEL_NAME")
 
-        story_active = is_story_mode(session_id) if "session_id" in is_story_mode.__code__.co_varnames else is_story_mode()
+        story_active = is_story_mode()
         max_tokens_limit = 1024 if story_active else 200
 
         payload = {
-            "messages": messages, 
-            "temperature": temperature, 
-            "max_tokens": max_tokens_limit
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens_limit,
+            "presence_penalty": 0.2,
+            "frequency_penalty": 0.2,
         }
         if target_model:
             payload["model"] = target_model
@@ -524,48 +463,33 @@ class BaseProgramRunner:
             bot_response_text = f"Error connecting to local model server: {e}"
             print(f"[LLM ERROR] {bot_response_text}", flush=True)
 
-        from core.banned_words import replace_banned_words_async
-
         # --- STAGE 3: POST-PROCESSING (TOOLS & CLEANUP) ---
         bot_response_text = self._sanitize_thinking_tags(bot_response_text)
 
-        async def _llm_rewrite_wrapper(prompt: str, model: str = None, temperature: float = 0.0, **kwargs) -> str:
-            rw_payload = {
-                "messages": [{"role": "user", "content": prompt}],
-                "temperature": temperature,
-                "max_tokens": kwargs.get("max_tokens", 256)
-            }
-            if model:
-                rw_payload["model"] = model
-
-            res = await self._post_llm_request(url, rw_payload, headers, timeout=10.0, session_id=session_id)
-            if res.status_code == 200:
-                return res.json()["choices"][0]["message"]["content"].strip()
-            return ""
-
-        # --- BANNED WORDS AND STRUCTURE REWRITE PASS ---
-        bot_response_text = await replace_banned_words_async(
-            text=bot_response_text,
-            llm_call_func=_llm_rewrite_wrapper,
-            target_model=target_model
-        )
-                
-        matches = list(re.finditer(r"\[(\w+)\(([\s\S]*?)\)\]", bot_response_text))
+        matches = list(TOOL_TAG_RE.finditer(bot_response_text))
         matches, bot_response_text = self._filter_story_mode_matches(matches, bot_response_text, session_id)
 
         tool_calls = []
         if matches:
-            results = []
-            for m_tool in matches:
-                if session_id in cancelled_sessions:
-                    raise asyncio.CancelledError("Session cancelled by user request.")
-                parsed_args, output = _execute_emulated_tool(m_tool.group(1), m_tool.group(2))
-                results.append((_normalize_tool_name(m_tool.group(1)), parsed_args["kwargs"], output))
+            if session_id in cancelled_sessions:
+                raise asyncio.CancelledError("Session cancelled by user request.")
+
+            loop = asyncio.get_running_loop()
+            tasks = [
+                loop.run_in_executor(None, _execute_emulated_tool, m.group(1), m.group(2))
+                for m in matches
+            ]
+            raw_results = await asyncio.gather(*tasks)
+
+            results = [
+                (_normalize_tool_name(m.group(1)), parsed_args["kwargs"], output)
+                for m, (parsed_args, output) in zip(matches, raw_results)
+            ]
 
             for idx, (t_name, t_args, t_output) in enumerate(results):
                 tool_calls.extend(_build_tool_calls_pair(t_name, t_args, t_output, idx))
 
-            bot_response_text = re.sub(r"\[\w+\([\s\S]*?\n?\)\]", "", bot_response_text, flags=re.DOTALL).strip()
+            bot_response_text = TOOL_TAG_STRIP_RE.sub("", bot_response_text).strip()
             adapter.append_assistant_message(bot_response_text, tool_calls, invocation_id)
             adapter.append_tool_events(results, invocation_id)
         else:
@@ -576,13 +500,12 @@ class BaseProgramRunner:
         if isinstance(session_id, str) and session_id.endswith("_voice"):
             bot_response_text = strip_story(bot_response_text)
 
-        # Trigger background 3-Step Memory Pass post-turn
         asyncio.create_task(
             self._process_memory_pipeline(
                 session_id=session_id,
                 active_model=target_model or "",
                 user_text=new_message_text,
-                assistant_text=bot_response_text
+                assistant_text=bot_response_text,
             )
         )
 
@@ -779,7 +702,7 @@ class BaseProgramRunner:
             else:
                 return False
 
-            self._save_session_to_disk(session_id)
+            self._save_session_to_disk(dest_id)
             return True
 
     async def delete_system_memory(self, session_id: str, timestamp: float) -> bool:
@@ -902,9 +825,8 @@ class BaseProgramRunner:
         if not text:
             return text
 
-        text = re.sub(r'(?<!\!)(\[[^\]]*\]\(/images/(?:portraits|media)/[^)]+\))', r'!\1', text)
-        raw_path_pattern = r'(?<![\([/])(/images/(?:portraits|media)/[a-zA-Z0-9_\-\.]+\.(?:png|jpg|jpeg|webp|gif|mp4))'
-        return re.sub(raw_path_pattern, r'![Portrait](\1)', text)
+        text = IMAGE_EMBED_RE.sub(r'!\1', text)
+        return RAW_IMAGE_PATH_RE.sub(r'![Portrait](\1)', text)
 
     def _load_profile_json(self, active_prog: str) -> dict:
         json_path = os.path.join(PROGRAMS_DIR, active_prog, f"{active_prog}.json")
@@ -917,13 +839,8 @@ class BaseProgramRunner:
         return {}
 
     def _clean_transcript_text(self, text: str) -> str:
-        think_pattern = (
-            r"(?:<think>|\[think\]|<thought>|\[thought\]|<\|thought\|>|<\|channel\|>thought|<channel\|>thought)"
-            r"[\s\S]*?"
-            r"(?:</think>|\[/think\]|</thought>|\[/thought\]|<\|thought\|>|<\|channel\|>|<channel\|>|<\/\s*think>|\[\s*/\s*think\s*\]|$)"
-        )
-        cleaned = re.sub(think_pattern, "", text, flags=re.IGNORECASE)
-        cleaned = re.sub(r"<\|channel\|>|<channel\|>", "", cleaned, flags=re.IGNORECASE)
+        cleaned = THINK_TAG_RE.sub("", text)
+        cleaned = CHANNEL_TAG_RE.sub("", cleaned)
         cleaned = re.sub(r"\*.*?\*", "", cleaned)
         return re.sub(r" +", " ", cleaned).strip()
 
@@ -983,24 +900,6 @@ class BaseProgramRunner:
 
         return instructions
 
-    def _inject_journals(self, instructions: str, user_message: str) -> str:
-        if not user_message:
-            return instructions
-
-        try:
-            from core.program_config import replace_placeholders
-            from core.journals import match_journals
-
-            if matched_entries := match_journals(user_message, get_active_program()):
-                if "\n\n# RECALLED JOURNALS / MEMORIES\n" not in instructions:
-                    instructions += "\n\n# RECALLED JOURNALS / MEMORIES\n"
-                for entry in matched_entries:
-                    instructions += f"- {replace_placeholders(entry['content'])}\n"
-        except Exception as je:
-            print(f"Error matching journals: {je}")
-
-        return instructions
-
     def _inject_system_memories(self, instructions: str, session_id: str) -> str:
         meta = self._get_memory_meta(session_id)
         epic = meta.get("epic_chronicle", "")
@@ -1019,8 +918,7 @@ class BaseProgramRunner:
         return instructions
 
     def _get_system_instructions(self, session_id: str, inversion_directive: str = None, user_message: str = None) -> str:
-        from core.program_config import get_program_name, is_story_mode
-        import re
+        from core.program_config import get_compiled_instructions, get_program_name, is_story_mode, set_inversion_directive
 
         try:
             program_name = get_program_name()
@@ -1032,14 +930,10 @@ class BaseProgramRunner:
         if is_voice:
             instructions = self._build_voice_prompt(session_id, program_name)
         else:
-            import importlib
-            from core import program_config
-            importlib.reload(program_config)
-
             if inversion_directive is not None:
-                program_config.set_inversion_directive(inversion_directive)
+                set_inversion_directive(inversion_directive)
 
-            instructions = program_config.get_compiled_instructions()
+            instructions = get_compiled_instructions()
 
             if "CONCISENESS" not in instructions and "brief, succinct, and natural" not in instructions:
                 instructions += (
@@ -1055,7 +949,7 @@ class BaseProgramRunner:
         instructions = self._inject_system_memories(instructions, session_id)
 
         if not is_voice and user_message and not is_story_mode(program_name):
-            if re.search(r'https?://[^\s>)]+', user_message):
+            if PASTED_LINK_RE.search(user_message):
                 instructions += (
                     "\n\n# PASTED LINK DIRECTIVE (MANDATORY)\n"
                     "User shared links. You MUST use the `read_webpage` tool to fetch their content before responding. "
@@ -1122,10 +1016,7 @@ class OpenSourceRunner(BaseProgramRunner):
             r = await self._post_llm_request(url, payload, headers, timeout=60.0)
             if r.status_code == 200:
                 content = r.json()["choices"][0]["message"].get("content", "").strip()
-                pattern = (
-                    r"(?:<think>|\[think\])[\s\S]*?(?:</think>|\[/think\]|<\/\s*think>|\[\s*/\s*think\s*\]|$)"
-                )
-                return re.sub(pattern, "", content, flags=re.IGNORECASE).strip()
+                return THINK_TAG_RE.sub("", content).strip()
 
             raise Exception(f"HTTP Server returned status code {r.status_code}: {r.text}")
 

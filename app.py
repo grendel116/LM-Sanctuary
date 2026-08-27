@@ -7,12 +7,15 @@ import importlib
 import traceback
 import threading
 import uuid
+import base64
+import socket
 import httpx
 import asyncio
 from pathlib import Path
 from functools import wraps
 from flask import Flask, render_template, request, jsonify, send_file, send_from_directory, Response, make_response
 from dotenv import load_dotenv
+from PIL import Image
 
 # 1. Setup paths and load environment BEFORE importing application code
 base_dir = Path(__file__).resolve().parent
@@ -30,15 +33,59 @@ if not env_path.exists():
 
 load_dotenv(dotenv_path=env_path, override=True)
 
-# 2. Application imports (runs after environment variables are loaded)
+# 2. Application imports
 from adapters import comfy_manager
 from runners.runner import cancelled_sessions, voice_call_sessions, OpenSourceRunner
-from variables.settings import LOCAL_SERVER_URL, get_local_server_headers
+from runners.program import get_active_program, get_active_user, _load_settings
+from variables.settings import LOCAL_SERVER_URL, get_local_server_headers, VARIABLES_DIR, PROGRAMS_DIR
 
 app = Flask(__name__)
 
+# Pre-compiled regular expressions
+PROGRAM_ID_RE = re.compile(r'^[a-zA-Z0-9_\-]+$')
+SAFE_NAME_RE = re.compile(r'[^a-zA-Z0-9_]')
+USER_PROFILE_NAME_RE = re.compile(r'[^a-zA-Z0-9_\-]')
+THINKING_STRIP_RE = re.compile(
+    r'(?:<think>|\[think\]|<thought>|\[thought\]|<\|thought\|>|<\|channel\|>thought|<channel\|>thought)'
+    r'[\s\S]*?'
+    r'(?:</think>|\[/think\]|</thought>|\[/thought\]|<\|/thought\|>|<\|channel\|>|<channel\|>|<\/\s*think>|\[\s*/\s*think\s*\]|$)',
+    re.IGNORECASE
+)
+
 _cached_active_program = None
 _cached_active_user = None
+_cached_local_ip = None
+_theme_cache = {}
+
+def get_local_ip() -> str:
+    global _cached_local_ip
+    if _cached_local_ip:
+        return _cached_local_ip
+    local_ip = "127.0.0.1"
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        local_ip = s.getsockname()[0]
+        s.close()
+    except Exception:
+        pass
+    _cached_local_ip = local_ip
+    return _cached_local_ip
+
+def get_program_dir(program_id: str) -> str:
+    return os.path.normpath(os.path.join(PROGRAMS_DIR, program_id))
+
+def read_program_card(program_id: str) -> dict:
+    program_dir = get_program_dir(program_id)
+    json_path = os.path.join(program_dir, f"{program_id}.json")
+    if os.path.exists(json_path):
+        try:
+            with open(json_path, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+            return raw.get("data", raw)
+        except Exception as e:
+            print(f"Error reading character card for {program_id}: {e}")
+    return {}
 
 def init_runner():
     global runner
@@ -60,7 +107,6 @@ def start_prewarm_on_first_request():
 @app.before_request
 def check_program_change():
     global _cached_active_program, _cached_active_user
-    from runners.program import get_active_program, get_active_user
     current_program = get_active_program()
     current_user = get_active_user()
             
@@ -72,18 +118,9 @@ def check_program_change():
             _cached_active_program = current_program
             os.environ["ACTIVE_PROGRAM"] = current_program
             try:
-                from variables.settings import PROGRAMS_DIR
-                program_path = os.path.join(PROGRAMS_DIR, current_program)
+                program_path = get_program_dir(current_program)
                 if os.path.isdir(program_path):
-                    # Setup portraits directory and perform migration from legacy folder if needed
                     portraits_dir = os.path.join(program_path, 'portraits')
-                    legacy_dir = os.path.join(program_path, 'sel' + 'fies')
-                    if os.path.exists(legacy_dir) and not os.path.exists(portraits_dir):
-                        try:
-                            os.rename(legacy_dir, portraits_dir)
-                            print(f"Migrated legacy folder to portraits for program {current_program}")
-                        except Exception as ex:
-                            print(f"Error migrating legacy folder for program {current_program}: {ex}")
                     os.makedirs(portraits_dir, exist_ok=True)
             except Exception as ex:
                 print(f"Error preparing portraits directory for active program: {ex}")
@@ -103,10 +140,8 @@ def add_cache_control_headers(response):
     response.headers['Expires'] = '0'
     return response
 
-
 # Initialize active program and active user cache
 try:
-    from runners.program import get_active_program, get_active_user
     _cached_active_program = get_active_program()
     _cached_active_user = get_active_user()
 except Exception as e:
@@ -115,34 +150,25 @@ except Exception as e:
 
 def prewarm_caches():
     print(">>> Pre-warming backend caches in background...")
-    # Gemini models cache prewarming removed to favor decoupled remote configs
-        
     try:
-        # Prewarm local models list
         from models.models import fetch_local_models
         fetch_local_models(force_refresh=True)
     except Exception as e:
         print(f"Error prewarming local models: {e}")
         
     try:
-        # Prewarm server status
         from adapters.local_llm_manager import check_status, check_installed
         llm_already_online = check_status(force_refresh=True)
         check_installed()
     except Exception as e:
         print(f"Error prewarming Local LLM server status: {e}")
-        llm_already_online = False
 
-    # Auto-start disabled: Local LLM and ComfyUI are manual only.
-    # Use the UI controls to start each server when needed.
     print(">>> Local LLM auto-start disabled (manual only).")
     print(">>> ComfyUI auto-start disabled (manual only).")
-
     print(">>> Backend caches pre-warmed successfully!")
 
 # Initialize the dynamic runner based on configuration
 init_runner()
-
 
 def reload_program_state():
     """Reload program config, reinitialize the runner, and clear session caches."""
@@ -151,14 +177,17 @@ def reload_program_state():
     init_runner()
     runner.sessions_history.clear()
 
-
 def load_theme(program_id):
     """Load theme.json for a program, returning the parsed dict or None."""
-    theme_path = os.path.join(base_dir, "core", "programs", program_id, "theme.json")
+    if program_id in _theme_cache:
+        return _theme_cache[program_id]
+    theme_path = os.path.join(get_program_dir(program_id), "theme.json")
     if os.path.exists(theme_path):
         try:
             with open(theme_path, "r", encoding="utf-8") as tf:
-                return json.load(tf)
+                theme_data = json.load(tf)
+                _theme_cache[program_id] = theme_data
+                return theme_data
         except Exception as e:
             print(f"Error loading theme for {program_id}: {e}")
     return None
@@ -296,29 +325,17 @@ def requires_auth(f):
 @app.route('/')
 @requires_auth
 def index():
-    import socket
-    local_ip = "127.0.0.1"
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        # Dummy connection to trigger local IP interface detection
-        s.connect(("8.8.8.8", 80))
-        local_ip = s.getsockname()[0]
-        s.close()
-    except Exception:
-        pass
-    
+    local_ip = get_local_ip()
     tts_auto_speak = os.getenv("TTS_AUTO_SPEAK", "false").lower() == "true"
     tts_provider = os.getenv("TTS_PROVIDER", "local").lower()
     active_program = os.getenv("ACTIVE_PROGRAM", "sebile")
     theme = load_theme(active_program)
 
-    from runners.program import get_active_user
     active_user = get_active_user()
     if os.getenv("AUTH_USER") and request.authorization and active_user == "builder":
         # If Basic Auth is active, default active user to authenticated user
         active_user = request.authorization.username
 
-    from flask import make_response
     from core.program_config import get_program_greeting
     welcome_message = get_program_greeting()
     response = make_response(render_template('index.html', local_ip=local_ip, tts_auto_speak=tts_auto_speak, tts_provider=tts_provider, active_program=active_program, theme=theme, active_user=active_user, welcome_message=welcome_message))
@@ -368,13 +385,11 @@ def profile_png():
 
 @app.route('/programs/<program_id>/profile.png')
 def program_profile_png(program_id):
-    import re
-    if not re.match(r'^[a-zA-Z0-9_\-]+$', program_id):
+    if not PROGRAM_ID_RE.match(program_id):
         return "Invalid program ID", 400
-    path_png = os.path.join('core', 'programs', program_id, 'portraits', 'profile.png')
+    path_png = os.path.join(get_program_dir(program_id), 'portraits', 'profile.png')
     if os.path.exists(path_png):
         response = send_file(path_png)
-        from flask import make_response
         res = make_response(response)
         res.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
         return res
@@ -2308,43 +2323,28 @@ def list_sessions():
 @requires_auth
 def list_programs():
     try:
-        active_program = os.getenv("ACTIVE_PROGRAM", "sebile")
-        from variables.settings import PROGRAMS_DIR
-        programs_dir = PROGRAMS_DIR
-        
+        active_program = get_active_program()
         programs = []
-        if os.path.exists(programs_dir):
-            for folder in os.listdir(programs_dir):
-                folder_path = os.path.join(programs_dir, folder)
+        if os.path.exists(PROGRAMS_DIR):
+            for folder in os.listdir(PROGRAMS_DIR):
+                folder_path = get_program_dir(folder)
                 if os.path.isdir(folder_path):
                     program_name = folder.title()
-                    json_path = os.path.join(folder_path, f"{folder}.json")
-                    if os.path.exists(json_path):
-                        try:
-                            with open(json_path, "r", encoding="utf-8") as jf:
-                                jdata = json.load(jf)
-                                # Unwrap v3 data block
-                                card = jdata.get("data", jdata)
-                                if card.get("name"):
-                                    program_name = card["name"]
-                        except Exception:
-                            pass
+                    card = read_program_card(folder)
+                    if card.get("name"):
+                        program_name = card["name"]
                     else:
                         for file in os.listdir(folder_path):
                             if file.lower().endswith('.md') and not file.lower().startswith('user'):
                                 program_name = os.path.splitext(file)[0].title()
                                 break
-                    # Read theme color from theme.json
                     theme_color = "#38bdf8"
                     tdata = load_theme(folder)
                     if tdata:
                         theme_color = tdata.get("primary_accent") or tdata.get("main_color") or theme_color
                             
-                    # Check if portraits/profile.png exists
-                    has_profile = False
                     profile_path = os.path.join(folder_path, "portraits", "profile.png")
-                    if os.path.exists(profile_path):
-                        has_profile = True
+                    has_profile = os.path.exists(profile_path)
                         
                     programs.append({
                         'id': folder,
@@ -2500,10 +2500,10 @@ def rename_program():
         if not program_id or not new_name:
             return jsonify({'error': 'Missing program_id or new_name'}), 400
             
-        if not re.match(r'^[a-zA-Z0-9_\-]+$', program_id):
+        if not PROGRAM_ID_RE.match(program_id):
             return jsonify({'error': 'Invalid program_id'}), 400
             
-        new_id = re.sub(r'[^a-zA-Z0-9_]', '', new_name).lower()
+        new_id = SAFE_NAME_RE.sub('', new_name).lower()
         if not new_id:
             return jsonify({'error': 'Invalid new name (must contain letters, numbers, or underscores)'}), 400
             
@@ -2647,8 +2647,7 @@ def get_program_profile():
         settings = _load_settings()
         program_voices = settings.get('program_voices', {})
         card_data['tts_voice'] = program_voices.get(program_id, settings.get('tts_voice', 'af_heart'))
-        card_data['story_mode'] = settings.get('story_mode', False)
-
+        card_data['story_mode'] = bool(card_data.get('story_mode', False))
 
         return jsonify(card_data)
     except Exception as e:
@@ -2677,12 +2676,7 @@ def save_program_profile():
         if tts_voice:
             set_tts_voice_for_program(program_id, tts_voice)
 
-        if story_mode is not None:
-            settings = _load_settings()
-            settings['story_mode'] = bool(story_mode)
-            _save_settings(settings)
-
-        # Load existing card to preserve spec envelope and any fields not sent by UI
+        # Load existing card
         existing = {}
         if os.path.exists(json_path):
             try:
@@ -2691,16 +2685,19 @@ def save_program_profile():
             except Exception:
                 pass
 
-        # Merge incoming data block into existing card
         if existing.get('spec') == 'chara_card_v3' and 'data' in existing:
-            existing['data'].update(incoming)
             card_to_write = existing
         else:
             card_to_write = {
                 'spec': 'chara_card_v3',
                 'spec_version': '3.0',
-                'data': incoming
+                'data': {}
             }
+
+        # Update data payload including story_mode if present
+        card_to_write['data'].update(incoming)
+        if story_mode is not None:
+            card_to_write['data']['story_mode'] = bool(story_mode)
 
         os.makedirs(os.path.dirname(json_path), exist_ok=True)
         with open(json_path, 'w', encoding='utf-8') as f:
@@ -2730,8 +2727,19 @@ def get_program_journals():
         from core.journals import get_journal_entries
         
         program_id = request.args.get('program_id') or get_active_program()
+        session_id = request.args.get('session_id', 'default')
         entries = get_journal_entries(program_id)
-        return jsonify({'journals': entries})
+        
+        # Ensure session history and memory state are loaded from disk if needed
+        if session_id not in runner.sessions_history:
+            runner._load_session_from_disk(session_id)
+        memory_meta = runner._get_memory_meta(session_id)
+
+        return jsonify({
+            'journals': entries,
+            'recent_chapters': memory_meta.get('recent_chapters', []),
+            'epic_chronicle': memory_meta.get('epic_chronicle', '')
+        })
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -2876,7 +2884,7 @@ def save_user_profile():
             return jsonify({"error": "Missing content"}), 400
         
         # Sanitize profile_id
-        profile_id = re.sub(r'[^a-zA-Z0-9_\-]', '', profile_id).lower()
+        profile_id = USER_PROFILE_NAME_RE.sub('', profile_id).lower()
         if not profile_id:
             return jsonify({"error": "Invalid profile name"}), 400
             
@@ -3099,8 +3107,7 @@ def generate_character_json(
                 cleaned = raw_response.strip()
 
                 # Remove reasoning/thinking tags
-                think_pattern = r"(?:<think>|\[think\])[\s\S]*?(?:</think>|\[/think\]|<\/\s*think>|\[\s*/\s*think\s*\]|$)"
-                cleaned = re.sub(think_pattern, "", cleaned, flags=re.IGNORECASE).strip()
+                cleaned = THINKING_STRIP_RE.sub("", cleaned).strip()
 
                 # Isolate raw JSON block
                 match = re.search(r"\{[\s\S]*\}", cleaned)

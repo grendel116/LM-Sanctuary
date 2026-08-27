@@ -20,12 +20,9 @@ REMOTE_SERVER_URL = os.getenv("REMOTE_SERVER_URL", "http://127.0.0.1:1234/v1/cha
 REMOTE_API_KEY = os.getenv("REMOTE_API_KEY")
 REMOTE_CLOUD_URL = os.getenv("REMOTE_CLOUD_URL")
 
-import os
-
 # Ensure it pulls from the environment (with a sensible local fallback if needed)
 LOCAL_SERVER_URL = os.getenv("LOCAL_SERVER_URL", "http://localhost:8080")
 
-# If you also need the headers function referenced in the traceback:
 def get_local_server_headers():
     headers = {"Content-Type": "application/json"}
     api_key = os.getenv("LOCAL_SERVER_API_KEY")
@@ -39,17 +36,11 @@ def get_remote_server_headers():
         headers["Authorization"] = f"Bearer {REMOTE_API_KEY}"
     return headers
 
-# Thinking configuration for LLM requests
-DISABLED_THINKING = {
-    "thinking": {"type": "disabled"},
-    "reasoning_budget": 0
-}
-
-def is_thinking_enabled(is_cloud: bool = False) -> bool:
+def is_thinking_enabled() -> bool:
     env_val = os.getenv("THINKING_ENABLED")
     if env_val is not None:
         return env_val.lower() in ("true", "1", "yes")
-    return True if is_cloud else False
+    return False
 
 # Dynamically derive models URL from REMOTE_SERVER_URL
 try:
@@ -63,7 +54,6 @@ try:
 except Exception:
     LOCAL_MODELS_URL = "http://127.0.0.1:1234/v1/models"
 
-
 # ComfyUI Image Generation configurations
 COMFYUI_SERVER_URL = os.getenv("COMFYUI_SERVER_URL", "http://127.0.0.1:8188")
 _env_comfyui_dir = os.getenv("COMFYUI_DIR")
@@ -73,5 +63,4 @@ COMFYUI_VAE = os.getenv("COMFYUI_VAE", "sdxl_vae.safetensors")
 
 # Shared directory paths
 PROGRAMS_DIR = os.path.join(BASE_DIR, "core", "programs")
-PROGRAMS_DIR = PROGRAMS_DIR
 

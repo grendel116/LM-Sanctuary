@@ -2117,7 +2117,7 @@ function switchConnectionTab(tab) {
     const descriptor = document.getElementById('connection-descriptor');
 
     const descriptors = {
-        engine: "Select your preferred model configuration. You can run completely offline, configure cloud connections, and manage your image generation environments.",
+        engine: "Select your preferred model configuration. Manage your local LLM engine, download models, and configure image generation environments.",
         project: "Configure project folder access paths, security execution policies, and search engine integration."
     };
 
@@ -2133,7 +2133,7 @@ function switchConnectionTab(tab) {
     if (projectTab) projectTab.style.display = 'none';
 
     if (tab === 'engine') {
-        if (modalCard) modalCard.style.maxWidth = '980px';
+        if (modalCard) modalCard.style.maxWidth = '780px';
         if (engineTab) engineTab.style.display = 'flex';
         if (engineBtn) engineBtn.classList.add('active');
     } else if (tab === 'project') {
@@ -3657,16 +3657,83 @@ async function saveProgramProfile() {
 async function loadProgramJournals() {
     if (!currentEditingProgramId) return;
     const journalsContainer = document.getElementById('program-journals-list');
+    const epicContainer = document.getElementById('program-epic-chronicle-container');
+    const chaptersContainer = document.getElementById('program-chapters-list');
+    
     if (journalsContainer) {
-        journalsContainer.innerHTML = '<div style="color: var(--text-muted); font-size: 0.8rem; text-align: center; padding: 10px;">Loading journals...</div>';
+        journalsContainer.innerHTML = '<div style="color: var(--text-muted); font-size: 0.8rem; text-align: center; padding: 10px;">Loading memory...</div>';
     }
     
     try {
-        // Fetch Keyphrase-Triggered Journals
-        const res = await fetch(`/api/programs/journals?program_id=${currentEditingProgramId}&t=${Date.now()}`);
+        const activeSession = (typeof currentSessionId !== 'undefined' && currentSessionId) ? currentSessionId : 'default';
+        const res = await fetch(`/api/programs/journals?program_id=${encodeURIComponent(currentEditingProgramId)}&session_id=${encodeURIComponent(activeSession)}&t=${Date.now()}`);
         const data = await res.json();
         if (data.error) throw new Error(data.error);
         
+        const userDisplayName = getUserDisplayName();
+        const programDisplayName = activeProgramName || 'Program';
+
+        // 1. Render Full Summary
+        if (epicContainer) {
+            epicContainer.innerHTML = '';
+            const chronicle = (data.epic_chronicle || '').trim();
+            if (chronicle) {
+                const card = document.createElement('div');
+                card.className = 'list-entry-row';
+                card.style.borderLeft = '3px solid var(--primary-accent)';
+                
+                const contentEl = document.createElement('div');
+                contentEl.className = 'list-entry-content';
+                contentEl.style.fontSize = '0.82rem';
+                contentEl.style.lineHeight = '1.5';
+                contentEl.style.color = 'var(--text-main)';
+                let cleanChronicle = chronicle.replace(/\{\{user\}\}/gi, userDisplayName).replace(/\{\{char\}\}/gi, programDisplayName);
+                contentEl.textContent = cleanChronicle;
+                
+                card.appendChild(contentEl);
+                epicContainer.appendChild(card);
+            } else {
+                epicContainer.innerHTML = '<div class="empty-state">No full conversation summary compiled yet.</div>';
+            }
+        }
+
+        // 2. Render Recent Summaries
+        if (chaptersContainer) {
+            chaptersContainer.innerHTML = '';
+            const chapters = data.recent_chapters || [];
+            if (chapters.length === 0) {
+                chaptersContainer.innerHTML = '<div class="empty-state">No recent summaries compiled yet (distilled every 12 conversation turns).</div>';
+            } else {
+                chapters.forEach((chText, idx) => {
+                    const row = document.createElement('div');
+                    row.className = 'list-entry-row';
+                    
+                    const header = document.createElement('div');
+                    header.className = 'list-entry-header';
+                    
+                    const tag = document.createElement('span');
+                    tag.style.color = 'var(--primary-accent)';
+                    tag.style.fontWeight = '600';
+                    tag.style.fontSize = '0.72rem';
+                    tag.textContent = `Summary ${idx + 1}`;
+                    header.appendChild(tag);
+                    row.appendChild(header);
+                    
+                    const contentEl = document.createElement('div');
+                    contentEl.className = 'list-entry-content';
+                    contentEl.style.fontSize = '0.8rem';
+                    contentEl.style.lineHeight = '1.4';
+                    let displayContent = (chText || '').trim();
+                    displayContent = displayContent.replace(/\{\{user\}\}/gi, userDisplayName).replace(/\{\{char\}\}/gi, programDisplayName);
+                    contentEl.textContent = displayContent;
+                    row.appendChild(contentEl);
+                    
+                    chaptersContainer.appendChild(row);
+                });
+            }
+        }
+
+        // 3. Render Log Journals
         const entries = data.journals || [];
         if (journalsContainer) {
             journalsContainer.innerHTML = '';
@@ -3708,8 +3775,6 @@ async function loadProgramJournals() {
                     const text = document.createElement('div');
                     text.className = 'list-entry-content';
                     let displayContent = e.content || '';
-                    const userDisplayName = getUserDisplayName();
-                    const programDisplayName = activeProgramName || 'Program';
                     displayContent = displayContent.replace(/\{\{user\}\}/gi, userDisplayName).replace(/\{\{char\}\}/gi, programDisplayName);
                     text.textContent = displayContent;
                     row.appendChild(text);
@@ -3722,7 +3787,7 @@ async function loadProgramJournals() {
     } catch (e) {
         console.error("Error in loadProgramJournals:", e);
         if (journalsContainer) {
-            journalsContainer.innerHTML = '<div style="color: #fca5a5; font-size: 0.75rem; text-align: center; padding: 10px;">Failed to load journals.</div>';
+            journalsContainer.innerHTML = '<div style="color: #fca5a5; font-size: 0.75rem; text-align: center; padding: 10px;">Failed to load memory.</div>';
         }
     }
 }

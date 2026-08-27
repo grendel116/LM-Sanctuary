@@ -13,18 +13,31 @@ _proc = None
 _starting = False
 _start_lock = threading.Lock()
 _on_status_change = None  # Callback set by app.py to broadcast SSE events
+_cached_gpu_type = None
+_http_session = None
+
+def _get_http_session() -> requests.Session:
+    global _http_session
+    if _http_session is None:
+        _http_session = requests.Session()
+    return _http_session
 
 def detect_gpu_type() -> str:
     """Detects if the system has an AMD, Nvidia, or Vulkan compatible GPU on Windows.
     Returns 'amd', 'nvidia', or 'vulkan'.
     """
+    global _cached_gpu_type
     forced_gpu = os.getenv("LOCAL_GPU_TYPE")
     if forced_gpu in ("amd", "nvidia", "vulkan"):
         return forced_gpu
         
+    if _cached_gpu_type:
+        return _cached_gpu_type
+
     if os.name != 'nt':
-        return 'vulkan'
-        
+        _cached_gpu_type = 'vulkan'
+        return _cached_gpu_type
+
     try:
         # Run PowerShell to get video controller names
         output = subprocess.check_output(
@@ -35,40 +48,49 @@ def detect_gpu_type() -> str:
         )
         output_lower = output.lower()
         if "nvidia" in output_lower:
-            return "nvidia"
+            _cached_gpu_type = "nvidia"
         elif "amd" in output_lower or "radeon" in output_lower:
-            return "amd"
+            _cached_gpu_type = "amd"
+        else:
+            _cached_gpu_type = "vulkan"
+        return _cached_gpu_type
     except Exception:
         pass
-    return "vulkan"
+
+    _cached_gpu_type = "vulkan"
+    return _cached_gpu_type
 
 def download_llama_server():
     os.makedirs(LLAMA_BIN_DIR, exist_ok=True)
-    api_url = "https://api.github.com/repos/ggml-org/llama.cpp/releases/latest"
+    api_url = "https://api.github.com/repos/ggml-org/llama.cpp/releases"
     try:
         resp = requests.get(api_url, headers={"User-Agent": "LM-Sanctuary-Client/1.0"}, timeout=10.0).json()
-        assets = resp.get("assets", [])
+        release = next(r for r in resp if len(r.get("assets", [])) > 5)
+        assets = release.get("assets", [])
         
         gpu_type = detect_gpu_type()
         print(f"[llama-runner] Detected GPU type: {gpu_type}", flush=True)
         
-        target_keyword = "win-vulkan-x64"
         if gpu_type == "amd":
-            target_keyword = "win-hip-radeon-x64"
+            target_keywords = ["win-rocm", "win-hip", "win-vulkan-x64"]
         elif gpu_type == "nvidia":
-            target_keyword = "win-cuda-12.4-x64"
+            target_keywords = ["win-cuda-12.4-x64", "win-cuda", "win-vulkan-x64"]
+        else:
+            target_keywords = ["win-vulkan-x64"]
             
-        # Try to find the target asset
+        # Try to find the best target asset
         asset = None
-        for a in assets:
-            name = a.get("name", "").lower()
-            if target_keyword in name and name.endswith(".zip"):
-                asset = a
+        for kw in target_keywords:
+            for a in assets:
+                name = a.get("name", "").lower()
+                if kw in name and name.endswith(".zip"):
+                    asset = a
+                    break
+            if asset:
                 break
                 
-        # If target asset not found, fallback to Vulkan
         if not asset:
-            print(f"[llama-runner] Target asset '{target_keyword}' not found, falling back to Vulkan", flush=True)
+            print("[llama-runner] Target asset not found, falling back to Vulkan", flush=True)
             asset = next(a for a in assets if "win-vulkan-x64" in a.get("name", "").lower() and a.get("name", "").endswith(".zip"))
             
         print(f"[llama-runner] Downloading {asset['name']}...", flush=True)
@@ -177,19 +199,20 @@ def start_local_server(model_key):
     ubatch_size = os.getenv("LOCAL_UBATCH_SIZE", "2048")
     
     cmd = [
-            SERVER_EXE,
-            "-m", model_path,
-            "-c", context_size,
-            "-b", batch_size,
-            "-ub", ubatch_size,
-            "--port", "1234",
-            "--host", "127.0.0.1",
-            "-ngl", gpu_layers,
-            "-np", "1",
-            "-fa", "on",
-            "--no-warmup",
-            "--fit", "off"
-        ]
+        SERVER_EXE,
+        "-m", model_path,
+        "-c", context_size,
+        "-b", batch_size,
+        "-ub", ubatch_size,
+        "--port", "1234",
+        "--host", "127.0.0.1",
+        "-ngl", gpu_layers,
+        "-np", "1",
+        "-ctk", "q8_0",
+        "-ctv", "q8_0",
+        "--no-warmup",
+        "--fit", "off"
+    ]
 
     from variables.settings import is_thinking_enabled
     if not is_thinking_enabled():
@@ -262,11 +285,11 @@ def _kill_all_llama_processes():
             subprocess.run(["taskkill", "/F", "/IM", "llama-server.exe"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except Exception:
             pass
-        else:
-            try:
-                subprocess.run(["pkill", "-9", "-f", "llama-server"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            except Exception:
-                pass
+    else:
+        try:
+            subprocess.run(["pkill", "-9", "-f", "llama-server"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
 
 def stop_local_server():
     global _proc, _current_model, _starting
@@ -292,7 +315,8 @@ def stop_local_server():
 
 def check_local_server_status():
     try:
-        resp = requests.get("http://127.0.0.1:1234/health", timeout=1.0)
+        session = _get_http_session()
+        resp = session.get("http://127.0.0.1:1234/health", timeout=1.0)
         if resp.status_code == 200:
             return True
         if resp.status_code == 503:
