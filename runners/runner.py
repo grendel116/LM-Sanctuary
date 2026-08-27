@@ -423,95 +423,119 @@ class BaseProgramRunner:
         new_message_text: str,
         invocation_id: str,
     ) -> tuple[str, list]:
-        # --- STAGE 1: LOCAL PREPROCESSING ---
-        sys_instructions = self._get_system_instructions(
-            session_id, inversion_directive, user_message=new_message_text
-        )
-        messages = adapter.get_openai_messages(sys_instructions, rag_context)
-        messages = _trim_context_messages(messages, max_chars=26000)
-
-        # --- STAGE 2: LOCAL PROCESSING PASS ---
-        from core.program_config import is_story_mode
-
-        temperature = self._load_temperature_setting()
-        url = LOCAL_SERVER_URL
-        headers = get_local_server_headers()
+        max_iterations = 5
+        iteration = 0
+        all_tool_calls = []
+        final_response_text = ""
         target_model = model if (model and model != "local-llm") else os.getenv("LOCAL_MODEL_NAME")
 
-        story_active = is_story_mode()
-        max_tokens_limit = 1024 if story_active else 200
+        while iteration < max_iterations:
+            iteration += 1
 
-        from variables.settings import is_thinking_enabled, DISABLED_THINKING
+            # --- STAGE 1: LOCAL PREPROCESSING ---
+            sys_instructions = self._get_system_instructions(
+                session_id, inversion_directive, user_message=new_message_text
+            )
+            messages = adapter.get_openai_messages(sys_instructions, rag_context)
+            messages = _trim_context_messages(messages, max_chars=26000)
 
-        payload = {
-            "messages": messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens_limit,
-        }
-        if not is_thinking_enabled() and isinstance(DISABLED_THINKING, dict):
-            payload.update(DISABLED_THINKING)
-        if target_model:
-            payload["model"] = target_model
+            # --- STAGE 2: LOCAL PROCESSING PASS ---
+            from core.program_config import is_story_mode
 
-        try:
-            response = await self._post_llm_request(url, payload, headers, timeout=120.0, session_id=session_id)
-            if response.status_code == 200:
-                bot_response_text = response.json()["choices"][0]["message"]["content"]
+            temperature = self._load_temperature_setting()
+            url = LOCAL_SERVER_URL
+            headers = get_local_server_headers()
+
+            story_active = is_story_mode()
+            max_tokens_limit = 1024 if story_active else 512
+
+            from variables.settings import is_thinking_enabled, DISABLED_THINKING
+
+            payload = {
+                "messages": messages,
+                "temperature": temperature,
+                "max_tokens": max_tokens_limit,
+            }
+            if not is_thinking_enabled() and isinstance(DISABLED_THINKING, dict):
+                payload.update(DISABLED_THINKING)
+            if target_model:
+                payload["model"] = target_model
+
+            try:
+                response = await self._post_llm_request(url, payload, headers, timeout=120.0, session_id=session_id)
+                if response.status_code == 200:
+                    bot_response_text = response.json()["choices"][0]["message"]["content"]
+                else:
+                    bot_response_text = f"Error: {response.text}"
+                print(f"[DEBUG STATUS] {response.status_code}", flush=True)
+                print(f"[DEBUG RAW RESPONSE] {repr(response.text)}", flush=True)
+            except Exception as e:
+                bot_response_text = f"Error connecting to local model server: {e}"
+                print(f"[LLM ERROR] {bot_response_text}", flush=True)
+
+            # --- STAGE 3: POST-PROCESSING (TOOLS & CLEANUP) ---
+            bot_response_text = self._sanitize_thinking_tags(bot_response_text)
+
+            matches = list(TOOL_TAG_RE.finditer(bot_response_text))
+            matches, bot_response_text = self._filter_story_mode_matches(matches, bot_response_text, session_id)
+
+            if matches:
+                if session_id in cancelled_sessions:
+                    raise asyncio.CancelledError("Session cancelled by user request.")
+
+                loop = asyncio.get_running_loop()
+                tasks = [
+                    loop.run_in_executor(None, _execute_emulated_tool, m.group(1), m.group(2))
+                    for m in matches
+                ]
+                raw_results = await asyncio.gather(*tasks)
+
+                results = [
+                    (_normalize_tool_name(m.group(1)), parsed_args["kwargs"], output)
+                    for m, (parsed_args, output) in zip(matches, raw_results)
+                ]
+
+                tool_calls = []
+                for idx, (t_name, t_args, t_output) in enumerate(results):
+                    tool_calls.extend(_build_tool_calls_pair(t_name, t_args, t_output, len(all_tool_calls) + idx))
+                all_tool_calls.extend(tool_calls)
+
+                clean_text = TOOL_TAG_STRIP_RE.sub("", bot_response_text).strip()
+                adapter.append_assistant_message(clean_text, tool_calls, invocation_id, intermediate=True)
+                adapter.append_tool_events(results, invocation_id)
+
+                if clean_text:
+                    if final_response_text:
+                        final_response_text += "\n\n" + clean_text
+                    else:
+                        final_response_text = clean_text
+
+                continue
             else:
-                bot_response_text = f"Error: {response.text}"
-            print(f"[DEBUG STATUS] {response.status_code}", flush=True)
-            print(f"[DEBUG RAW RESPONSE] {repr(response.text)}", flush=True)
-        except Exception as e:
-            bot_response_text = f"Error connecting to local model server: {e}"
-            print(f"[LLM ERROR] {bot_response_text}", flush=True)
+                clean_text = bot_response_text.strip()
+                if final_response_text and clean_text:
+                    final_response_text = final_response_text + "\n\n" + clean_text
+                elif clean_text:
+                    final_response_text = clean_text
 
-        # --- STAGE 3: POST-PROCESSING (TOOLS & CLEANUP) ---
-        bot_response_text = self._sanitize_thinking_tags(bot_response_text)
-
-        matches = list(TOOL_TAG_RE.finditer(bot_response_text))
-        matches, bot_response_text = self._filter_story_mode_matches(matches, bot_response_text, session_id)
-
-        tool_calls = []
-        if matches:
-            if session_id in cancelled_sessions:
-                raise asyncio.CancelledError("Session cancelled by user request.")
-
-            loop = asyncio.get_running_loop()
-            tasks = [
-                loop.run_in_executor(None, _execute_emulated_tool, m.group(1), m.group(2))
-                for m in matches
-            ]
-            raw_results = await asyncio.gather(*tasks)
-
-            results = [
-                (_normalize_tool_name(m.group(1)), parsed_args["kwargs"], output)
-                for m, (parsed_args, output) in zip(matches, raw_results)
-            ]
-
-            for idx, (t_name, t_args, t_output) in enumerate(results):
-                tool_calls.extend(_build_tool_calls_pair(t_name, t_args, t_output, idx))
-
-            bot_response_text = TOOL_TAG_STRIP_RE.sub("", bot_response_text).strip()
-            adapter.append_assistant_message(bot_response_text, tool_calls, invocation_id)
-            adapter.append_tool_events(results, invocation_id)
-        else:
-            adapter.append_assistant_message(bot_response_text, tool_calls, invocation_id)
+                adapter.append_assistant_message(final_response_text, all_tool_calls, invocation_id)
+                break
 
         adapter.post_process_thoughts(invocation_id)
-        bot_response_text = self._ensure_images_are_embedded(bot_response_text)
+        final_response_text = self._ensure_images_are_embedded(final_response_text)
         if isinstance(session_id, str) and session_id.endswith("_voice"):
-            bot_response_text = strip_story(bot_response_text)
+            final_response_text = strip_story(final_response_text)
 
         asyncio.create_task(
             self._process_memory_pipeline(
                 session_id=session_id,
                 active_model=target_model or "",
                 user_text=new_message_text,
-                assistant_text=bot_response_text,
+                assistant_text=final_response_text,
             )
         )
 
-        return bot_response_text, tool_calls
+        return final_response_text, all_tool_calls
 
     @property
     def sessions_dir(self) -> str:
