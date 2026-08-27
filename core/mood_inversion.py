@@ -106,66 +106,47 @@ def _mood_excerpt(text: str, total_tokens: int = 48) -> str:
     return f"[opening] {opening} [middle] {middle} [ending] {ending}"
 
 
-def analyze_sentiment_with_llm(text: str) -> dict:
-    """Classify mood as bounded UI metadata."""
-    if not text:
+# Lexicon for fast local sentiment classification (zero-latency, no KV cache eviction)
+MOOD_KEYWORDS = {
+    "intimate": ["love", "tender", "gentle", "sweet", "cherish", "embrace", "warmth", "caress", "softly", "affection", "darling", "beloved", "cushion", "starlight"],
+    "excited": ["excited", "thrilled", "amazing", "wonderful", "laugh", "smile", "delight", "bright", "celebrate", "eager", "haha", "yay", "cheer"],
+    "intense": ["intense", "urgent", "danger", "fierce", "battle", "struggle", "rage", "strike", "clash", "fury", "flame", "critical", "violent"],
+    "sad": ["sad", "sorrow", "grief", "mourn", "weep", "tear", "regret", "loss", "pain", "melancholy", "hurt", "despair", "lonely"],
+    "analytical": ["analyze", "dialectic", "materialism", "theory", "empirical", "logic", "synthesis", "capital", "structure", "critique", "system", "evaluate", "method"],
+    "focused": ["focus", "target", "plan", "execute", "task", "code", "inspect", "implement", "organize", "solve", "precise", "direct", "work"]
+}
+
+def analyze_sentiment_fast(text: str) -> dict:
+    """Classify mood instantly using keyword density and regex heuristics."""
+    if not text or not text.strip():
         return mood_details("calm", 0.0)
 
-    system_instruction = (
-        "Classify the message mood. Respond ONLY with a single-line valid JSON object matching this exact format: "
-        '{"name": "calm", "intensity": 0.5}. '
-        "Do not include markdowns, line breaks, or extra text. "
-        "Allowed names: calm, intimate, excited, intense, sad, analytical, focused."
-    )
+    # Check for explicit tags like [mood: analytical] or (mood: intimate)
+    tag_match = re.search(r"\[mood:\s*(\w+)\]", text, re.IGNORECASE)
+    if tag_match:
+        tag_name = tag_match.group(1).lower()
+        if tag_name in DEFAULT_MOOD_NAMES:
+            return mood_details(tag_name, 0.8)
 
-    excerpt = _mood_excerpt(text)
+    text_lower = text.lower()
+    scores = {}
+    for mood, keywords in MOOD_KEYWORDS.items():
+        score = sum(1 for kw in keywords if re.search(rf"\b{re.escape(kw)}\b", text_lower))
+        if score > 0:
+            scores[mood] = score
 
-    try:
-        # Fetch configurations directly from environment variables
-        base_endpoint = os.getenv("LOCAL_SERVER_URL", "http://127.0.0.1:1234/v1/chat/completions").rstrip("/")
-        model_name = os.getenv("LOCAL_MODEL_NAME", "default-model")
+    if not scores:
+        return mood_details("calm", 0.3)
 
-        endpoint = (
-            base_endpoint
-            if "/v1/chat/completions" in base_endpoint
-            else f"{base_endpoint}/v1/chat/completions"
-        )
+    best_mood = max(scores, key=scores.get)
+    max_count = scores[best_mood]
+    intensity = min(1.0, 0.3 + (max_count * 0.15))
+    return mood_details(best_mood, intensity)
 
-        headers = get_local_server_headers()
 
-        payload = {
-            "model": model_name,
-            "messages": [
-                {"role": "system", "content": system_instruction},
-                {"role": "user", "content": excerpt},
-            ],
-            "temperature": 0.0,
-            "max_tokens": 32,
-            "response_format": {"type": "json_object"},
-        }
-
-        # Increased timeout tuple to allow large GGUF model processing (2s connect, 15s read)
-        response = requests.post(
-            endpoint, json=payload, headers=headers, timeout=(2, 15)
-        )
-        response.raise_for_status()
-
-        content = response.json()["choices"][0]["message"]["content"]
-        match = re.search(r"\{.*\}", content, re.DOTALL)
-        raw_json = match.group(0) if match else content
-        result = json.loads(raw_json)
-
-        name = str(result.get("name", "calm")).lower().strip()
-        intensity = float(result.get("intensity", 0.5))
-
-        allowed_moods = set(DEFAULT_MOOD_NAMES) | {"calm"}
-        if name in allowed_moods:
-            return mood_details(name, intensity)
-
-    except Exception as e:
-        print(f"[MOOD] Sentiment classification failed: {e}")
-
-    return mood_details("calm", 0.5)
+def analyze_sentiment_with_llm(text: str) -> dict:
+    """Fast sentiment classification avoiding prompt cache invalidation."""
+    return analyze_sentiment_fast(text)
 
 
 def mood_details(name: str, intensity: float) -> dict:
@@ -179,8 +160,9 @@ def mood_details(name: str, intensity: float) -> dict:
 
 
 def extract_and_strip_mood(text: str) -> tuple[str, dict]:
-    return text, analyze_sentiment_with_llm(text)
+    clean_text = re.sub(r"\[mood:\s*\w+\]", "", text, flags=re.IGNORECASE).strip()
+    return clean_text, analyze_sentiment_fast(text)
 
 
 def analyze_emotional_state(text: str) -> dict:
-    return analyze_sentiment_with_llm(text)
+    return analyze_sentiment_fast(text)

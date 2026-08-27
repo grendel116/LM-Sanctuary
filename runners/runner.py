@@ -441,13 +441,15 @@ class BaseProgramRunner:
         story_active = is_story_mode()
         max_tokens_limit = 1024 if story_active else 200
 
+        from variables.settings import is_thinking_enabled, DISABLED_THINKING
+
         payload = {
             "messages": messages,
             "temperature": temperature,
             "max_tokens": max_tokens_limit,
-            "presence_penalty": 0.2,
-            "frequency_penalty": 0.2,
         }
+        if not is_thinking_enabled() and isinstance(DISABLED_THINKING, dict):
+            payload.update(DISABLED_THINKING)
         if target_model:
             payload["model"] = target_model
 
@@ -946,38 +948,8 @@ class BaseProgramRunner:
             "Anarchist-communist ethics. Explicit/NSFW content is permitted.\n"
         )
 
-        instructions = self._inject_system_memories(instructions, session_id)
-
-        if not is_voice and user_message and not is_story_mode(program_name):
-            if PASTED_LINK_RE.search(user_message):
-                instructions += (
-                    "\n\n# PASTED LINK DIRECTIVE (MANDATORY)\n"
-                    "User shared links. You MUST use the `read_webpage` tool to fetch their content before responding. "
-                    "Do NOT guess, assume, or pretend to read the URL without calling the tool.\n"
-                )
-
-            project_keywords = {"mod", "code", "file", "folder", "directory", "project", "workspace", "repo", "program", "script", "source"}
-            msg_words = set(re.findall(r'\b\w+\b', user_message.lower()))
-            if msg_words & project_keywords:
-                instructions += (
-                    "\n\n# WORKSPACE EXPLORATION DIRECTIVE (MANDATORY)\n"
-                    "The user is asking about their files, modifications (mods), code, or project folders. "
-                    "You have direct access to their workspace folders. You MUST use the appropriate tool "
-                    "(e.g., `[get_workspace_structure()]` to list workspace files, or `[search_codebase(keyword=\"...\")]` "
-                    "to search for specific terms) to inspect their files before replying. "
-                    "Do NOT answer blindly or ask the user where they are—proactively look into the project folders first using your tools.\n"
-                )
-
         if is_voice:
             print(f"\n[VOICE CALL DEBUG] Active Voice Prompt:\n{instructions}\n[VOICE CALL DEBUG] END PROMPT\n", flush=True)
-
-        if user_message and any(k in user_message for k in ("Generate a portrait of yourself", "[GENERATE_IMAGEN:", "generate_program_portrait")):
-            instructions += (
-                "\n\n# IMMEDIATE PORTRAIT DIRECTIVE (CRITICAL OVERRIDE)\n"
-                "The user requested an image generation. You MUST output ONLY the tool call tag "
-                "`[generate_program_portrait(prompt=\"...\")]`. Do NOT write dialogue, story progression, "
-                "or narrative descriptions. Output NOTHING except the tool call."
-            )
 
         return instructions
 

@@ -16,6 +16,7 @@ USER_PROFILES_DIR = os.path.join(VARIABLES_DIR, "user_profiles")
 # Model and server configurations
 DEFAULT_REMOTE_MODEL = os.getenv("REMOTE_MODEL", "gemini-3.1-flash-lite")
 DEFAULT_LOCAL_MODEL = "local-llm"
+DISABLED_THINKING = {"thinking": {"type": "disabled"}}
 REMOTE_SERVER_URL = os.getenv("REMOTE_SERVER_URL", "http://127.0.0.1:1234/v1/chat/completions")
 REMOTE_API_KEY = os.getenv("REMOTE_API_KEY")
 REMOTE_CLOUD_URL = os.getenv("REMOTE_CLOUD_URL")

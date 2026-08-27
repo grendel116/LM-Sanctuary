@@ -208,8 +208,7 @@ def start_local_server(model_key):
         "--host", "127.0.0.1",
         "-ngl", gpu_layers,
         "-np", "1",
-        "-ctk", "q8_0",
-        "-ctv", "q8_0",
+        "-fa", "on",
         "--no-warmup",
         "--fit", "off"
     ]
@@ -218,7 +217,7 @@ def start_local_server(model_key):
     if not is_thinking_enabled():
         cmd.extend(["--reasoning", "off", "--reasoning-budget", "0"])
 
-    if flash_attn:
+    if flash_attn and "-fa" not in cmd:
         cmd.extend(["-fa", "on"])
     if no_mmap:
         cmd.append("--no-mmap")

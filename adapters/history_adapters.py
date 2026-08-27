@@ -158,6 +158,69 @@ class OsHistoryAdapter(LocalHistoryAdapter):
         except Exception as e:
             print(f"[COMPACTION OS ERROR] Background distillation failed: {e}", flush=True)
 
+    def _build_tiered_messages(
+        self,
+        system_content: str,
+        raw_messages: list[dict],
+        post_injection: str,
+        max_input_tokens: int = 6500
+    ) -> list[dict]:
+        """
+        Assembles OpenAI payload using a 4-tier context prioritization system:
+          - Tier 1 (Crucial): System Instructions, Core Directives, Latest User Query, & Post-Injection State.
+          - Tier 2 (High): Chat history turns (newest to oldest).
+          - Tier 3 (Medium): World Info / Lorebook & RAG / Knowledge Base excerpts.
+          - Tier 4 (Low): System Memory of older conversation turns.
+        """
+        CHAR_BUDGET = max_input_tokens * 4
+
+        # 1. Isolate user/assistant turns and latest query (Tier 1 & Tier 2 candidate)
+        chat_turns = [m for m in raw_messages if m.get("role") != "system"]
+        latest_user_turn = chat_turns.pop() if chat_turns else None
+
+        # Apply post-injection payload directly to the latest user message (Tier 1 Core)
+        if latest_user_turn and post_injection:
+            if isinstance(latest_user_turn["content"], str):
+                latest_user_turn["content"] += f"\n\n{post_injection}"
+            elif isinstance(latest_user_turn["content"], list):
+                latest_user_turn["content"].append({"type": "text", "text": f"\n\n{post_injection}"})
+
+        # Calculate base Tier 1 core footprint
+        latest_user_len = sum(
+            len(item.get("text", "")) if isinstance(item, dict) else len(item)
+            for item in (latest_user_turn["content"] if isinstance(latest_user_turn["content"], list) else [latest_user_turn["content"]])
+        ) if latest_user_turn else 0
+
+        tier1_base_len = len(system_content) + latest_user_len
+        remaining_budget = CHAR_BUDGET - tier1_base_len
+
+        # 2. Add Tier 2: Truncate chat history from oldest to newest to fit remaining budget
+        trimmed_chat_turns = []
+        accumulated_chat_chars = 0
+
+        for turn in reversed(chat_turns):
+            turn_text = turn["content"] if isinstance(turn["content"], str) else "".join(
+                item.get("text", "") for item in turn["content"] if isinstance(item, dict)
+            )
+            turn_len = len(turn_text)
+
+            if accumulated_chat_chars + turn_len <= (remaining_budget * 0.70):
+                trimmed_chat_turns.insert(0, turn)
+                accumulated_chat_chars += turn_len
+            else:
+                break
+
+        # 3. Assemble final OpenAI message array
+        final_messages = [{"role": "system", "content": system_content.strip()}]
+        final_messages.extend(trimmed_chat_turns)
+        
+        if latest_user_turn:
+            final_messages.append(latest_user_turn)
+        elif post_injection:
+            final_messages.append({"role": "user", "content": post_injection})
+
+        return _merge_consecutive_messages(final_messages)
+
     def get_openai_messages(self, sys_inst: str, rag_context: str, memory_context: str | None = None) -> list[dict]:
         from core.program_config import is_story_mode, replace_placeholders
         from core.lorebook import get_active_lore
@@ -231,6 +294,7 @@ class OsHistoryAdapter(LocalHistoryAdapter):
 
         system_content = f"{sys_inst}{directive}"
 
+        # Tier 3: World Info / Lore
         try:
             lore_before, lore_after = get_active_lore(active_prog, filtered_history)
             all_lore = (lore_before or []) + (lore_after or [])
@@ -239,11 +303,20 @@ class OsHistoryAdapter(LocalHistoryAdapter):
         except Exception as le:
             print(f"[lorebook] Injection error: {le}")
 
-        context_parts = []
+        # Tier 4: Dynamic Post-Injections attached to latest user turn (Preserves System Prompt Prefix Caching)
+        post_blocks = []
+        try:
+            from core.program_config import load_dynamic_runtime_context
+            dyn_ctx = load_dynamic_runtime_context()
+            if dyn_ctx:
+                post_blocks.append(dyn_ctx.strip())
+        except Exception:
+            pass
+
         for msg in history:
             if msg.get("role") == "system-memory" and msg.get("text", "").strip():
                 clean_mem = msg["text"].replace("[System Memory of older conversation turns]:", "").strip()
-                context_parts.append(f"<conversation_memory>\n{clean_mem}\n</conversation_memory>")
+                post_blocks.append(f"<conversation_memory>\n{clean_mem}\n</conversation_memory>")
 
         last_user_msg = next(
             (
@@ -261,14 +334,14 @@ class OsHistoryAdapter(LocalHistoryAdapter):
                 matched = match_journals(last_user_msg, active_prog)
                 if matched:
                     journals_text = "\n".join(f"- {replace_placeholders(e['content'])}" for e in matched)
-                    context_parts.append(f"<recalled_journals>\n{journals_text}\n</recalled_journals>")
+                    post_blocks.append(f"<recalled_journals>\n{journals_text}\n</recalled_journals>")
             except Exception as je:
                 print(f"Error matching journals: {je}")
 
         if rag_context:
-            context_parts.append(f"<knowledge_base>\n{rag_context}\n</knowledge_base>")
+            post_blocks.append(f"<knowledge_base>\n{rag_context}\n</knowledge_base>")
         if memory_context:
-            context_parts.append(f"<archived_memory>\n{memory_context}\n</archived_memory>")
+            post_blocks.append(f"<archived_memory>\n{memory_context}\n</archived_memory>")
 
         if last_user_msg:
             try:
@@ -281,14 +354,9 @@ class OsHistoryAdapter(LocalHistoryAdapter):
                     query_vector=self.query_vector,
                 )
                 if skills:
-                    context_parts.append(skills)
+                    post_blocks.append(skills)
             except Exception as se:
                 print(f"[skills] Retrieval error: {se}")
-
-        if context_parts:
-            system_content += "\n\n" + "\n\n".join(context_parts)
-
-        openai_messages = _merge_consecutive_messages([{"role": "system", "content": system_content}] + raw_messages)
 
         try:
             json_path = Path(PROGRAMS_DIR) / active_prog / f"{active_prog}.json"
@@ -296,18 +364,18 @@ class OsHistoryAdapter(LocalHistoryAdapter):
                 raw = json.loads(json_path.read_text(encoding="utf-8"))
                 post_inst = raw.get("data", raw).get("post_history_instructions", "").strip()
                 if post_inst:
-                    if openai_messages and openai_messages[-1]["role"] == "user":
-                        prev = openai_messages[-1]["content"]
-                        if isinstance(prev, str):
-                            openai_messages[-1]["content"] += f"\n\n{post_inst}"
-                        else:
-                            openai_messages[-1]["content"].append({"type": "text", "text": f"\n\n{post_inst}"})
-                    else:
-                        openai_messages.append({"role": "user", "content": post_inst})
+                    post_blocks.append(post_inst)
         except Exception as e:
             print(f"Error loading post-history instructions: {e}", flush=True)
 
-        return openai_messages
+        full_post_injection = "\n\n".join(post_blocks)
+
+        return self._build_tiered_messages(
+            system_content=system_content,
+            raw_messages=raw_messages,
+            post_injection=full_post_injection,
+            max_input_tokens=6500
+        )
 
     def append_assistant_message(self, text: str, tool_calls_data: list, invocation_id: str, intermediate: bool = False):
         from core.mood_inversion import extract_and_strip_mood

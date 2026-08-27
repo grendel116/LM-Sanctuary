@@ -235,7 +235,6 @@ def get_compiled_instructions() -> str:
     if inversion_directive:
         base += f"\n\n# PERSONALITY INVERSION DIRECTIVE\n{replace_placeholders(inversion_directive)}\n"
         
-    base += load_dynamic_runtime_context()
     return base
 
 # Determine program name dynamically from the active program configuration
