@@ -229,7 +229,7 @@ def start_local_server(model_key):
         bias_args = generate_llama_cli_args(model_path)
         if bias_args:
             cmd.extend(bias_args)
-            print(f"[llama-runner] Applied {len(bias_args) // 2} logit bias suppression rules from banned_words.json", flush=True)
+            print(f"[llama-runner] Applied logit bias suppression rules from banned_words.json", flush=True)
     except Exception as e:
         print(f"[llama-runner] Warning: Could not apply logit bias: {e}", flush=True)
     # --------------------------------------

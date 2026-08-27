@@ -450,6 +450,7 @@ class BaseProgramRunner:
             max_tokens_limit = 1024 if story_active else 512
 
             from variables.settings import is_thinking_enabled, DISABLED_THINKING
+            from core.banned_words import get_logit_bias_dict
 
             payload = {
                 "messages": messages,
@@ -460,6 +461,10 @@ class BaseProgramRunner:
                 payload.update(DISABLED_THINKING)
             if target_model:
                 payload["model"] = target_model
+
+            logit_bias = get_logit_bias_dict(url)
+            if logit_bias:
+                payload["logit_bias"] = logit_bias
 
             try:
                 response = await self._post_llm_request(url, payload, headers, timeout=120.0, session_id=session_id)
@@ -997,6 +1002,8 @@ class OpenSourceRunner(BaseProgramRunner):
 
             target_model = model if (model and model != "local-llm") else os.getenv("LOCAL_MODEL_NAME")
 
+            from core.banned_words import get_logit_bias_dict
+
             payload = {
                 "messages": [
                     {"role": "system", "content": system_instruction},
@@ -1008,6 +1015,10 @@ class OpenSourceRunner(BaseProgramRunner):
 
             if target_model:
                 payload["model"] = target_model
+
+            logit_bias = get_logit_bias_dict(url)
+            if logit_bias:
+                payload["logit_bias"] = logit_bias
 
             r = await self._post_llm_request(url, payload, headers, timeout=60.0)
             if r.status_code == 200:

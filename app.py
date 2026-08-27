@@ -716,6 +716,11 @@ You must return a valid JSON object matching the following schema:
         if target_model:
             payload["model"] = target_model
             
+        from core.banned_words import get_logit_bias_dict
+        logit_bias = get_logit_bias_dict(LOCAL_SERVER_URL)
+        if logit_bias:
+            payload["logit_bias"] = logit_bias
+
         try:
             headers = get_local_server_headers()
             r = requests.post(LOCAL_SERVER_URL, json=payload, headers=headers, timeout=30.0)
