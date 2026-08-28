@@ -235,7 +235,8 @@ def start_local_server(model_key):
     # --------------------------------------
 
     try:
-        log_file = os.path.join(BASE_DIR, "llama_server.log")
+        from variables.settings import LOGS_DIR
+        log_file = os.path.join(LOGS_DIR, "llama_server.log")
         with open(log_file, "a", encoding="utf-8") as log_fd:
             log_fd.write(f"\n--- START {time.asctime()} ---\n")
             if os.name == 'nt':

@@ -40,6 +40,89 @@
     }
     </style>
     {% endif %}
+    <!-- Critical Splash Screen Styles (renders before external CSS) -->
+    <style id="critical-splash-styles">
+        #chat-loading-overlay {
+            position: fixed;
+            inset: 0;
+            width: 100vw;
+            height: 100vh;
+            background: #0d0d12;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            z-index: 999999;
+            transition: opacity 0.4s cubic-bezier(0.25, 1, 0.5, 1), visibility 0.4s;
+            opacity: 1;
+            visibility: visible;
+        }
+        #chat-loading-overlay.fade-out {
+            opacity: 0;
+            visibility: hidden;
+            pointer-events: none;
+        }
+        .splash-content {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 16px;
+            text-align: center;
+            animation: splash-pulse 2s infinite ease-in-out;
+        }
+        .splash-logo {
+            width: 72px;
+            height: 72px;
+            border-radius: 18px;
+            background: linear-gradient(135deg, #38bdf8, #818cf8);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            box-shadow: 0 8px 32px rgba(56, 189, 248, 0.35);
+        }
+        .splash-logo svg {
+            width: 38px;
+            height: 38px;
+            color: #ffffff;
+            animation: splash-heart 1.4s infinite ease-in-out;
+        }
+        .splash-text {
+            font-size: 1rem;
+            font-weight: 500;
+            letter-spacing: 0.05em;
+            color: #e2e8f0;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        }
+        .splash-bar {
+            width: 130px;
+            height: 3px;
+            background: rgba(255, 255, 255, 0.08);
+            border-radius: 99px;
+            overflow: hidden;
+            position: relative;
+        }
+        .splash-bar::after {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 50%;
+            height: 100%;
+            background: linear-gradient(90deg, transparent, #38bdf8, transparent);
+            animation: splash-slide 1.4s infinite ease-in-out;
+        }
+        @keyframes splash-pulse {
+            0%, 100% { transform: scale(1); }
+            50% { transform: scale(0.97); }
+        }
+        @keyframes splash-heart {
+            0%, 100% { transform: scale(1); }
+            50% { transform: scale(1.12); }
+        }
+        @keyframes splash-slide {
+            0% { transform: translateX(-100%); }
+            100% { transform: translateX(250%); }
+        }
+    </style>
     <!-- Server-side configuration bridge -->
     <script>
         window.__SANCTUARY_CONFIG = {
@@ -52,17 +135,21 @@
     </script>
 </head>
 <body class="{{ active_program | default('sebile') }}">
-    <div id="app-container">
-        <!-- App Loading Overlay -->
-        <div id="chat-loading-overlay">
-            <div class="loading-content">
-                <div class="loading-logo">
-                    <svg viewBox="0 0 24 24" fill="currentColor">
-                        <path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/>
-                    </svg>
-                </div>
+    <!-- App Loading Overlay (Centered on Viewport) -->
+    <div id="chat-loading-overlay">
+        <div class="splash-content">
+            <div class="splash-logo">
+                <svg viewBox="0 0 24 24" fill="currentColor">
+                    <path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/>
+                </svg>
+            </div>
+            <div style="display: flex; flex-direction: column; align-items: center; gap: 8px;">
+                <div class="splash-bar"></div>
             </div>
         </div>
+    </div>
+
+    <div id="app-container">
         <header>
             <div class="header-title-area">
                 <h1 class="sr-only">Sanctuary</h1>
@@ -305,7 +392,6 @@
                             <input type="url" id="databank-url-input" placeholder="https://example.com/article" class="onboarding-input" style="flex: 1; font-size: 0.85rem;">
                             <button onclick="scrapeDataBankUrl()" class="edit-btn edit-save-btn" style="padding: 8px 16px;">Scrape URL</button>
                         </div>
-                        <div style="font-size: 0.7rem; color: var(--text-muted); margin-top: 6px;">The program will fetch the page and extract readable content.</div>
                     </div>
 
                     <div id="databank-documents-container" style="display: flex; flex-direction: column; gap: 8px; margin-top: 10px;">
@@ -527,7 +613,7 @@
                 <span>Create / Import Program</span>
             </h3>
             <p style="color: var(--text-muted); font-size: 0.85rem; margin-bottom: 20px; line-height: 1.4;">
-                Procedurally import a new program from a character card (PNG) or describe a new character persona using text.
+                Procedurally import a new program from a character card (PNG or JSON) or describe a new character persona using text.
             </p>
 
             <!-- Tabs -->
@@ -542,9 +628,9 @@
 
             <!-- Tavern Card Import Tab -->
             <div id="import-tab-tavern" style="display: block;">
-                <input type="file" id="tavern-card-input" accept="image/png" style="display: none;" onchange="handleTavernCardFileChange(event)">
+                <input type="file" id="tavern-card-input" accept="image/png, .png, application/json, .json" style="display: none;" onchange="handleTavernCardFileChange(event)">
                 <button onclick="triggerTavernCardFileSelect()" class="dashed-action-btn" style="margin-bottom: 10px;">
-                    <span id="tavern-file-name">+ Select PNG Card</span>
+                    <span id="tavern-file-name">+ Select Card (PNG / JSON)</span>
                 </button>
                 <div style="display: flex; justify-content: flex-end;">
                     <button onclick="submitTavernCardImport()" id="tavern-import-btn" class="onboarding-btn" style="padding: 10px 24px; font-size: 0.85rem; min-width: auto; width: auto; height: auto;">
@@ -601,7 +687,7 @@
 
     <!-- Connection Settings -->
   <div id="connection-modal" class="modal" onclick="closeConnectionModal()">
-        <div id="connection-modal-card" class="modal-card" style="max-width: 780px; width: 95%; text-align: left; align-items: stretch; max-height: 85vh; display: flex; flex-direction: column; transition: max-width 0.25s ease;" onclick="event.stopPropagation()">
+        <div id="connection-modal-card" class="modal-card" style="max-width: 520px; width: 95%; text-align: left; align-items: stretch; max-height: 85vh; display: flex; flex-direction: column; transition: max-width 0.25s ease;" onclick="event.stopPropagation()">
             <span class="close-modal-btn" onclick="closeConnectionModal()">&times;</span>
             <h3 style="margin-bottom: 12px; display: flex; align-items: center; gap: 8px; font-size: 1.15rem; border-bottom: 1px solid rgba(255,255,255,0.08); padding-bottom: 10px;">
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--primary-accent)" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle; margin-right: 4px;"><line x1="4" y1="21" x2="4" y2="14"></line><line x1="4" y1="10" x2="4" y2="3"></line><line x1="12" y1="21" x2="12" y2="12"></line><line x1="12" y1="8" x2="12" y2="3"></line><line x1="20" y1="21" x2="20" y2="16"></line><line x1="20" y1="12" x2="20" y2="3"></line><line x1="1" y1="14" x2="7" y2="14"></line><line x1="9" y1="8" x2="15" y2="8"></line><line x1="17" y1="16" x2="23" y2="16"></line></svg>
@@ -613,63 +699,64 @@
                 <button onclick="switchConnectionTab('project')" id="conn-tab-btn-project" class="modal-tab-btn">Project Settings</button>
             </div>
 
-            <p id="connection-descriptor" style="color: var(--text-muted); font-size: 0.85rem; margin-bottom: 15px; line-height: 1.4;">
-                Select your preferred model configuration. Manage your local LLM engine, download models, and configure image generation environments.
+            <p id="connection-descriptor" style="color: var(--text-muted); font-size: 0.82rem; margin-bottom: 15px; line-height: 1.4;">
+                Select your preferred model configuration for local in-process execution.
             </p>
             
             <div style="overflow-y: auto; flex: 1; padding-right: 2px;">
                 <!-- Model & Engine Tab -->
                 <div id="connection-tab-engine" style="display: flex; flex-direction: column; gap: 15px;">
                     <!-- Chat Dynamism Slider -->
-                    <div style="background: rgba(255, 255, 255, 0.02); border: 1px solid rgba(255, 255, 255, 0.05); padding: 12px 18px; border-radius: 10px; margin-bottom: 5px; display: flex; align-items: center; justify-content: space-between; gap: 20px; flex-wrap: wrap;">
-                        <div style="flex: 1; min-width: 200px;">
-                            <div style="font-size: 0.85rem; font-weight: 600; color: var(--text-main); display: flex; align-items: center; gap: 4px;">
+                    <div style="background: rgba(255, 255, 255, 0.02); border: 1px solid rgba(255, 255, 255, 0.05); padding: 12px 16px; border-radius: 10px; margin-bottom: 5px;">
+                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+                            <div style="font-size: 0.85rem; font-weight: 600; color: var(--text-main);">
                                 Temperature: <span id="dynamism-current-val" style="color: var(--primary-accent); margin-left: 2px;">0.95</span>
                             </div>
-                            <div style="font-size: 0.7rem; color: var(--text-muted); margin-top: 2px; line-height: 1.3;">
-                                Controls response stability. A lower value is stable/predictable; higher is creative. <span style="color: #ef4444; font-weight: 500;">Tune carefully!</span>
+                            <div style="font-size: 0.7rem; color: var(--text-muted);">
+                                Higher is creative, lower is stable
                             </div>
                         </div>
-                        <div style="display: flex; align-items: center; width: 320px; max-width: 100%;">
-                            <input type="range" id="dynamism-slider" class="sanctuary-range" min="0.50" max="1.80" step="0.05" value="0.95" oninput="onDynamismSliderInput(this.value)" onchange="onDynamismSliderChange(this.value)" style="margin: 4px 0;">
-                        </div>
+                        <input type="range" id="dynamism-slider" class="sanctuary-range" min="0.50" max="1.80" step="0.05" value="0.95" oninput="onDynamismSliderInput(this.value)" onchange="onDynamismSliderChange(this.value)" style="width: 100%; margin: 4px 0;">
                     </div>
                     
-                    <div class="settings-grid" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 15px; margin-bottom: 15px;">
-                        <!-- Local Panel -->
-                        <div class="onboarding-option-box local-box" id="modal-local-box-container">
+                    <div class="settings-grid" style="display: flex; flex-direction: column; gap: 16px; margin-bottom: 15px;">
+                        <!-- Native LLM Panel -->
+                        <div class="onboarding-option-box local-box" id="modal-local-box-container" style="width: 100%; box-sizing: border-box;">
                             <div class="option-header">
-                                <h4 style="margin: 0; font-size: 1.05rem; font-weight: 600;">Local LLM</h4>
-                                <span id="modal-local-status" class="status-badge status-offline">Offline</span>
+                                <h4 style="margin: 0; font-size: 1.05rem; font-weight: 600;">LLM Engine</h4>
+                                <span id="modal-local-status" class="status-badge status-online">Online</span>
                             </div>
-                            <p id="modal-local-desc" class="option-desc" style="font-size: 0.8rem; margin: 8px 0 15px 0;">Local LLM engine is offline. Start the server or search Hugging Face below to download a GGUF model.</p>
+                            <p id="modal-local-desc" class="option-desc" style="font-size: 0.8rem; margin: 8px 0 12px 0;">Executes GGUF chat models in-process directly from <code>models/llm/</code>.</p>
                             
-                            <div style="display: flex; flex-direction: column; gap: 8px; margin-bottom: 15px;">
-                                <button id="modal-local-start-btn" onclick="startLocalLLM(this)" class="onboarding-btn connect-cloud-btn" style="width: 100%; font-size: 0.85rem; padding: 10px;">Start Server</button>
-                                <button id="modal-local-stop-btn" onclick="stopLocalLLM(this)" class="onboarding-btn" style="width: 100%; font-size: 0.85rem; padding: 10px; display: none;">Stop Server</button>
+                            <div class="input-group" style="margin-bottom: 10px;">
+                                <label style="font-size: 0.72rem; color: var(--text-muted); display: block; margin-bottom: 4px;">Active Chat Model</label>
+                                <select id="native-llm-select" class="onboarding-input glass-select" onchange="onSelectNativeLLM(this.value)" style="width: 100%; font-size: 0.82rem; height: 36px;"></select>
                             </div>
 
-                            <div id="modal-local-models-list" style="margin-bottom: 15px;"></div>
-                            
-                            <div style="border-top: 1px solid var(--border-color); padding-top: 15px;">
-                                <label style="font-size: 0.72rem; color: var(--text-muted); font-weight: 500;">Search Hugging Face (GGUF)</label>
-                                <div style="display: flex; gap: 8px; margin-top: 5px;">
-                                    <input type="text" id="modal-hf-search-input" placeholder="e.g. qwen2.5-0.5b" class="onboarding-input" style="flex: 1; font-size: 0.8rem; padding: 6px;" onkeydown="if(event.key==='Enter') searchHFModels('modal-hf-search-input', 'modal-hf-search-results')">
-                                    <button onclick="searchHFModels('modal-hf-search-input', 'modal-hf-search-results')" class="onboarding-btn" style="margin: 0; padding: 0 12px; font-size: 0.8rem;">Search</button>
-                                </div>
-                                <div id="modal-hf-search-results" style="margin-top: 10px; max-height: 120px; overflow-y: auto; display: flex; flex-direction: column; gap: 6px;"></div>
-                            </div>
+                            <div id="modal-native-llm-summary" style="font-size: 0.75rem; color: var(--text-muted); margin-bottom: 12px;"></div>
+
+                            <button onclick="openNativeModelsFolder('llm')" class="onboarding-btn" style="width: 100%; font-size: 0.8rem; padding: 8px 12px;">📂 Open LLM Folder</button>
                         </div>
 
-                        <!-- ComfyUI Panel -->
-                        <div class="onboarding-option-box comfy-box" id="modal-comfy-box-container">
+                        <!-- Native Diffusion Panel -->
+                        <div class="onboarding-option-box comfy-box" id="modal-comfy-box-container" style="width: 100%; box-sizing: border-box;">
                             <div class="option-header">
-                                <h4 style="margin: 0; font-size: 1.05rem; font-weight: 600;">ComfyUI (Portraits)</h4>
-                                <span id="modal-comfy-status" class="status-badge status-offline">Offline</span>
+                                <h4 style="margin: 0; font-size: 1.05rem; font-weight: 600;">Image Generation Engine</h4>
+                                <span id="modal-diffusion-status" class="status-badge status-online">Online</span>
                             </div>
-                            <p class="option-desc" style="font-size: 0.8rem; margin: 8px 0 15px 0;">Generate program portraits locally using ComfyUI.</p>
+                            <p class="option-desc" style="font-size: 0.8rem; margin: 8px 0 12px 0;">Renders character portraits in-process from <code>models/checkpoints/</code> and <code>models/loras/</code>.</p>
                             
-                            <button onclick="updateComfyModalStatus()" class="onboarding-btn" style="width: 100%; font-size: 0.85rem; padding: 10px; margin-top: 20px;">Check ComfyUI Connection</button>
+                            <div class="input-group" style="margin-bottom: 10px;">
+                                <label style="font-size: 0.72rem; color: var(--text-muted); display: block; margin-bottom: 4px;">Active Checkpoint Model</label>
+                                <select id="native-diffusion-select" class="onboarding-input glass-select" onchange="onSelectNativeCheckpoint(this.value)" style="width: 100%; font-size: 0.82rem; height: 36px;"></select>
+                            </div>
+
+                            <div id="modal-native-diffusion-summary" style="font-size: 0.75rem; color: var(--text-muted); margin-bottom: 12px;"></div>
+
+                            <div style="display: flex; gap: 8px;">
+                                <button onclick="openNativeModelsFolder('checkpoints')" class="onboarding-btn" style="flex: 1; font-size: 0.8rem; padding: 8px 12px;">📂 Open Checkpoints</button>
+                                <button onclick="openNativeModelsFolder('loras')" class="onboarding-btn" style="flex: 1; font-size: 0.8rem; padding: 8px 12px;">📂 Open LoRAs</button>
+                            </div>
                         </div>
                     </div>
 
@@ -758,8 +845,8 @@
     <!-- Voice Call Overlay -->
     <div id="voice-call-overlay" class="voice-call-modal">
         <div class="voice-call-card">
-            <!-- Pulsing Program Avatar -->
-            <div class="voice-call-avatar-container">
+            <!-- Pulsing Program Avatar (Tap to Talk / Tap to Send) -->
+            <div class="voice-call-avatar-container" onclick="toggleManualVoiceRecording()" title="Tap to Speak / Tap to Send" style="cursor: pointer;">
                 <div class="voice-call-pulse-ring ring1"></div>
                 <div class="voice-call-pulse-ring ring2"></div>
                 <img id="voice-call-program-avatar" class="voice-call-avatar" src="" alt="Program">
@@ -995,6 +1082,6 @@
     </div>
 
 
-    <script defer src="{{ url_for('static', filename='js/sanctuary.js') }}?v=4"></script>
+    <script defer src="{{ url_for('static', filename='js/sanctuary.js') }}?v=9"></script>
 </body>
 </html>

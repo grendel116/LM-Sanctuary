@@ -1321,102 +1321,108 @@ def generate_local_image(prompt: str) -> str:
 
     from runners.program import get_active_program
     active_program = get_active_program()
+
+    # Load image prompt tags from program details
+    img_details_val = ""
+    neg_details_val = ""
     
+    program_json_path = os.path.normpath(os.path.join(
+        root_dir, "core", "programs", active_program, f"{active_program}.json"
+    ))
+    if os.path.exists(program_json_path):
+        try:
+            with open(program_json_path, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+            card = raw.get("data", raw)
+            sanctuary = card.get("extensions", {}).get("sanctuary", {})
+            img_details = sanctuary.get("image_details", {})
+            img_details_val = img_details.get("positive", "")
+            neg_details_val = img_details.get("negative", "")
+        except Exception as e:
+            print(f"[DEBUG] Error reading active program JSON for image generation: {e}", flush=True)
+
+    # Combine prompt and image details
+    from core.program_config import replace_placeholders
+    final_prompt = replace_placeholders(prompt)
+    if img_details_val:
+        if final_prompt and not final_prompt.endswith(","):
+            final_prompt += ", "
+        final_prompt += img_details_val
+        
+    final_negative = neg_details_val if neg_details_val else "worst quality, low quality, deformed, mutated, extra limbs, watermark, text"
+
+    timestamp = int(time.time())
+    local_filename = f"portrait_{timestamp}.png"
+    portraits_dir = os.path.normpath(os.path.join(root_dir, "core", "programs", active_program, "portraits"))
+    local_path = os.path.join(portraits_dir, local_filename)
+    os.makedirs(portraits_dir, exist_ok=True)
+
+    # --- 1. Try Native In-Process Diffusion Engine first ---
+    try:
+        from core.engine_diffusion import list_checkpoints, list_loras, generate_portrait_image
+        local_ckpts = list_checkpoints()
+        if local_ckpts:
+            # Collect active LoRAs from models/loras
+            active_loras = []
+            for lora_item in list_loras():
+                active_loras.append((lora_item["name"], 0.7))
+
+            generate_portrait_image(
+                prompt=final_prompt,
+                negative_prompt=final_negative,
+                checkpoint=local_ckpts[0]["path"],
+                loras=active_loras if active_loras else None,
+                save_path=local_path
+            )
+
+            # Save sidecar JSON
+            json_path = os.path.join(portraits_dir, f"portrait_{timestamp}.json")
+            try:
+                with open(json_path, "w", encoding="utf-8") as jf:
+                    json.dump({"prompt": prompt, "full_prompt": final_prompt, "engine": "native_diffusion"}, jf, indent=4)
+            except Exception:
+                pass
+
+            return f"![Portrait](/images/portraits/{local_filename}?v={timestamp})"
+    except Exception as native_err:
+        print(f"[engine_diffusion] Native generation notice: {native_err}")
+
+    # --- 2. Fallback to external ComfyUI if installed and running ---
     workflow_env_path = os.getenv("COMFYUI_IMAGE_WORKFLOW", "core/skills/portrait_generation/ImageWorkflow.json")
     workflow_path = os.path.normpath(os.path.join(root_dir, workflow_env_path))
-    
-    if not os.path.exists(workflow_path):
-        return get_install_instructions(f"Workflow template not found at '{workflow_path}'")
 
-    comfy_url = COMFYUI_SERVER_URL
-
-    try:
-        # OPTIMIZATION: Query object_info once instead of calling separate functions that double HTTP payload latency
-        selected_checkpoint = COMFYUI_CHECKPOINT
-        selected_vae = COMFYUI_VAE
+    if os.path.exists(workflow_path):
         try:
-            info_res = requests.get(f"{comfy_url}/object_info", timeout=2.0)
-            if info_res.status_code == 200:
-                object_data = info_res.json()
-                
-                # Check Checkpoint
-                ckpt_loader = object_data.get("CheckpointLoaderSimple", {})
-                avail_ckpts = ckpt_loader.get("input", {}).get("required", {}).get("ckpt_name", [[]])[0]
-                if isinstance(avail_ckpts, list) and avail_ckpts and selected_checkpoint not in avail_ckpts:
-                    raise Exception(f"Missing Checkpoint: The required model checkpoint `{selected_checkpoint}` was not found.")
+            selected_checkpoint = COMFYUI_CHECKPOINT
+            selected_vae = COMFYUI_VAE
+            seed_val = random.randint(1, 1125899906842624)
+            replacements = {
+                "%prompt%": final_prompt,
+                "%negative_prompt%": final_negative,
+                "%seed%": seed_val,
+                "%model%": selected_checkpoint,
+                "%vae%": selected_vae
+            }
 
-                # Check VAE
-                vae_loader = object_data.get("VAELoader", {})
-                avail_vaes = vae_loader.get("input", {}).get("required", {}).get("vae_name", [[]])[0]
-                if isinstance(avail_vaes, list) and avail_vaes and selected_vae not in avail_vaes:
-                    raise Exception(f"Missing VAE: The required VAE file `{selected_vae}` was not found.")
+            result_path = apply_comfy_workflow(workflow_path, replacements, local_path, session_id=current_session_id.get())
+            if not result_path.startswith("Error"):
+                json_path = os.path.join(portraits_dir, f"portrait_{timestamp}.json")
+                try:
+                    with open(json_path, "w", encoding="utf-8") as jf:
+                        json.dump({"prompt": prompt, "engine": "comfyui"}, jf, indent=4)
+                except Exception:
+                    pass
+                return f"![Portrait](/images/portraits/{local_filename}?v={timestamp})"
         except Exception as e:
-            if "Missing Checkpoint" in str(e) or "Missing VAE" in str(e):
-                raise e
-            print(f"[DEBUG] Could not query object_info from ComfyUI: {e}", flush=True)
+            print(f"[INFO] ComfyUI fallback generation failed: {e}.")
 
-        # Load image prompt tags from program details
-        img_details_val = ""
-        neg_details_val = ""
-        
-        program_json_path = os.path.normpath(os.path.join(
-            root_dir, "core", "programs", active_program, f"{active_program}.json"
-        ))
-        if os.path.exists(program_json_path):
-            try:
-                with open(program_json_path, "r", encoding="utf-8") as f:
-                    raw = json.load(f)
-                card = raw.get("data", raw)
-                sanctuary = card.get("extensions", {}).get("sanctuary", {})
-                img_details = sanctuary.get("image_details", {})
-                img_details_val = img_details.get("positive", "")
-                neg_details_val = img_details.get("negative", "")
-            except Exception as e:
-                print(f"[DEBUG] Error reading active program JSON for image generation: {e}", flush=True)
-
-        # Combine prompt and image details
-        from core.program_config import replace_placeholders
-        final_prompt = replace_placeholders(prompt)
-        if img_details_val:
-            if final_prompt and not final_prompt.endswith(","):
-                final_prompt += ", "
-            final_prompt += img_details_val
-            
-        final_negative = neg_details_val if neg_details_val else "worst quality, low quality, deformed, mutated, extra limbs"
-
-        # Define dynamic replacement parameters
-        seed_val = random.randint(1, 1125899906842624)
-        replacements = {
-            "%prompt%": final_prompt,
-            "%negative_prompt%": final_negative,
-            "%seed%": seed_val,
-            "%model%": selected_checkpoint,
-            "%vae%": selected_vae
-        }
-
-        timestamp = int(time.time())
-        local_filename = f"portrait_{timestamp}.png"
-        portraits_dir = os.path.normpath(os.path.join(root_dir, "core", "programs", active_program, "portraits"))
-        local_path = os.path.join(portraits_dir, local_filename)
-
-        result_path = apply_comfy_workflow(workflow_path, replacements, local_path, session_id=current_session_id.get())
-        if result_path.startswith("Error"):
-            raise Exception(result_path)
-
-        # Save sidecar JSON
-        json_path = os.path.join(portraits_dir, f"portrait_{timestamp}.json")
-        try:
-            with open(json_path, "w", encoding="utf-8") as jf:
-                json.dump({"prompt": prompt}, jf, indent=4)
-        except Exception as je:
-            print(f"Error saving sidecar json: {je}")
-
-        # Return Markdown image tag with cache-busting version parameter
-        return f"![Portrait](/images/portraits/{local_filename}?v={timestamp})"
-
-    except Exception as e:
-        print(f"[INFO] ComfyUI generation failed or is offline: {e}.")
-        return get_install_instructions(str(e))
+    return (
+        "**Image Generation Inactive**\n\n"
+        "To enable native portrait generation:\n"
+        "- Place any Stable Diffusion SafeTensors model in `models/checkpoints/`.\n"
+        "- (Optional) Place any character or style LoRAs in `models/loras/`.\n"
+        "- Once placed, ask the program to generate a portrait!"
+    )
 
 @track_tool_activity
 def generate_video_from_image(image_path: str, prompt: str) -> str:
@@ -1998,7 +2004,7 @@ def add_quest(title: str, notes: str, due: str = None, location: str = "", remin
         from datetime import datetime, timezone, timedelta
         
         # Resolve quest log path under the active program directory
-        root_dir = os.path.dirname(os.path.abspath(__file__))
+        root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         from runners.program import get_active_program
         active_program = get_active_program()
         program_dir = os.path.normpath(os.path.join(root_dir, "core", "programs", active_program))

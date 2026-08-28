@@ -58,6 +58,7 @@ core/skills/speech_generation/speech_model/*.bin
 core/skills/speech_generation/speech_cache/
 
 # Runtime logs
+logs/
 *.log
 comfy_server.log
 

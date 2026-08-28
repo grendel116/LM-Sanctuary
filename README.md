@@ -9,8 +9,8 @@ Here, you roleplay, code, and chat with AI Companions on your own machine.
 
 I believe in seizing AI and the means of production into collective ownership. The Sanctuary is a unified companion home built on human-in-the-loop engagement.
 
-1. **Roleplay**: Uncensored conversation. Talk to your companions as friends, partners, or mentors.
-2. **Coding**: Build real software. Your companions read and write files directly on your own drive.
+1. **Roleplay**: Uncensored conversation. Talk to programs as partners.
+2. **Coding**: Build software. Your companions read and write files directly on your own drive.
 3. **Autonomous Action**: Let the AI run code, run tests, and manage workflows.
 
 ### Sovereign Infrastructure
@@ -48,9 +48,21 @@ These are the things your companion can do on your computer. By default, before 
 * **Hybrid Web Search** (`web_search`): A unified search client that queries SearXNG (for Baidu/Yandex/Bing), DuckDuckGo, Brave, and Tavily concurrently. It aggregates and deduplicates URLs, supports concurrent page content enrichment for thin search results, and provides explicit query prefix routing (e.g. `github: query`, `arxiv: query`, `hn: query`, `wikipedia: query`).
 * **Read URL** (`read_webpage`): Fetch and extract text content from any webpage.
 
-### Generative Media (Local)
-* **Render Portrait** (`generate_local_image`): Render companion in a scene using local ComfyUI. Triggered natively by the companion or via the chat interface button.
-* **Comfy Workflow** (`apply_comfy_workflow`): Run custom workflows against a local ComfyUI API.
+### Generative Media Engines (Local)
+* **Native LLM Engine**: Direct GGUF loading and token inference via `llama-cpp-python` with zero external server processes or port conflicts.
+* **Native Diffusion Engine** (`generate_local_image`): Render companion portraits in real-time directly using SafeTensors checkpoints and LoRAs.
+* **ComfyUI Compatibility** (`apply_comfy_workflow`): Optional connection to remote or headless ComfyUI for advanced custom node graphs.
+
+---
+
+## 📁 MODELS DIRECTORY STRUCTURE
+
+Place your models directly into the `models/` directory for automatic discovery:
+
+* **`models/llm/`**: Place GGUF chat models (e.g. `Qwen2.5-7B-Instruct.Q4_K_M.gguf`, `Gemma-2-9B.gguf`).
+* **`models/checkpoints/`**: Place Stable Diffusion / SDXL / Pony SafeTensors checkpoints.
+* **`models/loras/`**: Place character or style LoRAs (`.safetensors`).
+* **`models/vae/`**: Place custom VAE weights (`.safetensors` / `.pt`).
 
 ---
 
@@ -60,25 +72,24 @@ These are the things your companion can do on your computer. By default, before 
 * **Procedural Journals**: Companions build dynamic journal logs (`journals.json`), preserving context and relationships across sessions.
 * **Quest Log & Calendar Export**: Integrated quest system to track and display user objectives in the UI. Companions can assign quests (chores, habits, tasks) using the local `add_quest` tool. Each quest card provides a quick-action to export the task:
   * **Download ICS**: Download a standard `.ics` file containing a `VALARM` notification alert for native desktop/mobile task/calendar clients.
-* **Program Editing, Imports & Exports**: Edit companion profiles, import SillyTavern character cards (`.json`), import World Info lorebooks (`.json`), and export cards and lorebooks back to SillyTavern format.
+* **Program Editing, Imports & Exports**: Edit companion profiles, import SillyTavern character cards (PNG & `chara_card_v3` `.json`), import World Info lorebooks (`.json`), and export cards and lorebooks back to SillyTavern format.
 * **Character Accent Palette**: Dynamic accent colors resolved from your companion's profile card that automatically generate and update themed CSS variables (buttons, borders, highlights, and active states).
 * **Idle Thoughts**: Inline monologue bubbles (`.thought-row`) showing a companion's thoughts during inactivity.
 * **Temperature Control**: A dynamic slider in settings to control chat creativity.
-* **Portrait Animation**: Animate companion portraits using ComfyUI video.
 * **Story Mode**: Toggle between first-person conversational chat and third-person descriptive narrative storytelling styles.
 
 ---
 
 ## 🚀 HOW TO RUN
 
-### Easy Way (Windows):
-Double-click `run_local.bat` (or run `./run_local.ps1` in PowerShell).
-Open browser: **`http://localhost:5000`**
+### Easy Way (Windows Desktop App):
+Double-click **`run_local.bat`** (or run `./run_local.ps1` in PowerShell).
+This automatically launches LM-Sanctuary in a standalone native desktop window.
 
-### Manual Way:
+### Manual Way / Browser Mode:
 1. Open terminal in this folder.
 2. Run `python -m venv .venv` to make python environment.
 3. Run `.venv\Scripts\activate` (or `source .venv/bin/activate` on Mac/Linux).
 4. Run `pip install -r requirements.txt` to install tools.
-5. Run `python app.py` to start server.
-6. Open browser: **`http://localhost:5000`** (or **`http://<YOUR_PC_IP>:5000`** on phone).
+5. Run `python desktop.py` (for desktop window) or `python app.py` (for browser server).
+6. Browser UI is available at **`http://localhost:5000`** (or **`http://<YOUR_PC_IP>:5000`** on mobile/LAN).

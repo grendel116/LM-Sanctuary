@@ -64,4 +64,16 @@ COMFYUI_VAE = os.getenv("COMFYUI_VAE", "sdxl_vae.safetensors")
 
 # Shared directory paths
 PROGRAMS_DIR = os.path.join(BASE_DIR, "core", "programs")
+LOGS_DIR = os.path.join(BASE_DIR, "logs")
+
+# Centralized Models directory hierarchy
+MODELS_DIR = os.path.join(BASE_DIR, "models")
+LLM_MODELS_DIR = os.path.join(MODELS_DIR, "llm")
+CHECKPOINTS_DIR = os.path.join(MODELS_DIR, "checkpoints")
+LORAS_DIR = os.path.join(MODELS_DIR, "loras")
+VAE_DIR = os.path.join(MODELS_DIR, "vae")
+
+for _dir in (MODELS_DIR, LLM_MODELS_DIR, CHECKPOINTS_DIR, LORAS_DIR, VAE_DIR, PROGRAMS_DIR, LOGS_DIR):
+    os.makedirs(_dir, exist_ok=True)
+
 

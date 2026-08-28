@@ -15,3 +15,7 @@ pypdf
 ddgs
 musicbrainzngs
 llama-cpp-python
+diffusers
+pywebview
+cryptography
+faster-whisper

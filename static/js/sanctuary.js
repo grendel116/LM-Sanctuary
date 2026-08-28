@@ -1833,266 +1833,12 @@ function updateConnectionModalStatus() {
     }
     
     updateConnectionStatus(connectionStatus);
-
-    // Update the Local box panel states inside settings modal
-    const localBox = document.getElementById('modal-local-box-container');
-    if (localBox) {
-        const localDesc = document.getElementById('modal-local-desc');
-        const startBtn = document.getElementById('modal-local-start-btn');
-        const stopBtn = document.getElementById('modal-local-stop-btn');
-        
-        if (connectionStatus.local_online === 'starting' || _localStarting) {
-            if (localDesc) localDesc.textContent = "Local LLM engine is currently starting up in the background. Please wait...";
-            if (startBtn) {
-                startBtn.style.display = 'block';
-                startBtn.disabled = true;
-                startBtn.textContent = "Starting...";
-            }
-            if (stopBtn) stopBtn.style.display = 'none';
-        } else if (_localStopping) {
-            if (localDesc) localDesc.textContent = "Local LLM engine is stopping. Please wait...";
-            if (startBtn) {
-                startBtn.style.display = 'block';
-                startBtn.disabled = true;
-                startBtn.textContent = "Stopping...";
-            }
-            if (stopBtn) stopBtn.style.display = 'none';
-        } else if (!connectionStatus.local_online) {
-            if (localDesc) localDesc.textContent = "Local LLM engine is offline. Start the server or search Hugging Face below to download a GGUF model.";
-            if (startBtn) {
-                startBtn.style.display = 'block';
-                startBtn.disabled = false;
-                startBtn.textContent = "Start Server";
-            }
-            if (stopBtn) stopBtn.style.display = 'none';
-        } else {
-            if (localDesc) localDesc.textContent = "Local LLM server is running. Select active models via the header dropdown.";
-            if (startBtn) startBtn.style.display = 'none';
-            if (stopBtn) {
-                stopBtn.style.display = 'block';
-                stopBtn.disabled = false;
-                stopBtn.textContent = "Stop Server";
-            }
-        }
-        fetchAndRenderLocalModels();
-    }
+    fetchNativeModelsSummary();
 }
 
 // --- updateComfyModalStatus ---
-// skipFetch: when true, use in-memory comfyStatus (already populated by SSE or button handlers)
-async function updateComfyModalStatus(skipFetch = false) {
-    // Debounce: coalesce rapid consecutive calls into a single update
-    if (_comfyUpdateRunning) {
-        if (!_comfyUpdateTimer) {
-            _comfyUpdateTimer = setTimeout(() => {
-                _comfyUpdateTimer = null;
-                updateComfyModalStatus(skipFetch);
-            }, 200);
-        }
-        return;
-    }
-    _comfyUpdateRunning = true;
-
-    try {
-        if (!skipFetch) {
-            const res = await fetch('/api/comfy/status');
-            comfyStatus = await res.json();
-        }
-        
-        const comfyBox = document.getElementById('modal-comfy-box-container');
-        if (comfyBox) {
-            const statusBadge = document.getElementById('modal-comfy-status');
-            if (statusBadge) {
-                if (comfyStatus.running === true || comfyStatus.running === 'online') {
-                    statusBadge.textContent = "Running";
-                    statusBadge.className = "status-badge status-online";
-                } else if (comfyStatus.running === 'starting') {
-                    statusBadge.textContent = "Starting...";
-                    statusBadge.className = "status-badge status-starting";
-                } else if (comfyStatus.running === 'stopping') {
-                    statusBadge.textContent = "Stopping...";
-                    statusBadge.className = "status-badge status-starting";
-                } else if (comfyStatus.installed) {
-                    statusBadge.textContent = "Offline";
-                    statusBadge.className = "status-badge status-offline";
-                } else {
-                    statusBadge.textContent = "Uninstalled";
-                    statusBadge.className = "status-badge status-offline";
-                }
-            }
-            
-            if (!comfyStatus.installed) {
-                _comfyCheckpointsInitialized = false;
-                if (comfyStatus.resolution_status && comfyStatus.resolution_status.status === "resolving") {
-                    let percentWidth = "0%";
-                    const text = comfyStatus.resolution_status.progress;
-                    const match = text.match(/(\d+)%/);
-                    if (match) {
-                        percentWidth = match[1] + '%';
-                    }
-                    
-                    comfyBox.innerHTML = `
-                        <div class="option-header">
-                            <h4 style="margin: 0; font-size: 1.05rem; font-weight: 600;">ComfyUI (Portraits)</h4>
-                            <span class="status-badge status-offline">Installing...</span>
-                        </div>
-                        <p class="option-desc" style="font-size: 0.8rem; margin: 8px 0 15px 0;">ComfyUI is installing in the background.</p>
-                        <div id="comfy-install-progress" style="margin-top: 10px; font-size: 0.85rem; color: var(--text-main);">
-                            <div style="font-weight: 500; margin-bottom: 5px;">Status: INSTALLING</div>
-                            <div style="font-style: italic; margin-bottom: 8px;" id="comfy-install-progress-text">${comfyStatus.resolution_status.progress}</div>
-                            <div style="background: rgba(255,255,255,0.05); border-radius: 4px; height: 6px; width: 100%; overflow: hidden;">
-                                <div id="comfy-install-progress-bar" style="background: var(--primary-accent); height: 100%; width: ${percentWidth};"></div>
-                            </div>
-                        </div>
-                    `;
-                    setTimeout(() => updateComfyModalStatus(false), 2000);
-                } else {
-                    comfyBox.innerHTML = `
-                        <div class="option-header">
-                            <h4 style="margin: 0; font-size: 1.05rem; font-weight: 600;">ComfyUI (Portraits)</h4>
-                            <span id="modal-comfy-status" class="status-badge status-offline">Uninstalled</span>
-                        </div>
-                        <p class="option-desc" style="font-size: 0.8rem; margin: 8px 0 15px 0;">ComfyUI is not detected in your workspace or destination directory.</p>
-                        <button onclick="installComfyUI(this)" class="onboarding-btn connect-cloud-btn" style="width: 100%; font-size: 0.85rem; padding: 10px; margin-top: 10px;">Auto-Install ComfyUI</button>
-                    `;
-                }
-            } else {
-                // Check if checkpoint manager is already rendered to avoid resetting user inputs/lists
-                const managerExists = document.getElementById('comfy-checkpoint-manager');
-                if (managerExists) {
-                    // Just update status and button controls dynamically
-                    const badge = document.getElementById('modal-comfy-status');
-                    if (badge) {
-                        if (comfyStatus.running === true || comfyStatus.running === 'online') {
-                            badge.textContent = "Running";
-                            badge.className = "status-badge status-online";
-                        } else if (comfyStatus.running === 'starting') {
-                            badge.textContent = "Starting...";
-                            badge.className = "status-badge status-starting";
-                        } else if (comfyStatus.running === 'stopping') {
-                            badge.textContent = "Stopping...";
-                            badge.className = "status-badge status-starting";
-                        } else {
-                            badge.textContent = "Offline";
-                            badge.className = "status-badge status-offline";
-                        }
-                    }
-                    
-                    // Defer controls update when user is interacting with the search input
-                    const activeEl = document.activeElement;
-                    const isUserTyping = activeEl && (activeEl.id === 'comfy-hf-search-input');
-                    
-                    // Update the controls container (Start/Stop button etc.) only when not mid-operation
-                    const controls = document.getElementById('comfy-engine-controls');
-                    if (controls && !_comfyResolving) {
-                        const isRunning = comfyStatus.running === true || comfyStatus.running === 'online';
-                        const isStarting = comfyStatus.running === 'starting' || _comfyStarting;
-                        const isStopping = comfyStatus.running === 'stopping' || _comfyStopping;
-                        
-                        if (isRunning) {
-                            controls.innerHTML = `
-                                <button onclick="stopComfyUI(this)" class="onboarding-btn" style="width: 100%; font-size: 0.85rem; padding: 10px; margin-top: 5px;">Stop ComfyUI</button>
-                                <button onclick="resolveWorkflowDependencies(this)" class="onboarding-btn" style="width: 100%; font-size: 0.85rem; padding: 10px; margin-top: 8px; margin-bottom: 5px;">Resolve Workflow Dependencies</button>
-                            `;
-                        } else if (isStarting) {
-                            controls.innerHTML = `
-                                <button disabled class="onboarding-btn" style="width: 100%; font-size: 0.85rem; padding: 10px; margin-top: 5px; opacity: 0.7;">Starting ComfyUI...</button>
-                            `;
-                        } else if (isStopping) {
-                            controls.innerHTML = `
-                                <button disabled class="onboarding-btn" style="width: 100%; font-size: 0.85rem; padding: 10px; margin-top: 5px; opacity: 0.7;">Stopping ComfyUI...</button>
-                            `;
-                        } else {
-                            controls.innerHTML = `
-                                <button onclick="startComfyUI(this)" class="onboarding-btn" style="width: 100%; font-size: 0.85rem; padding: 10px; margin-top: 5px;">Start ComfyUI</button>
-                            `;
-                        }
-                    }
-                    
-                    // Update progress bar if resolving
-                    const progressDiv = document.getElementById('comfy-resolution-progress');
-                    if (progressDiv && comfyStatus.resolution_status) {
-                        const r = comfyStatus.resolution_status;
-                        if (r.status !== "idle") {
-                            let errorHtml = "";
-                            if (r.errors && r.errors.length > 0) {
-                                errorHtml = `<div style="color: #fca5a5; margin-top: 4px;">Errors: ${r.errors.join(", ")}</div>`;
-                            }
-                            progressDiv.innerHTML = `
-                                <div style="font-weight: 500; color: var(--text-main); margin-top: 8px; margin-bottom: 3px;">Status: ${r.status.toUpperCase()}</div>
-                                <div style="margin-top: 2px; font-style: italic;">${r.progress}</div>
-                                ${errorHtml}
-                            `;
-                            if (r.status === "resolving") {
-                                setTimeout(() => updateComfyModalStatus(false), 2000);
-                            }
-                        } else {
-                            progressDiv.innerHTML = '';
-                        }
-                    }
-                } else {
-                    // Render full ComfyUI installed view (including Checkpoint Manager)
-                    comfyBox.innerHTML = `
-                         <div class="option-header">
-                             <h4 style="margin: 0; font-size: 1.05rem; font-weight: 600;">ComfyUI (Portraits)</h4>
-                             <span id="modal-comfy-status" class="status-badge ${comfyStatus.running === 'starting' || comfyStatus.running === 'stopping' ? 'status-starting' : (comfyStatus.running ? 'status-online' : 'status-offline')}">
-                                 ${comfyStatus.running === 'starting' ? 'Starting...' : (comfyStatus.running === 'stopping' ? 'Stopping...' : (comfyStatus.running ? 'Running' : 'Offline'))}
-                             </span>
-                         </div>
-                         <p class="option-desc" style="font-size: 0.8rem; margin: 8px 0 10px 0;">Generate program portraits locally using ComfyUI.</p>
-                         
-                         <div id="comfy-engine-controls">
-                             ${comfyStatus.running === true || comfyStatus.running === 'online' ? `
-                                 <button onclick="stopComfyUI(this)" class="onboarding-btn" style="width: 100%; font-size: 0.85rem; padding: 10px; margin-top: 5px;">Stop ComfyUI</button>
-                                 <button onclick="resolveWorkflowDependencies(this)" class="onboarding-btn" style="width: 100%; font-size: 0.85rem; padding: 10px; margin-top: 8px; margin-bottom: 5px;">Resolve Workflow Dependencies</button>
-                             ` : (comfyStatus.running === 'starting' ? `
-                                 <button disabled class="onboarding-btn" style="width: 100%; font-size: 0.85rem; padding: 10px; margin-top: 5px; opacity: 0.7;">Starting ComfyUI...</button>
-                             ` : (comfyStatus.running === 'stopping' ? `
-                                 <button disabled class="onboarding-btn" style="width: 100%; font-size: 0.85rem; padding: 10px; margin-top: 5px; opacity: 0.7;">Stopping ComfyUI...</button>
-                             ` : `
-                                 <button onclick="startComfyUI(this)" class="onboarding-btn" style="width: 100%; font-size: 0.85rem; padding: 10px; margin-top: 5px;">Start ComfyUI</button>
-                             `))}
-                         </div>
-                        <div id="comfy-resolution-progress" style="font-size: 0.72rem; color: var(--text-muted); line-height: 1.3;"></div>
-                        
-                        <div id="comfy-checkpoint-manager" style="border-top: 1px solid var(--border-color); padding-top: 15px; margin-top: 15px; text-align: left;">
-                            <div style="margin-bottom: 15px;">
-                                <label style="font-size: 0.72rem; color: var(--text-muted); font-weight: 600; display: block; margin-bottom: 6px;">Active Checkpoint Model:</label>
-                                <select id="comfy-checkpoint-select" onchange="changeComfyCheckpoint()" class="onboarding-input glass-select" style="width: 100%; font-size: 0.8rem; background: rgba(0,0,0,0.25); color: var(--text-color); border: 1px solid var(--border-color); border-radius: 6px; outline: none; height: 32px; box-sizing: border-box;">
-                                    <option>Loading checkpoints...</option>
-                                </select>
-                                <button onclick="fetchComfyCheckpoints()" class="onboarding-btn" style="width: 100%; margin-top: 8px; font-size: 0.8rem; padding: 6px; height: 32px;">Refresh Checkpoints</button>
-                            </div>
-                            
-                            <div style="margin-bottom: 10px;">
-                                <label style="font-size: 0.72rem; color: var(--text-muted); font-weight: 600; display: block; margin-bottom: 6px;">Search Hugging Face (Checkpoints):</label>
-                                <input type="text" id="comfy-hf-search-input" placeholder="e.g. sd_xl, pony, custom_art" class="onboarding-input" style="width: 100%; font-size: 0.8rem; padding: 6px 10px; height: 32px; box-sizing: border-box;" onkeydown="if(event.key==='Enter') searchComfyHFCheckpoints()">
-                                <button onclick="searchComfyHFCheckpoints()" class="onboarding-btn" style="width: 100%; margin-top: 8px; font-size: 0.8rem; padding: 6px; height: 32px;">Search Checkpoints</button>
-                                <div id="comfy-hf-search-results" style="margin-top: 10px; max-height: 140px; overflow-y: auto; font-size: 0.75rem; display: flex; flex-direction: column; gap: 6px; padding-right: 4px;"></div>
-                            </div>
-                            
-                            <div id="comfy-checkpoint-downloads-container" style="display: none; font-size: 0.72rem; color: var(--text-muted); border-top: 1px solid rgba(255,255,255,0.05); padding-top: 10px; margin-top: 10px;">
-                                <div style="font-weight: 600; color: var(--text-color); margin-bottom: 5px;">Active Downloads:</div>
-                                <div id="comfy-checkpoint-downloads-list" style="display: flex; flex-direction: column; gap: 6px;"></div>
-                            </div>
-                        </div>
-                    `;
-                    
-                    // Trigger initial checkpoints loading only once per panel lifecycle
-                    if (!_comfyCheckpointsInitialized) {
-                        _comfyCheckpointsInitialized = true;
-                        fetchComfyCheckpoints();
-                        pollComfyCheckpointDownloads();
-                    }
-                }
-            }
-        }
-    } catch (e) {
-        console.error("Error fetching ComfyUI status:", e);
-    } finally {
-        _comfyUpdateRunning = false;
-
-    }
+async function updateComfyModalStatus() {
+    fetchNativeModelsSummary();
 }
 
 
@@ -2133,11 +1879,11 @@ function switchConnectionTab(tab) {
     if (projectTab) projectTab.style.display = 'none';
 
     if (tab === 'engine') {
-        if (modalCard) modalCard.style.maxWidth = '780px';
+        if (modalCard) modalCard.style.maxWidth = '520px';
         if (engineTab) engineTab.style.display = 'flex';
         if (engineBtn) engineBtn.classList.add('active');
     } else if (tab === 'project') {
-        if (modalCard) modalCard.style.maxWidth = '640px';
+        if (modalCard) modalCard.style.maxWidth = '560px';
         if (projectTab) projectTab.style.display = 'block';
         if (projectBtn) projectBtn.classList.add('active');
         loadProjectSettings();
@@ -2932,7 +2678,7 @@ function openImportProgramModal() {
     selectedTavernCardFile = null;
     document.getElementById('tavern-card-input').value = '';
     const nameEl = document.getElementById('tavern-file-name');
-    if (nameEl) { nameEl.textContent = '+ Select PNG Card'; nameEl.style.color = ''; nameEl.style.fontWeight = ''; }
+    if (nameEl) { nameEl.textContent = '+ Select Card (PNG / JSON)'; nameEl.style.color = ''; nameEl.style.fontWeight = ''; }
     document.getElementById('describe-program-name').value = '';
     document.getElementById('describe-program-desc').value = '';
     switchImportTab('tavern');
@@ -2992,7 +2738,7 @@ function handleTavernCardFileChange(e) {
 // --- submitTavernCardImport ---
 async function submitTavernCardImport() {
     if (!selectedTavernCardFile) {
-        showCustomAlert("Error", "Please select a character card PNG image first.");
+        showCustomAlert("Error", "Please select a character card (PNG or JSON) first.");
         return;
     }
     
@@ -3655,18 +3401,20 @@ async function saveProgramProfile() {
 }
 
 async function loadProgramJournals() {
-    if (!currentEditingProgramId) return;
+    const progId = currentEditingProgramId || (typeof activeProgramName !== 'undefined' && activeProgramName ? activeProgramName.toLowerCase() : '') || 'sebile';
+    currentEditingProgramId = progId;
+    
     const journalsContainer = document.getElementById('program-journals-list');
     const epicContainer = document.getElementById('program-epic-chronicle-container');
     const chaptersContainer = document.getElementById('program-chapters-list');
     
-    if (journalsContainer) {
+    if (journalsContainer && (!journalsContainer.children.length || journalsContainer.querySelector('.empty-state'))) {
         journalsContainer.innerHTML = '<div style="color: var(--text-muted); font-size: 0.8rem; text-align: center; padding: 10px;">Loading memory...</div>';
     }
     
     try {
         const activeSession = (typeof currentSessionId !== 'undefined' && currentSessionId) ? currentSessionId : 'default';
-        const res = await fetch(`/api/programs/journals?program_id=${encodeURIComponent(currentEditingProgramId)}&session_id=${encodeURIComponent(activeSession)}&t=${Date.now()}`);
+        const res = await fetch(`/api/programs/journals?program_id=${encodeURIComponent(progId)}&session_id=${encodeURIComponent(activeSession)}&t=${Date.now()}`);
         const data = await res.json();
         if (data.error) throw new Error(data.error);
         
@@ -3786,14 +3534,14 @@ async function loadProgramJournals() {
         
     } catch (e) {
         console.error("Error in loadProgramJournals:", e);
-        if (journalsContainer) {
+        if (journalsContainer && (!journalsContainer.children.length || journalsContainer.querySelector('.empty-state'))) {
             journalsContainer.innerHTML = '<div style="color: #fca5a5; font-size: 0.75rem; text-align: center; padding: 10px;">Failed to load memory.</div>';
         }
     }
 }
 
 async function addManualJournalEntry() {
-    if (!currentEditingProgramId) return;
+    const progId = currentEditingProgramId || (typeof activeProgramName !== 'undefined' && activeProgramName ? activeProgramName.toLowerCase() : '') || 'sebile';
     const kpInput = document.getElementById('journal-keyphrases-input');
     const cInput = document.getElementById('journal-content-input');
     if (!kpInput || !cInput) return;
@@ -3810,7 +3558,7 @@ async function addManualJournalEntry() {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-                program_id: currentEditingProgramId,
+                program_id: progId,
                 keyphrases: keyphrases,
                 content: content
             })
@@ -3827,7 +3575,7 @@ async function addManualJournalEntry() {
 }
 
 async function deleteProgramJournalEntry(entryId) {
-    if (!currentEditingProgramId) return;
+    const progId = currentEditingProgramId || (typeof activeProgramName !== 'undefined' && activeProgramName ? activeProgramName.toLowerCase() : '') || 'sebile';
     showCustomConfirm(
         "Delete Memory Entry",
         "Are you sure you want to permanently delete this memory entry? The program will forget this context immediately.",
@@ -3837,7 +3585,7 @@ async function deleteProgramJournalEntry(entryId) {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
-                        program_id: currentEditingProgramId,
+                        program_id: progId,
                         id: entryId
                     })
                 });
@@ -4050,6 +3798,10 @@ async function loadHistory() {
         }
         inversionActive = data.inversion_active || "";
 
+        if (currentProactiveThoughtText) {
+            showThoughtBubbleOverlay(currentProactiveThoughtText);
+        }
+
         // Restore scroll position
         const savedScrollPos = safeSessionStorage.getItem('chat_scroll_pos');
         const wasAtBottom = safeSessionStorage.getItem('chat_was_at_bottom');
@@ -4094,10 +3846,12 @@ function hideLoadingOverlay() {
     if (overlay) {
         overlay.classList.add('fade-out');
         setTimeout(() => {
-            overlay.remove();
-        }, 400);
+            try { overlay.remove(); } catch(e) {}
+        }, 450);
     }
 }
+// Guaranteed fallback so the splash overlay is never stuck on screen
+setTimeout(hideLoadingOverlay, 2500);
 
 // --- resetSession ---
 async function resetSession() {
@@ -5460,6 +5214,10 @@ function handleToolReloadOrRecovery() {
 // --- sendMessage ---
 async function sendMessage() {
     hideThoughtBubbleOverlay();
+    currentProactiveThoughtText = "";
+    lastUserMessageTime = Date.now();
+    hasTriggeredInitialProactive = false;
+    lastProactiveThoughtTime = 0;
     const text = userInput.value.trim();
     if (!text && !attachedBase64 && !attachedMediaPath) {
         const messageRows = chatContainer.querySelectorAll('.message-row:not(#welcome-message):not(#onboarding-container)');
@@ -8647,23 +8405,13 @@ if (document.readyState === 'loading') {
 }
 
 // Proactive idle action trigger and functions
-function resetIdleTimer() {
-    lastInteractionTime = Date.now();
-    hasTriggeredProactive = false;
-    // Cancel any in-flight proactive request so stale responses never render
-    if (proactiveAbortController) {
-        proactiveAbortController.abort();
-        proactiveAbortController = null;
-    }
-}
-
-window.addEventListener('mousemove', resetIdleTimer);
-window.addEventListener('click', resetIdleTimer);
-window.addEventListener('keypress', resetIdleTimer);
-window.addEventListener('touchstart', resetIdleTimer);
+// --- Proactive Thought System ---
+let lastUserMessageTime = Date.now();
+let hasTriggeredInitialProactive = false;
+let lastProactiveThoughtTime = 0;
+let currentProactiveThoughtText = "";
 
 async function triggerProactiveAction() {
-    // Create an abort controller for this request so user activity can cancel it
     proactiveAbortController = new AbortController();
     const signal = proactiveAbortController.signal;
     try {
@@ -8676,16 +8424,14 @@ async function triggerProactiveAction() {
             }),
             signal
         });
-        // After the await, verify the request was not aborted during the LLM call
         if (signal.aborted) return;
         const data = await response.json();
         if (signal.aborted) return;
-        if (data.status === 'success') {
-            if (data.type === 'thought') {
-                showThoughtBubbleOverlay(data.content);
-            } else if (data.type === 'message' || data.type === 'portrait') {
-                loadHistory();
-            }
+        if (data.status === 'success' && data.type === 'thought' && data.content) {
+            currentProactiveThoughtText = data.content;
+            lastProactiveThoughtTime = Date.now();
+            hasTriggeredInitialProactive = true;
+            showThoughtBubbleOverlay(data.content);
         }
     } catch (err) {
         if (err.name === 'AbortError') return;
@@ -8696,12 +8442,12 @@ async function triggerProactiveAction() {
 }
 
 function showThoughtBubbleOverlay(text) {
-    hideThoughtBubbleOverlay(); // Remove existing if any
+    hideThoughtBubbleOverlay();
+    currentProactiveThoughtText = text;
     
     const row = document.createElement('div');
     row.className = 'message-row program-row thought-row';
     row.id = 'active-thought-bubble';
-    row.onclick = () => hideThoughtBubbleOverlay();
     
     const profileUrl = getProfileUrl();
     
@@ -8731,24 +8477,28 @@ function hideThoughtBubbleOverlay() {
     if (bubble) {
         bubble.remove();
     }
-    // Remove glow from all program avatars
     document.querySelectorAll('.program-avatar.thinking-glow').forEach(img => {
         img.classList.remove('thinking-glow');
     });
 }
 
-// Periodically check for inactivity (every 5 seconds)
+// Periodically check for proactive thoughts:
+// 1. Initial thought triggers after 3 minutes (180,000 ms) of silence.
+// 2. Subsequent thoughts trigger at 4-hour intervals (14,400,000 ms) since the previous thought.
 setInterval(async () => {
-    const idleTime = Date.now() - lastInteractionTime;
-    // 3 minutes (180 seconds) of idle time triggers proactive check
-    if (idleTime > 180000 && !hasTriggeredProactive) {
-        hasTriggeredProactive = true;
-        const userInput = document.getElementById('user-input');
-        if (userInput && !userInput.disabled) {
-            await triggerProactiveAction();
-        }
+    const idleSinceUser = Date.now() - lastUserMessageTime;
+    const userInput = document.getElementById('user-input');
+    if (!userInput || userInput.disabled) return;
+
+    // First thought: after 3 minutes
+    if (!hasTriggeredInitialProactive && idleSinceUser >= 180000) {
+        await triggerProactiveAction();
     }
-}, 5000);
+    // Subsequent thoughts: every 4 hours after the initial thought
+    else if (hasTriggeredInitialProactive && lastProactiveThoughtTime > 0 && (Date.now() - lastProactiveThoughtTime >= 14400000)) {
+        await triggerProactiveAction();
+    }
+}, 10000);
 
 
 
@@ -8892,12 +8642,22 @@ let voiceCallSpeakerMuted = false;
 let voiceCallAnalyser = null;
 let voiceCallUserAnalyser = null;
 let voiceCallUserSource = null;
+let voiceCallMicStream = null;
+let voiceCallAudioContext = null;
+let voiceCallActiveAudio = null;
+let voiceCallVisualizerAnimation = null;
+let isProgramSpeaking = false;
+let isProgramThinking = false;
 let consecutiveShortSessions = 0;
 let lastRecognitionStartTime = 0;
 let visualizerTime = 0;
 let silenceTimer = null;
 let currentSpeechText = "";
 let lastUserSpeechTime = 0;
+let voiceCallMediaRecorder = null;
+let voiceCallAudioChunks = [];
+let isNativeRecording = false;
+let nativeSilenceTimer = null;
 
 function playCallStartSound() {
     try {
@@ -8941,13 +8701,7 @@ function playHangupSound() {
 
 function startVoiceCall() {
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-        showCustomAlert("Secure Context Required", "Microphone access is only available over HTTPS or localhost. Please access the Sanctuary using HTTPS or localhost to enable voice calls.");
-        return;
-    }
-
-    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SpeechRecognition) {
-        showCustomAlert("Speech Recognition Not Supported", "Your browser does not support Speech Recognition. Please try Chrome, Edge, or Safari.");
+        showCustomAlert("Secure Context Required", "Microphone access requires HTTPS. Please access using https:// (e.g., https://localhost:5000 or https://localhost:5000).");
         return;
     }
     
@@ -8990,141 +8744,168 @@ function startVoiceCall() {
         silenceTimer = null;
     }
     
-    // Capture user mic for dynamic audio-reactive visualization
-    navigator.mediaDevices.getUserMedia({ audio: true }).then(stream => {
-        voiceCallMicStream = stream;
+    function initNativeVoiceRecorder(stream) {
         try {
-            const AudioContextClass = window.AudioContext || window.webkitAudioContext;
-            if (!voiceCallAudioContext) {
-                voiceCallAudioContext = new AudioContextClass();
+            let mimeType = 'audio/webm';
+            if (typeof MediaRecorder !== 'undefined') {
+                if (MediaRecorder.isTypeSupported('audio/webm;codecs=opus')) {
+                    mimeType = 'audio/webm;codecs=opus';
+                } else if (MediaRecorder.isTypeSupported('audio/webm')) {
+                    mimeType = 'audio/webm';
+                } else if (MediaRecorder.isTypeSupported('audio/mp4')) {
+                    mimeType = 'audio/mp4';
+                } else if (MediaRecorder.isTypeSupported('audio/ogg')) {
+                    mimeType = 'audio/ogg';
+                }
             }
-            if (!voiceCallUserAnalyser) {
-                voiceCallUserAnalyser = voiceCallAudioContext.createAnalyser();
-                voiceCallUserAnalyser.fftSize = 64;
-            }
-            voiceCallUserSource = voiceCallAudioContext.createMediaStreamSource(stream);
-            voiceCallUserSource.connect(voiceCallUserAnalyser);
+
+            voiceCallMediaRecorder = new MediaRecorder(stream);
+            voiceCallAudioChunks = [];
+
+            voiceCallMediaRecorder.ondataavailable = (e) => {
+                if (e.data && e.data.size > 0) {
+                    voiceCallAudioChunks.push(e.data);
+                }
+            };
+
+            voiceCallMediaRecorder.onstop = async () => {
+                isNativeRecording = false;
+                if (voiceCallAudioChunks.length === 0 || !isVoiceCallActive || isProgramSpeaking || isProgramThinking) {
+                    voiceCallAudioChunks = [];
+                    return;
+                }
+                const audioBlob = new Blob(voiceCallAudioChunks, { type: mimeType });
+                voiceCallAudioChunks = [];
+
+                if (audioBlob.size > 1500 && !currentSpeechText) {
+                    updateVoiceCallStatus("Transcribing...");
+                    const formData = new FormData();
+                    formData.append('audio', audioBlob, 'voice_input.webm');
+                    try {
+                        const resp = await fetch('/api/voice_call/transcribe', {
+                            method: 'POST',
+                            body: formData
+                        });
+                        if (resp.ok) {
+                            const resData = await resp.json();
+                            if (resData.text && resData.text.trim()) {
+                                processUserSpeech(resData.text.trim());
+                                return;
+                            }
+                        }
+                    } catch(err) {
+                        console.warn("[VoiceCall] Local STT error:", err);
+                    }
+                }
+                if (isVoiceCallActive && !isProgramSpeaking && !isProgramThinking) {
+                    updateVoiceCallStatus("Listening...");
+                }
+            };
         } catch(e) {
-            console.warn("Could not setup user microphone visualizer node:", e);
+            console.warn("[VoiceCall] Could not initialize native MediaRecorder:", e);
         }
-    }).catch(err => {
-        console.warn("Could not capture user mic stream for visualization:", err);
-    });
+    }
+
+    // Capture user mic for dynamic audio-reactive visualization and native transcription
+    if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+        navigator.mediaDevices.getUserMedia({ audio: true }).then(stream => {
+            voiceCallMicStream = stream;
+            try {
+                const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+                if (!voiceCallAudioContext) {
+                    voiceCallAudioContext = new AudioContextClass();
+                }
+                if (!voiceCallUserAnalyser) {
+                    voiceCallUserAnalyser = voiceCallAudioContext.createAnalyser();
+                    voiceCallUserAnalyser.fftSize = 64;
+                }
+                voiceCallUserSource = voiceCallAudioContext.createMediaStreamSource(stream);
+                voiceCallUserSource.connect(voiceCallUserAnalyser);
+            } catch(e) {
+                console.warn("Could not setup user microphone visualizer node:", e);
+            }
+
+            // Initialize native audio recording pipeline
+            initNativeVoiceRecorder(stream);
+            playCallStartSound();
+            updateVoiceCallStatus("Listening...");
+        }).catch(err => {
+            console.warn("[VoiceCall] Microphone capture note:", err);
+            playCallStartSound();
+            updateVoiceCallStatus("Listening...");
+        });
+    } else {
+        playCallStartSound();
+        updateVoiceCallStatus("Listening...");
+    }
     
     document.getElementById('voice-call-mute-btn').classList.remove('disabled');
     document.getElementById('voice-call-speaker-btn').classList.remove('disabled');
     document.getElementById('voice-call-mute-btn').title = "Mute Microphone";
     document.getElementById('voice-call-speaker-btn').title = "Mute Speaker";
     
-    // Mic access is managed directly by the SpeechRecognition engine below
-    
     drawVisualizer();
-    
-    voiceCallRecognition = new SpeechRecognition();
-    voiceCallRecognition.continuous = true;
-    voiceCallRecognition.interimResults = true;
-    voiceCallRecognition.lang = 'en-US';
-    
-    voiceCallRecognition.onstart = () => {
-        updateVoiceCallStatus("Listening...");
-        lastRecognitionStartTime = Date.now();
-        currentSpeechText = "";
-        playCallStartSound();
-    };
-    
-    voiceCallRecognition.onresult = (event) => {
-        if (!isVoiceCallActive || isProgramSpeaking || isProgramThinking || voiceCallMuted) return;
-        
-        let interimTranscript = "";
-        let finalTranscript = "";
-        
-        for (let i = 0; i < event.results.length; ++i) {
-            if (event.results[i].isFinal) {
-                finalTranscript += event.results[i][0].transcript + " ";
-            } else {
-                interimTranscript += event.results[i][0].transcript;
-            }
-        }
-        
-        const text = (finalTranscript + interimTranscript).trim();
-        if (text) {
-            currentSpeechText = text;
-            updateVoiceCallStatus("Listening...");
-            lastUserSpeechTime = Date.now(); // Track speech activity for visualizer ripple
-            
-            if (silenceTimer) clearTimeout(silenceTimer);
-            silenceTimer = setTimeout(() => {
-                if (currentSpeechText && isVoiceCallActive && !isProgramSpeaking && !isProgramThinking) {
-                    const speechToProcess = currentSpeechText;
-                    currentSpeechText = "";
-                    processUserSpeech(speechToProcess);
-                }
-            }, 1300); // 1.3 seconds of silence -> send turn (prevents cut-off)
-        }
-    };
-    
-    let restartTimeout = null;
-    voiceCallRecognition.onend = () => {
-        const sessionDuration = Date.now() - lastRecognitionStartTime;
-        console.log("Speech recognition session ended. Duration:", sessionDuration, "ms");
-        
-        // If session was shorter than 4 seconds, count as a failure
-        if (sessionDuration < 4000) {
-            consecutiveShortSessions++;
-        } else {
-            consecutiveShortSessions = 0;
-        }
-        
-        if (consecutiveShortSessions >= 3) {
-            console.error("Speech recognition session ended too quickly 3 times. Stopping call loop.");
-            showCustomAlert("Speech Service Unavailable", "Your browser's speech recognition closed immediately. This usually happens if the speech service is not supported on this browser, blocked by settings, or lacks internet connection. Please try using Google Chrome on a secure connection (HTTPS/localhost).");
-            endVoiceCall();
-            return;
-        }
-        
-        if (isVoiceCallActive && !isProgramSpeaking && !isProgramThinking && !voiceCallMuted) {
-            updateVoiceCallStatus("Paused...");
-            if (restartTimeout) clearTimeout(restartTimeout);
-            restartTimeout = setTimeout(() => {
-                if (isVoiceCallActive && !isProgramSpeaking && !isProgramThinking && !voiceCallMuted) {
-                    try {
-                        updateVoiceCallStatus("Listening...");
-                        voiceCallRecognition.start();
-                    } catch(e) {
-                        console.error("Error restarting speech recognition:", e);
+
+    // Setup browser SpeechRecognition if available (as optional fast-path)
+    const SpeechRecClass = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (SpeechRecClass) {
+        try {
+            voiceCallRecognition = new SpeechRecClass();
+            voiceCallRecognition.continuous = true;
+            voiceCallRecognition.interimResults = true;
+            voiceCallRecognition.lang = 'en-US';
+
+            voiceCallRecognition.onstart = () => {
+                updateVoiceCallStatus("Listening...");
+                lastRecognitionStartTime = Date.now();
+                currentSpeechText = "";
+            };
+
+            voiceCallRecognition.onresult = (event) => {
+                if (!isVoiceCallActive || isProgramSpeaking || isProgramThinking || voiceCallMuted) return;
+                let interimTranscript = "";
+                let finalTranscript = "";
+
+                for (let i = 0; i < event.results.length; ++i) {
+                    if (event.results[i].isFinal) {
+                        finalTranscript += event.results[i][0].transcript + " ";
+                    } else {
+                        interimTranscript += event.results[i][0].transcript;
                     }
                 }
-            }, 1500); // 1.5-second cooldown
+
+                const text = (finalTranscript + interimTranscript).trim();
+                if (text) {
+                    currentSpeechText = text;
+                    updateVoiceCallStatus("Listening...");
+                    lastUserSpeechTime = Date.now();
+
+                    if (silenceTimer) clearTimeout(silenceTimer);
+                    silenceTimer = setTimeout(() => {
+                        if (currentSpeechText && isVoiceCallActive && !isProgramSpeaking && !isProgramThinking) {
+                            const speechToProcess = currentSpeechText;
+                            currentSpeechText = "";
+                            processUserSpeech(speechToProcess);
+                        }
+                    }, 1300);
+                }
+            };
+
+            voiceCallRecognition.onerror = (event) => {
+                console.warn("[VoiceCall] Browser SpeechRecognition notice:", event.error);
+                // In embedded WebView2/offline, browser SpeechRecognition fails — native MediaRecorder + faster-whisper handles transcription
+            };
+
+            voiceCallRecognition.onend = () => {
+                if (isVoiceCallActive && !isProgramSpeaking && !isProgramThinking && !voiceCallMuted) {
+                    try { voiceCallRecognition.start(); } catch(e) {}
+                }
+            };
+
+            voiceCallRecognition.start();
+        } catch(e) {
+            console.warn("[VoiceCall] Browser SpeechRecognition unavailable, using native STT:", e);
         }
-    };
-    
-    voiceCallRecognition.onerror = (event) => {
-        console.error("Speech recognition error:", event.error);
-        
-        // network is now treated as a fatal/critical error for transcription
-        const fatalErrors = ['audio-capture', 'not-allowed', 'service-not-allowed', 'language-not-supported', 'bad-grammar', 'network'];
-        if (fatalErrors.includes(event.error)) {
-            let errMsg = "Speech recognition error: " + event.error;
-            if (event.error === 'not-allowed') {
-                errMsg = "Microphone access blocked. Please grant microphone permissions in your browser settings.";
-            } else if (event.error === 'audio-capture') {
-                errMsg = "No microphone detected. Please connect a microphone and try again.";
-            } else if (event.error === 'service-not-allowed') {
-                errMsg = "Speech recognition service is not allowed or supported by your browser.";
-            } else if (event.error === 'language-not-supported') {
-                errMsg = "Language not supported by the browser speech recognition service.";
-            } else if (event.error === 'network') {
-                errMsg = "Speech recognition network error. This browser requires an active internet connection to transcribe speech.";
-            }
-            showCustomAlert("Voice Call Error", errMsg);
-            endVoiceCall();
-        }
-    };
-    
-    try {
-        voiceCallRecognition.start();
-    } catch(e) {
-        console.error("Error starting recognition:", e);
     }
 }
 
@@ -9303,6 +9084,37 @@ function resumeVoiceRecognition() {
     } catch(e) {}
 }
 
+function toggleManualVoiceRecording() {
+    if (!isVoiceCallActive || isProgramSpeaking || isProgramThinking || voiceCallMuted) return;
+
+    if (!voiceCallMediaRecorder) {
+        if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+            navigator.mediaDevices.getUserMedia({ audio: true }).then(stream => {
+                voiceCallMicStream = stream;
+                initNativeVoiceRecorder(stream);
+                if (voiceCallMediaRecorder && voiceCallMediaRecorder.state === 'inactive') {
+                    voiceCallAudioChunks = [];
+                    voiceCallMediaRecorder.start(250);
+                    isNativeRecording = true;
+                    updateVoiceCallStatus("Recording (Tap Orb to Send)...");
+                }
+            }).catch(e => console.warn("[VoiceCall] Mic toggle error:", e));
+        }
+        return;
+    }
+
+    if (voiceCallMediaRecorder.state === 'inactive') {
+        voiceCallAudioChunks = [];
+        voiceCallMediaRecorder.start(250);
+        isNativeRecording = true;
+        updateVoiceCallStatus("Recording (Tap Orb to Send)...");
+    } else if (voiceCallMediaRecorder.state === 'recording') {
+        updateVoiceCallStatus("Transcribing...");
+        voiceCallMediaRecorder.stop();
+        isNativeRecording = false;
+    }
+}
+
 function toggleCallMute() {
     voiceCallMuted = !voiceCallMuted;
     const btn = document.getElementById('voice-call-mute-btn');
@@ -9378,6 +9190,16 @@ function endVoiceCall() {
     if (voiceCallRecognition) {
         try { voiceCallRecognition.stop(); } catch(e) {}
         voiceCallRecognition = null;
+    }
+    if (voiceCallMediaRecorder) {
+        try { voiceCallMediaRecorder.stop(); } catch(e) {}
+        voiceCallMediaRecorder = null;
+    }
+    voiceCallAudioChunks = [];
+    isNativeRecording = false;
+    if (nativeSilenceTimer) {
+        clearTimeout(nativeSilenceTimer);
+        nativeSilenceTimer = null;
     }
     
     const overlay = document.getElementById('voice-call-overlay');
@@ -9462,12 +9284,35 @@ function drawVisualizer() {
             targetAmp = Math.max(5, (userVolume / 120) * 25);
             speed = 0.06 + (userVolume / 120) * 0.12;
             lastUserSpeechTime = Date.now();
+
+            if (voiceCallMediaRecorder && voiceCallMediaRecorder.state === 'inactive') {
+                try {
+                    voiceCallAudioChunks = [];
+                    voiceCallMediaRecorder.start(250);
+                    isNativeRecording = true;
+                } catch(e) {}
+            }
+            if (nativeSilenceTimer) {
+                clearTimeout(nativeSilenceTimer);
+                nativeSilenceTimer = null;
+            }
         } else if (Date.now() - lastUserSpeechTime < 800) {
             targetAmp = 3;
             speed = 0.04;
         } else {
             targetAmp = 1;
             speed = 0.02;
+
+            if (isNativeRecording && voiceCallMediaRecorder && voiceCallMediaRecorder.state === 'recording' && !nativeSilenceTimer) {
+                nativeSilenceTimer = setTimeout(() => {
+                    if (isNativeRecording && voiceCallMediaRecorder && voiceCallMediaRecorder.state === 'recording') {
+                        try {
+                            voiceCallMediaRecorder.stop();
+                        } catch(e) {}
+                    }
+                    nativeSilenceTimer = null;
+                }, 1100);
+            }
         }
     } else {
         targetAmp = 1;
@@ -9578,3 +9423,145 @@ document.addEventListener('error', function (event) {
         }
     }
 }, true);
+
+// --- Native Model Management Helpers ---
+async function openNativeModelsFolder(folderType = 'root') {
+    try {
+        const res = await fetch('/api/models/native/open_folder', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ folder: folderType })
+        });
+        const data = await res.json();
+        if (!data.success) {
+            showCustomAlert("Folder", data.error || "Could not open folder.");
+        }
+    } catch (e) {
+        showCustomAlert("Error", "Failed to open folder: " + e.message);
+    }
+}
+
+async function fetchNativeModelsSummary() {
+    try {
+        const res = await fetch('/api/models/native/list');
+        const data = await res.json();
+        if (data.error) return;
+
+        // 1. Native LLM Engine Card
+        const llmStatusBadge = document.getElementById('modal-local-status');
+        const llmSelect = document.getElementById('native-llm-select');
+        const llmSummary = document.getElementById('modal-native-llm-summary');
+        const llmDesc = document.getElementById('modal-local-desc');
+
+        if (data.gguf_models && data.gguf_models.length > 0) {
+            if (llmStatusBadge) {
+                llmStatusBadge.textContent = "Online";
+                llmStatusBadge.className = "status-badge status-online";
+            }
+            if (llmDesc) {
+                llmDesc.textContent = "Ready for in-process chat. Select active model below.";
+            }
+            if (llmSelect) {
+                llmSelect.innerHTML = data.gguf_models.map(m => 
+                    `<option value="${m.filename}" ${data.active_llm === m.name ? 'selected' : ''}>${m.name} (${m.size_gb} GB)</option>`
+                ).join('');
+            }
+            if (llmSummary) {
+                llmSummary.innerHTML = `<strong>${data.gguf_models.length}</strong> model(s) detected in <code>models/llm/</code>.`;
+            }
+        } else {
+            if (llmStatusBadge) {
+                llmStatusBadge.textContent = "No Models";
+                llmStatusBadge.className = "status-badge status-offline";
+            }
+            if (llmDesc) {
+                llmDesc.textContent = "Place your .gguf chat models in models/llm/ to enable.";
+            }
+            if (llmSelect) {
+                llmSelect.innerHTML = `<option value="">No .gguf models found</option>`;
+            }
+            if (llmSummary) {
+                llmSummary.innerHTML = `<em>Drop GGUF files into models/llm/ to start.</em>`;
+            }
+        }
+
+        // 2. Native Diffusion Engine Card
+        const diffStatusBadge = document.getElementById('modal-diffusion-status');
+        const diffSelect = document.getElementById('native-diffusion-select');
+        const diffSummary = document.getElementById('modal-native-diffusion-summary');
+
+        const ckpts = data.checkpoints || [];
+        const loras = data.loras || [];
+
+        if (ckpts.length > 0) {
+            if (diffStatusBadge) {
+                diffStatusBadge.textContent = "Online";
+                diffStatusBadge.className = "status-badge status-online";
+            }
+            if (diffSelect) {
+                diffSelect.innerHTML = ckpts.map(c => 
+                    `<option value="${c.filename}">${c.name} (${c.size_gb} GB)</option>`
+                ).join('');
+            }
+        } else {
+            if (diffStatusBadge) {
+                diffStatusBadge.textContent = "No Checkpoints";
+                diffStatusBadge.className = "status-badge status-offline";
+            }
+            if (diffSelect) {
+                diffSelect.innerHTML = `<option value="">No SafeTensors checkpoints found</option>`;
+            }
+        }
+
+        if (diffSummary) {
+            diffSummary.innerHTML = `
+                <div>• <strong>${ckpts.length}</strong> checkpoint(s) in <code>models/checkpoints/</code></div>
+                <div>• <strong>${loras.length}</strong> LoRA(s) detected in <code>models/loras/</code></div>
+            `;
+        }
+    } catch (e) {
+        console.error("fetchNativeModelsSummary error:", e);
+    }
+}
+
+async function onSelectNativeLLM(modelName) {
+    if (!modelName) return;
+    try {
+        const res = await fetch('/api/models/native/load_llm', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ model_name: modelName })
+        });
+        const data = await res.json();
+        if (data.success) {
+            showCustomAlert("Model Active", `Loaded '${data.active_model}' for in-process chat.`);
+        }
+    } catch (e) {
+        console.error("onSelectNativeLLM error:", e);
+    }
+}
+
+async function onSelectNativeCheckpoint(ckptName) {
+    if (!ckptName) return;
+    try {
+        const res = await fetch('/api/models/native/select_checkpoint', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ checkpoint_name: ckptName })
+        });
+        const data = await res.json();
+        if (data.success) {
+            showCustomAlert("Checkpoint Active", `Selected checkpoint '${data.active_checkpoint}' for native portrait generation.`);
+        }
+    } catch (e) {
+        console.error("onSelectNativeCheckpoint error:", e);
+    }
+}
+
+// Automatically populate native models when settings opens
+document.addEventListener('DOMContentLoaded', () => {
+    fetchNativeModelsSummary();
+});
+
+
+

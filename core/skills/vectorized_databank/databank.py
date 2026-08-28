@@ -11,11 +11,11 @@ _embedding_model = None
 def get_embedding_model():
     global _embedding_model
     if _embedding_model is None:
-        print(">>> Initializing SentenceTransformer model ('all-MiniLM-L6-v2')...")
         from sentence_transformers import SentenceTransformer
-        # This will download the ~90MB model on first execution
-        _embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
-        print(">>> SentenceTransformer model loaded successfully.")
+        try:
+            _embedding_model = SentenceTransformer('all-MiniLM-L6-v2', local_files_only=True)
+        except Exception:
+            _embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
     return _embedding_model
 
 

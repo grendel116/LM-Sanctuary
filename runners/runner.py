@@ -263,6 +263,20 @@ class BaseProgramRunner:
 
             print(f"Local server error: {response.status_code} - {response.text}", flush=True)
         except Exception as e:
+            # Fallback to in-process engine if standalone server is unavailable
+            try:
+                from runners import engine_llm
+                if engine_llm.is_loaded():
+                    raw_text = await asyncio.to_thread(
+                        engine_llm.generate_text,
+                        [{"role": "user", "content": prompt}],
+                        0.3,
+                        512
+                    )
+                    if raw_text:
+                        return THINK_TAG_RE.sub("", raw_text).strip()
+            except Exception:
+                pass
             print(f"Error in summary generation task: {e}", flush=True)
 
         return err_msg
@@ -451,6 +465,7 @@ class BaseProgramRunner:
 
             from variables.settings import is_thinking_enabled, DISABLED_THINKING
             from core.banned_words import get_logit_bias_dict
+            from runners import engine_llm
 
             payload = {
                 "messages": messages,
@@ -466,6 +481,7 @@ class BaseProgramRunner:
             if logit_bias:
                 payload["logit_bias"] = logit_bias
 
+            bot_response_text = ""
             try:
                 response = await self._post_llm_request(url, payload, headers, timeout=120.0, session_id=session_id)
                 if response.status_code == 200:
@@ -473,10 +489,22 @@ class BaseProgramRunner:
                 else:
                     bot_response_text = f"Error: {response.text}"
                 print(f"[DEBUG STATUS] {response.status_code}", flush=True)
-                print(f"[DEBUG RAW RESPONSE] {repr(response.text)}", flush=True)
             except Exception as e:
-                bot_response_text = f"Error connecting to local model server: {e}"
-                print(f"[LLM ERROR] {bot_response_text}", flush=True)
+                # Fallback to in-process engine if external server is offline
+                try:
+                    from runners import engine_llm
+                    if engine_llm.is_loaded():
+                        bot_response_text = await asyncio.to_thread(
+                            engine_llm.generate_text,
+                            messages,
+                            temperature,
+                            max_tokens_limit
+                        )
+                except Exception:
+                    pass
+
+                if not bot_response_text:
+                    bot_response_text = f"Error: Could not connect to LLM ({e}). Ensure local llama-server is running."
 
             # --- STAGE 3: POST-PROCESSING (TOOLS & CLEANUP) ---
             bot_response_text = self._sanitize_thinking_tags(bot_response_text)
@@ -1020,12 +1048,32 @@ class OpenSourceRunner(BaseProgramRunner):
             if logit_bias:
                 payload["logit_bias"] = logit_bias
 
-            r = await self._post_llm_request(url, payload, headers, timeout=60.0)
-            if r.status_code == 200:
-                content = r.json()["choices"][0]["message"].get("content", "").strip()
-                return THINK_TAG_RE.sub("", content).strip()
+            try:
+                r = await self._post_llm_request(url, payload, headers, timeout=60.0)
+                if r.status_code == 200:
+                    content = r.json()["choices"][0]["message"].get("content", "").strip()
+                    return THINK_TAG_RE.sub("", content).strip()
+            except Exception as e:
+                try:
+                    from runners import engine_llm
+                    if engine_llm.is_loaded():
+                        messages = [
+                            {"role": "system", "content": system_instruction},
+                            {"role": "user", "content": prompt},
+                        ]
+                        raw_text = await asyncio.to_thread(
+                            engine_llm.generate_text,
+                            messages,
+                            temperature,
+                            512
+                        )
+                        if raw_text:
+                            return THINK_TAG_RE.sub("", raw_text).strip()
+                except Exception:
+                    pass
+                print(f"Error in impersonation generation: {e}", flush=True)
 
-            raise Exception(f"HTTP Server returned status code {r.status_code}: {r.text}")
+            return ""
 
         def _get_session_path(self, session_id: str) -> str:
             safe_id = "".join(c for c in session_id if c.isalnum() or c in "-_")

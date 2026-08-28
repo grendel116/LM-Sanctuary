@@ -64,6 +64,7 @@ def get_local_ip() -> str:
     local_ip = "127.0.0.1"
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.settimeout(0.3)
         s.connect(("8.8.8.8", 80))
         local_ip = s.getsockname()[0]
         s.close()
@@ -106,6 +107,8 @@ def start_prewarm_on_first_request():
 
 @app.before_request
 def check_program_change():
+    if request.path == '/api/health':
+        return
     global _cached_active_program, _cached_active_user
     current_program = get_active_program()
     current_user = get_active_user()
@@ -151,63 +154,44 @@ except Exception as e:
 def prewarm_caches():
     print(">>> Pre-warming backend caches in background...")
     try:
-        from models.models import fetch_local_models
-        fetch_local_models(force_refresh=True)
+        from core import engine_diffusion
+        engine_diffusion.list_checkpoints()
+        engine_diffusion.list_loras()
     except Exception as e:
-        print(f"Error prewarming local models: {e}")
-        
-    llm_already_online = False
-    try:
-        from adapters.local_llm_manager import check_status, check_installed
-        llm_already_online = check_status(force_refresh=True)
-        check_installed()
-    except Exception as e:
-        print(f"Error prewarming Local LLM server status: {e}")
+        print(f"Error prewarming diffusion models: {e}")
 
-    auto_start_llm = os.getenv("AUTO_START_LOCAL_LLM", "true").lower() in ("true", "1", "yes")
-    if auto_start_llm and not llm_already_online:
-        # Double-check: if anything is already listening on port 1234 (e.g. Arena),
-        # treat it as online and do not attempt to start (which would kill it).
-        import socket
-        port_in_use = False
+    # Auto-start high-speed standalone llama-server if configured
+    auto_start = os.getenv("AUTO_START_LOCAL_LLM", "true").lower() in ("true", "1", "yes")
+    if auto_start:
         try:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                s.settimeout(1)
-                port_in_use = s.connect_ex(("127.0.0.1", 1234)) == 0
-        except Exception:
-            pass
-        if port_in_use:
-            print(">>> Local LLM port 1234 already in use (another app?). Skipping auto-start.")
-        else:
-            try:
-                print(">>> Auto-starting Local LLM server (llama-server)...")
-                from adapters.local_llm_manager import start_server
-                success, msg = start_server()
-                print(f">>> Local LLM auto-start: {msg} (success={success})")
-            except Exception as e:
-                print(f">>> Failed to auto-start Local LLM server: {e}")
-    elif llm_already_online:
-        print(">>> Local LLM server is already online.")
-    else:
-        print(">>> Local LLM auto-start disabled (manual only).")
+            from adapters import local_llm_manager
+            print(">>> Auto-starting high-speed local LLM server...")
+            local_llm_manager.start_server()
+        except Exception as e:
+            print(f"Error auto-starting local LLM server: {e}")
 
-    print(">>> ComfyUI auto-start disabled (manual only).")
+    # Pre-warm local STT whisper model
+    try:
+        from core import stt
+        stt.get_whisper_model()
+    except Exception as e:
+        print(f"Error prewarming STT model: {e}")
+
     print(">>> Backend caches pre-warmed successfully!")
 
-def _trigger_early_prewarm():
-    # Only auto-start in the active Werkzeug child worker, not the parent process.
-    # The parent's _atexit_clean may kill llama-server on reload, causing races.
-    if os.environ.get('WERKZEUG_RUN_MAIN') == 'true':
-        global _prewarm_started
-        with _prewarm_lock:
-            if not _prewarm_started:
-                _prewarm_started = True
-                threading.Thread(target=prewarm_caches, daemon=True).start()
-
-_trigger_early_prewarm()
+# Always start prewarming in a background thread immediately on import
+with _prewarm_lock:
+    if not _prewarm_started:
+        _prewarm_started = True
+        threading.Thread(target=prewarm_caches, daemon=True).start()
 
 # Initialize the dynamic runner based on configuration
 init_runner()
+
+@app.route('/api/health')
+def health_check():
+    """Lightweight endpoint for desktop launcher readiness detection."""
+    return jsonify({"status": "ok"})
 
 def reload_program_state():
     """Reload program config, reinitialize the runner, and clear session caches."""
@@ -659,17 +643,36 @@ def proactive_action():
         # Load session history
         chat_history = asyncio.run(runner.get_history(session_id))
         
-        # Limit proactive messages to one: do not send another if one was already sent during this idle period
+        # Calculate time elapsed since the last user message
+        last_user_timestamp = None
         for msg in reversed(chat_history):
             if msg.get('role') == 'user':
+                last_user_timestamp = msg.get('timestamp')
                 break
-            if msg.get('role') == 'program' and msg.get('is_proactive'):
-                print(f"[PROACTIVE] A proactive message was already sent since the last user message. Skipping.")
-                return jsonify({
-                    'status': 'success',
-                    'type': 'skipped',
-                    'reason': 'A proactive message was already sent since the last user message.'
-                })
+
+        import time
+        now = time.time()
+        elapsed_seconds = 180
+        if last_user_timestamp:
+            try:
+                elapsed_seconds = max(0, now - float(last_user_timestamp))
+            except Exception:
+                elapsed_seconds = 180
+
+        # Human-readable time formatting
+        if elapsed_seconds < 3600:
+            minutes = max(1, int(elapsed_seconds // 60))
+            time_str = f"{minutes} minute{'s' if minutes != 1 else ''}"
+        elif elapsed_seconds < 86400:
+            hours = int(elapsed_seconds // 3600)
+            time_str = f"{hours} hour{'s' if hours != 1 else ''}"
+        else:
+            days = int(elapsed_seconds // 86400)
+            rem_hours = int((elapsed_seconds % 86400) // 3600)
+            if rem_hours > 0:
+                time_str = f"{days} day{'s' if days != 1 else ''} and {rem_hours} hour{'s' if rem_hours != 1 else ''}"
+            else:
+                time_str = f"{days} day{'s' if days != 1 else ''}"
         
         # Generate history context string
         history_context = ""
@@ -690,9 +693,8 @@ Scenario: {scenario}
 Recent Conversation History:
 {history_context}
 
-The user ({user_display_name}) has been inactive/away for a while.
-Based on the conversation context above, decide how to react proactively.
-Generate a private inner thought or monologue representing your feelings about the silence, the user's absence, or the last topic (1-2 sentences). Format this in character.
+It has been {time_str} since the user ({user_display_name}) last sent a message.
+Based on the conversation context above and the fact that {time_str} have passed, generate your private inner thought or monologue representing your feelings about the silence, the user's absence, what you are doing/thinking right now, or the last topic (1-2 sentences). Format this strictly in character.
 
 You must return a valid JSON object matching the following schema:
 {{
@@ -1877,6 +1879,28 @@ def save_voice_call():
         print(f"Error in /api/voice_call/save: {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
 
+@app.route('/api/voice_call/transcribe', methods=['POST'])
+@requires_auth
+def transcribe_voice_api():
+    """Transcribes incoming audio chunks from MediaRecorder using local faster-whisper."""
+    try:
+        from core import stt
+        audio_bytes = b""
+        if 'audio' in request.files:
+            audio_bytes = request.files['audio'].read()
+        elif request.data:
+            audio_bytes = request.data
+
+        if not audio_bytes:
+            return jsonify({'text': '', 'error': 'No audio data received'}), 400
+
+        language = request.args.get('language', 'en')
+        text = stt.transcribe_audio_bytes(audio_bytes, language=language)
+        return jsonify({'text': text, 'success': True})
+    except Exception as e:
+        print(f"Error in /api/voice_call/transcribe: {e}")
+        return jsonify({'text': '', 'error': str(e)}), 500
+
 # --- VECTORIZED DATA BANK API ENDPOINTS ---
 from core.skills.vectorized_databank.databank import DataBankManager
 
@@ -2448,7 +2472,9 @@ def select_program():
         import traceback
         traceback.print_exc()
         try:
-            with open('server_error.log', 'w', encoding='utf-8') as lf:
+            from variables.settings import LOGS_DIR
+            err_log_path = os.path.join(LOGS_DIR, 'server_error.log')
+            with open(err_log_path, 'w', encoding='utf-8') as lf:
                 traceback.print_exc(file=lf)
         except Exception:
             pass
@@ -3300,64 +3326,82 @@ def import_tavern_program():
         if not file.filename:
             return jsonify({'error': 'No file selected'}), 400
 
-        import re, base64
+        import re, base64, io
         from PIL import Image
 
-        temp_dir = os.path.join(base_dir, 'backups')
-        os.makedirs(temp_dir, exist_ok=True)
-        temp_path = os.path.join(temp_dir, 'temp_tavern_card.png')
-        file.save(temp_path)
+        file_bytes = file.read()
+        if not file_bytes:
+            return jsonify({'error': 'Uploaded file is empty'}), 400
 
-        try:
-            with Image.open(temp_path) as img:
-                chara_data = None
-                for key in ('chara', 'ccv3', 'Character'):
-                    if key in img.info:
-                        chara_data = img.info[key]
-                        break
-                if not chara_data:
-                    for key, val in img.info.items():
-                        if isinstance(val, str) and len(val) > 20:
-                            try:
-                                test_json = json.loads(val)
-                                if isinstance(test_json, dict) and ("name" in test_json or "data" in test_json):
-                                    chara_data = val
-                                    break
-                            except Exception:
+        chara = None
+        is_png = False
+
+        # Detect PNG card format vs raw JSON card format
+        if file_bytes.startswith(b'\x89PNG\r\n\x1a\n'):
+            is_png = True
+            try:
+                with Image.open(io.BytesIO(file_bytes)) as img:
+                    chara_data = None
+                    for key in ('chara', 'ccv3', 'Character'):
+                        if key in img.info:
+                            chara_data = img.info[key]
+                            break
+                    if not chara_data:
+                        for key, val in img.info.items():
+                            if isinstance(val, str) and len(val) > 20:
                                 try:
-                                    decoded = base64.b64decode(val).decode('utf-8')
-                                    test_json = json.loads(decoded)
-                                    if isinstance(test_json, dict) and ("name" in test_json or "data" in test_json):
+                                    test_json = json.loads(val)
+                                    if isinstance(test_json, dict) and ("name" in test_json or "data" in test_json or "spec" in test_json):
                                         chara_data = val
                                         break
                                 except Exception:
-                                    pass
+                                    try:
+                                        decoded = base64.b64decode(val).decode('utf-8')
+                                        test_json = json.loads(decoded)
+                                        if isinstance(test_json, dict) and ("name" in test_json or "data" in test_json or "spec" in test_json):
+                                            chara_data = val
+                                            break
+                                    except Exception:
+                                        pass
 
-                if not chara_data:
-                    raise ValueError("No character metadata chunk found in PNG card.")
+                    if not chara_data:
+                        raise ValueError("No character metadata chunk found in PNG card.")
 
-                try:
-                    chara = json.loads(base64.b64decode(chara_data).decode('utf-8'))
-                except Exception:
-                    chara = json.loads(chara_data)
+                    try:
+                        chara = json.loads(base64.b64decode(chara_data).decode('utf-8'))
+                    except Exception:
+                        chara = json.loads(chara_data)
+            except Exception as e:
+                return jsonify({'error': f"Failed to parse PNG character card: {str(e)}"}), 400
+        else:
+            # Parse directly as JSON (chara_card_v3, chara_card_v2, or legacy ST JSON)
+            try:
+                text_content = None
+                for encoding in ('utf-8-sig', 'utf-8', 'latin-1'):
+                    try:
+                        text_content = file_bytes.decode(encoding)
+                        break
+                    except Exception:
+                        continue
+                if not text_content:
+                    raise ValueError("Unable to decode file content as text/JSON.")
+                chara = json.loads(text_content)
+                if not isinstance(chara, dict):
+                    raise ValueError("Character card JSON root must be an object.")
+            except Exception as e:
+                return jsonify({'error': f"Failed to parse Character Card JSON: {str(e)}"}), 400
 
-        except Exception as e:
-            if os.path.exists(temp_path):
-                try: os.remove(temp_path)
-                except Exception: pass
-            return jsonify({'error': f"Failed to parse Tavern card: {str(e)}"}), 400
-
-        finally:
-            if os.path.exists(temp_path):
-                try: os.remove(temp_path)
-                except Exception: pass
+        if not chara or not isinstance(chara, dict):
+            return jsonify({'error': 'Invalid character card data structure'}), 400
 
         # --- Convert to chara_card_v3 (bypass LLM — use the card data directly) ---
         spec = chara.get('spec', '')
         if spec == 'chara_card_v3':
             # Already v3 — use verbatim
             card_v3 = chara
-            data_block = card_v3.get('data', {})
+            if not isinstance(card_v3.get('data'), dict):
+                card_v3['data'] = {}
+            data_block = card_v3['data']
         else:
             # v1 / v2 flat or wrapped — normalise to v3
             data_block = chara.get('data', chara)
@@ -3393,6 +3437,18 @@ def import_tavern_program():
             return jsonify({'error': f"Program folder '{program_id}' already exists"}), 400
         os.makedirs(program_path, exist_ok=True)
 
+        portraits_dir = os.path.join(program_path, 'portraits')
+        os.makedirs(portraits_dir, exist_ok=True)
+
+        # Save profile image if imported from PNG card
+        if is_png:
+            try:
+                profile_path = os.path.join(portraits_dir, 'profile.png')
+                with open(profile_path, 'wb') as pf:
+                    pf.write(file_bytes)
+            except Exception as pe:
+                print(f"Warning: Could not save profile portrait: {pe}")
+
         # Ensure sanctuary extension block
         exts = card_v3["data"].setdefault("extensions", {})
         sanctuary = exts.setdefault("sanctuary", {})
@@ -3401,13 +3457,13 @@ def import_tavern_program():
             sanctuary["image_details"] = {"positive": "", "negative": ""}
 
         # Derive inversion and color from existing extensions or use defaults
-        inversion = sanctuary.pop("inversion", None) or {
+        inversion = sanctuary.pop("inversion", None) or card_v3.pop("_inversion", None) or {
             "intimate": f"{name} is now deeply affectionate and tender.",
             "excited": f"{name} is now playful and energetic.",
             "intense": f"{name} is now focused and direct.",
             "sad": f"{name} is now empathetic and gentle."
         }
-        main_color = sanctuary.pop("main_color", None) or "#38bdf8"
+        main_color = sanctuary.pop("main_color", None) or card_v3.pop("_colors", {}).get("main_color", None) or "#38bdf8"
 
         card_v3["_inversion"] = inversion
         card_v3["_colors"] = {"main_color": main_color}
@@ -3699,6 +3755,116 @@ def comfy_stop():
     success, message = comfy_manager.stop_comfy_server()
     broadcast_status()
     return jsonify({"success": success, "message": message})
+
+
+# --- Native In-Process Models Management API ---
+
+@app.route('/api/models/native/list', methods=['GET'])
+@requires_auth
+def list_native_models():
+    """Lists all user-placed GGUF models, Diffusion Checkpoints, LoRAs, and VAEs."""
+    try:
+        from runners import engine_llm
+        from core import engine_diffusion
+        from variables.settings import MODELS_DIR, LLM_MODELS_DIR, CHECKPOINTS_DIR, LORAS_DIR, VAE_DIR
+
+        ggufs = engine_llm.list_gguf_models()
+        checkpoints = engine_diffusion.list_checkpoints()
+        loras = engine_diffusion.list_loras()
+        vaes = engine_diffusion.list_vaes()
+
+        return jsonify({
+            "models_dir": MODELS_DIR,
+            "llm_models_dir": LLM_MODELS_DIR,
+            "checkpoints_dir": CHECKPOINTS_DIR,
+            "loras_dir": LORAS_DIR,
+            "vae_dir": VAE_DIR,
+            "gguf_models": ggufs,
+            "checkpoints": checkpoints,
+            "loras": loras,
+            "vaes": vaes,
+            "active_llm": engine_llm.get_loaded_model_name(),
+            "llm_loaded": engine_llm.is_loaded(),
+            "active_checkpoint": engine_diffusion.get_active_checkpoint()
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/models/native/load_llm', methods=['POST'])
+@requires_auth
+def load_native_llm():
+    """Loads a GGUF model into in-process memory."""
+    try:
+        from runners import engine_llm
+        data = request.get_json() or {}
+        model_name = data.get("model_name", "")
+        n_ctx = int(data.get("n_ctx")) if data.get("n_ctx") else None
+        n_gpu_layers = int(data.get("n_gpu_layers")) if data.get("n_gpu_layers") is not None else None
+        success, message = engine_llm.load_model(model_name, n_ctx=n_ctx, n_gpu_layers=n_gpu_layers)
+        return jsonify({"success": success, "message": message, "active_model": engine_llm.get_loaded_model_name()})
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)}), 500
+
+
+@app.route('/api/models/native/select_checkpoint', methods=['POST'])
+@requires_auth
+def select_native_checkpoint():
+    """Sets the active in-process diffusion checkpoint."""
+    try:
+        from core import engine_diffusion
+        data = request.get_json() or {}
+        ckpt_name = data.get("checkpoint_name", "")
+        success = engine_diffusion.set_active_checkpoint(ckpt_name)
+        return jsonify({"success": success, "active_checkpoint": engine_diffusion.get_active_checkpoint()})
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)}), 500
+
+
+@app.route('/api/models/native/unload_llm', methods=['POST'])
+@requires_auth
+def unload_native_llm():
+    """Unloads the active in-process GGUF model."""
+    try:
+        from runners import engine_llm
+        success = engine_llm.unload_model()
+        return jsonify({"success": success, "message": "Model unloaded." if success else "No model was loaded."})
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)}), 500
+
+
+@app.route('/api/models/native/open_folder', methods=['POST'])
+@requires_auth
+def open_models_folder():
+    """Opens the requested models folder in the native OS file explorer."""
+    try:
+        import subprocess, sys
+        from variables.settings import MODELS_DIR, LLM_MODELS_DIR, CHECKPOINTS_DIR, LORAS_DIR, VAE_DIR
+
+        data = request.get_json(silent=True) or {}
+        folder_type = data.get("folder", "root")
+
+        target_map = {
+            "root": MODELS_DIR,
+            "llm": LLM_MODELS_DIR,
+            "checkpoints": CHECKPOINTS_DIR,
+            "loras": LORAS_DIR,
+            "vae": VAE_DIR
+        }
+        target_dir = target_map.get(folder_type, MODELS_DIR)
+        os.makedirs(target_dir, exist_ok=True)
+
+        if sys.platform == 'win32':
+            os.startfile(target_dir)
+        elif sys.platform == 'darwin':
+            subprocess.Popen(['open', target_dir])
+        else:
+            subprocess.Popen(['xdg-open', target_dir])
+
+        return jsonify({"success": True, "path": target_dir})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
 
 @app.route('/api/comfy/resolve_workflow', methods=['POST'])
 @requires_auth
