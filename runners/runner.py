@@ -543,6 +543,18 @@ class BaseProgramRunner:
                     else:
                         final_response_text = clean_text
 
+                # Image generation tools are terminal — do not continue LLM loop or generate continued text
+                image_tools = {
+                    "generate_local_image",
+                    "generate_program_portrait",
+                    "generate_general_image",
+                    "generate_imagen",
+                    "apply_comfy_workflow",
+                }
+                if any(t_name in image_tools for t_name, _, _ in results):
+                    adapter.append_assistant_message(final_response_text, all_tool_calls, invocation_id)
+                    break
+
                 continue
             else:
                 clean_text = bot_response_text.strip()
