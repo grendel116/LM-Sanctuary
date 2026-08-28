@@ -58,7 +58,7 @@ Theme overrides (Jinja) remain inline in the HTML template.
     --danger-border: rgba(239, 68, 68, 0.2);
 }
 
-.avatar-fallback {
+.avatar-circle {
     border-radius: 50%;
     display: flex;
     align-items: center;

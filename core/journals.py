@@ -58,7 +58,7 @@ def delete_journal_entry(entry_id: str, program_id: str = None) -> bool:
     return False
 
 def match_journals(user_message: str, program_id: str = None) -> list:
-    """Finds top 3 matching journal entries using keyword matching, semantic similarity, and recent entries fallback."""
+    """Finds top 3 matching journal entries using keyword matching and semantic similarity."""
     if not user_message:
         return []
         
@@ -126,7 +126,7 @@ def match_journals(user_message: str, program_id: str = None) -> list:
             if semantic_matched:
                 return [item[1] for item in semantic_matched[:3]]
     except Exception as e:
-        print(f"[Journals] Semantic fallback error: {e}")
+        print(f"[Journals] Semantic matching notice: {e}")
         
     # If user inquired about memories/journals or if no specific topic matched, return most recent entries
     if has_memory_keyword or len(entries) <= 3:

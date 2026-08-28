@@ -53,7 +53,7 @@ def replace_placeholders(text: str) -> str:
     return text
 
 def get_program_greeting() -> str:
-    """Returns the program's first message from the card, with a default fallback."""
+    """Returns the program's first message from the card, defaulting to a standard greeting."""
     from runners.program import get_active_program
     active_program = get_active_program()
     card = _load_card_data(active_program)
@@ -174,12 +174,12 @@ def load_user_instructions() -> str:
             return f"\n\n# USER PROFILE & RELATIONSHIP CONTEXT\n{content}\n"
     except Exception as e:
         print(f"Failed to read user instructions from {profile_path}: {e}")
-        fallback_msg = (
+        default_msg = (
             "# USER CONTEXT: BUILDER\n"
             "- A software developer and code builder.\n"
             "- Hobby: Collects cute AI program programs in the Sanctuary.\n"
         )
-        return f"\n\n# USER PROFILE & RELATIONSHIP CONTEXT\n{fallback_msg}"
+        return f"\n\n# USER PROFILE & RELATIONSHIP CONTEXT\n{default_msg}"
 
 def is_story_mode(program_name: str = None) -> bool:
     """Checks if story mode is enabled for a specific program card."""

@@ -1668,11 +1668,11 @@ function getProfileUrl() {
     return `/profile.png?t=${profileCacheBuster}`;
 }
 
-// Helper to update profile/list avatars, automatically restoring from fallback DIVs to IMGs
+// Helper to update profile/list avatars, automatically restoring from circle placeholder DIVs to IMGs
 function updateAvatarElement(el, newSrc) {
-    if (el.classList.contains('avatar-fallback') || el.tagName === 'DIV') {
+    if (el.classList.contains('avatar-circle') || el.tagName === 'DIV') {
         const img = document.createElement('img');
-        img.className = el.className.replace('avatar-fallback', '').trim();
+        img.className = el.className.replace('avatar-circle', '').trim();
         img.src = newSrc;
         img.alt = el.getAttribute('alt') || 'Program';
         
@@ -3850,7 +3850,7 @@ function hideLoadingOverlay() {
         }, 450);
     }
 }
-// Guaranteed fallback so the splash overlay is never stuck on screen
+// Timeout guard so the splash overlay is never stuck on screen
 setTimeout(hideLoadingOverlay, 2500);
 
 // --- resetSession ---
@@ -4380,7 +4380,7 @@ function normalizeChatResponse(data) {
     const text = data.response || '';
     const media = [];
     
-    // Extract markdown images
+    // Extract markdown images from response text
     const imgRegex = /!\[([^\]]*)\]\(([^)]+)\)/g;
     let match;
     let cleanText = text;
@@ -4393,9 +4393,26 @@ function normalizeChatResponse(data) {
     }
     cleanText = text.replace(imgRegex, '').trim();
 
+    // Extract markdown images from tool calls responses
+    const toolCalls = data.tool_calls || [];
+    toolCalls.forEach(tc => {
+        if (tc.type === 'response' && typeof tc.response === 'string') {
+            let tcMatch;
+            const tcImgRegex = /!\[([^\]]*)\]\(([^)]+)\)/g;
+            while ((tcMatch = tcImgRegex.exec(tc.response)) !== null) {
+                const tcUrl = tcMatch[2];
+                if (!media.some(m => m.url === tcUrl)) {
+                    media.push({
+                        url: tcUrl,
+                        type: tcUrl.toLowerCase().endsWith('.mp4') ? 'video' : 'image'
+                    });
+                }
+            }
+        }
+    });
+
     // Determine portrait/image prompt from tool calls
     let imagePrompt = null;
-    const toolCalls = data.tool_calls || [];
     const imgCall = toolCalls.find(tc => tc.type === 'call' && [
         'generate_program_portrait', 'generate_local_image',
         'generate_imagen', 'generate_general_image'
@@ -5033,6 +5050,24 @@ function appendMessage(role, text, imageUrl = null, toolCalls = null, isLive = f
             }
         }
         cleanText = cleanText.replace(imgRegex, '').trim();
+
+        if (toolCalls && Array.isArray(toolCalls)) {
+            toolCalls.forEach(tc => {
+                if (tc.type === 'response' && typeof tc.response === 'string') {
+                    let tcMatch;
+                    const tcImgRegex = /!\[([^\]]*)\]\(([^)]+)\)/g;
+                    while ((tcMatch = tcImgRegex.exec(tc.response)) !== null) {
+                        const tcUrl = tcMatch[2];
+                        if (!media.some(m => m.url === tcUrl)) {
+                            media.push({
+                                url: tcUrl,
+                                type: tcUrl.toLowerCase().endsWith('.mp4') ? 'video' : 'image'
+                            });
+                        }
+                    }
+                }
+            });
+        }
     }
 
     const msg = {
@@ -7134,7 +7169,7 @@ async function loadQuests() {
                 } else {
                     dueTime = quest.due;
                     
-                    // Fallback Google Calendar Link using current time
+                    // Standard Google Calendar Link using current time
                     const now = new Date();
                     const startStr = now.toISOString().replace(/[-:]/g, '').split('.')[0] + 'Z';
                     const endParsed = new Date(now.getTime() + 60 * 60 * 1000);
@@ -8516,11 +8551,11 @@ if (document.readyState === 'loading') {
 // Global error listener to catch image load failures and switch to dynamic colored circles
 window.addEventListener('error', function (e) {
     if (e.target && e.target.tagName === 'IMG' && (e.target.classList.contains('program-avatar') || e.target.classList.contains('program-list-avatar') || e.target.classList.contains('voice-call-avatar') || e.target.classList.contains('voice-call-program-avatar'))) {
-        switchToCircleFallback(e.target);
+        switchToCircleAvatar(e.target);
     }
 }, true);
 
-function switchToCircleFallback(img) {
+function switchToCircleAvatar(img) {
     let name = '';
     let color = '';
     let useAccent = false;
@@ -8543,15 +8578,15 @@ function switchToCircleFallback(img) {
     if (!name) name = 'Program';
     if (!color) color = '#38bdf8';
     
-    const fallback = document.createElement('div');
+    const circleDiv = document.createElement('div');
     // Copy classes
-    fallback.className = img.className;
-    fallback.classList.add('avatar-fallback');
+    circleDiv.className = img.className;
+    circleDiv.classList.add('avatar-circle');
     
-    // Copy all original attributes to fallback div to preserve properties like src, data-*
+    // Copy all original attributes to circle div to preserve properties like src, data-*
     for (let attr of img.attributes) {
         if (attr.name !== 'class' && attr.name !== 'style') {
-            fallback.setAttribute(attr.name, attr.value);
+            circleDiv.setAttribute(attr.name, attr.value);
         }
     }
     
@@ -8563,18 +8598,18 @@ function switchToCircleFallback(img) {
         size = '120px';
     }
     
-    fallback.style.cssText = img.style.cssText;
-    fallback.style.width = size;
-    fallback.style.height = size;
-    fallback.style.aspectRatio = '1 / 1';
-    fallback.style.flexShrink = '0';
-    fallback.style.borderRadius = '50%';
+    circleDiv.style.cssText = img.style.cssText;
+    circleDiv.style.width = size;
+    circleDiv.style.height = size;
+    circleDiv.style.aspectRatio = '1 / 1';
+    circleDiv.style.flexShrink = '0';
+    circleDiv.style.borderRadius = '50%';
     
     if (useAccent) {
-        fallback.style.backgroundColor = 'var(--primary-accent)';
-        fallback.style.color = 'var(--primary-btn-text)';
+        circleDiv.style.backgroundColor = 'var(--primary-accent)';
+        circleDiv.style.color = 'var(--primary-btn-text)';
     } else {
-        fallback.style.backgroundColor = color;
+        circleDiv.style.backgroundColor = color;
         
         // Calculate text color brightness
         let hex = color.replace('#', '');
@@ -8585,23 +8620,23 @@ function switchToCircleFallback(img) {
         let g = parseInt(hex.substring(2, 4), 16) || 0;
         let b = parseInt(hex.substring(4, 6), 16) || 0;
         let brightness = (r * 299 + g * 587 + b * 114) / 1000;
-        fallback.style.color = brightness > 140 ? '#121214' : '#ffffff';
+        circleDiv.style.color = brightness > 140 ? '#121214' : '#ffffff';
     }
     
-    fallback.style.display = 'flex';
-    fallback.style.alignItems = 'center';
-    fallback.style.justifyContent = 'center';
-    const isBright = useAccent ? (getComputedStyle(document.documentElement).getPropertyValue('--primary-btn-text').trim() === '#121214') : (fallback.style.color === '#121214');
+    circleDiv.style.display = 'flex';
+    circleDiv.style.alignItems = 'center';
+    circleDiv.style.justifyContent = 'center';
+    const isBright = useAccent ? (getComputedStyle(document.documentElement).getPropertyValue('--primary-btn-text').trim() === '#121214') : (circleDiv.style.color === '#121214');
     const silhouetteColor = isBright ? 'rgba(0,0,0,0.35)' : 'rgba(255,255,255,0.3)';
-    fallback.innerHTML = `
+    circleDiv.innerHTML = `
         <svg viewBox="0 0 24 24" style="width: 62%; height: 62%; fill: ${silhouetteColor}; display: block;">
             <path d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z"/>
         </svg>
     `;
-    fallback.onclick = img.onclick;
+    circleDiv.onclick = img.onclick;
     
     if (img.parentNode) {
-        img.parentNode.replaceChild(fallback, img);
+        img.parentNode.replaceChild(circleDiv, img);
     }
 }
 

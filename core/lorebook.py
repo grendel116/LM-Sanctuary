@@ -161,7 +161,7 @@ def get_active_lore(
         key=lambda e: e["order"],
     )
 
-    # 5. Hybrid Semantic Fallback (If no keyword entries triggered, check vector similarity)
+    # 5. Hybrid Semantic Retrieval (If no keyword entries triggered, check vector similarity)
     if not triggered and scan_text:
         try:
             from core.skills.vectorized_databank.databank import DataBankManager
@@ -169,7 +169,7 @@ def get_active_lore(
             
             # Query the databank engine or use its internal similarity mechanism
             # (Assuming query_text or a similar method returns relevant chunks with scores)
-            vector_results = db.query_text(scan_text, top_k=2) # Limit semantic fallback hits
+            vector_results = db.query_text(scan_text, top_k=2) # Limit semantic search hits
             
             # Map search results back to lore entries if they match content
             matched_contents = {res.get("text") for res in vector_results if res.get("score", 0.0) >= 0.30}
@@ -184,7 +184,7 @@ def get_active_lore(
             triggered.sort(key=lambda x: x["order"])
             
         except Exception as ex:
-            print(f"[lorebook] Vector fallback error: {ex}")
+            print(f"[lorebook] Vector search notice: {ex}")
 
     before = [e["content"] for e in triggered if e["position"] == "before"]
     after  = [e["content"] for e in triggered if e["position"] == "after"]

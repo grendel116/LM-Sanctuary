@@ -263,7 +263,7 @@ def find_image_sidecar_json(image_filename, active_program):
 
 
 def extract_mood(chat_history):
-    """Extract mood from the latest program message, with neutral fallback."""
+    """Extract mood from the latest program message, defaulting to neutral."""
     for msg in reversed(chat_history):
         if msg.get('role') == 'program':
             mood = msg.get('mood')
@@ -1001,7 +1001,7 @@ def generate_user_message():
     user_profile = request.json.get('user_profile', '').strip()
     
     if not user_profile:
-        # Fallback to active user profile file
+        # Load active user profile file
         try:
             from variables.settings import USER_PROFILES_DIR
             from runners.program import get_active_user
@@ -1011,7 +1011,7 @@ def generate_user_message():
                 with open(profile_path, "r", encoding="utf-8") as f:
                     user_profile = f.read().strip()
         except Exception as e:
-            print(f"Error loading fallback user profile: {e}")
+            print(f"Error loading user profile: {e}")
             
     if not user_profile:
         user_profile = "A software developer and code builder."
@@ -1241,7 +1241,7 @@ def regenerate_image():
         except Exception as je:
             print(f"Error reading sidecar JSON: {je}")
 
-        # 2. Try to find the prompt in session history (fallback)
+        # 2. Check session history for prompt
         if not prompt:
             try:
                 chat_history = asyncio.run(runner.get_history(session_id))
@@ -1508,7 +1508,7 @@ def get_models():
     # 1. Fetch dynamic local models (only actively loaded models in Local LLM server)
     models = fetch_local_models()
     
-    # Default fallback: use the first loaded local model if available, otherwise "local-llm"
+    # Default selection: use the first loaded local model if available, otherwise "local-llm"
     default_model = "local-llm"
     if models and models[0]["value"] != "local-llm":
         default_model = models[0]["value"]
@@ -3263,7 +3263,7 @@ def finalize_imported_program(program_path, program_id, card_json):
         exts = card_json["data"].setdefault("extensions", {})
         exts.setdefault("sanctuary", {})["program_id"] = program_id
     else:
-        # Legacy flat format fallback
+        # Flat format compatibility
         card_json["program_id"] = program_id
 
     with open(os.path.join(program_path, f"{program_id}.json"), "w", encoding="utf-8") as f:

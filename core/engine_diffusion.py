@@ -1,11 +1,12 @@
 """
-core/engine_diffusion.py — Native in-process image diffusion engine.
+core/engine_diffusion.py — Internal GPU-accelerated diffusion engine.
 
-Eliminates the ComfyUI server dependency by running Stable Diffusion (SD1.5 / SDXL / Pony)
-pipelines and LoRAs directly in-process via diffusers/torch with CUDA/DirectML/CPU acceleration.
+Executes SDXL image generation directly in-process with PyTorch/GPU acceleration,
+using the exact parameters from ImageWorkflow.json.
 """
 
 import os
+import sys
 import gc
 import json
 import time
@@ -19,274 +20,336 @@ from variables.settings import CHECKPOINTS_DIR, LORAS_DIR, VAE_DIR, MODELS_DIR
 _diffusion_lock = threading.Lock()
 _active_pipe = None
 _active_checkpoint: Optional[str] = None
-_preferred_checkpoint: Optional[str] = None
-_active_loras: List[str] = []
+root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
 
-def set_active_checkpoint(name: str) -> bool:
-    """Sets the active checkpoint model preference."""
-    global _preferred_checkpoint
-    _preferred_checkpoint = name
-    return True
+def resolve_checkpoint_path(checkpoint_name: Optional[str] = None) -> str:
+    """Resolves the absolute path to the requested or default checkpoint model."""
+    if checkpoint_name and os.path.exists(checkpoint_name):
+        return checkpoint_name
 
+    candidates = []
+    if checkpoint_name:
+        candidates.append(os.path.join(CHECKPOINTS_DIR, checkpoint_name))
+        candidates.append(os.path.join(MODELS_DIR, checkpoint_name))
 
-def get_active_checkpoint() -> Optional[str]:
-    """Gets the active checkpoint model preference."""
-    global _preferred_checkpoint, _active_checkpoint
-    if _preferred_checkpoint:
-        return _preferred_checkpoint
-    if _active_checkpoint:
-        return os.path.basename(_active_checkpoint)
-    ckpts = list_checkpoints()
-    return ckpts[0]["name"] if ckpts else None
+    candidates.append(os.path.join(CHECKPOINTS_DIR, "WAI_illustrious-SDXL_16.safetensors"))
+    candidates.append(os.path.join(CHECKPOINTS_DIR, "sd_xl_base_1.0.safetensors"))
 
+    for path in candidates:
+        if os.path.exists(path):
+            return path
 
+    if os.path.exists(CHECKPOINTS_DIR):
+        for f in os.listdir(CHECKPOINTS_DIR):
+            if f.lower().endswith((".safetensors", ".ckpt")):
+                return os.path.join(CHECKPOINTS_DIR, f)
 
-def list_checkpoints() -> List[Dict[str, Any]]:
-    """Scans models/checkpoints and models/ for diffusion weights."""
-    checkpoints = []
-    seen = set()
-
-    for search_dir in (CHECKPOINTS_DIR, MODELS_DIR):
-        if not os.path.exists(search_dir):
-            continue
-        try:
-            for root, _, files in os.walk(search_dir):
-                for f in files:
-                    lower = f.lower()
-                    if (lower.endswith(".safetensors") or lower.endswith(".ckpt")) and f not in seen:
-                        # Skip if in loras or vae directory
-                        rel = os.path.relpath(root, MODELS_DIR).lower()
-                        if "lora" in rel or "vae" in rel:
-                            continue
-                        seen.add(f)
-                        full_path = os.path.join(root, f)
-                        size_gb = round(os.path.getsize(full_path) / (1024 ** 3), 2)
-                        checkpoints.append({
-                            "name": f,
-                            "filename": f,
-                            "path": full_path,
-                            "size_gb": size_gb,
-                            "folder": os.path.relpath(root, MODELS_DIR)
-                        })
-        except Exception as e:
-            print(f"[engine_diffusion] Error scanning checkpoints in {search_dir}: {e}")
-
-    return sorted(checkpoints, key=lambda x: x["name"])
-
-
-def list_loras() -> List[Dict[str, Any]]:
-    """Scans models/loras for LoRA weights."""
-    loras = []
-    seen = set()
-
-    if os.path.exists(LORAS_DIR):
-        try:
-            for root, _, files in os.walk(LORAS_DIR):
-                for f in files:
-                    if f.lower().endswith(".safetensors") and f not in seen:
-                        seen.add(f)
-                        full_path = os.path.join(root, f)
-                        size_mb = round(os.path.getsize(full_path) / (1024 ** 2), 1)
-                        loras.append({
-                            "name": f,
-                            "filename": f,
-                            "path": full_path,
-                            "size_mb": size_mb,
-                            "folder": os.path.relpath(root, LORAS_DIR)
-                        })
-        except Exception as e:
-            print(f"[engine_diffusion] Error scanning loras: {e}")
-
-    return sorted(loras, key=lambda x: x["name"])
-
-
-def list_vaes() -> List[Dict[str, Any]]:
-    """Scans models/vae for VAE files."""
-    vaes = []
-    seen = set()
-
-    if os.path.exists(VAE_DIR):
-        try:
-            for root, _, files in os.walk(VAE_DIR):
-                for f in files:
-                    if (f.lower().endswith(".safetensors") or f.lower().endswith(".pt")) and f not in seen:
-                        seen.add(f)
-                        full_path = os.path.join(root, f)
-                        size_mb = round(os.path.getsize(full_path) / (1024 ** 2), 1)
-                        vaes.append({
-                            "name": f,
-                            "filename": f,
-                            "path": full_path,
-                            "size_mb": size_mb
-                        })
-        except Exception as e:
-            print(f"[engine_diffusion] Error scanning VAEs: {e}")
-
-    return sorted(vaes, key=lambda x: x["name"])
-
-
-def resolve_checkpoint_path(ckpt_name: str) -> Optional[str]:
-    """Resolves full path of a checkpoint file."""
-    if not ckpt_name:
-        return None
-    if os.path.isabs(ckpt_name) and os.path.exists(ckpt_name):
-        return ckpt_name
-    for item in list_checkpoints():
-        if item["name"].lower() == ckpt_name.lower() or item["filename"].lower() == ckpt_name.lower():
-            return item["path"]
-    direct = os.path.join(CHECKPOINTS_DIR, ckpt_name)
-    if os.path.exists(direct):
-        return direct
-    return None
+    raise FileNotFoundError(f"No checkpoint models found in {CHECKPOINTS_DIR}.")
 
 
 def resolve_lora_path(lora_name: str) -> Optional[str]:
-    """Resolves full path of a LoRA file."""
-    if not lora_name:
-        return None
-    if os.path.isabs(lora_name) and os.path.exists(lora_name):
+    """Resolves absolute path to a LoRA weights file."""
+    if os.path.exists(lora_name):
         return lora_name
-    for item in list_loras():
-        if item["name"].lower() == lora_name.lower() or item["filename"].lower() == lora_name.lower():
-            return item["path"]
-    direct = os.path.join(LORAS_DIR, lora_name)
-    if os.path.exists(direct):
-        return direct
+
+    candidates = [
+        os.path.join(LORAS_DIR, lora_name),
+        os.path.join(MODELS_DIR, "loras", lora_name),
+        os.path.join(MODELS_DIR, lora_name)
+    ]
+    for path in candidates:
+        if os.path.exists(path):
+            return path
     return None
 
 
-def unload_diffusion_pipeline() -> bool:
-    """Unloads the active diffusion pipeline and clears GPU cache."""
-    global _active_pipe, _active_checkpoint, _active_loras
-    with _diffusion_lock:
-        if _active_pipe is not None:
-            del _active_pipe
-            _active_pipe = None
-            _active_checkpoint = None
-            _active_loras = []
-            gc.collect()
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-            print("[engine_diffusion] Diffusion pipeline unloaded.")
-            return True
-    return False
+def _detect_device():
+    try:
+        import torch_directml
+        return torch_directml.device(), torch.float16, "directml"
+    except Exception:
+        if torch.cuda.is_available():
+            return torch.device("cuda"), torch.float16, "cuda"
+        return torch.device("cpu"), torch.float32, "cpu"
 
 
-def get_or_load_pipeline(
-    checkpoint_name_or_path: Optional[str] = None,
-    vae_name: Optional[str] = None,
-    loras: Optional[List[Tuple[str, float]]] = None
-):
-    """Loads or retrieves the diffusion pipeline."""
-    global _active_pipe, _active_checkpoint, _active_loras
+def get_or_load_pipeline(checkpoint_name_or_path: Optional[str] = None):
+    """Loads and caches the diffusers pipeline on the available compute device."""
+    global _active_pipe, _active_checkpoint
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    dtype = torch.float16 if device == "cuda" else torch.float32
-
-    # If no checkpoint specified, pick preferred or first available in models/checkpoints
-    ckpt_path = None
-    if checkpoint_name_or_path:
-        ckpt_path = resolve_checkpoint_path(checkpoint_name_or_path)
-    elif _preferred_checkpoint:
-        ckpt_path = resolve_checkpoint_path(_preferred_checkpoint)
-
-    if not ckpt_path:
-        available = list_checkpoints()
-        if available:
-            ckpt_path = available[0]["path"]
-
-    if not ckpt_path or not os.path.exists(ckpt_path):
-        raise ValueError("No diffusion checkpoint found. Place your SafeTensors model in models/checkpoints/.")
+    ckpt_path = resolve_checkpoint_path(checkpoint_name_or_path)
 
     with _diffusion_lock:
-        # Check if already loaded with same checkpoint
         if _active_pipe is not None and _active_checkpoint == ckpt_path:
             return _active_pipe
 
-        # Unload previous pipeline
         if _active_pipe is not None:
+            print("[engine_diffusion] Unloading existing pipeline...")
             del _active_pipe
             _active_pipe = None
             gc.collect()
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
-        from diffusers import AutoPipelineForText2Image, DPMSolverMultistepScheduler
+        from diffusers import StableDiffusionXLPipeline, StableDiffusionPipeline, DPMSolverMultistepScheduler
 
-        print(f"[engine_diffusion] Loading diffusion pipeline from {ckpt_path} on {device} ({dtype})...")
-        pipe = AutoPipelineForText2Image.from_single_file(
-            ckpt_path,
-            torch_dtype=dtype,
-            use_safetensors=ckpt_path.lower().endswith(".safetensors")
-        )
+        device_obj, dtype, dev_kind = _detect_device()
+        if dev_kind == "cpu":
+            torch.set_num_threads(os.cpu_count() or 8)
 
-        pipe.scheduler = DPMSolverMultistepScheduler.from_config(pipe.scheduler.config, use_karras_sigmas=True)
-        pipe.to(device)
+        print(f"[engine_diffusion] Loading diffusion pipeline from {ckpt_path} on {dev_kind} ({dtype})...")
+        try:
+            pipe = StableDiffusionXLPipeline.from_single_file(
+                ckpt_path,
+                torch_dtype=dtype,
+                use_safetensors=ckpt_path.lower().endswith(".safetensors")
+            )
+        except Exception as sdxl_err:
+            print(f"[engine_diffusion] Note: SDXL single file loader: {sdxl_err}. Trying SD1.5 loader...")
+            pipe = StableDiffusionPipeline.from_single_file(
+                ckpt_path,
+                torch_dtype=dtype,
+                use_safetensors=ckpt_path.lower().endswith(".safetensors")
+            )
 
-        # Enable memory optimizations if on CUDA
-        if device == "cuda":
+        try:
+            pipe.scheduler = DPMSolverMultistepScheduler.from_config(pipe.scheduler.config, use_karras_sigmas=True)
+        except Exception:
+            pass
+
+        pipe.to(device_obj)
+
+        if dev_kind in ("cuda", "directml"):
             try:
-                pipe.enable_attention_slicing()
+                pipe.enable_attention_slicing("max")
+                pipe.enable_vae_slicing()
+                pipe.enable_vae_tiling()
             except Exception:
                 pass
 
-        # Load specified LoRAs
-        if loras:
-            for lora_name, scale in loras:
-                lora_path = resolve_lora_path(lora_name)
-                if lora_path and os.path.exists(lora_path):
-                    try:
-                        print(f"[engine_diffusion] Loading LoRA '{lora_name}' (weight={scale})...")
-                        adapter_name = os.path.splitext(os.path.basename(lora_name))[0]
-                        pipe.load_lora_weights(os.path.dirname(lora_path), weight_name=os.path.basename(lora_path), adapter_name=adapter_name)
-                        pipe.set_adapters([adapter_name], adapter_weights=[float(scale)])
-                    except Exception as le:
-                        print(f"[engine_diffusion] Warning loading LoRA {lora_name}: {le}")
+        if dev_kind == "directml":
+            try:
+                pipe.vae.to(torch.device("cpu"))
+                print("[engine_diffusion] Placed VAE on CPU to prevent DirectML memory allocation limits.")
+            except Exception:
+                pass
 
         _active_pipe = pipe
         _active_checkpoint = ckpt_path
-        print(f"[engine_diffusion] Diffusion pipeline loaded successfully.")
+        print(f"[engine_diffusion] Pipeline loaded successfully.")
         return _active_pipe
+
+
+def execute_workflow_graph(
+    workflow_path_or_dict: Any,
+    replacements: Optional[Dict[str, Any]] = None,
+    save_path: Optional[str] = None
+) -> Tuple[Optional[Any], str]:
+    """Dynamically executes any ComfyUI node graph JSON in-process with AMD DirectML GPU acceleration."""
+    comfy_dir = os.path.normpath(os.path.join(root_dir, "core", "comfy_engine"))
+    if comfy_dir not in sys.path:
+        sys.path.insert(0, comfy_dir)
+
+    import folder_paths
+    folder_paths.folder_names_and_paths["checkpoints"] = ([os.path.join(root_dir, "models", "checkpoints")], folder_paths.supported_pt_extensions)
+    folder_paths.folder_names_and_paths["loras"] = ([os.path.join(root_dir, "models", "loras")], folder_paths.supported_pt_extensions)
+    folder_paths.folder_names_and_paths["vae"] = ([os.path.join(root_dir, "models", "vae")], folder_paths.supported_pt_extensions)
+
+    import nodes
+    import comfy.model_management
+
+    if isinstance(workflow_path_or_dict, str):
+        with open(workflow_path_or_dict, "r", encoding="utf-8") as f:
+            wf_str = f.read()
+    else:
+        wf_str = json.dumps(workflow_path_or_dict)
+
+    if replacements:
+        for k, v in replacements.items():
+            wf_str = wf_str.replace(k, str(v))
+
+    graph: Dict[str, Any] = json.loads(wf_str)
+    executed_outputs: Dict[str, Any] = {}
+
+    def get_input_val(val: Any) -> Any:
+        if isinstance(val, list) and len(val) == 2 and isinstance(val[0], str) and val[0] in graph:
+            src_id, src_out_idx = val[0], val[1]
+            if src_id not in executed_outputs:
+                execute_node(src_id)
+            return executed_outputs[src_id][src_out_idx]
+        return val
+
+    def execute_node(node_id: str) -> Any:
+        if node_id in executed_outputs:
+            return executed_outputs[node_id]
+
+        node_data = graph[node_id]
+        class_type = node_data.get("class_type")
+        if not class_type or class_type not in nodes.NODE_CLASS_MAPPINGS:
+            print(f"[engine_diffusion] Skipping unmapped node [{node_id}] {class_type}")
+            return None
+
+        cls = nodes.NODE_CLASS_MAPPINGS[class_type]
+        instance = cls()
+
+        resolved_inputs = {}
+        for inp_k, inp_v in node_data.get("inputs", {}).items():
+            resolved_inputs[inp_k] = get_input_val(inp_v)
+
+        func_name = getattr(cls, "FUNCTION", "execute")
+        func = getattr(instance, func_name)
+
+        print(f"[engine_diffusion] Executing node [{node_id}] {class_type} -> {func_name}...")
+
+        # Optimizations for DirectML GPU execution
+        if class_type == "CheckpointLoaderSimple":
+            outs = func(**resolved_inputs)
+            model, clip, vae = outs[0], outs[1], outs[2]
+            try:
+                model.model.to(torch.float16)
+            except Exception:
+                pass
+            executed_outputs[node_id] = (model, clip, vae)
+            return executed_outputs[node_id]
+
+        if class_type == "VAEDecode":
+            vae = resolved_inputs.get("vae")
+            samples = resolved_inputs.get("samples")
+            if vae is not None:
+                try:
+                    vae.first_stage_model.to("cpu")
+                    vae.device = torch.device("cpu")
+                    vae.output_device = torch.device("cpu")
+                except Exception:
+                    pass
+            if isinstance(samples, dict) and "samples" in samples:
+                samples = {"samples": samples["samples"].to("cpu")}
+                resolved_inputs["samples"] = samples
+
+            outs = func(**resolved_inputs)
+            executed_outputs[node_id] = outs
+            return executed_outputs[node_id]
+
+        outs = func(**resolved_inputs)
+        executed_outputs[node_id] = outs
+        return outs
+
+    # Execute all nodes in the graph
+    final_images = None
+    for nid, nd in graph.items():
+        if nd.get("class_type") in ("VAEDecode", "SaveImage", "PreviewImage"):
+            res = execute_node(nid)
+            if res and len(res) > 0 and hasattr(res[0], "shape"):
+                final_images = res[0]
+
+    # If not found via end nodes, execute all remaining top-level nodes
+    if final_images is None:
+        for nid in list(graph.keys()):
+            res = execute_node(nid)
+            if res and len(res) > 0 and hasattr(res[0], "shape"):
+                final_images = res[0]
+
+    from PIL import Image
+    import numpy as np
+
+    if final_images is not None:
+        img_array = (final_images[0].detach().cpu().numpy() * 255).astype(np.uint8)
+        image = Image.fromarray(img_array)
+        if save_path:
+            os.makedirs(os.path.dirname(save_path), exist_ok=True)
+            image.save(save_path)
+            print(f"[engine_diffusion] Image saved dynamically to {save_path}")
+        return image, save_path or ""
+
+    return None, ""
 
 
 def generate_portrait_image(
     prompt: str,
     negative_prompt: str = "worst quality, low quality, deformed, mutated, extra limbs, watermark, text",
     checkpoint: Optional[str] = None,
-    loras: Optional[List[Tuple[str, float]]] = None,
     width: int = 832,
-    height: int = 1216,
+    height: int = 1248,
     num_inference_steps: int = 24,
     guidance_scale: float = 6.0,
+    sampler_name: str = "euler",
+    scheduler: str = "simple",
     seed: Optional[int] = None,
+    workflow_path: Optional[str] = None,
     save_path: Optional[str] = None
 ) -> str:
-    """Generates an image directly in-process and writes the output PNG to save_path."""
+    """Generates an image adaptively from whatever workflow JSON is present."""
     if seed is None or seed < 0:
         seed = random.randint(1, 2147483647)
 
-    generator = torch.Generator(device="cuda" if torch.cuda.is_available() else "cpu").manual_seed(seed)
+    wf_file = workflow_path or os.getenv("COMFYUI_IMAGE_WORKFLOW", "core/skills/portrait_generation/ImageWorkflow.json")
+    if not os.path.isabs(wf_file):
+        wf_file = os.path.normpath(os.path.join(root_dir, wf_file))
 
-    pipe = get_or_load_pipeline(checkpoint_name_or_path=checkpoint, loras=loras)
+    selected_checkpoint = checkpoint or "WAI_illustrious-SDXL_16.safetensors"
 
-    print(f"[engine_diffusion] Generating portrait (Steps={num_inference_steps}, CFG={guidance_scale}, Seed={seed}, Size={width}x{height})...")
-    
-    with torch.inference_mode():
-        image = pipe(
-            prompt=prompt,
-            negative_prompt=negative_prompt,
-            width=width,
-            height=height,
-            num_inference_steps=num_inference_steps,
-            guidance_scale=guidance_scale,
-            generator=generator
-        ).images[0]
+    if os.path.exists(wf_file):
+        print(f"[engine_diffusion] Adapting dynamically to workflow: {wf_file}")
+        replacements = {
+            "%prompt%": prompt,
+            "%negative_prompt%": negative_prompt,
+            "%seed%": seed,
+            "%model%": selected_checkpoint,
+            "%vae%": ""
+        }
+        _, out_path = execute_workflow_graph(wf_file, replacements=replacements, save_path=save_path)
+        if out_path and os.path.exists(out_path):
+            return out_path
+
+    # Fallback to direct node synthesis if no workflow file exists
+    comfy_dir = os.path.normpath(os.path.join(root_dir, "core", "comfy_engine"))
+    if comfy_dir not in sys.path:
+        sys.path.insert(0, comfy_dir)
+
+    import folder_paths
+    folder_paths.folder_names_and_paths["checkpoints"] = ([os.path.join(root_dir, "models", "checkpoints")], folder_paths.supported_pt_extensions)
+    folder_paths.folder_names_and_paths["loras"] = ([os.path.join(root_dir, "models", "loras")], folder_paths.supported_pt_extensions)
+
+    import nodes
+    import comfy.model_management
+
+    ckpt_loader = nodes.CheckpointLoaderSimple()
+    model, clip, vae = ckpt_loader.load_checkpoint(selected_checkpoint)
+    try:
+        model.model.to(torch.float16)
+    except Exception:
+        pass
+
+    clip_encoder = nodes.CLIPTextEncode()
+    positive = clip_encoder.encode(clip, prompt)[0]
+    negative = clip_encoder.encode(clip, negative_prompt)[0]
+
+    latent_node = nodes.EmptyLatentImage()
+    latent = latent_node.generate(width, height, 1)[0]
+
+    ksampler = nodes.KSampler()
+    samples = ksampler.sample(model, seed, num_inference_steps, guidance_scale, sampler_name, scheduler, positive, negative, latent, 1.0)[0]
+
+    try:
+        vae.first_stage_model.to("cpu")
+        vae.device = torch.device("cpu")
+        vae.output_device = torch.device("cpu")
+    except Exception:
+        pass
+
+    samples_cpu = {"samples": samples["samples"].to("cpu")}
+    vae_decoder = nodes.VAEDecode()
+    images = vae_decoder.decode(vae, samples_cpu)[0]
+
+    from PIL import Image
+    import numpy as np
+    img_array = (images[0].detach().cpu().numpy() * 255).astype(np.uint8)
+    image = Image.fromarray(img_array)
 
     if save_path:
         os.makedirs(os.path.dirname(save_path), exist_ok=True)
-        image.save(save_path, "PNG")
+        image.save(save_path)
         print(f"[engine_diffusion] Portrait saved to {save_path}")
-        return save_path
 
-    return ""
+    return save_path or ""

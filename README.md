@@ -50,19 +50,28 @@ These are the things your companion can do on your computer. By default, before 
 
 ### Generative Media Engines (Local)
 * **Native LLM Engine**: Direct GGUF loading and token inference via `llama-cpp-python` with zero external server processes or port conflicts.
-* **Native Diffusion Engine** (`generate_local_image`): Render companion portraits in real-time directly using SafeTensors checkpoints and LoRAs.
-* **ComfyUI Compatibility** (`apply_comfy_workflow`): Optional connection to remote or headless ComfyUI for advanced custom node graphs.
+* **Native In-Process Diffusion Engine** (`generate_local_image`): Real-time GPU-accelerated diffusion directly in-process using embedded engine nodes with SDXL SafeTensors checkpoints and LoRAs. No background daemons or external servers required.
 
 ---
 
-## 📁 MODELS DIRECTORY STRUCTURE
+## 📁 MODELS DIRECTORY & RECOMMENDED DOWNLOADS
 
-Place your models directly into the `models/` directory for automatic discovery:
+Place your local model weights into the `models/` directory for automatic discovery:
 
-* **`models/llm/`**: Place GGUF chat models (e.g. `Qwen2.5-7B-Instruct.Q4_K_M.gguf`, `Gemma-2-9B.gguf`).
-* **`models/checkpoints/`**: Place Stable Diffusion / SDXL / Pony SafeTensors checkpoints.
+* **`models/llm/`**: Place GGUF chat models.
+* **`models/checkpoints/`**: Place Stable Diffusion / SDXL SafeTensors checkpoints (e.g. `WAI_illustrious-SDXL_16.safetensors`).
 * **`models/loras/`**: Place character or style LoRAs (`.safetensors`).
 * **`models/vae/`**: Place custom VAE weights (`.safetensors` / `.pt`).
+
+### 🧠 Suggested GGUF LLM Models
+
+| Model | Recommended Quant | VRAM / RAM Req | Best For |
+| :--- | :--- | :--- | :--- |
+| **Qwen 2.5 7B Instruct** | `Qwen2.5-7B-Instruct-Q4_K_M.gguf` | ~5 GB | General roleplay, coding, and fast tool execution |
+| **Hermes 3 (Llama 3.1 8B)** | `Hermes-3-Llama-3.1-8B-Q4_K_M.gguf` | ~6 GB | Creative storytelling, complex roleplay, and uncensored interactions |
+| **Gemma 2 9B It** | `gemma-2-9b-it-Q4_K_M.gguf` | ~7 GB | Nuanced dialogue, character personas, and knowledge grounding |
+| **Mistral Small 24B (2501)** | `Mistral-Small-24B-Instruct-2501-Q4_K_M.gguf` | ~16 GB | Deep reasoning, intricate multi-character roleplay, and complex code generation |
+| **Qwen 2.5 14B / 32B Instruct** | `Qwen2.5-14B-Instruct-Q4_K_M.gguf` | ~10 GB / ~20 GB | High-fidelity roleplay and advanced autonomous tool use |
 
 ---
 

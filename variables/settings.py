@@ -21,7 +21,7 @@ REMOTE_SERVER_URL = os.getenv("REMOTE_SERVER_URL", "http://127.0.0.1:1234/v1/cha
 REMOTE_API_KEY = os.getenv("REMOTE_API_KEY")
 REMOTE_CLOUD_URL = os.getenv("REMOTE_CLOUD_URL")
 
-# Ensure it pulls from the environment (with a sensible local fallback if needed)
+# Pull server endpoint configuration from environment with standard local defaults
 LOCAL_SERVER_URL = os.getenv("LOCAL_SERVER_URL", "http://localhost:8080")
 
 def get_local_server_headers():

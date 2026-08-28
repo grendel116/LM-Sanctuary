@@ -47,7 +47,13 @@ core/programs/*/lorebooks/
 core/embeddings.pkl
 temp_uploads/
 
-# Local model weights
+# Local model weights and binary checkpoints
+*.safetensors
+*.gguf
+*.pt
+*.pth
+*.ckpt
+*.onnx
 models/*
 !models/__init__.py
 !models/models.py

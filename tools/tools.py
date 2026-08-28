@@ -709,9 +709,9 @@ def web_search(query: str) -> str:
                     seen_urls.add(compare_url)
                     unique_results.append(r)
 
-            # Fallback to Wikipedia only if everything else came back empty
+            # Query Wikipedia if other sources returned empty
             if not unique_results:
-                print("[Web Crawling] All primary sources empty or failed. Using Wikipedia fallback.")
+                print("[Web Crawling] Primary sources empty. Querying Wikipedia.")
                 wiki_results = run_wikipedia(query)
                 for r in wiki_results:
                     url_clean = r["url"].lower().strip().rstrip('/')
@@ -1357,72 +1357,24 @@ def generate_local_image(prompt: str) -> str:
     local_path = os.path.join(portraits_dir, local_filename)
     os.makedirs(portraits_dir, exist_ok=True)
 
-    # --- 1. Try Native In-Process Diffusion Engine first ---
+    # Execute pure in-process DirectML GPU diffusion engine
     try:
-        from core.engine_diffusion import list_checkpoints, list_loras, generate_portrait_image
-        local_ckpts = list_checkpoints()
-        if local_ckpts:
-            # Collect active LoRAs from models/loras
-            active_loras = []
-            for lora_item in list_loras():
-                active_loras.append((lora_item["name"], 0.7))
-
-            generate_portrait_image(
-                prompt=final_prompt,
-                negative_prompt=final_negative,
-                checkpoint=local_ckpts[0]["path"],
-                loras=active_loras if active_loras else None,
-                save_path=local_path
-            )
-
-            # Save sidecar JSON
-            json_path = os.path.join(portraits_dir, f"portrait_{timestamp}.json")
-            try:
-                with open(json_path, "w", encoding="utf-8") as jf:
-                    json.dump({"prompt": prompt, "full_prompt": final_prompt, "engine": "native_diffusion"}, jf, indent=4)
-            except Exception:
-                pass
-
-            return f"![Portrait](/images/portraits/{local_filename}?v={timestamp})"
-    except Exception as native_err:
-        print(f"[engine_diffusion] Native generation notice: {native_err}")
-
-    # --- 2. Fallback to external ComfyUI if installed and running ---
-    workflow_env_path = os.getenv("COMFYUI_IMAGE_WORKFLOW", "core/skills/portrait_generation/ImageWorkflow.json")
-    workflow_path = os.path.normpath(os.path.join(root_dir, workflow_env_path))
-
-    if os.path.exists(workflow_path):
+        from core.engine_diffusion import generate_portrait_image
+        generate_portrait_image(
+            prompt=final_prompt,
+            negative_prompt=final_negative,
+            save_path=local_path
+        )
+        json_path = os.path.join(portraits_dir, f"portrait_{timestamp}.json")
         try:
-            selected_checkpoint = COMFYUI_CHECKPOINT
-            selected_vae = COMFYUI_VAE
-            seed_val = random.randint(1, 1125899906842624)
-            replacements = {
-                "%prompt%": final_prompt,
-                "%negative_prompt%": final_negative,
-                "%seed%": seed_val,
-                "%model%": selected_checkpoint,
-                "%vae%": selected_vae
-            }
-
-            result_path = apply_comfy_workflow(workflow_path, replacements, local_path, session_id=current_session_id.get())
-            if not result_path.startswith("Error"):
-                json_path = os.path.join(portraits_dir, f"portrait_{timestamp}.json")
-                try:
-                    with open(json_path, "w", encoding="utf-8") as jf:
-                        json.dump({"prompt": prompt, "engine": "comfyui"}, jf, indent=4)
-                except Exception:
-                    pass
-                return f"![Portrait](/images/portraits/{local_filename}?v={timestamp})"
-        except Exception as e:
-            print(f"[INFO] ComfyUI fallback generation failed: {e}.")
-
-    return (
-        "**Image Generation Inactive**\n\n"
-        "To enable native portrait generation:\n"
-        "- Place any Stable Diffusion SafeTensors model in `models/checkpoints/`.\n"
-        "- (Optional) Place any character or style LoRAs in `models/loras/`.\n"
-        "- Once placed, ask the program to generate a portrait!"
-    )
+            with open(json_path, "w", encoding="utf-8") as jf:
+                json.dump({"prompt": prompt, "full_prompt": final_prompt, "engine": "in_process_gpu"}, jf, indent=4)
+        except Exception:
+            pass
+        return f"![Portrait](/images/portraits/{local_filename}?v={timestamp})"
+    except Exception as e:
+        print(f"[engine_diffusion] Error generating portrait: {e}")
+        return f"Error generating portrait: {e}"
 
 @track_tool_activity
 def generate_video_from_image(image_path: str, prompt: str) -> str:

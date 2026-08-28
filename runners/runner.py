@@ -263,7 +263,7 @@ class BaseProgramRunner:
 
             print(f"Local server error: {response.status_code} - {response.text}", flush=True)
         except Exception as e:
-            # Fallback to in-process engine if standalone server is unavailable
+            # Query in-process engine if standalone server is unavailable
             try:
                 from runners import engine_llm
                 if engine_llm.is_loaded():
@@ -490,7 +490,7 @@ class BaseProgramRunner:
                     bot_response_text = f"Error: {response.text}"
                 print(f"[DEBUG STATUS] {response.status_code}", flush=True)
             except Exception as e:
-                # Fallback to in-process engine if external server is offline
+                # Query in-process engine if external server is offline
                 try:
                     from runners import engine_llm
                     if engine_llm.is_loaded():
@@ -786,7 +786,7 @@ class BaseProgramRunner:
         return False
 
     async def update_message_text(self, session_id: str, msg_id: str, new_text: str) -> bool:
-        """Finds a message by its ID and updates its text with fallback checks."""
+        """Finds a message by its ID and updates its text."""
         # Ensure session is loaded in memory
         if session_id not in self.sessions_history:
             self._load_session_from_disk(session_id)

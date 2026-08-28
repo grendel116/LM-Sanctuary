@@ -74,7 +74,7 @@ def check_comfy_running(force_refresh=False):
         pass
         
     try:
-        # Fallback to GET / (static HTML, very lightweight)
+        # Secondary check on GET / (static HTML, very lightweight)
         res = requests.get(f"{COMFYUI_URL}/", timeout=0.3)
         if res.status_code == 200:
             _comfy_running_cached = True
@@ -99,7 +99,7 @@ def install_comfy():
         os.makedirs(parent_dir, exist_ok=True)
         
         # 1. Detect GPU Type
-        gpu_type = "nvidia"  # Default fallback
+        gpu_type = "nvidia"  # Default selection
         try:
             res = subprocess.run(["powershell", "-Command", "Get-CimInstance Win32_VideoController | Select-Object -ExpandProperty Name"], capture_output=True, text=True, timeout=3.0)
             output = res.stdout.lower()
@@ -331,7 +331,7 @@ def start_comfy_server():
         if not os.path.exists(portable_python):
             portable_python = os.path.join(os.path.dirname(os.path.normpath(COMFYUI_DIR)), "python_embeded", "python.exe")
             
-        # 3. Fallback to the main shared virtual environment
+        # 3. Main shared virtual environment
         shared_venv = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".venv", "Scripts", "python.exe")
         
         if os.path.exists(local_venv):
@@ -567,7 +567,7 @@ def _resolver_worker(workflow_json_str):
                         print(f"[Resolver] Mapped node {node_type} to {repo_url} using extension-node-map.json")
                         break
                     
-            # 2. Fallback to custom-node-list.json substring search
+            # 2. Check custom-node-list.json substring search
             if not found and custom_nodes_list:
                 for node_info in custom_nodes_list:
                     nodename_pattern = node_info.get("nodename_pattern", "")
@@ -644,7 +644,7 @@ def _resolver_worker(workflow_json_str):
                     download_url = m_info.get("url")
                     break
                     
-            # Hardcoded official stabilityai/Kijai HF fallbacks
+            # Direct official stabilityai/Kijai HF URLs
             if not download_url:
                 if filename == "sd_xl_base_1.0.safetensors":
                     download_url = "https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0/resolve/main/sd_xl_base_1.0.safetensors"
@@ -661,7 +661,7 @@ def _resolver_worker(workflow_json_str):
                 elif filename == "animatediff_lightning_4step_comfy.safetensors":
                     download_url = "https://huggingface.co/ByteDance/AnimateDiff-Lightning/resolve/main/animatediff_lightning_4step_comfy.safetensors"
                     
-            # Fallback to searching Hugging Face directly if still not listed
+            # Search Hugging Face directly if still not listed
             if not download_url:
                 try:
                     hf_url = f"https://huggingface.co/api/models?search={filename.replace('.safetensors','')}&limit=1"
@@ -767,7 +767,7 @@ def stop_comfy_server():
             except Exception as netstat_err:
                 print(f"[DEBUG] netstat termination failed: {netstat_err}", flush=True)
 
-        # 2. Combined fallback scanner (only run if netstat did not find anything)
+        # 2. Combined process scanner (only run if netstat did not find anything)
         if not terminated_any:
             for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
                 try:

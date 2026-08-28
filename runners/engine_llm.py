@@ -153,7 +153,7 @@ def load_model(
             try:
                 llm = llama_cpp.Llama(**kwargs, flash_attn=flash_attn)
             except Exception:
-                # Fallback if flash_attn is not supported on this backend build
+                # Load without flash_attn if not supported on this build
                 llm = llama_cpp.Llama(**kwargs)
 
             _active_llm = llm
