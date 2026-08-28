@@ -2970,6 +2970,13 @@ async function selectAssistant(assistantId) {
                 updateHeartState(currentHeartState, "", latestInversionState);
             }
             
+            // Reset proactive thought state for new assistant
+            hideThoughtBubbleOverlay();
+            currentProactiveThoughtText = "";
+            hasTriggeredInitialProactive = false;
+            lastProactiveThoughtTime = 0;
+            lastUserMessageTime = Date.now();
+            
             // Reset the chat container and reload history for new assistant
             const chatContainer = document.getElementById('chat-container');
             chatContainer.innerHTML = '';
@@ -3797,10 +3804,6 @@ async function loadHistory() {
             updateHeartState(data.state, data.inversion_active, data.inversion_state, null, false);
         }
         inversionActive = data.inversion_active || "";
-
-        if (currentProactiveThoughtText) {
-            showThoughtBubbleOverlay(currentProactiveThoughtText);
-        }
 
         // Restore scroll position
         const savedScrollPos = safeSessionStorage.getItem('chat_scroll_pos');
@@ -8449,6 +8452,8 @@ let currentProactiveThoughtText = "";
 async function triggerProactiveAction() {
     proactiveAbortController = new AbortController();
     const signal = proactiveAbortController.signal;
+    const targetSession = sessionId;
+    const targetProgram = activeProgramName;
     try {
         const response = await fetch('/api/proactive_action', {
             method: 'POST',
@@ -8459,9 +8464,9 @@ async function triggerProactiveAction() {
             }),
             signal
         });
-        if (signal.aborted) return;
+        if (signal.aborted || sessionId !== targetSession || activeProgramName !== targetProgram) return;
         const data = await response.json();
-        if (signal.aborted) return;
+        if (signal.aborted || sessionId !== targetSession || activeProgramName !== targetProgram) return;
         if (data.status === 'success' && data.type === 'thought' && data.content) {
             currentProactiveThoughtText = data.content;
             lastProactiveThoughtTime = Date.now();
