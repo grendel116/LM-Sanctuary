@@ -2995,7 +2995,8 @@ async function selectAssistant(assistantId) {
             // Update profile cache buster and switch avatars instantly
             profileCacheBuster = Date.now();
             updateProfileImages();
-            applyTheme(data.active, data.theme);
+            activeProgramId = data.active || assistantId;
+            applyTheme(data.active || assistantId, data.theme);
             
             // Re-request history and dynamic configuration
             modelInitPromise = initializeModelSelect();
@@ -3200,19 +3201,19 @@ async function openPaletteModal(programId, programName) {
         presetsContainer.appendChild(btn);
     });
     
-    // Try to load the current theme color first if theme.json exists
+    // Load the current theme color for this program
     let currentColor = '#38bdf8';
     try {
-        if (activeProgramName && programId === activeProgramName.toLowerCase()) {
-            currentColor = getComputedStyle(document.documentElement).getPropertyValue('--primary-accent').trim();
-        } else {
-            const response = await fetch(`/api/programs/profile?program_id=${programId}`);
-            if (response.ok) {
-                const prof = await response.json();
-                // Extract color if available
+        const response = await fetch(`/api/programs/theme?program_id=${encodeURIComponent(programId)}`);
+        if (response.ok) {
+            const tData = await response.json();
+            if (tData.theme && tData.theme.primary_accent) {
+                currentColor = tData.theme.primary_accent;
             }
         }
-    } catch(e) {}
+    } catch(e) {
+        console.error("Error fetching program theme:", e);
+    }
     
     // Set input values
     selectPalettePreset(currentColor || '#38bdf8');
@@ -3281,7 +3282,10 @@ async function saveProgramPalette() {
         
         const data = await response.json();
         if (response.ok && data.status === 'success') {
-            if (activeProgramName && paletteTargetProgramId === activeProgramName.toLowerCase()) {
+            const isMatch = !activeProgramId || 
+                paletteTargetProgramId === activeProgramId || 
+                (activeProgramName && activeProgramName.toLowerCase().replace(/[^a-z0-9]/g, '') === paletteTargetProgramId.toLowerCase().replace(/[^a-z0-9]/g, ''));
+            if (isMatch) {
                 applyTheme(paletteTargetProgramId, data.theme);
             }
             
@@ -3739,6 +3743,7 @@ async function loadHistory() {
             programWelcomeMessage = null;
         }
         if (data.active_program) {
+            activeProgramId = data.active_program;
             applyTheme(data.active_program, data.theme);
         }
         if (data.character_name) {
@@ -8299,6 +8304,7 @@ let lastInteractionTime = Date.now();
 let hasTriggeredProactive = false;
 let proactiveAbortController = null;
 let activeProgramName = "";
+let activeProgramId = "";
 let availableModels = [];
 let connectionStatus = { remote_configured: false, gemini_configured: false, local_online: false };
 let modelInitPromise = null;

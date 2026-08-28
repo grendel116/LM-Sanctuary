@@ -2481,6 +2481,22 @@ def select_program():
         return jsonify({'error': str(e)}), 500
 
 
+@app.route('/api/programs/theme', methods=['GET'])
+@requires_auth
+def get_program_theme_route():
+    try:
+        from runners.program import get_active_program
+        program_id = request.args.get('program_id') or get_active_program()
+        theme_data = load_theme(program_id)
+        return jsonify({
+            'status': 'success',
+            'program_id': program_id,
+            'theme': theme_data
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
 @app.route('/api/programs/palette', methods=['POST'])
 @requires_auth
 def update_program_palette():
@@ -2508,6 +2524,8 @@ def update_program_palette():
         with open(theme_path, "w", encoding="utf-8") as tf:
             json.dump(theme_data, tf, indent=2, ensure_ascii=False)
             
+        _theme_cache[program_id] = theme_data
+
         return jsonify({
             'status': 'success',
             'program_id': program_id,
