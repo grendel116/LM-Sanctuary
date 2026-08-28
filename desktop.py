@@ -104,7 +104,10 @@ def main():
     )
 
     window.events.closed += on_closed
-    webview.start(gui='edgechromium', debug=False)
+    if sys.platform == "win32":
+        webview.start(gui='edgechromium', debug=False)
+    else:
+        webview.start(debug=False)
     on_closed()
 
 

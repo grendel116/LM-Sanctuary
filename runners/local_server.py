@@ -229,10 +229,7 @@ def start_local_server(model_key=None):
 
     if flash_attn and "-fa" not in cmd:
         cmd.extend(["-fa", "on"])
-    if no_mmap:
-        cmd.append("--no-mmap")
-        
- # --- AUTOMATIC LOGIT BIAS INJECTION ---
+    # --- AUTOMATIC LOGIT BIAS INJECTION ---
     try:
         from core.banned_words import generate_llama_cli_args
         # Generates token-level bias flags dynamically from the active model's GGUF file
@@ -269,13 +266,11 @@ def start_local_server(model_key=None):
             try:
                 for _ in range(300):
                     time.sleep(1.0)
+                    if _proc and _proc.poll() is not None:
+                        break
                     status = check_local_server_status()
                     if status is True:
                         _current_model = model_key
-                        break
-                    if status is False:
-                        break
-                    if _proc and _proc.poll() is not None:
                         break
             finally:
                 with _start_lock:
@@ -318,7 +313,7 @@ def stop_local_server():
     if _proc:
         try:
             _proc.terminate()
-            _proc.wait(timeout=1.0)
+            _proc.wait(timeout=1.5)
         except Exception:
             try:
                 _proc.kill()
@@ -327,7 +322,7 @@ def stop_local_server():
         _proc = None
         
     _kill_all_llama_processes()
-    time.sleep(0.5)
+    time.sleep(1.5)
     return True, "Stopped"
 
 def check_local_server_status():

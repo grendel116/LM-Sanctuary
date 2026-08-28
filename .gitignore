@@ -57,6 +57,8 @@ temp_uploads/
 models/*
 !models/__init__.py
 !models/models.py
+!models/**/
+!models/**/.gitkeep
 
 # TTS Speech Model weights and synthesized audio cache
 core/skills/speech_generation/speech_model/*.onnx

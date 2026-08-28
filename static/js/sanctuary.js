@@ -8591,15 +8591,15 @@ function hideThoughtBubbleOverlay() {
 }
 
 // Periodically check for proactive thoughts:
-// 1. Initial thought triggers after 3 minutes (180,000 ms) of silence.
+// 1. Initial thought triggers after 10 minutes (600,000 ms) of silence.
 // 2. Subsequent thoughts trigger at 4-hour intervals (14,400,000 ms) since the previous thought.
 setInterval(async () => {
     const idleSinceUser = Date.now() - lastUserMessageTime;
     const userInput = document.getElementById('user-input');
     if (!userInput || userInput.disabled) return;
 
-    // First thought: after 3 minutes
-    if (!hasTriggeredInitialProactive && idleSinceUser >= 180000) {
+    // First thought: after 10 minutes
+    if (!hasTriggeredInitialProactive && idleSinceUser >= 600000) {
         await triggerProactiveAction();
     }
     // Subsequent thoughts: every 4 hours after the initial thought

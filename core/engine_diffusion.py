@@ -198,9 +198,7 @@ def unload_diffusion_models():
     """Unloads all cached ComfyUI models, pipelines, and releases GPU VRAM back to the LLM."""
     global _COMFY_NODE_CACHE, _active_pipe, _active_checkpoint
     with _diffusion_lock:
-        if _COMFY_NODE_CACHE:
-            print("[engine_diffusion] Unloading ComfyUI cached models to release VRAM to LLM...", flush=True)
-            _COMFY_NODE_CACHE.clear()
+        _COMFY_NODE_CACHE.clear()
         if _active_pipe is not None:
             del _active_pipe
             _active_pipe = None
@@ -212,6 +210,7 @@ def unload_diffusion_models():
                 sys.path.insert(0, comfy_path)
             import comfy.model_management as mm
             mm.unload_all_models()
+            mm.current_loaded_models.clear()
             mm.soft_empty_cache()
         except Exception:
             pass
@@ -222,6 +221,7 @@ def unload_diffusion_models():
                 torch.cuda.empty_cache()
         except Exception:
             pass
+        time.sleep(1.0)
 
 
 def _detect_device():
