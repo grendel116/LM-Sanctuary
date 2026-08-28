@@ -1,7 +1,0 @@
-# UI Styling Directive
-Use predefined classes for buttons.
-- **Secondary/Cancel**: `class="edit-btn edit-cancel-btn"` (hollow border, dark hover).
-- **Primary/Save/Confirm**: `class="edit-btn edit-save-btn"` (filled dark background).
-- **General**: `class="glass-btn"` (glassy).
-- **Aesthetic**: Maintain a dark theme throughout the styling.
-
