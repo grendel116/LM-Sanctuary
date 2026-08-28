@@ -364,20 +364,23 @@ def execute_workflow_graph(
         executed_outputs[node_id] = outs
         return outs
 
-    # Execute all nodes in the graph
+    # Execute VAEDecode node(s) to retrieve the decoded image tensor
     final_images = None
     for nid, nd in graph.items():
-        if nd.get("class_type") in ("VAEDecode", "SaveImage", "PreviewImage"):
+        if nd.get("class_type") == "VAEDecode":
             res = execute_node(nid)
-            if res and len(res) > 0 and hasattr(res[0], "shape"):
+            if res is not None and len(res) > 0 and hasattr(res[0], "shape"):
                 final_images = res[0]
+                break
 
-    # If not found via end nodes, execute all remaining top-level nodes
+    # Fallback to SaveImage / PreviewImage if no VAEDecode node matched
     if final_images is None:
-        for nid in list(graph.keys()):
-            res = execute_node(nid)
-            if res and len(res) > 0 and hasattr(res[0], "shape"):
-                final_images = res[0]
+        for nid, nd in graph.items():
+            if nd.get("class_type") in ("SaveImage", "PreviewImage"):
+                res = execute_node(nid)
+                if res is not None and len(res) > 0 and hasattr(res[0], "shape"):
+                    final_images = res[0]
+                    break
 
     from PIL import Image
     import numpy as np

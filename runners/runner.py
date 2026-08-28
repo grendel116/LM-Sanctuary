@@ -552,6 +552,17 @@ class BaseProgramRunner:
                     "apply_comfy_workflow",
                 }
                 if any(t_name in image_tools for t_name, _, _ in results):
+                    is_portrait_turn = any(
+                        k in new_message_text for k in (
+                            "generate_program_portrait",
+                            "generate_local_image",
+                            "[GENERATE_IMAGE:",
+                            "Generate a portrait",
+                            "portrait",
+                        )
+                    )
+                    if is_portrait_turn:
+                        final_response_text = ""
                     adapter.append_assistant_message(final_response_text, all_tool_calls, invocation_id)
                     break
 

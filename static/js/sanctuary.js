@@ -6399,9 +6399,9 @@ function handleSwipeGesture() {
 async function generatePortraitPrompt() {
     if (isGenerating) return;
     if (useImagenMode) {
-        userInput.value = "[generate_imagen(prompt=\"Render a visual portrait of the current character\")]";
+        userInput.value = "[System instruction: Generate ONLY an image tool call tag summarizing the current scene and character appearance. Do NOT write any story text or narrative response.]";
     } else {
-        userInput.value = "[generate_program_portrait(prompt=\"Portrait based on current context\")]";
+        userInput.value = "[generate_program_portrait(prompt=\"Generate image tags summarizing the character appearance, pose, outfit, and scene from the latest message. Do NOT include story text.\")]";
     }
     await sendMessage();
 }
