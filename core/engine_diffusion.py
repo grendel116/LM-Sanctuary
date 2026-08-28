@@ -64,6 +64,135 @@ def resolve_lora_path(lora_name: str) -> Optional[str]:
     return None
 
 
+def list_checkpoints() -> List[Dict[str, Any]]:
+    """Lists all available SafeTensors/checkpoint files in models/checkpoints."""
+    ckpts = []
+    seen = set()
+    if os.path.exists(CHECKPOINTS_DIR):
+        try:
+            for root, _, files in os.walk(CHECKPOINTS_DIR):
+                for f in files:
+                    if f.lower().endswith((".safetensors", ".ckpt")) and not f.startswith("."):
+                        full_path = os.path.join(root, f)
+                        if full_path in seen:
+                            continue
+                        seen.add(full_path)
+                        size_gb = round(os.path.getsize(full_path) / (1024 ** 3), 2)
+                        ckpts.append({
+                            "name": f,
+                            "filename": f,
+                            "path": full_path,
+                            "size_gb": size_gb,
+                            "folder": "checkpoints"
+                        })
+        except Exception as e:
+            print(f"[engine_diffusion] Error scanning checkpoints in {CHECKPOINTS_DIR}: {e}")
+
+    if os.path.exists(MODELS_DIR):
+        try:
+            for f in os.listdir(MODELS_DIR):
+                full_path = os.path.join(MODELS_DIR, f)
+                if os.path.isfile(full_path) and f.lower().endswith((".safetensors", ".ckpt")) and not f.startswith("."):
+                    if full_path in seen:
+                        continue
+                    seen.add(full_path)
+                    size_gb = round(os.path.getsize(full_path) / (1024 ** 3), 2)
+                    ckpts.append({
+                        "name": f,
+                        "filename": f,
+                        "path": full_path,
+                        "size_gb": size_gb,
+                        "folder": "models"
+                    })
+        except Exception as e:
+            print(f"[engine_diffusion] Error scanning root MODELS_DIR: {e}")
+
+    return sorted(ckpts, key=lambda x: x["name"])
+
+
+def list_loras() -> List[Dict[str, Any]]:
+    """Lists all available LoRAs in models/loras."""
+    loras = []
+    search_dirs = [LORAS_DIR, os.path.join(MODELS_DIR, "loras")]
+    seen = set()
+    for s_dir in search_dirs:
+        if not os.path.exists(s_dir):
+            continue
+        try:
+            for root, _, files in os.walk(s_dir):
+                for f in files:
+                    if f.lower().endswith((".safetensors", ".ckpt", ".pt")) and not f.startswith("."):
+                        full_path = os.path.join(root, f)
+                        if full_path in seen:
+                            continue
+                        seen.add(full_path)
+                        size_mb = round(os.path.getsize(full_path) / (1024 ** 2), 1)
+                        loras.append({
+                            "name": f,
+                            "filename": f,
+                            "path": full_path,
+                            "size_mb": size_mb,
+                            "folder": os.path.relpath(root, MODELS_DIR)
+                        })
+        except Exception as e:
+            print(f"[engine_diffusion] Error scanning LoRAs in {s_dir}: {e}")
+    return sorted(loras, key=lambda x: x["name"])
+
+
+def list_vaes() -> List[Dict[str, Any]]:
+    """Lists all available VAE weights in models/vae."""
+    vaes = []
+    search_dirs = [VAE_DIR, os.path.join(MODELS_DIR, "vae")]
+    seen = set()
+    for s_dir in search_dirs:
+        if not os.path.exists(s_dir):
+            continue
+        try:
+            for root, _, files in os.walk(s_dir):
+                for f in files:
+                    if f.lower().endswith((".safetensors", ".pt", ".bin")) and not f.startswith("."):
+                        full_path = os.path.join(root, f)
+                        if full_path in seen:
+                            continue
+                        seen.add(full_path)
+                        size_mb = round(os.path.getsize(full_path) / (1024 ** 2), 1)
+                        vaes.append({
+                            "name": f,
+                            "filename": f,
+                            "path": full_path,
+                            "size_mb": size_mb,
+                            "folder": os.path.relpath(root, MODELS_DIR)
+                        })
+        except Exception as e:
+            print(f"[engine_diffusion] Error scanning VAEs in {s_dir}: {e}")
+    return sorted(vaes, key=lambda x: x["name"])
+
+
+def get_active_checkpoint() -> Optional[str]:
+    """Returns the name of the currently selected checkpoint."""
+    global _active_checkpoint
+    if _active_checkpoint and os.path.exists(_active_checkpoint):
+        return os.path.basename(_active_checkpoint)
+    ckpts = list_checkpoints()
+    for c in ckpts:
+        if "illustrious" in c["filename"].lower() or "sdxl" in c["filename"].lower():
+            return c["filename"]
+    return ckpts[0]["filename"] if ckpts else None
+
+
+def set_active_checkpoint(checkpoint_name: str) -> bool:
+    """Sets the active diffusion checkpoint."""
+    global _active_checkpoint
+    try:
+        resolved = resolve_checkpoint_path(checkpoint_name)
+        _active_checkpoint = resolved
+        print(f"[engine_diffusion] Active checkpoint set to: {resolved}")
+        return True
+    except Exception as e:
+        print(f"[engine_diffusion] Failed to set active checkpoint: {e}")
+        return False
+
+
 def _detect_device():
     try:
         import torch_directml

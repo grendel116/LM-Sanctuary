@@ -8483,6 +8483,12 @@ function showThoughtBubbleOverlay(text) {
     const row = document.createElement('div');
     row.className = 'message-row program-row thought-row';
     row.id = 'active-thought-bubble';
+    row.style.cursor = 'pointer';
+    row.title = 'Click to dismiss';
+    row.onclick = () => {
+        hideThoughtBubbleOverlay();
+        currentProactiveThoughtText = "";
+    };
     
     const profileUrl = getProfileUrl();
     
@@ -9498,7 +9504,7 @@ async function fetchNativeModelsSummary() {
             }
             if (llmSelect) {
                 llmSelect.innerHTML = data.gguf_models.map(m => 
-                    `<option value="${m.filename}" ${data.active_llm === m.name ? 'selected' : ''}>${m.name} (${m.size_gb} GB)</option>`
+                    `<option value="${m.filename}" ${(data.active_llm === m.name || data.active_llm === m.filename) ? 'selected' : ''}>${m.name} (${m.size_gb} GB)</option>`
                 ).join('');
             }
             if (llmSummary) {
@@ -9535,7 +9541,7 @@ async function fetchNativeModelsSummary() {
             }
             if (diffSelect) {
                 diffSelect.innerHTML = ckpts.map(c => 
-                    `<option value="${c.filename}">${c.name} (${c.size_gb} GB)</option>`
+                    `<option value="${c.filename}" ${(data.active_checkpoint === c.filename || data.active_checkpoint === c.name) ? 'selected' : ''}>${c.name} (${c.size_gb} GB)</option>`
                 ).join('');
             }
         } else {
