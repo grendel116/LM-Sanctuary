@@ -20,6 +20,7 @@ from variables.settings import CHECKPOINTS_DIR, LORAS_DIR, VAE_DIR, MODELS_DIR
 _diffusion_lock = threading.Lock()
 _active_pipe = None
 _active_checkpoint: Optional[str] = None
+_COMFY_NODE_CACHE: Dict[Tuple[Any, ...], Any] = {}
 root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
 
@@ -284,8 +285,19 @@ def execute_workflow_graph(
     folder_paths.folder_names_and_paths["checkpoints"] = ([os.path.join(root_dir, "models", "checkpoints")], folder_paths.supported_pt_extensions)
     folder_paths.folder_names_and_paths["loras"] = ([os.path.join(root_dir, "models", "loras")], folder_paths.supported_pt_extensions)
     folder_paths.folder_names_and_paths["vae"] = ([os.path.join(root_dir, "models", "vae")], folder_paths.supported_pt_extensions)
+    folder_paths.folder_names_and_paths["ultralytics"] = ([os.path.join(root_dir, "models", "ultralytics")], folder_paths.supported_pt_extensions)
 
     import nodes
+    if "FaceDetailer" not in nodes.NODE_CLASS_MAPPINGS:
+        try:
+            import logging, asyncio
+            prev_level = logging.getLogger().level
+            logging.getLogger().setLevel(logging.ERROR)
+            asyncio.run(nodes.init_extra_nodes(init_custom_nodes=True))
+            logging.getLogger().setLevel(prev_level)
+        except Exception as custom_node_err:
+            print(f"[engine_diffusion] Warning initializing custom nodes: {custom_node_err}")
+
     import comfy.model_management
 
     if isinstance(workflow_path_or_dict, str):
@@ -296,6 +308,8 @@ def execute_workflow_graph(
 
     if replacements:
         for k, v in replacements.items():
+            if k == "%seed%":
+                wf_str = wf_str.replace(f'"{k}"', str(v))
             wf_str = wf_str.replace(k, str(v))
 
     graph: Dict[str, Any] = json.loads(wf_str)
@@ -324,7 +338,10 @@ def execute_workflow_graph(
 
         resolved_inputs = {}
         for inp_k, inp_v in node_data.get("inputs", {}).items():
-            resolved_inputs[inp_k] = get_input_val(inp_v)
+            val = get_input_val(inp_v)
+            if inp_k == "seed" and isinstance(val, str) and val.isdigit():
+                val = int(val)
+            resolved_inputs[inp_k] = val
 
         func_name = getattr(cls, "FUNCTION", "execute")
         func = getattr(instance, func_name)
@@ -333,53 +350,84 @@ def execute_workflow_graph(
 
         # Optimizations for DirectML GPU execution
         if class_type == "CheckpointLoaderSimple":
+            ckpt_name = resolved_inputs.get("ckpt_name")
+            cache_key = ("CheckpointLoaderSimple", ckpt_name)
+            if cache_key in _COMFY_NODE_CACHE:
+                print(f"[engine_diffusion] Reusing cached checkpoint model: {ckpt_name}")
+                executed_outputs[node_id] = _COMFY_NODE_CACHE[cache_key]
+                return executed_outputs[node_id]
+
             outs = func(**resolved_inputs)
             model, clip, vae = outs[0], outs[1], outs[2]
             try:
                 model.model.to(torch.float16)
             except Exception:
                 pass
-            executed_outputs[node_id] = (model, clip, vae)
-            return executed_outputs[node_id]
+            res = (model, clip, vae)
+            _COMFY_NODE_CACHE[cache_key] = res
+            executed_outputs[node_id] = res
+            return res
 
-        if class_type == "VAEDecode":
-            vae = resolved_inputs.get("vae")
-            samples = resolved_inputs.get("samples")
-            if vae is not None:
-                try:
-                    vae.first_stage_model.to("cpu")
-                    vae.device = torch.device("cpu")
-                    vae.output_device = torch.device("cpu")
-                except Exception:
-                    pass
-            if isinstance(samples, dict) and "samples" in samples:
-                samples = {"samples": samples["samples"].to("cpu")}
-                resolved_inputs["samples"] = samples
+        if class_type == "LoraLoader":
+            lora_name = resolved_inputs.get("lora_name")
+            sm = resolved_inputs.get("strength_model")
+            sc = resolved_inputs.get("strength_clip")
+            m_in = resolved_inputs.get("model")
+            c_in = resolved_inputs.get("clip")
+            cache_key = ("LoraLoader", lora_name, sm, sc, id(m_in), id(c_in))
+            if cache_key in _COMFY_NODE_CACHE:
+                print(f"[engine_diffusion] Reusing cached LoRA weights: {lora_name}")
+                executed_outputs[node_id] = _COMFY_NODE_CACHE[cache_key]
+                return executed_outputs[node_id]
 
             outs = func(**resolved_inputs)
+            _COMFY_NODE_CACHE[cache_key] = outs
             executed_outputs[node_id] = outs
-            return executed_outputs[node_id]
+            return outs
+
+        if class_type == "UltralyticsDetectorProvider":
+            m_name = resolved_inputs.get("model_name")
+            cache_key = ("UltralyticsDetectorProvider", m_name)
+            if cache_key in _COMFY_NODE_CACHE:
+                print(f"[engine_diffusion] Reusing cached detector: {m_name}")
+                executed_outputs[node_id] = _COMFY_NODE_CACHE[cache_key]
+                return executed_outputs[node_id]
+
+            outs = func(**resolved_inputs)
+            _COMFY_NODE_CACHE[cache_key] = outs
+            executed_outputs[node_id] = outs
+            return outs
 
         outs = func(**resolved_inputs)
         executed_outputs[node_id] = outs
         return outs
 
-    # Execute VAEDecode node(s) to retrieve the decoded image tensor
     final_images = None
-    for nid, nd in graph.items():
-        if nd.get("class_type") == "VAEDecode":
-            res = execute_node(nid)
-            if res is not None and len(res) > 0 and hasattr(res[0], "shape"):
-                final_images = res[0]
+    with torch.inference_mode():
+        # Priority search for terminal output node (PreviewImage / SaveImage -> FaceDetailer -> VAEDecode)
+        target_nid = None
+        for ptype in ("PreviewImage", "SaveImage", "FaceDetailer", "VAEDecode"):
+            for nid, nd in graph.items():
+                if nd.get("class_type") == ptype:
+                    target_nid = nid
+                    break
+            if target_nid:
                 break
 
-    # Fallback to SaveImage / PreviewImage if no VAEDecode node matched
-    if final_images is None:
-        for nid, nd in graph.items():
-            if nd.get("class_type") in ("SaveImage", "PreviewImage"):
-                res = execute_node(nid)
-                if res is not None and len(res) > 0 and hasattr(res[0], "shape"):
+        if target_nid:
+            res = execute_node(target_nid)
+            if res is not None:
+                if isinstance(res, (list, tuple)) and len(res) > 0 and hasattr(res[0], "shape"):
                     final_images = res[0]
+                elif isinstance(res, dict) and "images" in res:
+                    final_images = res["images"]
+
+        # Search executed outputs for any rendered image tensor if final_images wasn't directly returned by target_nid
+        if final_images is None:
+            for nid in reversed(list(executed_outputs.keys())):
+                out = executed_outputs[nid]
+                if isinstance(out, (list, tuple)) and len(out) > 0 and hasattr(out[0], "shape") and len(out[0].shape) == 4:
+                    final_images = out[0]
                     break
 
     from PIL import Image

@@ -6398,12 +6398,68 @@ function handleSwipeGesture() {
 // --- generatePortraitPrompt ---
 async function generatePortraitPrompt() {
     if (isGenerating) return;
-    if (useImagenMode) {
-        userInput.value = "[System instruction: Generate ONLY an image tool call tag summarizing the current scene and character appearance. Do NOT write any story text or narrative response.]";
-    } else {
-        userInput.value = "[generate_program_portrait(prompt=\"Generate image tags summarizing the character appearance, pose, outfit, and scene from the latest message. Do NOT include story text.\")]";
+    
+    setGenerating(true);
+    
+    const btn = document.getElementById('generate-portrait-btn');
+    if (btn) {
+        btn.disabled = true;
+        btn.style.opacity = '0.5';
     }
-    await sendMessage();
+
+    const typingIndicatorRow = document.createElement('div');
+    typingIndicatorRow.className = 'message-row program-row';
+    const profileUrl = typeof getProfileUrl === 'function' ? getProfileUrl() : '';
+    typingIndicatorRow.innerHTML = `
+        <div class="avatar-container">
+            <img class="avatar program-avatar" src="${profileUrl}" alt="Program">
+        </div>
+        <div class="message program">
+            <div class="typing-indicator">
+                <div class="typing-dot"></div>
+                <div class="typing-dot"></div>
+                <div class="typing-dot"></div>
+            </div>
+        </div>
+    `;
+    chatContainer.appendChild(typingIndicatorRow);
+    chatContainer.scrollTop = chatContainer.scrollHeight;
+
+    try {
+        const customPrompt = userInput ? userInput.value.trim() : "";
+        const response = await fetch('/api/portrait/generate', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                session_id: sessionId,
+                prompt: customPrompt
+            })
+        });
+
+        const data = await response.json();
+        if (data.error) {
+            showCustomAlert("Portrait Generation Failed", data.error);
+        } else {
+            if (userInput) {
+                userInput.value = "";
+                userInput.style.height = 'auto';
+            }
+            await loadHistory();
+            chatContainer.scrollTop = chatContainer.scrollHeight;
+        }
+    } catch (err) {
+        console.error("Error generating portrait directly:", err);
+        showCustomAlert("Portrait Error", "Could not generate portrait: " + err.message);
+    } finally {
+        if (chatContainer.contains(typingIndicatorRow)) {
+            chatContainer.removeChild(typingIndicatorRow);
+        }
+        setGenerating(false);
+        if (btn) {
+            btn.disabled = false;
+            btn.style.opacity = '1';
+        }
+    }
 }
 
 // --- autoGenerateUserMessage ---

@@ -752,7 +752,8 @@ def stop_comfy_server():
         # 1. Search by active port using netstat (highly robust on Windows)
         if os.name == 'nt':
             try:
-                output = subprocess.check_output("netstat -ano", shell=True).decode('utf-8', errors='ignore')
+                flags = subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0x08000000
+                output = subprocess.check_output("netstat -ano", shell=True, creationflags=flags).decode('utf-8', errors='ignore')
                 for line in output.splitlines():
                     if f":{COMFYUI_PORT}" in line and "LISTENING" in line:
                         parts = line.strip().split()

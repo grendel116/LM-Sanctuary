@@ -181,10 +181,12 @@ def generate_llama_cli_args(gguf_path: str = None, bias_weight: float = None) ->
                 variants = get_banned_word_variants()
                 # Run batch tokenization in chunks
                 chunk = " ".join(variants)
+                flags = subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0x08000000
                 out = subprocess.check_output(
                     [tok_exe, "-m", gguf_path, "-p", chunk, "--ids", "--no-bos"],
                     stderr=subprocess.DEVNULL,
-                    text=True
+                    text=True,
+                    creationflags=flags if os.name == 'nt' else 0
                 ).strip()
                 parsed = json.loads(out)
                 if isinstance(parsed, list):

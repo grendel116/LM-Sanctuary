@@ -18,7 +18,10 @@ import comfy.model_management
 import comfy.model_patcher
 import comfy.model_prefetch
 import comfy.system_memory
-import comfy_aimdo.model_vbar
+try:
+    import comfy_aimdo.model_vbar
+except Exception:
+    pass
 from comfy.internal_logging import detail
 
 from latent_preview import set_preview_method

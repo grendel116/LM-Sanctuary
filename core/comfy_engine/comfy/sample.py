@@ -46,7 +46,7 @@ def fix_empty_latent_channels(model, latent_image, downscale_ratio_spacial=None,
     if latent_image.is_nested:
         return latent_image
     latent_format = model.get_model_object("latent_format")
-    is_empty = torch.count_nonzero(latent_image) == 0
+    is_empty = not (latent_image != 0).any()
     if is_empty:
         if latent_format.latent_channels != latent_image.shape[1]:
             latent_image = comfy.utils.repeat_to_batch_size(latent_image, latent_format.latent_channels, dim=1)

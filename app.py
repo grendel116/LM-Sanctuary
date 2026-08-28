@@ -1306,7 +1306,80 @@ def regenerate_image():
             return jsonify({'error': 'Original image not found in session'}), 404
     except Exception as e:
         print(f"Error regenerating image in session {session_id}: {e}")
+def extract_portrait_tags_from_context(session_id: str, custom_prompt: str = "") -> str:
+    """Uses the LLM in an isolated, decoupled prompt to extract comma-separated tags from the latest scene."""
+    try:
+        chat_history = asyncio.run(runner.get_history(session_id))
+        recent_history = chat_history[-4:] if len(chat_history) > 4 else chat_history
+        history_text = ""
+        for msg in recent_history:
+            role = "User" if msg.get('role') == 'user' else "Character"
+            text_val = msg.get('text', '')
+            if text_val and not text_val.startswith("![Portrait"):
+                history_text += f"{role}: {text_val}\n"
+
+        system_instruction = (
+            "You are an expert Stable Diffusion prompt tagger. "
+            "Your task is to analyze the recent scene context and extract visual image tags describing the character, outfit, pose, expression, and environment. "
+            "Output ONLY comma-separated Stable Diffusion prompt tags (e.g. '1girl, long hair, smiling, red jacket, sitting in cafe, dynamic lighting'). "
+            "Do NOT write conversational text, narrative, sentences, or explanations. ONLY output the comma-separated prompt tags."
+        )
+        
+        prompt = f"Scene & Dialogue Context:\n{history_text}\n\n"
+        if custom_prompt:
+            prompt += f"Specific Focus: {custom_prompt}\n\n"
+        prompt += "Output comma-separated Stable Diffusion tags summarizing this scene:"
+
+        tags = asyncio.run(runner.generate_impersonation(prompt, system_instruction, temperature=0.3))
+        if tags:
+            import re
+            tags = re.sub(r'<think>.*?</think>', '', tags, flags=re.DOTALL).strip()
+            tags = tags.strip('`"\'').strip()
+            print(f"[Portrait] LLM extracted tags: {tags}", flush=True)
+            return tags
+    except Exception as e:
+        print(f"[Portrait] Error extracting tags via LLM: {e}")
+    return custom_prompt
+
+
+@app.route('/api/portrait/generate', methods=['POST'])
+@requires_auth
+def api_generate_portrait():
+    session_id = request.json.get('session_id', 'default')
+    custom_prompt = request.json.get('prompt', '')
+
+    try:
+        import tools.tools as tools
+        tools.current_session_id.set(session_id)
+        with tools.session_tool_calls_lock:
+            tools.session_tool_calls[session_id] = []
+
+        # 1. Decoupled tag extraction via LLM (auto-starts LLM if paused)
+        extracted_tags = extract_portrait_tags_from_context(session_id, custom_prompt)
+
+        # 2. Local GPU image generation (unloads LLM before running diffusion engine)
+        new_markdown = tools.generate_local_image(extracted_tags)
+
+        if new_markdown.startswith("Error"):
+            return jsonify({'error': new_markdown}), 500
+
+        # Extract image URL
+        new_image_url = None
+        if new_markdown.startswith("![") and new_markdown.endswith(")"):
+            new_image_url = new_markdown.split("(", 1)[1][:-1]
+
+        # Append directly to session history as an image message
+        asyncio.run(runner.append_message_to_session(session_id, "program", new_markdown))
+
+        return jsonify({
+            'status': 'success',
+            'markdown': new_markdown,
+            'image_url': new_image_url
+        })
+    except Exception as e:
+        print(f"Error generating direct portrait: {e}")
         return jsonify({'error': str(e)}), 500
+
 
 import threading
 import uuid

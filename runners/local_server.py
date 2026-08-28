@@ -243,7 +243,8 @@ def start_local_server(model_key):
                 si = subprocess.STARTUPINFO()
                 si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
                 si.wShowWindow = 0
-                _proc = subprocess.Popen(cmd, stdout=log_fd, stderr=log_fd, startupinfo=si, shell=False)
+                flags = subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0x08000000
+                _proc = subprocess.Popen(cmd, stdout=log_fd, stderr=log_fd, startupinfo=si, creationflags=flags, shell=False)
             else:
                 _proc = subprocess.Popen(cmd, stdout=log_fd, stderr=log_fd, shell=False)
                 
@@ -282,7 +283,13 @@ def start_local_server(model_key):
 def _kill_all_llama_processes():
     if os.name == 'nt':
         try:
-            subprocess.run(["taskkill", "/F", "/IM", "llama-server.exe"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            flags = subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0x08000000
+            subprocess.run(
+                ["taskkill", "/F", "/IM", "llama-server.exe"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=flags
+            )
         except Exception:
             pass
     else:

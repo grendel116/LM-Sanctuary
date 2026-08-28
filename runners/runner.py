@@ -140,6 +140,15 @@ class BaseProgramRunner:
             _check_cancellation()
 
             try:
+                from runners import local_server
+                status = local_server.check_local_server_status()
+                if not status or status == "stopped":
+                    print("[Local LLM] Server is currently stopped. Auto-restarting local server on demand...", flush=True)
+                    from adapters import local_llm_manager
+                    local_llm_manager.start_server()
+                    await asyncio.sleep(1.0)
+                    continue
+
                 client = get_http_client()
                 if session_id:
                     req_payload = {**payload, "stream": True}
@@ -552,15 +561,8 @@ class BaseProgramRunner:
                     "apply_comfy_workflow",
                 }
                 if any(t_name in image_tools for t_name, _, _ in results):
-                    is_portrait_turn = any(
-                        k in new_message_text for k in (
-                            "generate_program_portrait",
-                            "generate_local_image",
-                            "[GENERATE_IMAGE:",
-                            "Generate a portrait",
-                            "portrait",
-                        )
-                    )
+                    msg_lower = new_message_text.lower()
+                    is_portrait_turn = any(k in msg_lower for k in ("portrait", "draw", "picture", "image", "photo", "selfie", "generate_program_portrait", "generate_local_image"))
                     if is_portrait_turn:
                         final_response_text = ""
                     adapter.append_assistant_message(final_response_text, all_tool_calls, invocation_id)
