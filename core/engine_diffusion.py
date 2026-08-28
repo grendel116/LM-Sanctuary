@@ -194,6 +194,36 @@ def set_active_checkpoint(checkpoint_name: str) -> bool:
         return False
 
 
+def unload_diffusion_models():
+    """Unloads all cached ComfyUI models, pipelines, and releases GPU VRAM back to the LLM."""
+    global _COMFY_NODE_CACHE, _active_pipe, _active_checkpoint
+    with _diffusion_lock:
+        if _COMFY_NODE_CACHE:
+            print("[engine_diffusion] Unloading ComfyUI cached models to release VRAM to LLM...", flush=True)
+            _COMFY_NODE_CACHE.clear()
+        if _active_pipe is not None:
+            del _active_pipe
+            _active_pipe = None
+        _active_checkpoint = None
+
+        try:
+            comfy_path = os.path.join(root_dir, "core", "comfy_engine")
+            if comfy_path not in sys.path:
+                sys.path.insert(0, comfy_path)
+            import comfy.model_management as mm
+            mm.unload_all_models()
+            mm.soft_empty_cache()
+        except Exception:
+            pass
+
+        gc.collect()
+        try:
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
+
+
 def _detect_device():
     try:
         import torch_directml

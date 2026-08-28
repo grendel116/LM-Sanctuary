@@ -130,9 +130,12 @@ def resolve_model_path(model_key):
 
 _current_model = None
 
-def start_local_server(model_key):
+def start_local_server(model_key=None):
     global _proc, _current_model, _starting
     
+    if not model_key:
+        model_key = os.getenv("LOCAL_MODEL_NAME", "")
+
     with _start_lock:
         if _starting:
             return True, "Already starting"
@@ -191,6 +194,13 @@ def start_local_server(model_key):
         except Exception:
             pass
             
+    # 0. Free any VRAM allocated by ComfyUI / in-process diffusion engine before starting LLM
+    try:
+        from core import engine_diffusion
+        engine_diffusion.unload_diffusion_models()
+    except Exception as e:
+        print(f"[llama-runner] Note: Could not unload diffusion models: {e}", flush=True)
+
     context_size = os.getenv("LOCAL_CONTEXT", "8192")
     gpu_layers = os.getenv("LOCAL_GPU_LAYERS", "99")
     flash_attn = os.getenv("LOCAL_FLASH_ATTN", "true").lower() == "true"
