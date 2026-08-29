@@ -724,6 +724,8 @@ You must return a valid JSON object matching the following schema:
             payload["logit_bias"] = logit_bias
 
         try:
+            from runners import local_server
+            local_server.ensure_server_online(target_model)
             headers = get_local_server_headers()
             r = requests.post(LOCAL_SERVER_URL, json=payload, headers=headers, timeout=30.0)
             if r.status_code == 200:
@@ -1018,6 +1020,8 @@ def generate_user_message():
         
     try:
         generated_msg = generate_impersonated_message(session_id, user_profile, model)
+        if not generated_msg:
+            return jsonify({'error': 'Local LLM returned an empty response. Please check server logs.'}), 500
         return jsonify({'status': 'success', 'message': generated_msg})
     except Exception as e:
         print(f"Error generating impersonated user message: {e}")
@@ -3270,6 +3274,8 @@ def generate_character_json(
 
         # 1. Network Request
         try:
+            from runners import local_server
+            local_server.ensure_server_online(local_model)
             headers = get_local_server_headers()
             res = httpx.post(
                 endpoint, json=payload, headers=headers, timeout=300.0

@@ -133,7 +133,7 @@ _current_model = None
 def start_local_server(model_key=None):
     global _proc, _current_model, _starting
     
-    if not model_key:
+    if not model_key or model_key == "local-llm":
         model_key = os.getenv("LOCAL_MODEL_NAME", "")
 
     with _start_lock:
@@ -143,7 +143,13 @@ def start_local_server(model_key=None):
     is_online = check_local_server_status()
     model_path = resolve_model_path(model_key)
     if not model_path:
-        return False, f"Model not found: {model_key}"
+        from adapters.local_llm_manager import list_local_models
+        downloaded = list_local_models()
+        if downloaded:
+            model_key = downloaded[0]
+            model_path = resolve_model_path(model_key)
+        if not model_path:
+            return False, f"Model not found: {model_key}"
         
     # Check if server is running and has this model loaded
     if is_online is True:
@@ -193,13 +199,6 @@ def start_local_server(model_key=None):
                 f.write(gpu_type)
         except Exception:
             pass
-            
-    # 0. Free any VRAM allocated by ComfyUI / in-process diffusion engine before starting LLM
-    try:
-        from core import engine_diffusion
-        engine_diffusion.unload_diffusion_models()
-    except Exception as e:
-        print(f"[llama-runner] Note: Could not unload diffusion models: {e}", flush=True)
 
     context_size = os.getenv("LOCAL_CONTEXT", "8192")
     gpu_layers = os.getenv("LOCAL_GPU_LAYERS", "99")
@@ -207,6 +206,8 @@ def start_local_server(model_key=None):
     no_mmap = os.getenv("LOCAL_NO_MMAP", "false").lower() == "true"
     batch_size = os.getenv("LOCAL_BATCH_SIZE", "2048")
     ubatch_size = os.getenv("LOCAL_UBATCH_SIZE", "2048")
+    ctk = os.getenv("LOCAL_CACHE_TYPE_K", "q8_0")
+    ctv = os.getenv("LOCAL_CACHE_TYPE_V", "q8_0")
     
     cmd = [
         SERVER_EXE,
@@ -219,8 +220,9 @@ def start_local_server(model_key=None):
         "-ngl", gpu_layers,
         "-np", "1",
         "-fa", "on",
-        "--no-warmup",
-        "--fit", "off"
+        "-ctk", ctk,
+        "-ctv", ctv,
+        "--no-warmup"
     ]
 
     from variables.settings import is_thinking_enabled
@@ -340,6 +342,69 @@ def check_local_server_status():
     if _starting:
         return "starting"
         
+    return False
+
+def ensure_server_online(model_key=None, timeout=120.0) -> bool:
+    """Ensures local LLM server is up and responsive before sending requests.
+    If offline or stopped, starts the server with model_key and waits until /health returns 200 OK.
+    """
+    if not model_key or model_key == "local-llm":
+        model_key = os.getenv("LOCAL_MODEL_NAME", "")
+
+    status = check_local_server_status()
+    if status is True:
+        return True
+
+    if not status or status == "stopped":
+        print(f"[Local LLM] Server is offline. Auto-starting local server (model: {model_key or 'default'})...", flush=True)
+        from adapters import local_llm_manager
+        success, msg = local_llm_manager.start_server(model_key)
+        if not success:
+            print(f"[Local LLM] Failed to start local server: {msg}", flush=True)
+            return False
+
+    start_wait = time.time()
+    while time.time() - start_wait < timeout:
+        time.sleep(1.0)
+        current_status = check_local_server_status()
+        if current_status is True:
+            return True
+        if current_status is False and _proc and _proc.poll() is not None:
+            print(f"[Local LLM] Server process exited during startup with code {_proc.poll()}.", flush=True)
+            return False
+
+    print(f"[Local LLM] Server startup timed out after {timeout}s.", flush=True)
+    return False
+
+async def ensure_server_online_async(model_key=None, timeout=120.0) -> bool:
+    """Async variant of ensure_server_online that yields control via asyncio.sleep."""
+    import asyncio
+    if not model_key or model_key == "local-llm":
+        model_key = os.getenv("LOCAL_MODEL_NAME", "")
+
+    status = check_local_server_status()
+    if status is True:
+        return True
+
+    if not status or status == "stopped":
+        print(f"[Local LLM] Server is offline. Auto-starting local server (model: {model_key or 'default'})...", flush=True)
+        from adapters import local_llm_manager
+        success, msg = local_llm_manager.start_server(model_key)
+        if not success:
+            print(f"[Local LLM] Failed to start local server: {msg}", flush=True)
+            return False
+
+    start_wait = time.time()
+    while time.time() - start_wait < timeout:
+        await asyncio.sleep(1.0)
+        current_status = check_local_server_status()
+        if current_status is True:
+            return True
+        if current_status is False and _proc and _proc.poll() is not None:
+            print(f"[Local LLM] Server process exited during startup with code {_proc.poll()}.", flush=True)
+            return False
+
+    print(f"[Local LLM] Server startup timed out after {timeout}s.", flush=True)
     return False
 
 def _atexit_clean():

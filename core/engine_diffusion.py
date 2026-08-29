@@ -216,9 +216,18 @@ def unload_diffusion_models():
             pass
 
         gc.collect()
+        gc.collect()
         try:
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
+                if hasattr(torch.cuda, "ipc_collect"):
+                    torch.cuda.ipc_collect()
+        except Exception:
+            pass
+        try:
+            import torch_directml
+            if hasattr(torch_directml, "empty_cache"):
+                torch_directml.empty_cache()
         except Exception:
             pass
         time.sleep(1.0)

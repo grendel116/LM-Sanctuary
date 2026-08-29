@@ -20,8 +20,10 @@ def install_server():
         return True, "llama-server successfully installed."
     return False, "Failed to download llama-server."
 def check_status(force_refresh=False): return local_server.check_local_server_status()
-def start_server():
-    model_name = os.getenv("LOCAL_MODEL_NAME", "")
+def ensure_server_online(model_name=None, timeout=60.0): return local_server.ensure_server_online(model_name, timeout)
+def start_server(model_name=None):
+    if not model_name or model_name == "local-llm":
+        model_name = os.getenv("LOCAL_MODEL_NAME", "")
     if not local_server.resolve_model_path(model_name):
         downloaded = list_local_models()
         if downloaded:

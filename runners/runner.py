@@ -127,6 +127,13 @@ class BaseProgramRunner:
         session_id: str | None = None,
     ) -> httpx.Response:
         """Send a request to the local LLM endpoint with cancellation support."""
+        # Pre-flight check: ensure local LLM server is booted and ready before making requests
+        from runners import local_server
+        target_model = payload.get("model")
+        server_ready = await local_server.ensure_server_online_async(target_model)
+        if not server_ready:
+            raise RuntimeError(f"Local LLM server is offline or failed to start (model: {target_model or 'default'}). Check logs/llama_server.log for details.")
+
         start_time = time.time()
         max_retry_time, retry_interval = 180.0, 2.0
 
@@ -140,15 +147,6 @@ class BaseProgramRunner:
             _check_cancellation()
 
             try:
-                from runners import local_server
-                status = local_server.check_local_server_status()
-                if not status or status == "stopped":
-                    print("[Local LLM] Server is currently stopped. Auto-restarting local server on demand...", flush=True)
-                    from adapters import local_llm_manager
-                    local_llm_manager.start_server()
-                    await asyncio.sleep(1.0)
-                    continue
-
                 client = get_http_client()
                 if session_id:
                     req_payload = {**payload, "stream": True}
@@ -249,9 +247,6 @@ class BaseProgramRunner:
                 server_status = local_server.check_local_server_status()
                 if (server_status == "starting" or not server_status) and (time.time() - start_time < max_retry_time):
                     print(f"[Local LLM] Waiting for local server to complete startup. Retrying in {retry_interval}s...", flush=True)
-                    if not server_status:
-                        from adapters import local_llm_manager
-                        local_llm_manager.start_server()
                     await asyncio.sleep(retry_interval)
                     continue
                 raise e
@@ -1090,6 +1085,7 @@ class OpenSourceRunner(BaseProgramRunner):
                     content = r.json()["choices"][0]["message"].get("content", "").strip()
                     return THINK_TAG_RE.sub("", content).strip()
             except Exception as e:
+                print(f"[Impersonate] Error during impersonation request: {e}", flush=True)
                 try:
                     from runners import engine_llm
                     if engine_llm.is_loaded():
@@ -1107,7 +1103,7 @@ class OpenSourceRunner(BaseProgramRunner):
                             return THINK_TAG_RE.sub("", raw_text).strip()
                 except Exception:
                     pass
-                print(f"Error in impersonation generation: {e}", flush=True)
+                raise
 
             return ""
 

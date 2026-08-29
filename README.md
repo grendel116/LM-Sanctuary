@@ -67,6 +67,7 @@ Place your local model weights into the `models/` directory for automatic discov
 
 | Model | Recommended Quant | VRAM / RAM Req | Best For |
 | :--- | :--- | :--- | :--- |
+| **[Huihui Gemma 4 31B It Abliterated v2](https://huggingface.co/mradermacher/Huihui-gemma-4-31B-it-abliterated-v2-i1-GGUF/resolve/main/Huihui-gemma-4-31B-it-abliterated-v2.i1-IQ3_XS.gguf)** *(Recommended)* | `Huihui-gemma-4-31B-it-abliterated-v2.i1-IQ3_XS.gguf` | ~12–14 GB | Uncensored roleplay, advanced reasoning, and simultaneous coexistence with SDXL on 24GB GPUs |
 | **Qwen 2.5 7B Instruct** | `Qwen2.5-7B-Instruct-Q4_K_M.gguf` | ~5 GB | General roleplay, coding, and fast tool execution |
 | **Hermes 3 (Llama 3.1 8B)** | `Hermes-3-Llama-3.1-8B-Q4_K_M.gguf` | ~6 GB | Creative storytelling, complex roleplay, and uncensored interactions |
 | **Gemma 2 9B It** | `gemma-2-9b-it-Q4_K_M.gguf` | ~7 GB | Nuanced dialogue, character personas, and knowledge grounding |
