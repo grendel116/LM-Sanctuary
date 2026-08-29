@@ -1088,6 +1088,8 @@ def dtype_size(dtype):
     return dtype_size
 
 def unet_offload_device():
+    if directml_enabled:
+        return torch.device("cpu")
     if vram_state == VRAMState.HIGH_VRAM:
         return get_torch_device()
     else:
@@ -1095,6 +1097,8 @@ def unet_offload_device():
 
 def unet_inital_load_device(parameters, dtype):
     cpu_dev = torch.device("cpu")
+    if directml_enabled:
+        return cpu_dev
     if comfy.memory_management.aimdo_enabled:
         return cpu_dev
 
@@ -1212,7 +1216,7 @@ def text_encoder_device():
         return torch.device("cpu")
 
 def text_encoder_initial_device(load_device, offload_device, model_size=0):
-    if comfy.memory_management.aimdo_enabled:
+    if directml_enabled or comfy.memory_management.aimdo_enabled:
         return offload_device
 
     if load_device == offload_device or model_size <= 1024 * 1024 * 1024:

@@ -126,7 +126,19 @@ def resolve_model_path(model_key):
         os.path.join(user_profile, ".lmstudio", "models", model_key),
         model_key
     ]
-    return next((os.path.normpath(p) for p in paths if os.path.isfile(p)), None)
+    resolved = next((os.path.normpath(p) for p in paths if os.path.isfile(p)), None)
+    if resolved:
+        return resolved
+
+    clean_key = os.path.basename(model_key).lower()
+    from adapters.local_llm_manager import list_local_models
+    downloaded = list_local_models()
+    for d in downloaded:
+        if os.path.basename(d).lower() == clean_key or clean_key in d.lower():
+            for p in [os.path.join(BASE_DIR, "models", d), os.path.join(user_profile, ".lmstudio", "models", d), d]:
+                if os.path.isfile(p):
+                    return os.path.normpath(p)
+    return None
 
 _current_model = None
 
@@ -306,12 +318,19 @@ def _kill_all_llama_processes():
             pass
 
 def stop_local_server():
-    global _proc, _current_model, _starting
+    global _proc, _current_model, _starting, _http_session
     _current_model = None
     
     with _start_lock:
         _starting = False
         
+    if _http_session:
+        try:
+            _http_session.close()
+        except Exception:
+            pass
+        _http_session = None
+
     if _proc:
         try:
             _proc.terminate()
@@ -324,7 +343,7 @@ def stop_local_server():
         _proc = None
         
     _kill_all_llama_processes()
-    time.sleep(1.5)
+    time.sleep(1.0)
     return True, "Stopped"
 
 def check_local_server_status():
@@ -344,31 +363,68 @@ def check_local_server_status():
         
     return False
 
-def ensure_server_online(model_key=None, timeout=120.0) -> bool:
-    """Ensures local LLM server is up and responsive before sending requests.
-    If offline or stopped, starts the server with model_key and waits until /health returns 200 OK.
-    """
+def is_model_loaded(model_key=None) -> bool:
+    """Checks if the local server is running AND serving the requested model."""
+    status = check_local_server_status()
+    if status is not True:
+        return False
     if not model_key or model_key == "local-llm":
         model_key = os.getenv("LOCAL_MODEL_NAME", "")
 
-    status = check_local_server_status()
-    if status is True:
+    target_path = resolve_model_path(model_key) if model_key else None
+    if not target_path:
+        from adapters.local_llm_manager import list_local_models
+        downloaded = list_local_models()
+        if downloaded:
+            target_path = resolve_model_path(downloaded[0])
+
+    if not target_path:
         return True
 
-    if not status or status == "stopped":
-        print(f"[Local LLM] Server is offline. Auto-starting local server (model: {model_key or 'default'})...", flush=True)
-        from adapters import local_llm_manager
-        success, msg = local_llm_manager.start_server(model_key)
-        if not success:
-            print(f"[Local LLM] Failed to start local server: {msg}", flush=True)
-            return False
+    target_base = os.path.basename(target_path).lower()
+
+    global _current_model
+    if _current_model:
+        curr_path = resolve_model_path(_current_model)
+        curr_base = os.path.basename(curr_path or _current_model).lower()
+        if curr_base == target_base:
+            return True
+
+    from models.models import fetch_local_models
+    loaded = fetch_local_models(force_refresh=True)
+    if loaded:
+        for m in loaded:
+            val = m.get("value", "")
+            if val:
+                val_path = resolve_model_path(val)
+                val_base = os.path.basename(val_path or val).lower()
+                if val_base == target_base or (target_path and val_path and os.path.samefile(val_path, target_path)):
+                    _current_model = val
+                    return True
+        return False
+    return False
+
+def ensure_server_online(model_key=None, timeout=120.0) -> bool:
+    """Ensures local LLM server is up, responsive, and serving the requested model."""
+    if not model_key or model_key == "local-llm":
+        model_key = os.getenv("LOCAL_MODEL_NAME", "")
+
+    if is_model_loaded(model_key):
+        return True
+
+    print(f"[Local LLM] Server offline or switching model. Starting server (model: {model_key or 'default'})...", flush=True)
+    from adapters import local_llm_manager
+    success, msg = local_llm_manager.start_server(model_key)
+    if not success:
+        print(f"[Local LLM] Failed to start local server: {msg}", flush=True)
+        return False
 
     start_wait = time.time()
     while time.time() - start_wait < timeout:
         time.sleep(1.0)
-        current_status = check_local_server_status()
-        if current_status is True:
+        if is_model_loaded(model_key):
             return True
+        current_status = check_local_server_status()
         if current_status is False and _proc and _proc.poll() is not None:
             print(f"[Local LLM] Server process exited during startup with code {_proc.poll()}.", flush=True)
             return False
@@ -382,24 +438,22 @@ async def ensure_server_online_async(model_key=None, timeout=120.0) -> bool:
     if not model_key or model_key == "local-llm":
         model_key = os.getenv("LOCAL_MODEL_NAME", "")
 
-    status = check_local_server_status()
-    if status is True:
+    if is_model_loaded(model_key):
         return True
 
-    if not status or status == "stopped":
-        print(f"[Local LLM] Server is offline. Auto-starting local server (model: {model_key or 'default'})...", flush=True)
-        from adapters import local_llm_manager
-        success, msg = local_llm_manager.start_server(model_key)
-        if not success:
-            print(f"[Local LLM] Failed to start local server: {msg}", flush=True)
-            return False
+    print(f"[Local LLM] Server offline or switching model. Starting server async (model: {model_key or 'default'})...", flush=True)
+    from adapters import local_llm_manager
+    success, msg = local_llm_manager.start_server(model_key)
+    if not success:
+        print(f"[Local LLM] Failed to start local server: {msg}", flush=True)
+        return False
 
     start_wait = time.time()
     while time.time() - start_wait < timeout:
         await asyncio.sleep(1.0)
-        current_status = check_local_server_status()
-        if current_status is True:
+        if is_model_loaded(model_key):
             return True
+        current_status = check_local_server_status()
         if current_status is False and _proc and _proc.poll() is not None:
             print(f"[Local LLM] Server process exited during startup with code {_proc.poll()}.", flush=True)
             return False

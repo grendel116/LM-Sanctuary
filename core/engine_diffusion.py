@@ -12,13 +12,13 @@ import json
 import time
 import random
 import threading
+import subprocess
 from typing import List, Dict, Any, Optional, Tuple
 
 import torch
 from variables.settings import CHECKPOINTS_DIR, LORAS_DIR, VAE_DIR, MODELS_DIR
 
 _diffusion_lock = threading.Lock()
-_active_pipe = None
 _active_checkpoint: Optional[str] = None
 _COMFY_NODE_CACHE: Dict[Tuple[Any, ...], Any] = {}
 root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -194,120 +194,111 @@ def set_active_checkpoint(checkpoint_name: str) -> bool:
         return False
 
 
+DIFFUSION_DAEMON_PORT = 8189
+DIFFUSION_DAEMON_URL = f"http://127.0.0.1:{DIFFUSION_DAEMON_PORT}"
+_daemon_proc: Optional[subprocess.Popen] = None
+_daemon_lock = threading.Lock()
+
+
+def check_daemon_status() -> bool:
+    """Checks if the persistent diffusion daemon is online."""
+    try:
+        import urllib.request
+        req = urllib.request.Request(f"{DIFFUSION_DAEMON_URL}/health", method="GET")
+        with urllib.request.urlopen(req, timeout=1.0) as resp:
+            return resp.status == 200
+    except Exception:
+        return False
+
+
+def ensure_daemon_running(timeout: float = 60.0) -> bool:
+    """Starts the persistent diffusion daemon if not already running."""
+    global _daemon_proc
+    if check_daemon_status():
+        return True
+
+    with _daemon_lock:
+        if check_daemon_status():
+            return True
+
+        print("[engine_diffusion] Starting persistent diffusion daemon...", flush=True)
+        py_exe = sys.executable
+        env = os.environ.copy()
+        env["DIFFUSION_WORKER"] = "1"
+        env["PYTHONPATH"] = root_dir + os.pathsep + env.get("PYTHONPATH", "")
+
+        if os.name == 'nt':
+            si = subprocess.STARTUPINFO()
+            si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            si.wShowWindow = 0
+            flags = subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0x08000000
+            _daemon_proc = subprocess.Popen(
+                [py_exe, os.path.abspath(__file__), "--server"],
+                env=env,
+                cwd=root_dir,
+                startupinfo=si,
+                creationflags=flags
+            )
+        else:
+            _daemon_proc = subprocess.Popen(
+                [py_exe, os.path.abspath(__file__), "--server"],
+                env=env,
+                cwd=root_dir
+            )
+
+        start_t = time.time()
+        while time.time() - start_t < timeout:
+            time.sleep(0.5)
+            if check_daemon_status():
+                print("[engine_diffusion] Persistent diffusion daemon is ready.", flush=True)
+                return True
+            if _daemon_proc and _daemon_proc.poll() is not None:
+                print(f"[engine_diffusion] Daemon exited prematurely with code {_daemon_proc.poll()}.", flush=True)
+                return False
+
+        print("[engine_diffusion] Daemon startup timed out.", flush=True)
+        return False
+
+
 def unload_diffusion_models():
-    """Unloads all cached ComfyUI models, pipelines, and releases GPU VRAM back to the LLM."""
-    global _COMFY_NODE_CACHE, _active_pipe, _active_checkpoint
-    with _diffusion_lock:
+    """Unloads the persistent diffusion daemon, releasing 100% of GPU VRAM back to the OS."""
+    global _daemon_proc, _COMFY_NODE_CACHE, _active_checkpoint
+    with _daemon_lock:
+        try:
+            import urllib.request
+            req = urllib.request.Request(f"{DIFFUSION_DAEMON_URL}/shutdown", method="POST", data=b"{}")
+            urllib.request.urlopen(req, timeout=1.0)
+        except Exception:
+            pass
+
+        if _daemon_proc is not None:
+            try:
+                _daemon_proc.terminate()
+                _daemon_proc.wait(timeout=2.0)
+            except Exception:
+                try:
+                    _daemon_proc.kill()
+                except Exception:
+                    pass
+            _daemon_proc = None
+
+        if os.name == 'nt':
+            try:
+                flags = subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0x08000000
+                subprocess.run(
+                    ["powershell", "-Command", "Get-Process -Name python -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -like '*--server*' -and $_.CommandLine -like '*engine_diffusion*' } | Stop-Process -Force"],
+                    creationflags=flags,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL
+                )
+            except Exception:
+                pass
+
         _COMFY_NODE_CACHE.clear()
-        if _active_pipe is not None:
-            del _active_pipe
-            _active_pipe = None
         _active_checkpoint = None
 
-        try:
-            comfy_path = os.path.join(root_dir, "core", "comfy_engine")
-            if comfy_path not in sys.path:
-                sys.path.insert(0, comfy_path)
-            import comfy.model_management as mm
-            mm.unload_all_models()
-            mm.current_loaded_models.clear()
-            mm.soft_empty_cache()
-        except Exception:
-            pass
-
         gc.collect()
-        gc.collect()
-        try:
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-                if hasattr(torch.cuda, "ipc_collect"):
-                    torch.cuda.ipc_collect()
-        except Exception:
-            pass
-        try:
-            import torch_directml
-            if hasattr(torch_directml, "empty_cache"):
-                torch_directml.empty_cache()
-        except Exception:
-            pass
-        time.sleep(1.0)
-
-
-def _detect_device():
-    try:
-        import torch_directml
-        return torch_directml.device(), torch.float16, "directml"
-    except Exception:
-        if torch.cuda.is_available():
-            return torch.device("cuda"), torch.float16, "cuda"
-        return torch.device("cpu"), torch.float32, "cpu"
-
-
-def get_or_load_pipeline(checkpoint_name_or_path: Optional[str] = None):
-    """Loads and caches the diffusers pipeline on the available compute device."""
-    global _active_pipe, _active_checkpoint
-
-    ckpt_path = resolve_checkpoint_path(checkpoint_name_or_path)
-
-    with _diffusion_lock:
-        if _active_pipe is not None and _active_checkpoint == ckpt_path:
-            return _active_pipe
-
-        if _active_pipe is not None:
-            print("[engine_diffusion] Unloading existing pipeline...")
-            del _active_pipe
-            _active_pipe = None
-            gc.collect()
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-
-        from diffusers import StableDiffusionXLPipeline, StableDiffusionPipeline, DPMSolverMultistepScheduler
-
-        device_obj, dtype, dev_kind = _detect_device()
-        if dev_kind == "cpu":
-            torch.set_num_threads(os.cpu_count() or 8)
-
-        print(f"[engine_diffusion] Loading diffusion pipeline from {ckpt_path} on {dev_kind} ({dtype})...")
-        try:
-            pipe = StableDiffusionXLPipeline.from_single_file(
-                ckpt_path,
-                torch_dtype=dtype,
-                use_safetensors=ckpt_path.lower().endswith(".safetensors")
-            )
-        except Exception as sdxl_err:
-            print(f"[engine_diffusion] Note: SDXL single file loader: {sdxl_err}. Trying SD1.5 loader...")
-            pipe = StableDiffusionPipeline.from_single_file(
-                ckpt_path,
-                torch_dtype=dtype,
-                use_safetensors=ckpt_path.lower().endswith(".safetensors")
-            )
-
-        try:
-            pipe.scheduler = DPMSolverMultistepScheduler.from_config(pipe.scheduler.config, use_karras_sigmas=True)
-        except Exception:
-            pass
-
-        pipe.to(device_obj)
-
-        if dev_kind in ("cuda", "directml"):
-            try:
-                pipe.enable_attention_slicing("max")
-                pipe.enable_vae_slicing()
-                pipe.enable_vae_tiling()
-            except Exception:
-                pass
-
-        if dev_kind == "directml":
-            try:
-                pipe.vae.to(torch.device("cpu"))
-                print("[engine_diffusion] Placed VAE on CPU to prevent DirectML memory allocation limits.")
-            except Exception:
-                pass
-
-        _active_pipe = pipe
-        _active_checkpoint = ckpt_path
-        print(f"[engine_diffusion] Pipeline loaded successfully.")
-        return _active_pipe
+        time.sleep(0.5)
 
 
 def execute_workflow_graph(
@@ -397,15 +388,9 @@ def execute_workflow_graph(
                 return executed_outputs[node_id]
 
             outs = func(**resolved_inputs)
-            model, clip, vae = outs[0], outs[1], outs[2]
-            try:
-                model.model.to(torch.float16)
-            except Exception:
-                pass
-            res = (model, clip, vae)
-            _COMFY_NODE_CACHE[cache_key] = res
-            executed_outputs[node_id] = res
-            return res
+            _COMFY_NODE_CACHE[cache_key] = outs
+            executed_outputs[node_id] = outs
+            return outs
 
         if class_type == "LoraLoader":
             lora_name = resolved_inputs.get("lora_name")
@@ -487,19 +472,31 @@ def execute_workflow_graph(
     from PIL import Image
     import numpy as np
 
+    result_image = None
     if final_images is not None:
         img_array = (final_images[0].detach().cpu().numpy() * 255).astype(np.uint8)
-        image = Image.fromarray(img_array)
+        result_image = Image.fromarray(img_array)
         if save_path:
             os.makedirs(os.path.dirname(save_path), exist_ok=True)
-            image.save(save_path)
+            result_image.save(save_path)
             print(f"[engine_diffusion] Image saved dynamically to {save_path}")
-        return image, save_path or ""
+
+    # Free intermediate node outputs from memory
+    executed_outputs.clear()
+    gc.collect()
+    try:
+        import comfy.model_management as mm
+        mm.soft_empty_cache()
+    except Exception:
+        pass
+
+    if result_image is not None:
+        return result_image, save_path or ""
 
     return None, ""
 
 
-def generate_portrait_image(
+def _generate_portrait_image_inprocess(
     prompt: str,
     negative_prompt: str = "worst quality, low quality, deformed, mutated, extra limbs, watermark, text",
     checkpoint: Optional[str] = None,
@@ -513,7 +510,7 @@ def generate_portrait_image(
     workflow_path: Optional[str] = None,
     save_path: Optional[str] = None
 ) -> str:
-    """Generates an image adaptively from whatever workflow JSON is present."""
+    """Internal implementation executing workflow graph with GPU acceleration."""
     if seed is None or seed < 0:
         seed = random.randint(1, 2147483647)
 
@@ -587,3 +584,127 @@ def generate_portrait_image(
         print(f"[engine_diffusion] Portrait saved to {save_path}")
 
     return save_path or ""
+
+
+def generate_portrait_image(
+    prompt: str,
+    negative_prompt: str = "worst quality, low quality, deformed, mutated, extra limbs, watermark, text",
+    checkpoint: Optional[str] = None,
+    width: int = 832,
+    height: int = 1248,
+    num_inference_steps: int = 24,
+    guidance_scale: float = 6.0,
+    sampler_name: str = "euler",
+    scheduler: str = "simple",
+    seed: Optional[int] = None,
+    workflow_path: Optional[str] = None,
+    save_path: Optional[str] = None
+) -> str:
+    """Generates an image via persistent diffusion daemon, maintaining cached models across calls."""
+    if os.getenv("DIFFUSION_WORKER") == "1":
+        return _generate_portrait_image_inprocess(
+            prompt=prompt,
+            negative_prompt=negative_prompt,
+            checkpoint=checkpoint,
+            width=width,
+            height=height,
+            num_inference_steps=num_inference_steps,
+            guidance_scale=guidance_scale,
+            sampler_name=sampler_name,
+            scheduler=scheduler,
+            seed=seed,
+            workflow_path=workflow_path,
+            save_path=save_path
+        )
+
+    if not ensure_daemon_running():
+        raise RuntimeError("Failed to start persistent diffusion daemon.")
+
+    import urllib.request
+
+    payload = {
+        "prompt": prompt,
+        "negative_prompt": negative_prompt,
+        "checkpoint": checkpoint,
+        "width": width,
+        "height": height,
+        "num_inference_steps": num_inference_steps,
+        "guidance_scale": guidance_scale,
+        "sampler_name": sampler_name,
+        "scheduler": scheduler,
+        "seed": seed,
+        "workflow_path": workflow_path,
+        "save_path": save_path
+    }
+
+    req_data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        f"{DIFFUSION_DAEMON_URL}/generate",
+        data=req_data,
+        headers={"Content-Type": "application/json"},
+        method="POST"
+    )
+
+    with urllib.request.urlopen(req, timeout=300) as resp:
+        res_json = json.loads(resp.read().decode("utf-8"))
+        if res_json.get("status") == "ok":
+            return res_json.get("path", "")
+        else:
+            raise RuntimeError(res_json.get("error", "Unknown diffusion error"))
+
+
+if __name__ == "__main__":
+    import argparse
+    from http.server import HTTPServer, BaseHTTPRequestHandler
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--server", action="store_true", help="Run as HTTP diffusion daemon")
+    args = parser.parse_args()
+
+    if args.server:
+        class DiffusionHandler(BaseHTTPRequestHandler):
+            def log_message(self, format, *args):
+                pass  # Suppress access logs
+
+            def do_GET(self):
+                if self.path == "/health":
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(b'{"status":"ready"}')
+                else:
+                    self.send_response(404)
+                    self.end_headers()
+
+            def do_POST(self):
+                if self.path == "/generate":
+                    content_len = int(self.headers.get("Content-Length", 0))
+                    body = self.rfile.read(content_len)
+                    try:
+                        cfg = json.loads(body.decode("utf-8"))
+                        out_path = _generate_portrait_image_inprocess(**cfg)
+                        self.send_response(200)
+                        self.send_header("Content-Type", "application/json")
+                        self.end_headers()
+                        self.wfile.write(json.dumps({"status": "ok", "path": out_path}).encode("utf-8"))
+                    except Exception as ex:
+                        self.send_response(500)
+                        self.send_header("Content-Type", "application/json")
+                        self.end_headers()
+                        self.wfile.write(json.dumps({"status": "error", "error": str(ex)}).encode("utf-8"))
+                elif self.path == "/shutdown":
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(b'{"status":"shutting_down"}')
+                    threading.Thread(target=lambda: (time.sleep(0.5), os._exit(0))).start()
+                else:
+                    self.send_response(404)
+                    self.end_headers()
+
+        server = HTTPServer(("127.0.0.1", DIFFUSION_DAEMON_PORT), DiffusionHandler)
+        print(f"[engine_diffusion daemon] Listening on http://127.0.0.1:{DIFFUSION_DAEMON_PORT}", flush=True)
+        try:
+            server.serve_forever()
+        except KeyboardInterrupt:
+            pass

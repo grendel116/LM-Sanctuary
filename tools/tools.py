@@ -1378,12 +1378,6 @@ def generate_local_image(prompt: str) -> str:
     except Exception as e:
         print(f"[engine_diffusion] Error generating portrait: {e}")
         return f"Error generating portrait: {e}"
-    finally:
-        try:
-            from core import engine_diffusion
-            engine_diffusion.unload_diffusion_models()
-        except Exception as cleanup_err:
-            print(f"[engine_diffusion] Note unloading diffusion models: {cleanup_err}")
 
 @track_tool_activity
 def generate_video_from_image(image_path: str, prompt: str) -> str:

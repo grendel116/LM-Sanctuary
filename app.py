@@ -1310,61 +1310,75 @@ def regenerate_image():
             return jsonify({'error': 'Original image not found in session'}), 404
     except Exception as e:
         print(f"Error regenerating image in session {session_id}: {e}")
+        return jsonify({'error': str(e)}), 500
+
 def extract_portrait_tags_from_context(session_id: str, custom_prompt: str = "") -> str:
-    """Uses the LLM in an isolated, decoupled prompt to extract comma-separated tags from the latest scene."""
+    """Extracts comma-separated visual tags from the latest conversation and character context
+    by querying the LLM (which automatically triggers start_llm()).
+    """
+    if custom_prompt and custom_prompt.strip():
+        return custom_prompt.strip()
+
+    from core.program_config import _load_card_data, replace_placeholders
+    from runners.program import get_active_program, get_active_user
+
+    active_prog = get_active_program()
+    card = _load_card_data(active_prog)
+    char_name = card.get("name") or active_prog.title()
+    description = replace_placeholders(card.get("description", "")).strip()
+    scenario = replace_placeholders(card.get("scenario", "")).strip()
+    user_name = get_active_user().replace("_", " ").title()
+
+    chat_history = []
     try:
-        from core.program_config import _load_card_data, replace_placeholders
-        from runners.program import get_active_program, get_active_user
-
-        active_prog = get_active_program()
-        card = _load_card_data(active_prog)
-        char_name = card.get("name") or active_prog.title()
-        description = replace_placeholders(card.get("description", "")).strip()
-        scenario = replace_placeholders(card.get("scenario", "")).strip()
-        user_name = get_active_user().replace("_", " ").title()
-
         chat_history = asyncio.run(runner.get_history(session_id))
-        recent_history = chat_history[-4:] if len(chat_history) > 4 else chat_history
-        history_text = ""
-        for msg in recent_history:
-            role = user_name if msg.get('role') == 'user' else char_name
-            text_val = msg.get('text', '')
-            if text_val and not text_val.startswith("![Portrait"):
-                history_text += f"{role}: {text_val}\n"
+    except Exception:
+        pass
 
-        system_instruction = (
-            "You are an expert Stable Diffusion prompt tagger. "
-            f"Your task is to generate precise visual image tags depicting the character '{char_name}' in the current scene.\n"
-            "Rules for tag generation:\n"
-            f"1. Main Subject: Focus on '{char_name}' (e.g. '1girl, solo'). Do NOT include additional characters.\n"
-            "2. Character & Outfit: Include the character's clothing/outfit, features, and accessories.\n"
-            "3. Setting & Environment: Include environment details combined with the active scene context.\n"
-            "4. Pose & Expression: Capture the character's posture, action, and expression.\n"
-            "5. Format: Output ONLY comma-separated tags. "
-            "ONLY output the comma-separated prompt tags."
-        )
+    recent_history = chat_history[-4:] if len(chat_history) > 4 else chat_history
+    history_text = ""
+    for msg in recent_history:
+        role = user_name if msg.get('role') == 'user' else char_name
+        text_val = msg.get('text', '')
+        if text_val and not text_val.startswith("![Portrait"):
+            history_text += f"{role}: {text_val}\n"
 
-        prompt_parts = []
-        if description:
-            prompt_parts.append(f"Character Profile ({char_name}):\n{description}")
-        if scenario:
-            prompt_parts.append(f"Default Setting / Scenario:\n{scenario}")
-        if history_text:
-            prompt_parts.append(f"Recent Scene & Dialogue:\n{history_text.strip()}")
-        if custom_prompt:
-            prompt_parts.append(f"Specific Focus / Request:\n{custom_prompt}")
-        prompt_parts.append(f"Output comma-separated Stable Diffusion tags for {char_name} in this scene:")
-        prompt = "\n\n".join(prompt_parts)
+    system_instruction = (
+        "You are an expert Stable Diffusion prompt tagger. "
+        f"Your task is to generate precise visual image tags depicting the character '{char_name}' in the current scene.\n"
+        "Rules for tag generation:\n"
+        f"1. Main Subject: Focus on '{char_name}' (e.g. '1girl, solo'). Do NOT include additional characters.\n"
+        "2. Character & Outfit: Include the character's clothing/outfit, features, and accessories.\n"
+        "3. Setting & Environment: Include environment details combined with the active scene context.\n"
+        "4. Pose & Expression: Capture the character's posture, action, and expression.\n"
+        "5. Format: Output ONLY comma-separated tags. "
+        "ONLY output the comma-separated prompt tags."
+    )
 
+    prompt_parts = []
+    if description:
+        prompt_parts.append(f"Character Profile ({char_name}):\n{description}")
+    if scenario:
+        prompt_parts.append(f"Default Setting / Scenario:\n{scenario}")
+    if history_text:
+        prompt_parts.append(f"Recent Scene & Dialogue:\n{history_text.strip()}")
+    prompt_parts.append(f"Output comma-separated Stable Diffusion tags for {char_name} in this scene:")
+    prompt = "\n\n".join(prompt_parts)
+
+    try:
+        from adapters.vram_orchestrator import start_llm
+        start_llm()
         tags = asyncio.run(runner.generate_impersonation(prompt, system_instruction, temperature=0.3))
         if tags:
             import re
             tags = re.sub(r'<think>.*?</think>', '', tags, flags=re.DOTALL).strip()
             tags = tags.strip('`"\'').strip()
-            print(f"[Portrait] LLM extracted tags: {tags}", flush=True)
-            return tags
+            if tags:
+                print(f"[Portrait] LLM extracted tags: {tags}", flush=True)
+                return tags
     except Exception as e:
-        print(f"[Portrait] Error extracting tags via LLM: {e}")
+        print(f"[Portrait] Error querying LLM for tags: {e}", flush=True)
+
     return custom_prompt
 
 
