@@ -724,8 +724,8 @@ You must return a valid JSON object matching the following schema:
             payload["logit_bias"] = logit_bias
 
         try:
-            from runners import local_server
-            local_server.ensure_server_online(target_model)
+            from adapters.vram_orchestrator import start_llm
+            start_llm(target_model)
             headers = get_local_server_headers()
             r = requests.post(LOCAL_SERVER_URL, json=payload, headers=headers, timeout=30.0)
             if r.status_code == 200:
@@ -3272,10 +3272,9 @@ def generate_character_json(
             "max_tokens": 512,
         }
 
-        # 1. Network Request
         try:
-            from runners import local_server
-            local_server.ensure_server_online(local_model)
+            from adapters.vram_orchestrator import start_llm
+            start_llm(local_model)
             headers = get_local_server_headers()
             res = httpx.post(
                 endpoint, json=payload, headers=headers, timeout=300.0

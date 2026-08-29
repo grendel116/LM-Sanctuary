@@ -128,9 +128,9 @@ class BaseProgramRunner:
     ) -> httpx.Response:
         """Send a request to the local LLM endpoint with cancellation support."""
         # Pre-flight check: ensure local LLM server is booted and ready before making requests
-        from runners import local_server
+        from adapters.vram_orchestrator import start_llm_async
         target_model = payload.get("model")
-        server_ready = await local_server.ensure_server_online_async(target_model)
+        server_ready = await start_llm_async(target_model)
         if not server_ready:
             raise RuntimeError(f"Local LLM server is offline or failed to start (model: {target_model or 'default'}). Check logs/llama_server.log for details.")
 

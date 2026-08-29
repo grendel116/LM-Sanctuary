@@ -1359,12 +1359,8 @@ def generate_local_image(prompt: str) -> str:
 
     # Execute pure in-process DirectML GPU diffusion engine
     try:
-        try:
-            from adapters import local_llm_manager
-            print("[engine_diffusion] Freeing VRAM for image generation...")
-            local_llm_manager.stop_server()
-        except Exception as stop_err:
-            print(f"[engine_diffusion] Note stopping local LLM: {stop_err}")
+        from adapters.vram_orchestrator import start_img
+        start_img()
 
         from core.engine_diffusion import generate_portrait_image
         generate_portrait_image(
