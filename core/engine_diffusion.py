@@ -439,6 +439,21 @@ def execute_workflow_graph(
 
         outs = func(**resolved_inputs)
         executed_outputs[node_id] = outs
+
+        if class_type in ("KSampler", "VAEDecode", "FaceDetailer"):
+            gc.collect()
+            try:
+                import comfy.model_management as mm
+                mm.soft_empty_cache()
+            except Exception:
+                pass
+            try:
+                import torch_directml
+                if hasattr(torch_directml, "empty_cache"):
+                    torch_directml.empty_cache()
+            except Exception:
+                pass
+
         return outs
 
     final_images = None
