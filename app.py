@@ -1309,26 +1309,48 @@ def regenerate_image():
 def extract_portrait_tags_from_context(session_id: str, custom_prompt: str = "") -> str:
     """Uses the LLM in an isolated, decoupled prompt to extract comma-separated tags from the latest scene."""
     try:
+        from core.program_config import _load_card_data, replace_placeholders
+        from runners.program import get_active_program, get_active_user
+
+        active_prog = get_active_program()
+        card = _load_card_data(active_prog)
+        char_name = card.get("name") or active_prog.title()
+        description = replace_placeholders(card.get("description", "")).strip()
+        scenario = replace_placeholders(card.get("scenario", "")).strip()
+        user_name = get_active_user().replace("_", " ").title()
+
         chat_history = asyncio.run(runner.get_history(session_id))
         recent_history = chat_history[-4:] if len(chat_history) > 4 else chat_history
         history_text = ""
         for msg in recent_history:
-            role = "User" if msg.get('role') == 'user' else "Character"
+            role = user_name if msg.get('role') == 'user' else char_name
             text_val = msg.get('text', '')
             if text_val and not text_val.startswith("![Portrait"):
                 history_text += f"{role}: {text_val}\n"
 
         system_instruction = (
             "You are an expert Stable Diffusion prompt tagger. "
-            "Your task is to analyze the recent scene context and extract visual image tags describing the character, outfit, pose, expression, and environment. "
-            "Output ONLY comma-separated Stable Diffusion prompt tags (e.g. '1girl, long hair, smiling, red jacket, sitting in cafe, dynamic lighting'). "
-            "Do NOT write conversational text, narrative, sentences, or explanations. ONLY output the comma-separated prompt tags."
+            f"Your task is to generate precise visual image tags depicting the character '{char_name}' in the current scene.\n"
+            "Rules for tag generation:\n"
+            f"1. Main Subject: Focus on '{char_name}' (e.g. '1girl, solo'). Do NOT include additional characters.\n"
+            "2. Character & Outfit: Include the character's clothing/outfit, features, and accessories.\n"
+            "3. Setting & Environment: Include environment details combined with the active scene context.\n"
+            "4. Pose & Expression: Capture the character's posture, action, and expression.\n"
+            "5. Format: Output ONLY comma-separated tags. "
+            "ONLY output the comma-separated prompt tags."
         )
-        
-        prompt = f"Scene & Dialogue Context:\n{history_text}\n\n"
+
+        prompt_parts = []
+        if description:
+            prompt_parts.append(f"Character Profile ({char_name}):\n{description}")
+        if scenario:
+            prompt_parts.append(f"Default Setting / Scenario:\n{scenario}")
+        if history_text:
+            prompt_parts.append(f"Recent Scene & Dialogue:\n{history_text.strip()}")
         if custom_prompt:
-            prompt += f"Specific Focus: {custom_prompt}\n\n"
-        prompt += "Output comma-separated Stable Diffusion tags summarizing this scene:"
+            prompt_parts.append(f"Specific Focus / Request:\n{custom_prompt}")
+        prompt_parts.append(f"Output comma-separated Stable Diffusion tags for {char_name} in this scene:")
+        prompt = "\n\n".join(prompt_parts)
 
         tags = asyncio.run(runner.generate_impersonation(prompt, system_instruction, temperature=0.3))
         if tags:

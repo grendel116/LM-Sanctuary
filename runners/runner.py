@@ -547,38 +547,45 @@ class BaseProgramRunner:
                 all_tool_calls.extend(tool_calls)
 
                 clean_text = TOOL_TAG_STRIP_RE.sub("", bot_response_text).strip()
-                adapter.append_assistant_message(clean_text, tool_calls, invocation_id, intermediate=True)
-                adapter.append_tool_events(results, invocation_id)
 
-                if clean_text:
-                    if final_response_text:
-                        final_response_text += "\n\n" + clean_text
-                    else:
-                        final_response_text = clean_text
-
-                # Image generation tools are terminal — do not continue LLM loop or generate continued text
-                image_tools = {
+                # Terminal / side-effect tools that do not require continued LLM turn
+                terminal_tools = {
+                    "add_journal_entry",
+                    "add_quest",
                     "generate_local_image",
                     "generate_program_portrait",
                     "generate_general_image",
                     "generate_imagen",
                     "apply_comfy_workflow",
+                    "generate_video_from_image",
                 }
-                if any(t_name in image_tools for t_name, _, _ in results):
-                    msg_lower = new_message_text.lower()
-                    is_portrait_turn = any(k in msg_lower for k in ("portrait", "draw", "picture", "image", "photo", "selfie", "generate_program_portrait", "generate_local_image"))
-                    if is_portrait_turn:
-                        final_response_text = ""
+                if all(t_name in terminal_tools for t_name, _, _ in results):
+                    final_response_text = clean_text
+                    image_tools = {
+                        "generate_local_image",
+                        "generate_program_portrait",
+                        "generate_general_image",
+                        "generate_imagen",
+                        "apply_comfy_workflow",
+                    }
+                    if any(t_name in image_tools for t_name, _, _ in results):
+                        msg_lower = new_message_text.lower()
+                        is_portrait_turn = any(k in msg_lower for k in ("portrait", "draw", "picture", "image", "photo", "selfie", "generate_program_portrait", "generate_local_image"))
+                        if is_portrait_turn:
+                            final_response_text = ""
                     adapter.append_assistant_message(final_response_text, all_tool_calls, invocation_id)
                     break
+
+                adapter.append_assistant_message(clean_text, tool_calls, invocation_id, intermediate=True)
+                adapter.append_tool_events(results, invocation_id)
+
+                if clean_text:
+                    final_response_text = clean_text
 
                 continue
             else:
                 clean_text = bot_response_text.strip()
-                if final_response_text and clean_text:
-                    final_response_text = final_response_text + "\n\n" + clean_text
-                elif clean_text:
-                    final_response_text = clean_text
+                final_response_text = clean_text if clean_text else final_response_text
 
                 adapter.append_assistant_message(final_response_text, all_tool_calls, invocation_id)
                 break
@@ -1414,24 +1421,20 @@ class OpenSourceRunner(BaseProgramRunner):
 
             bot_response_text, tool_calls = res
             program_msg_id = None
-            program_texts = []
 
             history = self.sessions_history.get(session_id, [])
             user_idx = next((i for i, m in enumerate(history) if m.get("id") == user_msg_id), -1)
 
+            hidden_prefixes = ("tool_", "port_", "quest_", "sys_", "itm_")
             if user_idx != -1:
-                for msg in history[user_idx + 1 :]:
-                    if msg.get("role") == "program":
-                        if msg.get("text"):
-                            program_texts.append(msg["text"])
-                        if msg.get("id"):
-                            program_msg_id = msg["id"]
+                for msg in reversed(history[user_idx + 1 :]):
+                    if msg.get("role") == "program" and not msg.get("id", "").startswith(hidden_prefixes):
+                        program_msg_id = msg.get("id")
+                        break
 
-            if program_texts:
-                bot_response_text = "\n\n".join(program_texts)
-            else:
+            if not program_msg_id:
                 program_msg_id = next(
-                    (m.get("id") for m in reversed(history) if m.get("role") == "program"), None
+                    (m.get("id") for m in reversed(history) if m.get("role") == "program" and not m.get("id", "").startswith(hidden_prefixes)), None
                 )
 
             return bot_response_text, tool_calls, user_msg_id, program_msg_id
