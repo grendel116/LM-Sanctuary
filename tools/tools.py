@@ -1359,6 +1359,13 @@ def generate_local_image(prompt: str) -> str:
 
     # Execute pure in-process DirectML GPU diffusion engine
     try:
+        try:
+            from adapters import local_llm_manager
+            print("[engine_diffusion] Freeing VRAM for image generation...")
+            local_llm_manager.stop_server()
+        except Exception as stop_err:
+            print(f"[engine_diffusion] Note stopping local LLM: {stop_err}")
+
         from core.engine_diffusion import generate_portrait_image
         generate_portrait_image(
             prompt=final_prompt,
@@ -1375,6 +1382,12 @@ def generate_local_image(prompt: str) -> str:
     except Exception as e:
         print(f"[engine_diffusion] Error generating portrait: {e}")
         return f"Error generating portrait: {e}"
+    finally:
+        try:
+            from core import engine_diffusion
+            engine_diffusion.unload_diffusion_models()
+        except Exception as cleanup_err:
+            print(f"[engine_diffusion] Note unloading diffusion models: {cleanup_err}")
 
 @track_tool_activity
 def generate_video_from_image(image_path: str, prompt: str) -> str:
