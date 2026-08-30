@@ -5384,9 +5384,7 @@ async function sendMessage() {
         if (chatContainer.contains(typingIndicatorRow)) {
             chatContainer.removeChild(typingIndicatorRow);
         }
-        if (error.name === 'AbortError') {
-            appendMessage('program', '*(Generation stopped)*');
-        } else {
+        if (error.name !== 'AbortError') {
             appendMessage('program', 'Error connecting to the Sanctuary.');
         }
         handleToolReloadOrRecovery();
@@ -5468,9 +5466,7 @@ async function continueMessage() {
         if (chatContainer.contains(typingIndicatorRow)) {
             chatContainer.removeChild(typingIndicatorRow);
         }
-        if (error.name === 'AbortError') {
-            appendMessage('program', '*(Generation stopped)*');
-        } else {
+        if (error.name !== 'AbortError') {
             appendMessage('program', 'Error connecting to the Sanctuary.');
         }
     } finally {
@@ -5799,9 +5795,7 @@ async function rerollMessage(trigger) {
         if (chatContainer.contains(typingIndicatorRow)) {
             chatContainer.removeChild(typingIndicatorRow);
         }
-        if (error.name === 'AbortError') {
-            appendMessage('program', '*(Generation stopped)*');
-        } else {
+        if (error.name !== 'AbortError') {
             appendMessage('program', 'Error connecting to the Sanctuary.');
         }
         handleToolReloadOrRecovery();
@@ -6400,6 +6394,10 @@ async function generatePortraitPrompt() {
     if (isGenerating) return;
     
     setGenerating(true);
+    if (chatAbortController) {
+        chatAbortController.abort();
+    }
+    chatAbortController = new AbortController();
     
     const btn = document.getElementById('generate-portrait-btn');
     if (btn) {
@@ -6433,7 +6431,8 @@ async function generatePortraitPrompt() {
             body: JSON.stringify({
                 session_id: sessionId,
                 prompt: customPrompt
-            })
+            }),
+            signal: chatAbortController.signal
         });
 
         const data = await response.json();
@@ -6448,8 +6447,10 @@ async function generatePortraitPrompt() {
             chatContainer.scrollTop = chatContainer.scrollHeight;
         }
     } catch (err) {
-        console.error("Error generating portrait directly:", err);
-        showCustomAlert("Portrait Error", "Could not generate portrait: " + err.message);
+        if (err.name !== 'AbortError') {
+            console.error("Error generating portrait directly:", err);
+            showCustomAlert("Portrait Error", "Could not generate portrait: " + err.message);
+        }
     } finally {
         if (chatContainer.contains(typingIndicatorRow)) {
             chatContainer.removeChild(typingIndicatorRow);
@@ -6464,6 +6465,7 @@ async function generatePortraitPrompt() {
 
 // --- autoGenerateUserMessage ---
 async function autoGenerateUserMessage() {
+    if (isGenerating) return;
     const btn = document.getElementById('auto-generate-user-btn');
     if (!btn || btn.disabled) return;
     
@@ -6519,6 +6521,12 @@ async function autoGenerateUserMessage() {
 
 // --- regenerateImage ---
 async function regenerateImage(buttonElement, oldImageUrl, prompt) {
+    if (isGenerating) return;
+    setGenerating(true);
+    if (chatAbortController) {
+        chatAbortController.abort();
+    }
+    chatAbortController = new AbortController();
 
     try {
         const container = buttonElement.closest('.message-image-container');
@@ -6559,7 +6567,8 @@ async function regenerateImage(buttonElement, oldImageUrl, prompt) {
                 old_image_url: getRelativePath(oldImageUrl),
                 prompt: prompt,
                 use_imagen: useImagenMode
-            })
+            }),
+            signal: chatAbortController.signal
         });
         
         const data = await response.json();
@@ -6610,8 +6619,10 @@ async function regenerateImage(buttonElement, oldImageUrl, prompt) {
             showCustomAlert("Image Regeneration Failed", errorMsg);
         }
     } catch (error) {
-        console.error("Error regenerating image:", error);
-        showCustomAlert("Connection Error", "Failed to connect to the server for image regeneration: " + error.message);
+        if (error.name !== 'AbortError') {
+            console.error("Error regenerating image:", error);
+            showCustomAlert("Connection Error", "Failed to connect to the server for image regeneration: " + error.message);
+        }
     } finally {
         const container = buttonElement.closest('.message-image-container');
         if (container) {
@@ -6620,6 +6631,7 @@ async function regenerateImage(buttonElement, oldImageUrl, prompt) {
         }
         buttonElement.style.pointerEvents = 'auto';
         buttonElement.style.opacity = '';
+        setGenerating(false);
         stopToolPolling();
         await initializeModelSelect();
     }
@@ -8288,6 +8300,19 @@ async function cancelGeneration() {
         chatAbortController.abort();
         chatAbortController = null;
     }
+    if (typeof proactiveAbortController !== 'undefined' && proactiveAbortController) {
+        proactiveAbortController.abort();
+        proactiveAbortController = null;
+    }
+    setGenerating(false);
+    userInput.disabled = false;
+    userInput.placeholder = "Ask " + (activeProgramName || "Program");
+    updateInputGlow();
+    stopToolPolling();
+    const heartElement = document.querySelector('.heart-pulse');
+    if (heartElement) {
+        heartElement.classList.remove('jiggling');
+    }
     try {
         await fetch('/api/cancel_chat', {
             method: 'POST',
@@ -8507,11 +8532,22 @@ if (document.readyState === 'loading') {
 // Proactive idle action trigger and functions
 // --- Proactive Thought System ---
 let lastUserMessageTime = Date.now();
+let lastUserActivityTime = Date.now();
 let hasTriggeredInitialProactive = false;
 let lastProactiveThoughtTime = 0;
 let currentProactiveThoughtText = "";
 
+function recordUserActivity() {
+    lastUserActivityTime = Date.now();
+}
+
+window.addEventListener('mousemove', recordUserActivity, { passive: true });
+window.addEventListener('keydown', recordUserActivity, { passive: true });
+window.addEventListener('click', recordUserActivity, { passive: true });
+window.addEventListener('scroll', recordUserActivity, { passive: true });
+
 async function triggerProactiveAction() {
+    if (isGenerating) return;
     proactiveAbortController = new AbortController();
     const signal = proactiveAbortController.signal;
     const targetSession = sessionId;
@@ -8591,18 +8627,19 @@ function hideThoughtBubbleOverlay() {
 }
 
 // Periodically check for proactive thoughts:
-// 1. Initial thought triggers after 10 minutes (600,000 ms) of silence.
+// 1. Initial thought triggers after 5 minutes (300,000 ms) of UI inactivity.
 // 2. Subsequent thoughts trigger at 4-hour intervals (14,400,000 ms) since the previous thought.
 setInterval(async () => {
-    const idleSinceUser = Date.now() - lastUserMessageTime;
+    if (isGenerating) return;
+    const idleSinceActivity = Date.now() - lastUserActivityTime;
     const userInput = document.getElementById('user-input');
     if (!userInput || userInput.disabled) return;
 
-    // First thought: after 10 minutes
-    if (!hasTriggeredInitialProactive && idleSinceUser >= 600000) {
+    // First thought: after 5 minutes (300,000 ms) of absent UI activity
+    if (!hasTriggeredInitialProactive && idleSinceActivity >= 300000) {
         await triggerProactiveAction();
     }
-    // Subsequent thoughts: every 4 hours after the initial thought
+    // Subsequent thoughts: every 4 hours (14,400,000 ms) after the previous thought
     else if (hasTriggeredInitialProactive && lastProactiveThoughtTime > 0 && (Date.now() - lastProactiveThoughtTime >= 14400000)) {
         await triggerProactiveAction();
     }
@@ -8610,10 +8647,35 @@ setInterval(async () => {
 
 
 
+let sseEventSource = null;
+
+function initSessionSync() {
+    if (sseEventSource) {
+        sseEventSource.close();
+        sseEventSource = null;
+    }
+    if (!sessionId) return;
+    try {
+        sseEventSource = new EventSource(`/api/stream_events?session_id=${encodeURIComponent(sessionId)}`);
+        sseEventSource.addEventListener('session_updated', (e) => {
+            if (!isGenerating) {
+                console.log("[SYNC] Session updated remotely, syncing history...");
+                loadHistory();
+            }
+        });
+        sseEventSource.onerror = (err) => {
+            console.warn("[SYNC] SSE connection issue, retrying...", err);
+        };
+    } catch (e) {
+        console.error("[SYNC] Could not start EventSource:", e);
+    }
+}
+
 // Load previous chat history on DOM ready
 function initMainApp() {
     updateProfileImages();
     loadHistory();
+    initSessionSync();
 }
 if (document.readyState === 'loading') {
     window.addEventListener('DOMContentLoaded', initMainApp);

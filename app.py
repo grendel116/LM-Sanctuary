@@ -606,6 +606,10 @@ def proactive_action():
     session_id = request.json.get('session_id', 'default')
     selected_model = request.json.get('model')
     
+    from runners.runner import cancelled_sessions
+    if session_id in cancelled_sessions:
+        return jsonify({'error': 'Session cancelled'}), 400
+        
     try:
         import os
         import json
@@ -1215,6 +1219,9 @@ def delete_image():
 @requires_auth
 def regenerate_image():
     session_id = request.json.get('session_id', 'default')
+    from runners.runner import cancelled_sessions
+    cancelled_sessions.discard(session_id)
+    
     old_image_url = request.json.get('old_image_url')
     prompt = request.json.get('prompt')
     
@@ -1276,6 +1283,9 @@ def regenerate_image():
 
         if not prompt:
             return jsonify({'error': 'Original prompt not found. Unable to regenerate image.'}), 400
+
+    if session_id in cancelled_sessions:
+        return jsonify({'error': 'Image regeneration cancelled by user.'}), 400
 
     try:
         import tools.tools as tools
@@ -1387,8 +1397,13 @@ def extract_portrait_tags_from_context(session_id: str, custom_prompt: str = "")
 def api_generate_portrait():
     session_id = request.json.get('session_id', 'default')
     custom_prompt = request.json.get('prompt', '')
+    from runners.runner import cancelled_sessions
+    cancelled_sessions.discard(session_id)
 
     try:
+        if session_id in cancelled_sessions:
+            return jsonify({'error': 'Portrait generation cancelled by user.'}), 400
+
         import tools.tools as tools
         tools.current_session_id.set(session_id)
         with tools.session_tool_calls_lock:
@@ -1397,8 +1412,14 @@ def api_generate_portrait():
         # 1. Decoupled tag extraction via LLM (auto-starts LLM if paused)
         extracted_tags = extract_portrait_tags_from_context(session_id, custom_prompt)
 
+        if session_id in cancelled_sessions:
+            return jsonify({'error': 'Portrait generation cancelled by user.'}), 400
+
         # 2. Local GPU image generation (unloads LLM before running diffusion engine)
         new_markdown = tools.generate_local_image(extracted_tags)
+
+        if session_id in cancelled_sessions:
+            return jsonify({'error': 'Portrait generation cancelled by user.'}), 400
 
         if new_markdown.startswith("Error"):
             return jsonify({'error': new_markdown}), 500
@@ -1581,7 +1602,47 @@ def cancel_chat():
     from runners.runner import cancelled_sessions
     cancelled_sessions.add(session_id)
     print(f"[CANCEL] Session cancellation requested: {session_id}", flush=True)
+    
+    # Immediately interrupt active ComfyUI rendering job if running
+    try:
+        from variables.settings import COMFYUI_SERVER_URL
+        import requests
+        requests.post(f"{COMFYUI_SERVER_URL}/interrupt", timeout=1.0)
+    except Exception:
+        pass
+        
     return jsonify({'status': 'success'})
+
+@app.route('/api/stream_events', methods=['GET'])
+@requires_auth
+def stream_events():
+    session_id = request.args.get('session_id', 'default')
+    import queue
+    import time
+    from flask import Response
+    from runners.runner import register_session_listener, unregister_session_listener
+
+    q = queue.Queue()
+    register_session_listener(q)
+
+    def event_generator():
+        try:
+            yield f"event: connected\ndata: {json.dumps({'status': 'ok'})}\n\n"
+            while True:
+                try:
+                    updated_id = q.get(timeout=25.0)
+                    if updated_id == session_id:
+                        yield f"event: session_updated\ndata: {json.dumps({'session_id': session_id, 'timestamp': time.time()})}\n\n"
+                except queue.Empty:
+                    yield "event: heartbeat\ndata: {}\n\n"
+        finally:
+            unregister_session_listener(q)
+
+    return Response(event_generator(), mimetype='text/event-stream', headers={
+        'Cache-Control': 'no-cache',
+        'X-Accel-Buffering': 'no',
+        'Connection': 'keep-alive'
+    })
 
 @app.route('/api/session_tool_calls', methods=['GET'])
 @requires_auth
