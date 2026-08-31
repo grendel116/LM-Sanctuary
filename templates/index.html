@@ -275,7 +275,7 @@
     </div>
 
     <!-- Image Expand Modal -->
-    <div id="image-modal" class="modal" onclick="closeModal()">
+    <div id="image-modal" class="modal">
         <span class="close-modal" onclick="closeModal()">&times;</span>
         
         <!-- Active Queue Container -->
@@ -330,7 +330,7 @@
     </div>
 
     <!-- Crop Modal -->
-    <div id="crop-modal" class="modal" style="display: none; z-index: 11000; align-items: center; justify-content: center;" onclick="closeCropModal(event)">
+    <div id="crop-modal" class="modal" style="display: none; z-index: 11000; align-items: center; justify-content: center;">
         <div class="modal-card" style="max-width: 400px; width: 90%; text-align: left; align-items: stretch;" onclick="event.stopPropagation()">
             <span class="close-modal-btn" onclick="closeCropModal(event)">&times;</span>
             <h3 style="margin: 0; font-size: 1.2rem; color: #fff; border-bottom: 1px solid rgba(255,255,255,0.08); padding-bottom: 10px;">Crop Profile Picture</h3>
@@ -345,7 +345,7 @@
     </div>
             
     <!-- Data Bank / Knowledge Base Modal -->
-    <div id="databank-modal" class="modal" onclick="closeDataBank()">
+    <div id="databank-modal" class="modal">
         <div class="modal-card" style="max-width: 600px; width: 90%; text-align: left; align-items: stretch; max-height: 85vh; display: flex; flex-direction: column;" onclick="event.stopPropagation()">
             <span class="close-modal-btn" onclick="closeDataBank()">&times;</span>
             
@@ -457,7 +457,7 @@
     </div>
 
     <!-- Quest Log Modal -->
-    <div id="quest-modal" class="modal" onclick="closeQuestLog()">
+    <div id="quest-modal" class="modal">
         <div class="modal-card" style="max-width: 580px; width: 95%; text-align: left; align-items: stretch;" onclick="event.stopPropagation()">
             <span class="close-modal-btn" onclick="closeQuestLog()">&times;</span>
             <h3 style="margin-bottom: 12px; display: flex; align-items: center; justify-content: flex-start; gap: 12px; font-size: 1.15rem; border-bottom: 1px solid rgba(255,255,255,0.08); padding-bottom: 10px; flex-wrap: wrap;">
@@ -478,7 +478,7 @@
     </div>
 
     <!-- Assistant Selection Modal -->
-    <div id="assistant-modal" class="modal" onclick="closeAssistantModal()">
+    <div id="assistant-modal" class="modal">
         <div class="modal-card" style="max-width: 580px; width: 95%; text-align: left; align-items: stretch;" onclick="event.stopPropagation()">
             <span class="close-modal-btn" onclick="closeAssistantModal()">&times;</span>
             <h3 style="margin-bottom: 12px; display: flex; align-items: center; gap: 8px; font-size: 1.15rem; border-bottom: 1px solid rgba(255,255,255,0.08); padding-bottom: 10px;">
@@ -605,7 +605,7 @@
     </div>
 
     <!-- Import / Create Program Modal -->
-    <div id="import-program-modal" class="modal" onclick="closeImportProgramModal()">
+    <div id="import-program-modal" class="modal">
         <div class="modal-card" style="max-width: 520px; width: 95%; text-align: left; align-items: stretch;" onclick="event.stopPropagation()">
             <span class="close-modal-btn" onclick="closeImportProgramModal()">&times;</span>
             <h3 style="margin-bottom: 12px; display: flex; align-items: center; gap: 8px; font-size: 1.15rem; border-bottom: 1px solid rgba(255,255,255,0.08); padding-bottom: 10px;">
@@ -686,7 +686,7 @@
     </div>
 
     <!-- Connection Settings -->
-  <div id="connection-modal" class="modal" onclick="closeConnectionModal()">
+  <div id="connection-modal" class="modal">
         <div id="connection-modal-card" class="modal-card" style="max-width: 520px; width: 95%; text-align: left; align-items: stretch; max-height: 85vh; display: flex; flex-direction: column; transition: max-width 0.25s ease;" onclick="event.stopPropagation()">
             <span class="close-modal-btn" onclick="closeConnectionModal()">&times;</span>
             <h3 style="margin-bottom: 12px; display: flex; align-items: center; gap: 8px; font-size: 1.15rem; border-bottom: 1px solid rgba(255,255,255,0.08); padding-bottom: 10px;">
@@ -892,7 +892,7 @@
     </div>
 
     <!-- Program Profile Editor Modal -->
-    <div id="program-profile-modal" class="modal" onclick="closeProgramProfileModal()">
+    <div id="program-profile-modal" class="modal">
         <div class="modal-card" style="max-width: 650px; width: 95%; text-align: left; align-items: stretch;" onclick="event.stopPropagation()">
             <span class="close-modal-btn" onclick="closeProgramProfileModal()">&times;</span>
             <h3 style="margin-bottom: 12px; display: flex; align-items: center; gap: 8px; font-size: 1.15rem; border-bottom: 1px solid rgba(255,255,255,0.08); padding-bottom: 10px;">
@@ -1017,7 +1017,7 @@
     </div>
 
     <!-- Custom Dialog Modal (Alert/Confirm) -->
-    <div id="custom-dialog-modal" class="modal" style="display: none;" onclick="closeCustomDialog(false)">
+    <div id="custom-dialog-modal" class="modal" style="display: none;">
         <div class="modal-card" style="max-width: 400px; width: 90%; text-align: center; align-items: center;" onclick="event.stopPropagation()">
             <h3 style="margin-top: 0; margin-bottom: 12px; font-size: 1.2rem; font-weight: 600; color: var(--text-main); border-bottom: 1px solid rgba(255,255,255,0.08); padding-bottom: 10px; width: 100%;" id="custom-dialog-title">Sanctuary Dialog</h3>
             <div style="color: var(--text-muted); font-size: 0.9rem; margin-bottom: 20px; line-height: 1.5; text-align: left; width: 100%; box-sizing: border-box; overflow-wrap: break-word;" id="custom-dialog-message">Message content...</div>
@@ -1037,7 +1037,7 @@
     </div>
 
     <!-- Color Palette Modal -->
-    <div id="palette-modal" class="modal" onclick="closePaletteModal()" style="display: none;">
+    <div id="palette-modal" class="modal" style="display: none;">
         <div class="modal-card" style="max-width: 420px; width: 95%; text-align: left; align-items: stretch;" onclick="event.stopPropagation()">
             <span class="close-modal-btn" onclick="closePaletteModal()">&times;</span>
             <h3 style="margin-bottom: 12px; display: flex; align-items: center; gap: 8px; font-size: 1.15rem; border-bottom: 1px solid rgba(255,255,255,0.08); padding-bottom: 10px;">

@@ -607,7 +607,7 @@ function setupCustomDropdown(select) {
                 item.classList.add("selected");
             }
             
-            item.addEventListener("click", (e) => {
+            item.addEventListener("pointerdown", (e) => {
                 e.stopPropagation();
                 select.selectedIndex = idx;
                 
@@ -619,6 +619,7 @@ function setupCustomDropdown(select) {
                 container.classList.remove("open");
                 list.style.display = "none";
             });
+            item.addEventListener("click", (e) => e.stopPropagation());
             
             list.appendChild(item);
         });
@@ -632,8 +633,8 @@ function setupCustomDropdown(select) {
         }
     }
 
-    // Click trigger to toggle
-    trigger.addEventListener("click", (e) => {
+    // Toggle dropdown on click press (pointerdown)
+    trigger.addEventListener("pointerdown", (e) => {
         e.stopPropagation();
         if (select.disabled) return;
         
@@ -649,11 +650,14 @@ function setupCustomDropdown(select) {
         const isOpen = container.classList.toggle("open");
         list.style.display = isOpen ? "block" : "none";
     });
+    trigger.addEventListener("click", (e) => e.stopPropagation());
 
-    // Document click to close
-    document.addEventListener("click", () => {
-        container.classList.remove("open");
-        list.style.display = "none";
+    // Document pointerdown outside to close
+    document.addEventListener("pointerdown", (e) => {
+        if (!container.contains(e.target)) {
+            container.classList.remove("open");
+            list.style.display = "none";
+        }
     });
 
     // Initial build
@@ -8510,8 +8514,58 @@ document.addEventListener('keydown', (event) => {
     }
 });
 
+function initModalBackdropPressListeners() {
+    const handleModalPress = (e) => {
+        if (e.target && e.target.classList && e.target.classList.contains('modal')) {
+            const modalId = e.target.id;
+            switch (modalId) {
+                case 'image-modal':
+                    closeModal();
+                    break;
+                case 'crop-modal':
+                    closeCropModal(e);
+                    break;
+                case 'databank-modal':
+                    closeDataBank();
+                    break;
+                case 'quest-modal':
+                    closeQuestLog();
+                    break;
+                case 'assistant-modal':
+                    closeAssistantModal();
+                    break;
+                case 'import-program-modal':
+                    closeImportProgramModal();
+                    break;
+                case 'connection-modal':
+                    closeConnectionModal();
+                    break;
+                case 'program-profile-modal':
+                    closeProgramProfileModal();
+                    break;
+                case 'custom-dialog-modal':
+                    closeCustomDialog(false);
+                    break;
+                case 'palette-modal':
+                    closePaletteModal();
+                    break;
+            }
+        }
+    };
+
+    document.addEventListener('pointerdown', handleModalPress);
+
+    // Prevent click release on modal backdrop from triggering close or propagating
+    document.addEventListener('click', (e) => {
+        if (e.target && e.target.classList && e.target.classList.contains('modal')) {
+            e.stopPropagation();
+        }
+    }, true);
+}
+
 // Initialize swipe event listeners once the modal exists in DOM
 function initModalListeners() {
+    initModalBackdropPressListeners();
     const modal = document.getElementById('image-modal');
     if (modal) {
         modal.addEventListener('touchstart', handleTouchStart, { passive: true });
