@@ -8865,7 +8865,9 @@ function playHangupSound() {
 
 function startVoiceCall() {
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-        showCustomAlert("Secure Context Required", "Microphone access requires HTTPS. Please access using https:// (e.g., https://localhost:5000 or https://localhost:5000).");
+        const hostStr = window.location.hostname || 'localhost';
+        const portStr = window.location.port ? `:${window.location.port}` : '';
+        showCustomAlert("Secure Context Required", `Microphone access requires HTTPS. Please access using https:// (e.g., https://${hostStr}${portStr} or https://localhost:5000).`);
         return;
     }
     
