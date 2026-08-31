@@ -5987,13 +5987,15 @@ async function loadServerImages() {
 function getGalleryImages() {
     const imgs = [];
     
-    // Add server-side generated portraits
-    serverImages.forEach(img => {
-        const rel = getRelativePath(img);
-        if (!rel.includes('profile.svg') && !imgs.includes(rel)) {
-            imgs.push(rel);
-        }
-    });
+    // Add server-side generated portraits and media
+    if (Array.isArray(serverImages)) {
+        serverImages.forEach(img => {
+            const rel = getRelativePath(img);
+            if (!imgs.includes(rel)) {
+                imgs.push(rel);
+            }
+        });
+    }
     
     // Collect any additional message images and videos currently in the DOM
     const rows = document.querySelectorAll('.message-row');
@@ -6005,7 +6007,7 @@ function getGalleryImages() {
                 if (img.src && !img.classList.contains('avatar')) {
                     const src = img.getAttribute('src') || img.src;
                     const rel = getRelativePath(src);
-                    if (!rel.includes('profile.svg') && !imgs.includes(rel)) {
+                    if (!imgs.includes(rel)) {
                         imgs.push(rel);
                     }
                 }
@@ -6027,27 +6029,19 @@ function getGalleryImages() {
 
 // --- expandImage ---
 function expandImage(src) {
+    if (!src) return;
     galleryImages = getGalleryImages();
     const pathOnly = getRelativePath(src);
     
-    // If the user clicked a profile avatar picture, show the first available portrait/media image
-    const isProfile = pathOnly.includes('profile.png') || pathOnly.includes('profile.svg') || pathOnly.startsWith('/programs/');
-    if (isProfile) {
-        const profileIndex = galleryImages.findIndex(img => img.includes('profile.png'));
-        if (profileIndex !== -1) {
-            currentGalleryIndex = profileIndex;
-        } else if (galleryImages.length === 0) {
-            showCustomAlert("No Media", "No portraits or generated images exist in this sanctuary yet.");
-            return;
-        } else {
-            currentGalleryIndex = 0;
-        }
-    } else {
-        currentGalleryIndex = galleryImages.indexOf(pathOnly);
-        if (currentGalleryIndex === -1) {
-            galleryImages.push(pathOnly);
-            currentGalleryIndex = galleryImages.length - 1;
-        }
+    currentGalleryIndex = galleryImages.indexOf(pathOnly);
+    if (currentGalleryIndex === -1) {
+        galleryImages.unshift(pathOnly);
+        currentGalleryIndex = 0;
+    }
+
+    if (galleryImages.length === 0) {
+        showCustomAlert("No Media", "No portraits or generated images exist in this sanctuary yet.");
+        return;
     }
 
     document.body.style.overflow = "hidden";
@@ -6374,22 +6368,30 @@ async function saveCroppedProfile(event) {
 
 // --- handleTouchStart ---
 function handleTouchStart(event) {
+    if (!event.changedTouches || event.changedTouches.length === 0) return;
     touchStartX = event.changedTouches[0].screenX;
+    touchStartY = event.changedTouches[0].screenY;
 }
 
 // --- handleTouchEnd ---
 function handleTouchEnd(event) {
+    if (!event.changedTouches || event.changedTouches.length === 0) return;
     touchEndX = event.changedTouches[0].screenX;
+    touchEndY = event.changedTouches[0].screenY;
     handleSwipeGesture();
 }
 
 // --- handleSwipeGesture ---
 function handleSwipeGesture() {
-    const swipeThreshold = 50;
-    if (touchEndX < touchStartX - swipeThreshold) {
-        nextGalleryImage();
-    } else if (touchEndX > touchStartX + swipeThreshold) {
-        prevGalleryImage();
+    const swipeThreshold = 40;
+    const diffX = touchEndX - touchStartX;
+    const diffY = touchEndY - touchStartY;
+    if (Math.abs(diffX) > Math.abs(diffY) && Math.abs(diffX) > swipeThreshold) {
+        if (diffX < 0) {
+            nextGalleryImage();
+        } else {
+            prevGalleryImage();
+        }
     }
 }
 
@@ -8213,46 +8215,6 @@ function purgeDataBank() {
    XI. 10. TOOL INVOCATION & PORTRAITS
    ========================================================================== */
 
-// --- fetchComfyCheckpoints ---
-
-// --- changeComfyCheckpoint ---
-
-// --- searchComfyHFCheckpoints ---
-
-// --- loadServerImages ---
-
-// --- getGalleryImages ---
-
-// --- expandImage ---
-
-// --- updateModalImage ---
-
-// --- closeModal ---
-
-// --- prevGalleryImage ---
-
-// --- nextGalleryImage ---
-
-// --- deleteCurrentImage ---
-
-// --- handleTouchStart ---
-
-// --- handleTouchEnd ---
-
-// --- handleSwipeGesture ---
-
-// --- generatePortraitPrompt ---
-
-// --- regenerateImage ---
-
-// --- startToolPolling ---
-
-// --- stopToolPolling ---
-
-// --- showToolConfirmModal ---
-
-// --- respondToToolCall ---
-
 /* ==========================================================================
    XII. 11. DATABANK RAG SYSTEM
    ========================================================================== */
@@ -8498,7 +8460,9 @@ let currentGalleryIndex = -1;
 
 // Swipe gestures detection
 let touchStartX = 0;
+let touchStartY = 0;
 let touchEndX = 0;
+let touchEndY = 0;
 
 // Bind keyboard navigation globally
 document.addEventListener('keydown', (event) => {
@@ -8701,35 +8665,11 @@ setInterval(async () => {
 
 
 
-let sseEventSource = null;
-
-function initSessionSync() {
-    if (sseEventSource) {
-        sseEventSource.close();
-        sseEventSource = null;
-    }
-    if (!sessionId) return;
-    try {
-        sseEventSource = new EventSource(`/api/stream_events?session_id=${encodeURIComponent(sessionId)}`);
-        sseEventSource.addEventListener('session_updated', (e) => {
-            if (!isGenerating) {
-                console.log("[SYNC] Session updated remotely, syncing history...");
-                loadHistory();
-            }
-        });
-        sseEventSource.onerror = (err) => {
-            console.warn("[SYNC] SSE connection issue, retrying...", err);
-        };
-    } catch (e) {
-        console.error("[SYNC] Could not start EventSource:", e);
-    }
-}
-
-// Load previous chat history on DOM ready
+// Initialize main application on DOM ready
 function initMainApp() {
     updateProfileImages();
     loadHistory();
-    initSessionSync();
+    loadServerImages();
 }
 if (document.readyState === 'loading') {
     window.addEventListener('DOMContentLoaded', initMainApp);

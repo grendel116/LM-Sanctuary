@@ -1613,37 +1613,6 @@ def cancel_chat():
         
     return jsonify({'status': 'success'})
 
-@app.route('/api/stream_events', methods=['GET'])
-@requires_auth
-def stream_events():
-    session_id = request.args.get('session_id', 'default')
-    import queue
-    import time
-    from flask import Response
-    from runners.runner import register_session_listener, unregister_session_listener
-
-    q = queue.Queue()
-    register_session_listener(q)
-
-    def event_generator():
-        try:
-            yield f"event: connected\ndata: {json.dumps({'status': 'ok'})}\n\n"
-            while True:
-                try:
-                    updated_id = q.get(timeout=25.0)
-                    if updated_id == session_id:
-                        yield f"event: session_updated\ndata: {json.dumps({'session_id': session_id, 'timestamp': time.time()})}\n\n"
-                except queue.Empty:
-                    yield "event: heartbeat\ndata: {}\n\n"
-        finally:
-            unregister_session_listener(q)
-
-    return Response(event_generator(), mimetype='text/event-stream', headers={
-        'Cache-Control': 'no-cache',
-        'X-Accel-Buffering': 'no',
-        'Connection': 'keep-alive'
-    })
-
 @app.route('/api/session_tool_calls', methods=['GET'])
 @requires_auth
 def get_session_tool_calls():

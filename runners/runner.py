@@ -12,21 +12,6 @@ from pathlib import Path
 cancelled_sessions = set()
 voice_call_sessions = set()
 
-_session_update_listeners = set()
-
-def register_session_listener(q):
-    _session_update_listeners.add(q)
-
-def unregister_session_listener(q):
-    _session_update_listeners.discard(q)
-
-def broadcast_session_update(session_id: str):
-    for q in list(_session_update_listeners):
-        try:
-            q.put_nowait(session_id)
-        except Exception:
-            pass
-
 import httpx
 from dotenv import load_dotenv
 
@@ -1149,7 +1134,6 @@ class OpenSourceRunner(BaseProgramRunner):
                         json.dump(data, f, indent=2, ensure_ascii=False)
                     
                     os.replace(temp_path, target_path)
-                    broadcast_session_update(session_id)
                 except Exception as e:
                     print(f"Error saving OS session {session_id} to disk: {e}")
 
