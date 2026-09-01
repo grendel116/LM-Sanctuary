@@ -2063,7 +2063,7 @@ def add_journal_entry(keyphrases: str, content: str) -> str:
 
 @track_tool_activity
 def search_music(query: str, mode: str = "deep_cuts") -> str:
-    """Searches for music, deep cuts, forgotten artists, albums, and tracks with rich cultural lore.
+    """Searches for music, deep cuts, forgotten artists, and obscure recordings with cultural lore.
     
     Args:
         query: Search term, artist, track, album, mood, or thematic topic.
@@ -2077,23 +2077,33 @@ def search_music(query: str, mode: str = "deep_cuts") -> str:
     import requests
     from concurrent.futures import ThreadPoolExecutor
 
-    clean_query = query.strip()
     mode_lower = (mode or "deep_cuts").lower().strip()
+    raw_query = query.strip()
+
+    # Strip meta query wrappers for clean entity extraction
+    cleaned = re.sub(
+        r"\b(deep cuts|obscure tracks|obscure songs|obscure artists|music like|songs like|artists like|similar to|find me|recommendations for|recommend)\b",
+        "",
+        raw_query,
+        flags=re.IGNORECASE
+    ).strip(" :-,")
+
+    clean_query = cleaned if cleaned else raw_query
     results = []
 
-    # 1. MusicBrainz structured exploration (Artists & Recordings)
+    # 1. MusicBrainz Structured Discovery
     try:
         import musicbrainzngs
         musicbrainzngs.set_useragent("Sanctuary", "1.0", "https://github.com/sanctuary")
 
         # Artist search
         if mode_lower in ("artist", "deep_cuts", "kexp"):
-            artist_res = musicbrainzngs.search_artists(artist=clean_query, limit=4)
+            artist_res = musicbrainzngs.search_artists(artist=clean_query, limit=3)
             for artist in artist_res.get("artist-list", []):
                 name = artist.get("name", "")
                 mbid = artist.get("id", "")
                 area = artist.get("area", {}).get("name", "")
-                tags = ", ".join(t.get("name", "") for t in artist.get("tag-list", [])[:6])
+                tags = ", ".join(t.get("name", "") for t in artist.get("tag-list", [])[:5])
                 disambig = artist.get("disambiguation", "")
                 meta_parts = []
                 if area:
@@ -2110,7 +2120,7 @@ def search_music(query: str, mode: str = "deep_cuts") -> str:
                 })
 
         # Recording / track search
-        rec_res = musicbrainzngs.search_recordings(query=clean_query, limit=5)
+        rec_res = musicbrainzngs.search_recordings(query=clean_query, limit=4)
         for rec in rec_res.get("recording-list", []):
             title = rec.get("title", "")
             mbid = rec.get("id", "")
@@ -2130,7 +2140,7 @@ def search_music(query: str, mode: str = "deep_cuts") -> str:
             if date:
                 desc_parts.append(f"Year: {date[:4]}")
             results.append({
-                "title": f"Track: {title}",
+                "title": f"Track: '{title}'",
                 "url": f"https://musicbrainz.org/recording/{mbid}",
                 "details": " | ".join(desc_parts) if desc_parts else "MusicBrainz Recording",
                 "source": "MusicBrainz"
@@ -2138,21 +2148,21 @@ def search_music(query: str, mode: str = "deep_cuts") -> str:
     except Exception as e:
         print(f"[MusicBrainz Search Error] {e}")
 
-    # 2. Targeted Crate-Digging via Web Search Queries
+    # 2. Targeted Crate-Digging Queries
     crate_queries = []
     if mode_lower == "kexp":
         crate_queries.append(f"site:kexp.org {clean_query}")
-        crate_queries.append(f"{clean_query} KEXP live session OR playlist")
+        crate_queries.append(f"{clean_query} \"similar artists\" OR \"KEXP session\"")
     elif mode_lower == "theme_time":
         crate_queries.append(f"site:themetimeradio.com {clean_query}")
-        crate_queries.append(f"{clean_query} Bob Dylan Theme Time Radio Hour song")
+        crate_queries.append(f"\"{clean_query}\" \"Theme Time Radio Hour\"")
     elif mode_lower == "bandcamp":
         crate_queries.append(f"site:bandcamp.com/album {clean_query}")
-        crate_queries.append(f"site:bandcamp.com/track {clean_query}")
+        crate_queries.append(f"site:bandcamp.com/tag/{clean_query.replace(' ', '-')}")
     else:  # deep_cuts (default)
-        crate_queries.append(f"site:discogs.com {clean_query} obscure OR vinyl OR reissue")
+        crate_queries.append(f"site:rateyourmusic.com/list \"{clean_query}\"")
+        crate_queries.append(f"\"{clean_query}\" \"similar artists\" OR \"sounds like\" OR \"underrated\"")
         crate_queries.append(f"site:bandcamp.com {clean_query}")
-        crate_queries.append(f"site:rateyourmusic.com/release {clean_query}")
 
     def run_web_query(q_str):
         try:
@@ -2160,14 +2170,15 @@ def search_music(query: str, mode: str = "deep_cuts") -> str:
                 from ddgs import DDGS
             except ImportError:
                 from duckduckgo_search import DDGS
-            ddgs = DDGS()
+            ddgs = DDGS(timeout=5)
             hits = ddgs.text(q_str, max_results=3)
             out = []
+            junk_keywords = ("buy vinyl", "180 gram", "add to cart", "marketplace", "shipping", "seller rating", "in stock")
             for h in (hits or []):
                 u = h.get("href", "")
                 t = h.get("title", "")
                 b = h.get("body", "")
-                if u:
+                if u and not any(k in t.lower() or k in b.lower() for k in junk_keywords):
                     out.append({
                         "title": t,
                         "url": u,
@@ -2190,10 +2201,10 @@ def search_music(query: str, mode: str = "deep_cuts") -> str:
     seen = set()
     formatted = []
     for r in results:
-        key = r.get("url") or r.get("title")
+        key = (r.get("url") or r.get("title", "")).lower()
         if key in seen:
             continue
         seen.add(key)
         formatted.append(f"• {r['title']}\n  Details: {r['details']}\n  Link: {r['url']}\n  Source: {r['source']}")
 
-    return f"[Music Discovery: Mode='{mode_lower}', Query='{clean_query}']\n\n" + "\n\n".join(formatted[:10])
+    return f"[Music Discovery: Mode='{mode_lower}', Query='{clean_query}']\n\n" + "\n\n".join(formatted[:8])
