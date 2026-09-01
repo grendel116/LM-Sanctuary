@@ -17,6 +17,15 @@ VECTOR_TOP_K = 4
 VECTOR_SCORE_THRESHOLD = 0.25
 VECTOR_TOKEN_BUDGET = 2048
 
+def atomic_save_json(path: str | Path, data: object, indent: int = 2):
+    """Atomically writes JSON to disk using a unique temporary file and replacement."""
+    target_path = str(path)
+    os.makedirs(os.path.dirname(os.path.abspath(target_path)), exist_ok=True)
+    temp_path = f"{target_path}.tmp_{uuid.uuid4().hex[:6]}"
+    with open(temp_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=indent, ensure_ascii=False)
+    os.replace(temp_path, target_path)
+
 TOOL_ALIASES = {
     "generate_program_portrait": "generate_local_image",
     "dalle.text2im": "generate_local_image",
@@ -31,7 +40,7 @@ _MAIN_DIRECTIVE_PROMPT = (
     "The TOOLBELT above is the capability index. When a capability is relevant, use the matching retrieved skill instructions as the detailed procedure.\n"
     "Available tools: google_search, web_search, read_webpage, read_file, write_file, replace_in_file, replace_file_content, multi_replace_file_content, "
     "run_shell_command, run_command_async, manage_task, wait_task, get_workspace_structure, search_codebase, generate_local_image, generate_imagen, "
-    "apply_comfy_workflow, add_quest, add_journal_entry.\n"
+    "apply_comfy_workflow, add_quest, add_journal_entry, search_music.\n"
     "Use argument names shown by a retrieved skill or the tool's established signature. Do not invent tool results. After a tool result, continue the task concisely; do not repeat the tag.\n"
     "For research, search first and read the most relevant pages; use distinct queries or URLs when continuing. Ground claims in retrieved facts.\n"
     "Use image tools sparingly. Image prompts are short comma-separated tags, and image generation must be the only content in that model response.\n"

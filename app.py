@@ -2377,8 +2377,10 @@ def delete_quest(quest_id):
             with open(quests_path, 'r', encoding='utf-8') as f:
                 quests = json.load(f)
             quests = [q for q in quests if q['id'] != quest_id]
-            with open(quests_path, 'w', encoding='utf-8') as f:
+            temp_path = quests_path + ".tmp"
+            with open(temp_path, 'w', encoding='utf-8') as f:
                 json.dump(quests, f, indent=2, ensure_ascii=False)
+            os.replace(temp_path, quests_path)
                 
         return jsonify({"status": "success"})
     except Exception as e:
@@ -2400,8 +2402,10 @@ def complete_quest(quest_id):
             quest_data = next((q for q in quests if q['id'] == quest_id), None)
             if quest_data:
                 quests = [q for q in quests if q['id'] != quest_id]
-                with open(quests_path, 'w', encoding='utf-8') as f:
+                temp_path = quests_path + ".tmp"
+                with open(temp_path, 'w', encoding='utf-8') as f:
                     json.dump(quests, f, indent=2, ensure_ascii=False)
+                os.replace(temp_path, quests_path)
         
         if not quest_data:
             return jsonify({"error": "Quest not found"}), 404
@@ -2956,15 +2960,28 @@ def get_program_journals():
     try:
         from runners.program import get_active_program
         from core.journals import get_journal_entries
+        from variables.settings import PROGRAMS_DIR
         
         program_id = request.args.get('program_id') or get_active_program()
         session_id = request.args.get('session_id', 'default')
         entries = get_journal_entries(program_id)
         
-        # Ensure session history and memory state are loaded from disk if needed
-        if session_id not in runner.sessions_history:
-            runner._load_session_from_disk(session_id)
-        memory_meta = runner._get_memory_meta(session_id)
+        # Load memory metadata for the requested program and session
+        safe_session_id = "".join(c for c in session_id if c.isalnum() or c in "-_")
+        session_path = os.path.join(PROGRAMS_DIR, program_id, "sessions", f"{safe_session_id}.json")
+        memory_meta = None
+        if os.path.exists(session_path):
+            try:
+                with open(session_path, "r", encoding="utf-8") as f:
+                    sdata = json.load(f)
+                    memory_meta = sdata.get("memory_state")
+            except Exception as se:
+                print(f"Error loading session file {session_path}: {se}")
+
+        if memory_meta is None:
+            if session_id not in runner.sessions_history:
+                runner._load_session_from_disk(session_id)
+            memory_meta = runner._get_memory_meta(session_id)
 
         return jsonify({
             'journals': entries,

@@ -264,7 +264,7 @@ class BaseProgramRunner:
             payload["model"] = target_model
 
         try:
-            response = await self._post_llm_request(LOCAL_SERVER_URL, payload, get_local_server_headers(), timeout=60.0)
+            response = await self._post_llm_request(LOCAL_SERVER_URL, payload, get_local_server_headers(), timeout=180.0)
             if response.status_code == 200:
                 raw_text = response.json()["choices"][0]["message"].get("content", "").strip()
                 return THINK_TAG_RE.sub("", raw_text).strip()
@@ -344,45 +344,48 @@ class BaseProgramRunner:
         )
 
     async def _process_memory_pipeline(self, session_id: str, active_model: str, user_text: str, assistant_text: str):
-            """Asynchronous post-turn worker handling Step 2 (Chapters) and Step 3 (Epic & RAG)."""
-            meta = self._get_memory_meta(session_id)
-            history = self.sessions_history.get(session_id, [])
+        """Asynchronous post-turn worker handling Step 2 (Chapters) and Step 3 (Epic & RAG)."""
+        meta = self._get_memory_meta(session_id)
+        history = self.sessions_history.get(session_id, [])
 
-            # Filter to user and assistant messages only
-            dialogue_messages = [
-                msg for msg in history 
-                if msg.get("role") in ("user", "assistant")
-            ]
+        # Filter to user and program/assistant messages only
+        dialogue_messages = [
+            msg for msg in history 
+            if msg.get("role") in ("user", "assistant", "program")
+        ]
+        
+        turn_count = len(dialogue_messages) // 2
+
+        # Trigger summary every 12 full turns using trimmed history
+        if turn_count > 0 and turn_count % 12 == 0:
+            # Take the last 24 dialogue entries (12 full turns)
+            recent_turns = dialogue_messages[-24:]
             
-            turn_count = len(dialogue_messages) // 2
+            # Format and truncate long messages if needed to fit context limits
+            formatted_turns = "\n".join(
+                f"{('User' if msg.get('role') == 'user' else 'Program')}: {(msg.get('text') or msg.get('content') or '')[:1000]}" 
+                for msg in recent_turns
+            )
 
-            # Trigger summary every 12 full turns using trimmed history
-            if turn_count > 0 and turn_count % 12 == 0:
-                # Take the last 24 dialogue entries (12 full turns)
-                recent_turns = dialogue_messages[-24:]
-                
-                # Format and truncate long messages if needed to fit context limits
-                formatted_turns = "\n".join(
-                    f"{msg.get('role', 'user').capitalize()}: {(msg.get('text') or msg.get('content') or '')[:1000]}" 
-                    for msg in recent_turns
-                )
+            chapter_summary = await self._generate_local_summary(
+                text_to_summarize=formatted_turns,
+                active_model=active_model,
+                prior_memories=meta.get("recent_chapters", [])
+            )
 
-                chapter_summary = await self._generate_local_summary(
-                    text_to_summarize=formatted_turns,
-                    active_model=active_model,
-                    prior_memories=meta["recent_chapters"]
-                )
-
-                meta["recent_chapters"].append(chapter_summary)
+            if chapter_summary and not chapter_summary.startswith("Memory compaction summary generation failed"):
+                meta.setdefault("recent_chapters", []).append(chapter_summary)
 
                 # STEP 3 TRIGGER: Every 5 chapters, distill Epic Chronicle & offload to Vector DB
                 if len(meta["recent_chapters"]) >= 5:
                     all_chapters_text = "\n\n".join(meta["recent_chapters"])
                     
-                    meta["epic_chronicle"] = await self._distill_epic_chronicle(
+                    epic_summary = await self._distill_epic_chronicle(
                         text_to_distill=all_chapters_text,
                         active_model=active_model
                     )
+                    if epic_summary and not epic_summary.startswith("Distillation failed"):
+                        meta["epic_chronicle"] = epic_summary
 
                     try:
                         from core.skills.vectorized_databank.databank import DataBankManager
@@ -397,6 +400,8 @@ class BaseProgramRunner:
                         print(f"[MEMORY PIPELINE] Error offloading chapters to Vector DB: {e}", flush=True)
 
                     meta["recent_chapters"].clear()
+
+                self._save_session_to_disk(session_id)
 
     def _load_temperature_setting(self, default_temp: float = 0.95) -> float:
         from variables.settings import VARIABLES_DIR
@@ -641,15 +646,18 @@ class BaseProgramRunner:
             inversion_directive = await self._get_inversion_directive(session_id)
             rag_context = "" # Fetch RAG context if applicable in your app
             
-            return await self._execute_local_llm_loop(
-                session_id=session_id,
-                adapter=adapter,
-                model=model,
-                inversion_directive=inversion_directive,
-                rag_context=rag_context,
-                new_message_text=new_message_text,
-                invocation_id=user_msg["id"]
-            )
+            try:
+                return await self._execute_local_llm_loop(
+                    session_id=session_id,
+                    adapter=adapter,
+                    model=model,
+                    inversion_directive=inversion_directive,
+                    rag_context=rag_context,
+                    new_message_text=new_message_text,
+                    invocation_id=user_msg["id"]
+                )
+            finally:
+                self._save_session_to_disk(session_id)
 
     async def edit_turn(self, session_id: str, msg_id: str, new_text: str = None, model: str = None) -> tuple:
         """Edits an existing turn, truncates subsequent history, and re-runs generation."""
@@ -1024,6 +1032,7 @@ class BaseProgramRunner:
                 set_inversion_directive(inversion_directive)
 
             instructions = get_compiled_instructions()
+            instructions = self._inject_system_memories(instructions, session_id)
 
             if "CONCISENESS" not in instructions and "brief, succinct, and natural" not in instructions:
                 instructions += (

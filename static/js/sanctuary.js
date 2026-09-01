@@ -3000,6 +3000,7 @@ async function selectAssistant(assistantId) {
             profileCacheBuster = Date.now();
             updateProfileImages();
             activeProgramId = data.active || assistantId;
+            currentEditingProgramId = activeProgramId;
             applyTheme(data.active || assistantId, data.theme);
             
             // Re-request history and dynamic configuration
@@ -3416,7 +3417,7 @@ async function saveProgramProfile() {
 }
 
 async function loadProgramJournals() {
-    const progId = currentEditingProgramId || (typeof activeProgramName !== 'undefined' && activeProgramName ? activeProgramName.toLowerCase() : '') || 'sebile';
+    const progId = (typeof activeProgramId !== 'undefined' && activeProgramId) || currentEditingProgramId || (typeof activeProgramName !== 'undefined' && activeProgramName ? activeProgramName.toLowerCase() : '') || 'sebile';
     currentEditingProgramId = progId;
     
     const journalsContainer = document.getElementById('program-journals-list');
@@ -3428,7 +3429,7 @@ async function loadProgramJournals() {
     }
     
     try {
-        const activeSession = (typeof currentSessionId !== 'undefined' && currentSessionId) ? currentSessionId : 'default';
+        const activeSession = (typeof sessionId !== 'undefined' && sessionId) ? sessionId : ((typeof currentSessionId !== 'undefined' && currentSessionId) ? currentSessionId : 'default');
         const res = await fetch(`/api/programs/journals?program_id=${encodeURIComponent(progId)}&session_id=${encodeURIComponent(activeSession)}&t=${Date.now()}`);
         const data = await res.json();
         if (data.error) throw new Error(data.error);
@@ -3556,7 +3557,7 @@ async function loadProgramJournals() {
 }
 
 async function addManualJournalEntry() {
-    const progId = currentEditingProgramId || (typeof activeProgramName !== 'undefined' && activeProgramName ? activeProgramName.toLowerCase() : '') || 'sebile';
+    const progId = (typeof activeProgramId !== 'undefined' && activeProgramId) || currentEditingProgramId || (typeof activeProgramName !== 'undefined' && activeProgramName ? activeProgramName.toLowerCase() : '') || 'sebile';
     const kpInput = document.getElementById('journal-keyphrases-input');
     const cInput = document.getElementById('journal-content-input');
     if (!kpInput || !cInput) return;
@@ -3590,7 +3591,7 @@ async function addManualJournalEntry() {
 }
 
 async function deleteProgramJournalEntry(entryId) {
-    const progId = currentEditingProgramId || (typeof activeProgramName !== 'undefined' && activeProgramName ? activeProgramName.toLowerCase() : '') || 'sebile';
+    const progId = (typeof activeProgramId !== 'undefined' && activeProgramId) || currentEditingProgramId || (typeof activeProgramName !== 'undefined' && activeProgramName ? activeProgramName.toLowerCase() : '') || 'sebile';
     showCustomConfirm(
         "Delete Memory Entry",
         "Are you sure you want to permanently delete this memory entry? The program will forget this context immediately.",
@@ -7197,12 +7198,14 @@ async function openDataBank() {
     document.getElementById('databank-modal').style.display = 'flex';
     switchDataBankTab('upload');
     loadDataBankFiles();
+    currentEditingProgramId = (typeof activeProgramId !== 'undefined' && activeProgramId) || currentEditingProgramId;
     if (!currentEditingProgramId) {
         try {
             const res = await fetch(`/history?session_id=default&t=${Date.now()}`);
             const data = await res.json();
             if (data.active_program) {
                 currentEditingProgramId = data.active_program;
+                activeProgramId = data.active_program;
             }
         } catch (e) {
             console.error('openDataBank: failed to resolve active program', e);
@@ -7458,7 +7461,7 @@ function switchDataBankTab(tab) {
     };
 
     if (tab === 'upload')     activate(uploadTab, uploadBtn);
-    else if (tab === 'memories')  activate(memoriesTab, memoriesBtn);
+    else if (tab === 'memories')  { activate(memoriesTab, memoriesBtn); loadProgramJournals(); }
     else if (tab === 'lorebooks') { activate(lorebooksTab, lorebooksBtn); loadLorebooks(); }
 }
 

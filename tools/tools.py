@@ -2034,8 +2034,10 @@ def add_quest(title: str, notes: str, due: str = None, location: str = "", remin
         quests.append(quest)
 
         os.makedirs(program_dir, exist_ok=True)
-        with open(QUEST_LOG_PATH, 'w', encoding='utf-8') as f:
+        temp_path = QUEST_LOG_PATH + ".tmp"
+        with open(temp_path, 'w', encoding='utf-8') as f:
             json.dump(quests, f, indent=2, ensure_ascii=False)
+        os.replace(temp_path, QUEST_LOG_PATH)
 
         return f"Successfully added quest: '{title}' to the quest log with {len(objectives)} objectives."
     except Exception as e:
@@ -2057,3 +2059,141 @@ def add_journal_entry(keyphrases: str, content: str) -> str:
         return f"Successfully saved memory journal entry: {entry.get('content')}"
     except Exception as e:
         return f"Error saving memory journal entry: {e}"
+
+
+@track_tool_activity
+def search_music(query: str, mode: str = "deep_cuts") -> str:
+    """Searches for music, deep cuts, forgotten artists, albums, and tracks with rich cultural lore.
+    
+    Args:
+        query: Search term, artist, track, album, mood, or thematic topic.
+        mode: Discovery mode ('deep_cuts', 'kexp', 'theme_time', 'bandcamp', 'artist').
+    
+    Returns:
+        Curated list of matching artists, recordings, and liner notes.
+    """
+    import os
+    import re
+    import requests
+    from concurrent.futures import ThreadPoolExecutor
+
+    clean_query = query.strip()
+    mode_lower = (mode or "deep_cuts").lower().strip()
+    results = []
+
+    # 1. MusicBrainz structured exploration (Artists & Recordings)
+    try:
+        import musicbrainzngs
+        musicbrainzngs.set_useragent("Sanctuary", "1.0", "https://github.com/sanctuary")
+
+        # Artist search
+        if mode_lower in ("artist", "deep_cuts", "kexp"):
+            artist_res = musicbrainzngs.search_artists(artist=clean_query, limit=4)
+            for artist in artist_res.get("artist-list", []):
+                name = artist.get("name", "")
+                mbid = artist.get("id", "")
+                area = artist.get("area", {}).get("name", "")
+                tags = ", ".join(t.get("name", "") for t in artist.get("tag-list", [])[:6])
+                disambig = artist.get("disambiguation", "")
+                meta_parts = []
+                if area:
+                    meta_parts.append(f"Origin: {area}")
+                if tags:
+                    meta_parts.append(f"Tags: {tags}")
+                if disambig:
+                    meta_parts.append(f"Note: {disambig}")
+                results.append({
+                    "title": f"Artist: {name}",
+                    "url": f"https://musicbrainz.org/artist/{mbid}",
+                    "details": " | ".join(meta_parts) if meta_parts else "MusicBrainz Artist",
+                    "source": "MusicBrainz"
+                })
+
+        # Recording / track search
+        rec_res = musicbrainzngs.search_recordings(query=clean_query, limit=5)
+        for rec in rec_res.get("recording-list", []):
+            title = rec.get("title", "")
+            mbid = rec.get("id", "")
+            artist_credit = ", ".join(
+                a.get("artist", {}).get("name", "")
+                for a in rec.get("artist-credit", [])
+                if isinstance(a, dict)
+            )
+            releases = rec.get("release-list", [])
+            album = releases[0].get("title", "") if releases else ""
+            date = releases[0].get("date", "") if releases else ""
+            desc_parts = []
+            if artist_credit:
+                desc_parts.append(f"by {artist_credit}")
+            if album:
+                desc_parts.append(f"Album: '{album}'")
+            if date:
+                desc_parts.append(f"Year: {date[:4]}")
+            results.append({
+                "title": f"Track: {title}",
+                "url": f"https://musicbrainz.org/recording/{mbid}",
+                "details": " | ".join(desc_parts) if desc_parts else "MusicBrainz Recording",
+                "source": "MusicBrainz"
+            })
+    except Exception as e:
+        print(f"[MusicBrainz Search Error] {e}")
+
+    # 2. Targeted Crate-Digging via Web Search Queries
+    crate_queries = []
+    if mode_lower == "kexp":
+        crate_queries.append(f"site:kexp.org {clean_query}")
+        crate_queries.append(f"{clean_query} KEXP live session OR playlist")
+    elif mode_lower == "theme_time":
+        crate_queries.append(f"site:themetimeradio.com {clean_query}")
+        crate_queries.append(f"{clean_query} Bob Dylan Theme Time Radio Hour song")
+    elif mode_lower == "bandcamp":
+        crate_queries.append(f"site:bandcamp.com/album {clean_query}")
+        crate_queries.append(f"site:bandcamp.com/track {clean_query}")
+    else:  # deep_cuts (default)
+        crate_queries.append(f"site:discogs.com {clean_query} obscure OR vinyl OR reissue")
+        crate_queries.append(f"site:bandcamp.com {clean_query}")
+        crate_queries.append(f"site:rateyourmusic.com/release {clean_query}")
+
+    def run_web_query(q_str):
+        try:
+            try:
+                from ddgs import DDGS
+            except ImportError:
+                from duckduckgo_search import DDGS
+            ddgs = DDGS()
+            hits = ddgs.text(q_str, max_results=3)
+            out = []
+            for h in (hits or []):
+                u = h.get("href", "")
+                t = h.get("title", "")
+                b = h.get("body", "")
+                if u:
+                    out.append({
+                        "title": t,
+                        "url": u,
+                        "details": b,
+                        "source": "Crate Digger"
+                    })
+            return out
+        except Exception:
+            return []
+
+    with ThreadPoolExecutor(max_workers=len(crate_queries) or 1) as pool:
+        web_res_lists = pool.map(run_web_query, crate_queries)
+        for wlist in web_res_lists:
+            results.extend(wlist)
+
+    if not results:
+        return f"No music results found for '{query}' (mode: {mode})."
+
+    # Deduplicate by URL or title
+    seen = set()
+    formatted = []
+    for r in results:
+        key = r.get("url") or r.get("title")
+        if key in seen:
+            continue
+        seen.add(key)
+        formatted.append(f"• {r['title']}\n  Details: {r['details']}\n  Link: {r['url']}\n  Source: {r['source']}")
+
+    return f"[Music Discovery: Mode='{mode_lower}', Query='{clean_query}']\n\n" + "\n\n".join(formatted[:10])

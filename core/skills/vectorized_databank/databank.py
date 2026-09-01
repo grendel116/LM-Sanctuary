@@ -48,8 +48,11 @@ class DataBankManager:
 
     def _save_data(self, path, data):
         try:
-            with open(path, "w", encoding="utf-8") as f:
+            os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+            temp_path = f"{path}.tmp"
+            with open(temp_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
+            os.replace(temp_path, path)
         except Exception as e:
             print(f"Error saving JSON file to {path}: {e}")
 

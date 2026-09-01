@@ -27,8 +27,10 @@ def save_journal_entries(entries: list, program_id: str = None):
     try:
         # Ensure parent folder exists
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
+        temp_path = path + ".tmp"
+        with open(temp_path, "w", encoding="utf-8") as f:
             json.dump(entries, f, indent=2, ensure_ascii=False)
+        os.replace(temp_path, path)
     except Exception as e:
         print(f"Error saving journals to {path}: {e}")
 

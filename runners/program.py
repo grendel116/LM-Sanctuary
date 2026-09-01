@@ -34,8 +34,11 @@ def _save_settings(settings: dict):
     global _settings_cache, _settings_mtime
     path = _get_settings_path()
     try:
-        with open(path, "w", encoding="utf-8") as f:
+        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+        temp_path = f"{path}.tmp"
+        with open(temp_path, "w", encoding="utf-8") as f:
             json.dump(settings, f, indent=2, ensure_ascii=False)
+        os.replace(temp_path, path)
         _settings_cache = settings
         _settings_mtime = os.path.getmtime(path)
     except Exception as e:
