@@ -1559,7 +1559,7 @@ def list_images():
             target_dir = os.path.join(program_dir, folder)
             if os.path.exists(target_dir):
                 for f in os.listdir(target_dir):
-                    if f.lower().endswith(valid_exts) and f.lower() != 'profile.png':
+                    if f.lower().endswith(valid_exts) and f.lower() not in ('profile.png', 'profile.svg'):
                         full_path = os.path.join(target_dir, f)
                         if os.path.isfile(full_path):
                             all_items.append({

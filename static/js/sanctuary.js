@@ -5983,6 +5983,14 @@ async function loadServerImages() {
     }
 }
 
+// Helper to check if a path refers to a profile picture
+function isProfileImage(path) {
+    if (!path) return false;
+    const clean = path.split('?')[0].toLowerCase();
+    const filename = clean.split('/').pop();
+    return filename === 'profile.png' || filename === 'profile.svg';
+}
+
 // --- getGalleryImages ---
 function getGalleryImages() {
     const imgs = [];
@@ -5991,7 +5999,7 @@ function getGalleryImages() {
     if (Array.isArray(serverImages)) {
         serverImages.forEach(img => {
             const rel = getRelativePath(img);
-            if (!imgs.includes(rel)) {
+            if (!isProfileImage(rel) && !imgs.includes(rel)) {
                 imgs.push(rel);
             }
         });
@@ -6007,7 +6015,7 @@ function getGalleryImages() {
                 if (img.src && !img.classList.contains('avatar')) {
                     const src = img.getAttribute('src') || img.src;
                     const rel = getRelativePath(src);
-                    if (!imgs.includes(rel)) {
+                    if (!isProfileImage(rel) && !imgs.includes(rel)) {
                         imgs.push(rel);
                     }
                 }
@@ -6017,7 +6025,7 @@ function getGalleryImages() {
                 if (vid.src) {
                     const src = vid.getAttribute('src') || vid.src;
                     const rel = getRelativePath(src);
-                    if (!imgs.includes(rel)) {
+                    if (!isProfileImage(rel) && !imgs.includes(rel)) {
                         imgs.push(rel);
                     }
                 }
@@ -6029,19 +6037,26 @@ function getGalleryImages() {
 
 // --- expandImage ---
 function expandImage(src) {
-    if (!src) return;
     galleryImages = getGalleryImages();
-    const pathOnly = getRelativePath(src);
     
-    currentGalleryIndex = galleryImages.indexOf(pathOnly);
-    if (currentGalleryIndex === -1) {
-        galleryImages.unshift(pathOnly);
-        currentGalleryIndex = 0;
-    }
-
     if (galleryImages.length === 0) {
         showCustomAlert("No Media", "No portraits or generated images exist in this sanctuary yet.");
         return;
+    }
+
+    let pathOnly = src ? getRelativePath(src) : '';
+    if (isProfileImage(pathOnly)) {
+        pathOnly = '';
+    }
+
+    if (pathOnly) {
+        currentGalleryIndex = galleryImages.indexOf(pathOnly);
+        if (currentGalleryIndex === -1) {
+            galleryImages.unshift(pathOnly);
+            currentGalleryIndex = 0;
+        }
+    } else {
+        currentGalleryIndex = 0;
     }
 
     document.body.style.overflow = "hidden";
@@ -6078,18 +6093,21 @@ function updateModalImage() {
     
     const prevBtn = document.querySelector('.prev-btn');
     const nextBtn = document.querySelector('.next-btn');
+    const navBar = document.querySelector('.gallery-nav-bar');
     
     if (galleryImages.length <= 1) {
         if (prevBtn) prevBtn.style.display = 'none';
         if (nextBtn) nextBtn.style.display = 'none';
+        if (navBar) navBar.style.display = 'none';
     } else {
         if (prevBtn) prevBtn.style.display = 'flex';
         if (nextBtn) nextBtn.style.display = 'flex';
+        if (navBar) navBar.style.display = 'flex';
     }
     
     const deleteBtn = document.getElementById('delete-gallery-btn');
     if (deleteBtn) {
-        if (currentSrc.includes('profile.svg') || currentSrc.includes('profile.png')) {
+        if (isProfileImage(currentSrc)) {
             deleteBtn.style.display = 'none';
         } else {
             deleteBtn.style.display = 'flex';
@@ -6098,7 +6116,7 @@ function updateModalImage() {
     
     const setProfileBtn = document.getElementById('set-profile-btn');
     if (setProfileBtn) {
-        if (currentSrc.includes('profile.svg') || currentSrc.includes('profile.png') || isVideo) {
+        if (isProfileImage(currentSrc) || isVideo) {
             setProfileBtn.style.display = 'none';
         } else {
             setProfileBtn.style.display = 'flex';
@@ -6138,7 +6156,7 @@ function nextGalleryImage(event) {
 async function deleteCurrentImage(event) {
     if (event) event.stopPropagation();
     const currentSrc = galleryImages[currentGalleryIndex];
-    if (currentSrc.includes('profile.svg') || currentSrc.includes('profile.png')) return;
+    if (isProfileImage(currentSrc)) return;
     
     showCustomConfirm("Delete Image", "Are you sure you want to permanently delete this image from this conversation and the server?", async () => {
         try {
@@ -6227,7 +6245,7 @@ let cropSourcePath = '';
 function setCurrentImageAsProfile(event) {
     if (event) event.stopPropagation();
     const currentSrc = galleryImages[currentGalleryIndex];
-    if (currentSrc.includes('profile.png') || currentSrc.includes('profile.svg')) return;
+    if (isProfileImage(currentSrc)) return;
 
     closeModal();
     cropSourcePath = currentSrc;
