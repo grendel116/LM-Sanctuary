@@ -13,8 +13,8 @@ DEFAULT_BIAS_WEIGHT = -100.0
 
 # Strict pattern for 'not X, [it's] Y' or 'not A; B' contrast structures
 ANTITHESIS_PATTERN = re.compile(
-    r"\b(?:it's|that's|this\s+is)\s+not\s+[^;,.!?]+[;,]?\s*(?:it's|it\s+is|you're|there's)\b"
-    r"|\bnot\s+a\s+[^;,.!?]+[;,]\s*(?:it's|it\s+is|this\s+is)\b",
+    r"\b(?:it's|it\s+is|that's|that\s+is|this\s+is|you're|you\s+are)\s+not\s+[^;,.!?]+[;,]?\s*(?:it's|it\s+is|that's|that\s+is|this\s+is|you're|you\s+are|there's)\b"
+    r"|\bnot\s+a\s+[^;,.!?]+[;,]\s*(?:it's|it\s+is|this\s+is|that's|that\s+is|you're|you\s+are)\b",
     re.IGNORECASE
 )
 
