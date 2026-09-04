@@ -40,8 +40,18 @@ function showDebugToast(message) {
     const toast = document.createElement('div');
     toast.style.cssText = 'background: rgba(239, 68, 68, 0.95); color: white; padding: 12px 16px; border-radius: 8px; font-family: monospace; font-size: 0.8rem; box-shadow: 0 4px 12px rgba(0,0,0,0.5); pointer-events: auto; word-break: break-all; border-left: 4px solid #fca5a5;';
     toast.innerHTML = `<div style="font-weight: bold; margin-bottom: 4px; display: flex; align-items: center; gap: 6px;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#fca5a5" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>Application Error</div><div>${message}</div><button onclick="this.parentElement.remove()" style="background: none; border: none; color: white; text-decoration: underline; margin-top: 8px; cursor: pointer; padding: 0; font-size: 0.75rem;">Dismiss</button>`;
-    container.appendChild(toast);
 }
+
+// Delegate all external link clicks to open in default browser
+document.addEventListener('click', function (e) {
+    const link = e.target.closest('a');
+    if (!link) return;
+    const href = link.getAttribute('href') || link.href;
+    if (href && (href.startsWith('http://') || href.startsWith('https://'))) {
+        e.preventDefault();
+        window.open(href, '_blank', 'noopener,noreferrer');
+    }
+});
 
 /* ==========================================================================
    I. CONFIGURATION, GLOBAL STATE CONSTANTS & CACHING
