@@ -285,7 +285,7 @@ def query_searxng(query: str, base_url: str = None, engines: str = "baidu,yandex
 def web_search(query: str) -> str:
     """Searches the web and returns raw hits containing titles, links, and snippets.
     Supports routing via prefix queries (e.g. 'github: query', 'arxiv: query', 'hn: query', 'wikipedia: query')
-    or concurrent hybrid web blending for standard queries.
+    or concurrent web blending for standard queries.
 
     Args:
         query: The search query.
@@ -310,8 +310,8 @@ def web_search(query: str) -> str:
     except Exception as e:
         print(f"Error loading search settings: {e}")
 
-    # Map older values to web_crawling
-    if search_engine in ("sovereign_hybrid", "sovereign_search", "searxng", "google_grounding"):
+    # Map invalid or older values to web_crawling
+    if search_engine not in ("web_crawling", "wikipedia"):
         search_engine = "web_crawling"
 
     def run_searxng(q):
@@ -674,7 +674,7 @@ def web_search(query: str) -> str:
             print(f"[MusicBrainz] Error: {e}")
             results_pool = []
     else:
-        # Standard hybrid concurrent search blending
+        # Standard concurrent search blending
         if search_engine == "web_crawling":
             futures = {
                 _search_executor.submit(run_searxng, query): "SearXNG",

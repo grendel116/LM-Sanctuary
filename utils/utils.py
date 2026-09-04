@@ -277,13 +277,13 @@ def is_real_user_msg(msg: dict) -> bool:
 
     msg_id = msg.get('id', '')
     if msg_id:
-        if any(msg_id.startswith(p) for p in ('tool_', 'port_', 'quest_', 'sys_')):
+        if any(msg_id.startswith(p) for p in ('tool_', 'port_', 'quest_', 'sys_', 'itm_')):
             return False
         if any(msg_id.startswith(p) for p in ('usr_', 'img_')):
             return True
 
     text = msg.get('text', '')
-    invalid_triggers = ('[Tool Response', '[SYSTEM:', 'Generate a portrait of yourself')
+    invalid_triggers = ('[Tool Response', '[SYSTEM:', 'Generate a portrait of yourself', '[GENERATE_IMAGE:', '[GENERATE_IMAGEN:', 'generate_program_portrait')
     return not any(text.startswith(t) or t in text for t in invalid_triggers)
 
 

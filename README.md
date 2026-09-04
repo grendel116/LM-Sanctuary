@@ -13,7 +13,7 @@ I believe in seizing AI and the means of production into collective ownership. T
 2. **Coding**: Build software. Your companions read and write files directly on your own drive.
 3. **Autonomous Action**: Let the AI run code, run tests, and manage workflows.
 
-### Sovereign Infrastructure
+### Sovereign Workspace
 
 100% Local-First workspace. Your chats, your memory, and your data stay on your drive. Local models do all the heavy lifting directly on your hardware, saving resources from capitalist hyperscale data centers. Compute should be a public utility governed locally, not by shareholders or venture capitalists.
 
@@ -40,17 +40,17 @@ These are the things your companion can do on your computer. By default, before 
 * **Edit File** (`replace_file_content` / `multi_replace_file_content`): Swap single or multiple non-contiguous text blocks inside files with line-bounded precision.
 * **Map Directory** (`get_workspace_structure`): Read directory layouts and tree structures.
 * **Find Code** (`search_codebase`): Search codebase for keywords.
-* **Shell Execution** (`run_shell_command` / `run_command_async`): Run terminal commands, or spawn headless asynchronous background subprocesses with daemon reading threads streaming stdout/stderr asynchronously (allowing the companion to multitask and write to stdin).
+* **Shell Execution** (`run_shell_command` / `run_command_async`): Run terminal commands, or spawn headless asynchronous background subprocesses with background reading threads streaming stdout/stderr asynchronously (allowing the companion to multitask and write to stdin).
 * **Task Manager** (`manage_task` / `wait_task`): Monitor, write to stdin, kill, or block and wait on active background commands.
 * **Add Quest** (`add_quest`): Create and append a structured task or chore to the user's local quest log with objectives, target date/time, coordinates/address, and alarm offsets.
 
 ### Network Grounding & Research (Online)
-* **Hybrid Web Search** (`web_search`): A unified search client that queries SearXNG (for Baidu/Yandex/Bing), DuckDuckGo, Brave, and Tavily concurrently. It aggregates and deduplicates URLs, supports concurrent page content enrichment for thin search results, and provides explicit query prefix routing (e.g. `github: query`, `arxiv: query`, `hn: query`, `wikipedia: query`).
+* **Unified Web Search** (`web_search`): A unified search client that queries SearXNG (for Baidu/Yandex/Bing), DuckDuckGo, Brave, and Tavily concurrently. It aggregates and deduplicates URLs, supports concurrent page content enrichment for thin search results, and provides explicit query prefix routing (e.g. `github: query`, `arxiv: query`, `hn: query`, `wikipedia: query`).
 * **Read URL** (`read_webpage`): Fetch and extract text content from any webpage.
 
 ### Generative Media Engines (Local)
 * **Native LLM Engine**: Direct GGUF loading and token inference via `llama-cpp-python` with zero external server processes or port conflicts.
-* **Native In-Process Diffusion Engine** (`generate_local_image`): Real-time GPU-accelerated diffusion directly in-process using embedded engine nodes with SDXL SafeTensors checkpoints and LoRAs. No background daemons or external servers required.
+* **Native In-Process Diffusion Engine** (`generate_local_image`): Real-time GPU-accelerated diffusion directly in-process using embedded engine nodes with SDXL SafeTensors checkpoints and LoRAs. No background services or external servers required.
 
 ---
 

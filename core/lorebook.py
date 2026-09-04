@@ -161,7 +161,7 @@ def get_active_lore(
         key=lambda e: e["order"],
     )
 
-    # 5. Hybrid Semantic Retrieval (If no keyword entries triggered, check vector similarity)
+    # 5. Semantic Retrieval (If no keyword entries triggered, check vector similarity)
     if not triggered and scan_text:
         try:
             from core.skills.vectorized_databank.databank import DataBankManager

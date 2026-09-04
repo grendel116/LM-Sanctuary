@@ -190,8 +190,18 @@ async function softReloadApp() {
         updateProfileImages();
         modelInitPromise = initializeModelSelect();
 
+        const _hiddenPrefixes = ['port_', 'quest_', 'tool_', 'sys_', 'itm_'];
         const newHistory = (data.history || []).filter(msg => {
-            if (msg.id && msg.id.startsWith('sys_')) return false;
+            if (msg.id && _hiddenPrefixes.some(p => msg.id.startsWith(p))) return false;
+            if (msg.text && (
+                msg.text.startsWith('[SYSTEM:') ||
+                msg.text.startsWith('[Tool Response from') ||
+                msg.text.includes('Generate a portrait of yourself') ||
+                msg.text.includes('[GENERATE_IMAGE:') ||
+                msg.text.includes('[GENERATE_IMAGEN:') ||
+                msg.text.includes('[generate_program_portrait') ||
+                msg.text.includes('(Generation stopped)')
+            )) return false;
             return true;
         });
         
@@ -516,6 +526,8 @@ function generateMessageId(text, role = 'user') {
                 prefix = 'port_';
             } else if (text && text.startsWith("[SYSTEM: User has completed")) {
                 prefix = 'quest_';
+            } else if (text && text.startsWith("[SYSTEM:")) {
+                prefix = 'sys_';
             } else if (text && text.startsWith("[Tool Response from")) {
                 prefix = 'tool_';
             } else {
@@ -783,8 +795,8 @@ function showOnboardingCard() {
 }
 
 // --- saveConfigData ---
-async function saveConfigData(apiKey, projectId, geminiModel = null) {
-    if (!apiKey && !projectId && !geminiModel) {
+async function saveConfigData(apiKey, projectId, remoteModel = null) {
+    if (!apiKey && !projectId && !remoteModel) {
         showCustomAlert("Validation Error", "Please provide at least one configuration value.");
         return;
     }
@@ -792,7 +804,7 @@ async function saveConfigData(apiKey, projectId, geminiModel = null) {
         const bodyObj = {};
         if (apiKey) bodyObj.remote_api_key = apiKey;
         if (projectId) bodyObj.remote_cloud_url = projectId;
-        if (geminiModel) bodyObj.remote_model = geminiModel;
+        if (remoteModel) bodyObj.remote_model = remoteModel;
 
         const res = await fetch('/api/save_config', {
             method: 'POST',
@@ -820,18 +832,18 @@ async function saveConfigData(apiKey, projectId, geminiModel = null) {
 
 // --- saveOnboardingConfig ---
 function saveOnboardingConfig() {
-    const apiKey = document.getElementById('onboarding-api-key').value;
-    const projectId = document.getElementById('onboarding-project-id').value;
-    const geminiModel = document.getElementById('onboarding-gemini-model').value;
-    saveConfigData(apiKey, projectId, geminiModel);
+    const apiKey = document.getElementById('onboarding-api-key')?.value;
+    const projectId = document.getElementById('onboarding-project-id')?.value;
+    const remoteModel = document.getElementById('onboarding-remote-model')?.value;
+    saveConfigData(apiKey, projectId, remoteModel);
 }
 
 // --- saveModalConfig ---
 function saveModalConfig() {
-    const apiKey = document.getElementById('modal-api-key').value;
-    const projectId = document.getElementById('modal-project-id').value;
-    const geminiModel = document.getElementById('modal-gemini-model').value;
-    saveConfigData(apiKey, projectId, geminiModel);
+    const apiKey = document.getElementById('modal-api-key')?.value;
+    const projectId = document.getElementById('modal-project-id')?.value;
+    const remoteModel = document.getElementById('modal-remote-model')?.value;
+    saveConfigData(apiKey, projectId, remoteModel);
 }
 
 // --- Slider Handlers ---
@@ -1753,17 +1765,17 @@ function updateConnectionStatus(status) {
     const headerStatusText = document.getElementById('header-status-text');
     const headerHeart = document.getElementById('header-heart-pulse');
     
-    const geminiBadges = [
-        document.getElementById('onboarding-gemini-status'),
-        document.getElementById('modal-gemini-status')
+    const remoteBadges = [
+        document.getElementById('onboarding-remote-status'),
+        document.getElementById('modal-remote-status')
     ];
     const localLLMBadges = [
         document.getElementById('onboarding-local-status'),
         document.getElementById('modal-local-status')
     ];
     
-    // Update Gemini badges
-    geminiBadges.forEach(badge => {
+    // Update remote badges
+    remoteBadges.forEach(badge => {
         if (!badge) return;
         if (status.remote_configured ) {
             badge.textContent = "Configured";
@@ -1809,7 +1821,7 @@ function updateConnectionStatus(status) {
 function updateConnectionModalStatus() {
     const modalApiKey = document.getElementById('modal-api-key');
     const modalProjectId = document.getElementById('modal-project-id');
-    const modalGeminiModel = document.getElementById('modal-gemini-model');
+    const modalRemoteModel = document.getElementById('modal-remote-model');
     
     // Dynamically set dynamism slider
     const tempVal = connectionStatus.temperature !== undefined ? connectionStatus.temperature : 0.95;
@@ -1827,8 +1839,8 @@ function updateConnectionModalStatus() {
         }
     }
     
-    if (modalGeminiModel && !modalGeminiModel.value && connectionStatus.remote_model) {
-        modalGeminiModel.value = connectionStatus.remote_model;
+    if (modalRemoteModel && !modalRemoteModel.value && connectionStatus.remote_model) {
+        modalRemoteModel.value = connectionStatus.remote_model;
     }
     
     const envPathEl = document.querySelector('.env-path');
@@ -4589,7 +4601,7 @@ function renderMessage(msg, isLive = false) {
     const text = msg.text || '';
 
 // Client-side hidden prefix check
-    const _hiddenPrefixes = ['port_', 'quest_', 'tool_'];
+    const _hiddenPrefixes = ['port_', 'quest_', 'tool_', 'sys_', 'itm_'];
     if (msg.id && _hiddenPrefixes.some(p => msg.id.startsWith(p))) return null;
     
     if (text && (
@@ -4597,7 +4609,9 @@ function renderMessage(msg, isLive = false) {
         text.includes("[GENERATE_IMAGE:") || 
         text.includes("[GENERATE_IMAGEN:") ||
         text.includes("[generate_program_portrait") ||
-        text.includes("(Generation stopped)")
+        text.includes("(Generation stopped)") ||
+        text.startsWith("[SYSTEM:") ||
+        text.startsWith("[Tool Response from")
     )) return null;
 
     const welcome = document.getElementById('welcome-message');
@@ -5373,7 +5387,7 @@ async function sendMessage() {
         } else if (data.error) {
             let errMsg = data.error;
             if (errMsg.includes("429") || errMsg.includes("RESOURCE_EXHAUSTED")) {
-                errMsg = "The Sanctuary is momentarily overwhelmed (Gemini Rate Limit 429: Resource Exhausted). Let us pause, take a slow breath, and try our chavruta again in 15 seconds.";
+                errMsg = "The Sanctuary is momentarily overwhelmed (Rate Limit 429: Resource Exhausted). Let us pause, take a slow breath, and try our chavruta again in 15 seconds.";
             }
             appendMessage('program', errMsg);
         }
@@ -5784,7 +5798,7 @@ async function rerollMessage(trigger) {
         } else if (data.error) {
             let errMsg = data.error;
             if (errMsg.includes("429") || errMsg.includes("RESOURCE_EXHAUSTED")) {
-                errMsg = "The Sanctuary is momentarily overwhelmed (Gemini Rate Limit 429: Resource Exhausted). Let us pause, take a slow breath, and try our chavruta again in 15 seconds.";
+                errMsg = "The Sanctuary is momentarily overwhelmed (Rate Limit 429: Resource Exhausted). Let us pause, take a slow breath, and try our chavruta again in 15 seconds.";
             }
             appendMessage('program', errMsg);
         }
@@ -6609,16 +6623,16 @@ async function regenerateImage(buttonElement, oldImageUrl, prompt) {
                     const logRes = await fetch(`/api/session_tool_calls?session_id=${sessionId}`);
                     const logData = await logRes.json();
                     if (logData.tool_calls && logData.tool_calls.length > 0) {
-                        // Convert Python session tool calls to Gemini type/format
-                        const geminiToolCalls = [];
+                        // Convert Python session tool calls to formatted logs
+                        const formattedToolCalls = [];
                         logData.tool_calls.forEach(tc => {
-                            geminiToolCalls.push({
+                            formattedToolCalls.push({
                                 type: 'call',
                                 name: tc.name,
                                 args: tc.args ? { prompt: tc.args } : {},
                                 id: tc.id
                             });
-                            geminiToolCalls.push({
+                            formattedToolCalls.push({
                                 type: 'response',
                                 name: tc.name,
                                 response: tc.response || '',
@@ -6626,7 +6640,7 @@ async function regenerateImage(buttonElement, oldImageUrl, prompt) {
                             });
                         });
                         const totalDur = logData.tool_calls.reduce((sum, tc) => sum + (tc.duration || 0), 0);
-                        renderCompletedLogs(bubble, geminiToolCalls, totalDur ? Math.round(totalDur * 10) / 10 : null);
+                        renderCompletedLogs(bubble, formattedToolCalls, totalDur ? Math.round(totalDur * 10) / 10 : null);
                     }
                 }
             } catch (err) {
@@ -8374,7 +8388,7 @@ let proactiveAbortController = null;
 let activeProgramName = "";
 let activeProgramId = "";
 let availableModels = [];
-let connectionStatus = { remote_configured: false, gemini_configured: false, local_online: false };
+let connectionStatus = { remote_configured: false, local_online: false };
 let modelInitPromise = null;
 
 let comfyStatus = { installed: false, running: false, resolution_status: { status: "idle", progress: "", errors: [] } };

@@ -755,14 +755,38 @@ class BaseProgramRunner:
             self._save_session_to_disk(session_id)
             return True
 
-    async def append_message_to_session(self, session_id: str, role: str, text: str) -> bool:
+    async def append_message_to_session(self, session_id: str, role: str, text: str, msg_id: str = None) -> bool:
         """Appends a new raw message to the session history."""
         with self._lock:
             if session_id not in self.sessions_history:
                 self.sessions_history[session_id] = []
 
+            if not msg_id:
+                if text.startswith("[SYSTEM: User has completed"):
+                    prefix = "quest_"
+                elif any(
+                    k in text
+                    for k in (
+                        "Generate a portrait of yourself",
+                        "[GENERATE_IMAGE:",
+                        "generate_program_portrait",
+                    )
+                ):
+                    prefix = "port_"
+                elif text.startswith("[Tool Response from"):
+                    prefix = "tool_"
+                elif text.startswith("[SYSTEM:") or role in ("system-memory", "system"):
+                    prefix = "sys_"
+                elif role == "voice-call":
+                    prefix = "vc_"
+                elif role == "program":
+                    prefix = "prgm_"
+                else:
+                    prefix = "usr_"
+                msg_id = f"{prefix}{uuid.uuid4().hex}"
+
             msg = {
-                "id": f"msg_{uuid.uuid4().hex}",
+                "id": msg_id,
                 "role": role,
                 "text": text,
                 "timestamp": time.time(),
@@ -1051,7 +1075,7 @@ class BaseProgramRunner:
         return instructions
 
 class OpenSourceRunner(BaseProgramRunner):
-        """Operates independently of cloud infrastructure, reading character settings
+        """Operates locally and independently, reading character settings
         directly from the program's JSON profile.
         """
 
@@ -1313,7 +1337,13 @@ class OpenSourceRunner(BaseProgramRunner):
                 chat_history = []
 
                 for msg in raw_history:
-                    if msg.get("role") == "system-memory" or msg.get("id", "").startswith(hidden_prefixes):
+                    msg_id = msg.get("id", "")
+                    text = msg.get("text", "")
+                    if msg.get("role") == "system-memory" or msg_id.startswith(hidden_prefixes):
+                        continue
+                    if text.startswith(("[SYSTEM:", "[Tool Response from")) or any(
+                        k in text for k in ("Generate a portrait of yourself", "[GENERATE_IMAGE:", "[GENERATE_IMAGEN:", "generate_program_portrait")
+                    ):
                         continue
                     if msg.get("role") == "program":
                         if not (msg.get("text") or "").strip() and not msg.get("tool_calls"):
@@ -1384,12 +1414,15 @@ class OpenSourceRunner(BaseProgramRunner):
                     for k in (
                         "Generate a portrait of yourself",
                         "[GENERATE_IMAGE:",
+                        "[GENERATE_IMAGEN:",
                         "generate_program_portrait",
                     )
                 ):
                     prefix = "port_"
                 elif new_message_text.startswith("[Tool Response from"):
                     prefix = "tool_"
+                elif new_message_text.startswith("[SYSTEM:"):
+                    prefix = "sys_"
                 elif (media_path or image_data) and not new_message_text.strip():
                     prefix = "img_"
                 else:

@@ -1663,7 +1663,7 @@ def get_models():
         "default": default_model,
         "status": {
             "remote_configured": is_remote_configured,
-            "remote_model": os.getenv("REMOTE_MODEL", "gemini-3.1-flash-lite"),
+            "remote_model": os.getenv("REMOTE_MODEL", ""),
             "remote_url": remote_cloud_url,
             "local_online": is_local_online,
             "local_installed": check_installed(),
@@ -1722,7 +1722,7 @@ def project_settings():
                         settings["folders"][0] = default_folder
                         dirty = True
                 
-                if settings.get("search_engine") in ("sovereign_hybrid", "sovereign_search"):
+                if settings.get("search_engine") not in ("web_crawling", "wikipedia"):
                     settings["search_engine"] = "web_crawling"
                     dirty = True
                 if dirty:
@@ -1878,9 +1878,9 @@ def save_generation_params():
 def save_config():
     try:
         data = request.get_json() or {}
-        remote_api_key = data.get('remote_api_key', data.get('gemini_api_key', '')).strip()
-        remote_cloud_url = data.get('remote_cloud_url', data.get('project_id', '')).strip()
-        remote_model = data.get('remote_model', data.get('gemini_model', '')).strip()
+        remote_api_key = (data.get('remote_api_key') or data.get('api_key') or '').strip()
+        remote_cloud_url = (data.get('remote_cloud_url') or data.get('project_id') or '').strip()
+        remote_model = (data.get('remote_model') or data.get('model') or '').strip()
         
         existing_key = os.getenv("REMOTE_API_KEY")
         
@@ -3719,7 +3719,7 @@ def _get_current_status():
         
     return {
         "remote_configured": is_remote_configured,
-        "remote_model": os.getenv("REMOTE_MODEL", "gemini-3.1-flash-lite"),
+        "remote_model": os.getenv("REMOTE_MODEL", ""),
         "remote_url": remote_cloud_url,
         "local_online": local_llm_manager.check_status(),
         "local_installed": local_llm_manager.check_installed(),

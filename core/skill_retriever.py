@@ -6,7 +6,7 @@ Tier 1 (Toolbelt): A compact list of all available capabilities with tool call s
 
 Tier 2 (Vector Retrieved): Full SKILL.md instruction blocks, injected only when the
     conversation context matches a skill via keyword triggers or vector similarity.
-    Uses the same keyword + vector hybrid pattern as the journal system.
+    Uses the same keyword + vector pattern as the journal system.
 
 Skills with retrieval: "always" bypass matching and are always included
 in the full instruction output alongside any matched skills.
@@ -180,7 +180,7 @@ def retrieve_skill_instructions(query: str, story_active: bool = False,
                                  query_vector=None) -> str:
     """Retrieves full instruction blocks for matched skills.
 
-    Uses a hybrid keyword + vector approach (same pattern as journals.py):
+    Uses a keyword + vector approach (same pattern as journals.py):
     1. Always includes skills marked retrieval: "always"
     2. Keyword matching: checks trigger phrases against the user's message
     3. Vector search: for skills not matched by keywords, checks semantic
