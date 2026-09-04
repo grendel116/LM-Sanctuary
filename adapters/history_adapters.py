@@ -236,7 +236,7 @@ class OsHistoryAdapter(LocalHistoryAdapter):
         if not filtered_history:
             return [{"role": "system", "content": sys_inst}]
 
-        latest_img_idx = -1
+        latest_user_idx = -1
         has_new_image = bool((self.image_data and self.image_mime) or self.file_path_resolved)
 
         for idx in range(len(filtered_history) - 1, -1, -1):
@@ -244,8 +244,7 @@ class OsHistoryAdapter(LocalHistoryAdapter):
             if msg.get("role") == "user":
                 if msg.get("id", "").startswith("tool_") or msg.get("text", "").startswith("[Tool Response from"):
                     continue
-                if has_new_image or msg.get("image_url"):
-                    latest_img_idx = idx
+                latest_user_idx = idx
                 break
 
         raw_messages = []
@@ -262,14 +261,14 @@ class OsHistoryAdapter(LocalHistoryAdapter):
                         ]
                         content_text += f"\n[{tc.get('name')}({', '.join(args_list)})]"
 
-            if idx == latest_img_idx:
+            if idx == latest_user_idx:
                 img_src = (
                     f"data:{self.image_mime};base64,{self.image_data}"
                     if self.image_data and self.image_mime
                     else self.file_path_resolved or msg.get("image_url")
                 )
                 from utils.utils import scan_and_tag_image, extract_uploaded_file_content
-                scan_info = scan_and_tag_image(img_src)
+                scan_info = scan_and_tag_image(img_src) if (has_new_image or msg.get("image_url")) else ""
                 doc_info = extract_uploaded_file_content(self.file_path_resolved) if self.file_path_resolved else ""
 
                 extra_parts = [p for p in (doc_info, scan_info) if p]

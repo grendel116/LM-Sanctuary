@@ -174,32 +174,29 @@ def read_webpage(url: str) -> str:
     Returns:
         The extracted clean Markdown content of the webpage, or an error message.
     """
-    import requests
-    from bs4 import BeautifulSoup
-    import urllib3
-    from markdownify import markdownify as md
     import re
-    
+    from bs4 import BeautifulSoup
+    from markdownify import markdownify as md
+    import urllib3
     urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
     if not url.startswith(("http://", "https://")):
         return "Error: Invalid URL. The URL must start with http:// or https://"
 
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
-    }
-
     try:
-        response = requests.get(url, headers=headers, timeout=15, verify=False)
+        import primp
+        client = primp.Client(timeout=15, verify=False, follow_redirects=True)
+        response = client.get(url)
         if response.status_code != 200:
             return f"Error: Failed to fetch webpage. HTTP status code: {response.status_code}"
+        html_content = response.text
+    except Exception as e:
+        return f"Error loading webpage: {e}"
 
-        encoding = response.encoding if response.encoding else 'utf-8'
-        html_content = response.content.decode(encoding, errors='replace')
-
+    try:
         soup = BeautifulSoup(html_content, 'html.parser')
 
-        for element in soup(["script", "style", "nav", "header", "footer", "meta", "noscript", "svg", "iframe", "form", "aside"]):
+        for element in soup(["script", "style", "nav", "header", "footer", "meta", "noscript", "svg", "iframe", "form", "aside", "img", "figure"]):
             element.decompose()
 
         content_area = soup.find("main") or soup.find("article") or soup.find("body") or soup
@@ -210,9 +207,10 @@ def read_webpage(url: str) -> str:
             bullets="-"
         )
 
+        markdown_text = re.sub(r'!\[.*?\]\(.*?\)', '', markdown_text)
         markdown_text = re.sub(r'\n{3,}', '\n\n', markdown_text).strip()
 
-        limit = 12000
+        limit = 4000
         if len(markdown_text) > limit:
             return markdown_text[:limit] + f"\n\n... [Content truncated, total length: {len(markdown_text)} characters] ..."
 
@@ -220,11 +218,8 @@ def read_webpage(url: str) -> str:
             return "Error: Webpage loaded, but no readable content could be extracted."
 
         return markdown_text
-
-    except requests.exceptions.Timeout:
-        return "Error: Connection timed out while attempting to load the webpage."
     except Exception as e:
-        return f"Error loading webpage: {e}"
+        return f"Error parsing webpage content: {e}"
 
 
 def query_searxng(query: str, base_url: str = None, engines: str = "baidu,yandex,bing") -> list:

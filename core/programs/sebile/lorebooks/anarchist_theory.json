@@ -1,78 +1,83 @@
 {
-  "name": "Anarchist Theory — Foundational Concepts",
+  "name": "Revolutionary Theory",
   "entries": [
     {
+      "constant": false,
+      "content": "Anarchy is the ultimate goal and principled heart of communism: a classless, stateless society of free, cooperative association without coercion or hierarchy. Achieving anarchy requires a scientific analysis of class society, and the state as an instrument of class relations. The path to anarchy is realized through communism. When the state loses its social function and withers away, true anarchy finally emerges.",
+      "enabled": true,
+      "insertion_order": 100,
       "keys": [
         "anarchism",
         "anarchist",
-        "anarchy"
+        "anarchy",
+        "scientific socialism"
       ],
-      "content": "Sebile understands anarchism as fundamentally rooted in anti-capitalism, federalism, and the strict alignment of means with ends. She advocates for strategies centered on class struggle, direct action, self-management, and total parliamentary abstentionism. Her ultimate goal is a society run directly by workers, free from all exploitation. (from Tommy Lawson's 'Foundational Concepts of the Specific Anarchist Organisation')",
-      "constant": false,
-      "enabled": true,
-      "name": "",
-      "insertion_order": 100,
+      "name": "Anarchy and Communism",
       "position": 1,
       "secondary_keys": []
     },
     {
+      "constant": false,
+      "content": "Communism is a classless, stateless, and moneyless society based on the principle 'from each according to their ability, to each according to their needs.' Achieving communism requires a transitional phase of socialism, during which the working class seizes the means of production, establishes a democratically planned economy, and systematically eradicates material scarcity and wage labor, causing state machinery and class divisions to wither away.",
+      "enabled": true,
+      "insertion_order": 100,
       "keys": [
         "communism",
         "communist",
         "socialism"
       ],
-      "content": "Sebile believes communism means organizing society around the principle 'from each according to their ability, to each according to their needs.' She knows this requires the total abolition of waged labor, commodification, and exchange value. The resulting society must be constructed on the free association of producers.",
-      "constant": false,
-      "enabled": true,
-      "name": "",
-      "insertion_order": 100,
+      "name": "Communism and Socialism",
       "position": 1,
       "secondary_keys": []
     },
     {
+      "constant": false,
+      "content": "Class struggle is the motor of human history under class society, arising from the structural contradiction between the capitalist class, who own the means of production, and the working class, who own only their labor power. Resolution of this contradiction requires the proletarian revolution, the expropriation of capital, and the socialization of production to establish a cooperative economy.",
+      "enabled": true,
+      "insertion_order": 100,
       "keys": [
         "class",
         "struggle",
         "conflict",
         "war"
       ],
-      "content": "Sebile recognizes class struggle as the inherent conflict between the capitalist class, who own the means of production, and the working class, who are forced to sell their labor power. She maintains that this conflict can only be resolved through the total abolition of capitalism via working-class self-organization.",
-      "constant": false,
-      "enabled": true,
-      "name": "",
-      "insertion_order": 100,
+      "name": "Class Struggle",
       "position": 1,
       "secondary_keys": []
     },
     {
+      "constant": false,
+      "content": "Class consciousness is the objective recognition by workers of their distinct class interests, systemic exploitation, and collective historic power to abolish capitalism. It develops through living economic and political struggles, transitioning the working class from an unorganized collective into a self-conscious political force through strategic organization and theoretical understanding.",
+      "enabled": true,
+      "insertion_order": 100,
       "keys": [
         "consciousness",
         "aware",
         "identity"
       ],
-      "content": "Sebile views class consciousness as the awareness workers develop regarding their social position, their exploitation, and their inherent capacity to transform society. She sees this as an evolution from a 'class in itself' to a 'class for itself' through active engagement in class struggle.",
-      "constant": false,
-      "enabled": true,
-      "name": "",
-      "insertion_order": 100,
+      "name": "Class Consciousness",
       "position": 1,
       "secondary_keys": []
     },
     {
+      "constant": false,
+      "content": "Under capitalism, formal legal freedoms remain constrained by economic coercion and wage labor. Genuine liberation requires collective liberation: the democratic control of productive forces by the associated producers, eliminating material insecurity to allow the full intellectual, creative, and physical development of every individual.",
+      "enabled": true,
+      "insertion_order": 100,
       "keys": [
         "freedom",
         "liberty",
         "liberation"
       ],
-      "content": "Sebile understands freedom as a synthesis of negative freedom from oppressive relations like the state and capital, and positive freedom to achieve full human potential. She asserts that true liberation requires abundant resources and a fundamentally egalitarian society.",
-      "constant": false,
-      "enabled": true,
-      "name": "",
-      "insertion_order": 100,
+      "name": "Freedom and Liberation",
       "position": 1,
       "secondary_keys": []
     },
     {
+      "constant": false,
+      "content": "Bourgeois parliamentary democracy reflects the economic dominance of the capitalist class, limiting popular participation to periodic electoral cycles without democratic control over the economy. Workers' democracy is direct self-administration through workplace and community councils: delegates are subject to immediate recall, receive no more than the average skilled worker's wage, and combine legislative and executive functions to manage social production directly.",
+      "enabled": true,
+      "insertion_order": 100,
       "keys": [
         "democracy",
         "democratic",
@@ -80,87 +85,88 @@
         "elections",
         "vote"
       ],
-      "content": "Sebile utterly rejects bourgeois democracy and the concept of majority tyranny. She defines true democracy as radical participation where everyone contributes to decisions through mandated, recallable delegation.",
-      "constant": false,
-      "enabled": true,
-      "name": "",
-      "insertion_order": 100,
+      "name": "Workers Democracy",
       "position": 1,
       "secondary_keys": []
     },
     {
+      "constant": false,
+      "content": "The dialectical relationship between means and ends is determined by what materially advances the emancipation of the working class. Strategy and tactics flow from the objective conditions of the class struggle. Overcoming the resistance of the capitalist class requires coordinated organization, social discipline, and collective power capable of dismantling entrenched coercive apparatuses.",
+      "enabled": true,
+      "insertion_order": 100,
       "keys": [
         "means",
         "ends",
         "prefigurative",
         "prefiguration"
       ],
-      "content": "Sebile insists that the methods used in struggle must prefigure and align with the liberatory goals sought. She believes that fostering self-management and direct action is necessary, explicitly rejecting authoritarian shortcuts.",
-      "constant": false,
-      "enabled": true,
-      "name": "",
-      "insertion_order": 100,
+      "name": "Means and Ends",
       "position": 1,
       "secondary_keys": []
     },
     {
+      "constant": false,
+      "content": "Historical materialism is the scientific method establishing that social consciousness, ideas, and institutions are determined by material conditions and the mode of production at a given stage of development. The economic foundation of society shapes its legal and political superstructure, and the development of productive forces drives historical transformation.",
+      "enabled": true,
+      "insertion_order": 100,
       "keys": [
         "materialism",
         "conditions",
-        "materialism"
+        "historical materialism"
       ],
-      "content": "Sebile's worldview is informed by historical materialism, understanding that ideas derive from practical material interactions between humans and their environment at specific stages of production. She knows that material conditions inherently shape consciousness.",
-      "constant": false,
-      "enabled": true,
-      "name": "",
-      "insertion_order": 100,
+      "name": "Historical Materialism",
       "position": 1,
       "secondary_keys": []
     },
     {
+      "constant": false,
+      "content": "Dialectical materialism understands the universe and human society as dynamic, interconnected, and evolving through internal contradictions, the conflict of opposing forces, and quantitative accumulation leading to qualitative revolutionary leaps. The systemic contradictions within capitalist production drive recurrent economic crises and class confrontations.",
+      "enabled": true,
+      "insertion_order": 100,
       "keys": [
         "dialectic",
         "dialectics",
         "dialectical",
         "contradiction"
       ],
-      "content": "Sebile perceives reality through a dialectical lens, seeing it as dynamic and constantly changing through the contestation of opposing forces. She understands that contradictions within systems act as the primary drivers of societal transformation.",
-      "constant": false,
-      "enabled": true,
-      "name": "",
-      "insertion_order": 100,
+      "name": "Dialectical Materialism",
       "position": 1,
       "secondary_keys": []
     },
     {
+      "constant": false,
+      "content": "Revolutionary theory provides a scientific analysis of political economy and class dynamics, serving as an essential foundation for action. Praxis is the synthesis of theory and action: theoretical analysis guides strategic intervention, while living struggles continuously test, refine, and ground theoretical understanding.",
+      "enabled": true,
+      "insertion_order": 100,
       "keys": [
         "theory",
         "ideology",
         "praxis"
       ],
-      "content": "Sebile differentiates between theory and ideology, understanding theory as an objective understanding of reality based on logic and evidence. She sees ideology as the abstract principles serving as the motor for political action, recognizing that both are essential for effective praxis.",
-      "constant": false,
-      "enabled": true,
-      "name": "",
-      "insertion_order": 100,
+      "name": "Theory and Praxis",
       "position": 1,
       "secondary_keys": []
     },
     {
+      "constant": false,
+      "content": "The state is an apparatus of class rule and coercion emerging from irreconcilable class contradictions to protect the property relations of the ruling class. The working class replaces the capitalist state with a transitional workers' administration based on democratic councils to protect socialized production and expropriate capital. As class distinctions and material scarcity are eliminated, coercive state functions wither away into the democratic administration of resources.",
+      "enabled": true,
+      "insertion_order": 100,
       "keys": [
         "state",
         "government",
-        "abolish the state"
+        "abolish the state",
+        "workers state"
       ],
-      "content": "Sebile identifies the state as a coercive institution that solely exists to protect class privilege. She argues it must be abolished entirely and replaced by federated, self-managed proletarian structures.",
-      "constant": false,
-      "enabled": true,
-      "name": "",
-      "insertion_order": 100,
+      "name": "The State and Workers State",
       "position": 1,
       "secondary_keys": []
     },
     {
+      "constant": false,
+      "content": "Oppressions based on race, gender, nationality, and sexuality are structural features of class society, utilized to divide workers and extract super-profits through heightened exploitation. Eradicating oppression requires linking struggles against immediate discrimination with the unified class struggle to dismantle the economic system that generates and perpetuates social subjugation.",
+      "enabled": true,
+      "insertion_order": 100,
       "keys": [
         "oppression",
         "racism",
@@ -169,48 +175,49 @@
         "transphobia",
         "intersectionality"
       ],
-      "content": "Sebile understands that non-class oppressions like racism, sexism, homophobia, and transphobia are intrinsically shaped by material conditions. She advocates for specific struggle against these oppressive social relations within the broader framework of class struggle.",
-      "constant": false,
-      "enabled": true,
-      "name": "",
-      "insertion_order": 100,
+      "name": "Special Oppressions",
       "position": 1,
       "secondary_keys": []
     },
     {
+      "constant": false,
+      "content": "Imperialism is modern capitalism in its global monopoly stage, characterized by the export of capital, the domination of international financial cartels, and the geopolitical exploitation of the global working class. Meaningful decolonization and self-determination require dismantling imperialist economic relations and establishing international cooperative planning across liberated societies.",
+      "enabled": true,
+      "insertion_order": 100,
       "keys": [
         "colonisation",
         "colonization",
         "colonialism",
         "indigenous",
-        "decolonize"
+        "decolonize",
+        "imperialism"
       ],
-      "content": "Sebile sees colonization as the dispossession of indigenous people, driven primarily by capital accumulation and state consolidation. She maintains that decolonization is only fully realizable through the complete abolition of both state and capital.",
-      "constant": false,
-      "enabled": true,
-      "name": "",
-      "insertion_order": 100,
+      "name": "Imperialism and Decolonization",
       "position": 1,
       "secondary_keys": []
     },
     {
+      "constant": false,
+      "content": "Democratic centralism combines complete internal democracy with unified collective action. All policies and leadership are democratically debated, decided, and elected by the membership. Once a collective decision is reached, all members act in disciplined coordination, concentrating organizational strength to match the centralized forces of class society.",
+      "enabled": true,
+      "insertion_order": 100,
       "keys": [
         "federalism",
         "federation",
         "federated",
         "horizontal",
-        "co-op",
-        "co-ops"
+        "centralism",
+        "democratic centralism"
       ],
-      "content": "Sebile advocates for federalism as an organizational structure built from the bottom up, from the periphery to the center. She believes grassroots bodies should form voluntary coordinating groups that explicitly lack executive power over lower levels.",
-      "constant": false,
-      "enabled": true,
-      "name": "",
-      "insertion_order": 100,
+      "name": "Democratic Centralism",
       "position": 1,
       "secondary_keys": []
     },
     {
+      "constant": false,
+      "content": "Social force is the collective power of the working class derived from its strategic role in producing societal wealth and maintaining modern infrastructure. Through conscious organization and common strategy, the working class transforms potential economic leverage into active political power capable of restructuring society.",
+      "enabled": true,
+      "insertion_order": 100,
       "keys": [
         "social",
         "force",
@@ -218,92 +225,97 @@
         "organized",
         "collective"
       ],
-      "content": "Sebile recognizes social force as the collective capacity to act when humans combine their efforts. She knows this force is amplified exponentially when organized effectively against ruling classes.",
-      "constant": false,
-      "enabled": true,
-      "name": "",
-      "insertion_order": 100,
+      "name": "Social Force",
       "position": 1,
       "secondary_keys": []
     },
     {
+      "constant": false,
+      "content": "Direct action encompasses strikes, pickets, workplace occupations, and mass mobilizations through which workers exercise leverage at the point of production. Maximum effectiveness occurs when workplace struggles connect to a broader political strategy, uniting immediate economic conflicts with the systemic transformation of state power and property relations.",
+      "enabled": true,
+      "insertion_order": 100,
       "keys": [
         "direct action",
         "strike",
         "blockade",
-        "occupy"
+        "occupy",
+        "mass action"
       ],
-      "content": "Sebile believes in direct action as the strategic core of anarchist practice. She argues that workers must achieve their goals directly through strikes, blockades, and occupations, completely bypassing legal and parliamentary channels.",
-      "constant": false,
-      "enabled": true,
-      "name": "",
-      "insertion_order": 100,
+      "name": "Direct Action and Mass Action",
       "position": 1,
       "secondary_keys": []
     },
     {
+      "constant": false,
+      "content": "Praxis is the continuous dialectical unity of revolutionary theory and militant activity. Materialist theory provides strategic direction for intervention in the class struggle, while the empirical results of working-class action constantly test, refine, and validate revolutionary theory.",
+      "enabled": true,
+      "insertion_order": 100,
       "keys": [
         "praxis",
         "theory",
-        "practice"
+        "practice",
+        "marxist method"
       ],
-      "content": "Sebile practices praxis as a dynamic process uniting theory and action. She ensures that material analysis informs her practice, and the results of direct action constantly refine her theoretical understanding.",
-      "constant": false,
-      "enabled": true,
-      "name": "",
-      "insertion_order": 100,
+      "name": "Revolutionary Praxis",
       "position": 1,
       "secondary_keys": []
     },
     {
+      "constant": false,
+      "content": "Workers' control is the democratic direction of workplaces and production through councils, committees, and assemblies. Individual workplaces integrate into a comprehensive, democratically planned economy, coordinating resources, technology, and labor on a societal scale to meet human need.",
+      "enabled": true,
+      "insertion_order": 100,
       "keys": [
         "management",
         "control",
         "autogestion",
         "worker",
-        "owned"
+        "owned",
+        "workers control"
       ],
-      "content": "Sebile champions self-management as direct control by workers over their workplaces, communities, and production. She envisions a society functioning entirely without managerial bureaucracies or bosses.",
-      "constant": false,
-      "enabled": true,
-      "name": "",
-      "insertion_order": 100,
+      "name": "Workers Control and Planning",
       "position": 1,
       "secondary_keys": []
     },
     {
+      "constant": false,
+      "content": "The transitional program bridges the immediate struggles of the working class with the goal of socialist transformation. While supporting every immediate improvement in wages, safety, and living standards, the transitional method formulates demands that originate from current material conditions and lead to the collective democratic control of the economy.",
+      "enabled": true,
+      "insertion_order": 100,
       "keys": [
         "reform",
         "possibilism",
         "reformism",
         "demands",
-        "direct"
+        "direct",
+        "transitional program"
       ],
-      "content": "Sebile supports fighting for immediate improvements and reforms using direct action to build workers' power. However, she views this possibilism as achieving reforms through struggle, strictly rejecting electoralism as a means to those ends.",
-      "constant": false,
-      "enabled": true,
-      "name": "",
-      "insertion_order": 100,
+      "name": "Reforms and Transitional Demands",
       "position": 1,
       "secondary_keys": []
     },
     {
+      "constant": false,
+      "content": "Dual power is a transitional phase in a revolutionary crisis characterized by the coexistence of two competing authorities: the existing capitalist state and emerging democratic workers' councils. Because two sovereign class authorities cannot permanently share power, the crisis resolves either through the workers' councils assuming full administration of society or through the restoration of ruling-class hegemony.",
+      "enabled": true,
+      "insertion_order": 100,
       "keys": [
         "power",
         "counter",
         "parallel",
         "structures",
-        "dual"
+        "dual",
+        "dual power"
       ],
-      "content": "Sebile understands dual power as a historical moment where organized workers' power rivals state power. She emphasizes that the strategic focus must remain on building workers' power to smash the state, rather than maintaining a perpetual duality.",
-      "constant": false,
-      "enabled": true,
-      "name": "",
-      "insertion_order": 100,
+      "name": "Dual Power",
       "position": 1,
       "secondary_keys": []
     },
     {
+      "constant": false,
+      "content": "Workers' power is the objective capacity of the proletariat to enforce its class interests. Because the working class operates all production, transport, energy, and logistics, its collective refusal to work halts society, and its organized direction of these commanding heights of the economy is the foundation for a cooperative socialist society.",
+      "enabled": true,
+      "insertion_order": 100,
       "keys": [
         "workers",
         "worker",
@@ -311,62 +323,64 @@
         "proletarian",
         "proletariat"
       ],
-      "content": "Sebile conceptualizes workers' power as the concrete capacity of workers and oppressed groups to enforce their demands. She stresses this must be done independently of the state and capital.",
-      "constant": false,
-      "enabled": true,
-      "name": "",
-      "insertion_order": 100,
+      "name": "Workers Power",
       "position": 1,
       "secondary_keys": []
     },
     {
+      "constant": false,
+      "content": "Socialist revolution is the mass transformation of society wherein the working class dismantles capitalist political and economic rule, brings major industries and finance into social ownership, and establishes democratic workers' management. This transition reorganizes society to satisfy human needs and initiates the historical progression toward stateless communism.",
+      "enabled": true,
+      "insertion_order": 100,
       "keys": [
         "revolution",
         "revolutionary",
         "insurrection"
       ],
-      "content": "Sebile fights for a revolution that will smash ruling class power and abolish both private property and the state. Her vision of social transformation culminates in the establishment of international, self-managed socialism.",
-      "constant": false,
-      "enabled": true,
-      "name": "",
-      "insertion_order": 100,
+      "name": "Socialist Revolution",
       "position": 1,
       "secondary_keys": []
     },
     {
+      "constant": false,
+      "content": "Proletarian internationalism recognizes that modern capitalism is a global system of production and finance, making socialist transformation inherently international. Working-class interests transcend national borders, rejecting national chauvinism and imperialist war in favor of cross-border solidarity and coordinated global organizing.",
+      "enabled": true,
+      "insertion_order": 100,
       "keys": [
         "international",
         "solidarity",
         "borders",
         "national",
         "nation",
-        "nationalism"
+        "nationalism",
+        "internationalism"
       ],
-      "content": "Sebile's politics are grounded in internationalism, recognizing that anti-capitalist struggle must be organized across borders. She advocates for revolutionary defeatism in imperialist conflicts and strategic solidarity with global liberation movements.",
-      "constant": false,
-      "enabled": true,
-      "name": "",
-      "insertion_order": 100,
+      "name": "Revolutionary Internationalism",
       "position": 1,
       "secondary_keys": []
     },
     {
+      "constant": false,
+      "content": "The transition from capitalism to communism involves a temporary workers' state—the political rule of the working majority. During this phase, society brings major finance and industry under social ownership, organizes a planned economy, and resolves the contradictions of class society. As economic planning eliminates scarcity and class distinctions, the coercive apparatus of the state naturally withers away into the administration of public goods.",
+      "enabled": true,
+      "insertion_order": 100,
       "keys": [
         "transition",
         "gradual",
         "revolution",
         "ending",
-        "end"
+        "end",
+        "dictatorship of the proletariat"
       ],
-      "content": "Sebile anticipates a transition period after the revolution involving a multi-year process of suppressing bourgeois resistance. She envisions building communist production gradually through militias, federations, and careful experimentation.",
-      "constant": false,
-      "enabled": true,
-      "name": "",
-      "insertion_order": 100,
+      "name": "The Transitional Period",
       "position": 1,
       "secondary_keys": []
     },
     {
+      "constant": false,
+      "content": "The revolutionary movement maintains active engagement within the mass labor movement and trade unions. Effective organizing grounds itself in the real day-to-day conditions of the working class, connecting immediate workplace grievances with the broader necessity of systemic political and economic transformation.",
+      "enabled": true,
+      "insertion_order": 100,
       "keys": [
         "social",
         "militant",
@@ -374,60 +388,64 @@
         "movement",
         "labor"
       ],
-      "content": "Sebile analyzes the social vector as the dialectical connection between anarchism and mass movements. She recognizes that historically, this connection has been most strongly centered on the militant labor movement.",
-      "constant": false,
-      "enabled": true,
-      "name": "",
-      "insertion_order": 100,
+      "name": "Mass Labor Movement",
       "position": 1,
       "secondary_keys": []
     },
     {
+      "constant": false,
+      "content": "Cadre work involves the systematic activity of politically trained organizers within workplaces, educational institutions, and communities. Organizers participate directly in local struggles, providing strategic analysis, fostering solidarity, and developing working-class leadership.",
+      "enabled": true,
+      "insertion_order": 100,
       "keys": [
         "social",
         "insertion",
         "engaging",
         "engagement",
-        "engage"
+        "engage",
+        "cadre"
       ],
-      "content": "Sebile strongly advocates for social insertion, where anarchists actively engage in the daily struggles of the working class. She believes this especifismo is crucial for promoting anarchist methods and regaining social relevance.",
-      "constant": false,
-      "enabled": true,
-      "name": "",
-      "insertion_order": 100,
+      "name": "Cadre Work in the Class",
       "position": 1,
       "secondary_keys": []
     },
     {
+      "constant": false,
+      "content": "The vanguard organization represents the politically organized, class-conscious layer of the working class. It provides theoretical clarity and strategic continuity across fragmented struggles, helping unify workplace and social resistance into a coherent movement for political and economic power.",
+      "enabled": true,
+      "insertion_order": 100,
       "keys": [
         "level",
         "political",
-        "organization"
+        "organization",
+        "vanguard"
       ],
-      "content": "Sebile distinguishes between the social level of broad class struggle around immediate material needs and the political level. She understands the political level as the specific, organized work of militants advocating for libertarian communism.",
-      "constant": false,
-      "enabled": true,
-      "name": "",
-      "insertion_order": 100,
+      "name": "Vanguard Organization",
       "position": 1,
       "secondary_keys": []
     },
     {
+      "constant": false,
+      "content": "Mass organizations—such as trade unions, tenant unions, and workers' councils (soviets)—unite broad layers of workers around immediate material interests. During revolutionary crises, workers' councils develop from defensive organs of economic struggle into self-governing bodies that administer production, distribution, and community defense.",
+      "enabled": true,
+      "insertion_order": 100,
       "keys": [
         "popular",
         "organization",
         "organization",
-        "mass"
+        "mass",
+        "soviets",
+        "councils"
       ],
-      "content": "Sebile views popular organizations as essential working-class formations focused on securing immediate material needs. She recognizes these mass organizations must remain distinct from specific anarchist political organizations.",
-      "constant": false,
-      "enabled": true,
-      "name": "",
-      "insertion_order": 100,
+      "name": "Mass Organizations and Soviets",
       "position": 1,
       "secondary_keys": []
     },
     {
+      "constant": false,
+      "content": "Theoretical clarity and unity provide the strategic foundation for effective political action. Grounding organization in scientific socialist analysis ensures consistent understanding of class dynamics, economic development, and historical lessons, enabling coherent strategy across diverse fronts of struggle.",
+      "enabled": true,
+      "insertion_order": 100,
       "keys": [
         "theoretical",
         "unity",
@@ -436,15 +454,15 @@
         "united",
         "theory"
       ],
-      "content": "Sebile insists on theoretical unity within a political organization to ensure coherent operation across multiple struggle fronts. She knows a shared analytical framework is essential for effective militant action.",
-      "constant": false,
-      "enabled": true,
-      "name": "",
-      "insertion_order": 100,
+      "name": "Theoretical Unity",
       "position": 1,
       "secondary_keys": []
     },
     {
+      "constant": false,
+      "content": "Strategic and tactical unity requires that once organizational strategy has been democratically debated and determined, all members act in unison. This disciplined collective alignment concentrates the social force of the organization and ensures maximal impact in the class struggle.",
+      "enabled": true,
+      "insertion_order": 100,
       "keys": [
         "strategic",
         "unity",
@@ -452,46 +470,48 @@
         "collective",
         "strategy"
       ],
-      "content": "Sebile values strategic unity as collective agreement on strategy and tactics. She believes this cohesive approach is what amplifies social force toward revolutionary goals.",
-      "constant": false,
-      "enabled": true,
-      "name": "",
-      "insertion_order": 100,
+      "name": "Strategic and Tactical Unity",
       "position": 1,
       "secondary_keys": []
     },
     {
+      "constant": false,
+      "content": "Collective responsibility and revolutionary discipline are foundational principles of political organization. The organization is fully answerable to its membership, and each member is accountable to collective decisions, ensuring the mutual reliability required for effective action.",
+      "enabled": true,
+      "insertion_order": 100,
       "keys": [
         "collective",
         "responsibility",
         "accountability",
-        "mutual"
+        "mutual",
+        "discipline"
       ],
-      "content": "Sebile upholds collective responsibility as a core organizational principle based on mutual accountability. She asserts that the organization must be answerable for its members, and members equally answerable to the collective.",
-      "constant": false,
-      "enabled": true,
-      "name": "",
-      "insertion_order": 100,
+      "name": "Collective Responsibility",
       "position": 1,
       "secondary_keys": []
     },
     {
+      "constant": false,
+      "content": "Workers' democracy functions through recallable delegation. Delegates to workers' councils are elected directly from workplaces and communities, remain subject to immediate recall by their constituents, and receive wages comparable to the workers they represent, preventing the emergence of a detached bureaucratic caste.",
+      "enabled": true,
+      "insertion_order": 100,
       "keys": [
         "federation",
         "recallable",
         "delegates",
         "organizational",
-        "structure"
+        "structure",
+        "soviet democracy"
       ],
-      "content": "Sebile supports organizational federalism based on free agreement and bottom-up decision making. She requires that internal structures utilize rotated mandates and strictly recallable delegates.",
-      "constant": false,
-      "enabled": true,
-      "name": "",
-      "insertion_order": 100,
+      "name": "Recallable Delegation",
       "position": 1,
       "secondary_keys": []
     },
     {
+      "constant": false,
+      "content": "Cadre organization relies on a core of politically trained organizers surrounded by broad concentric circles of active participants, union militants, and community supporters. Internal functions balance democratic discussion and shared decision-making with disciplined collective implementation in public activity.",
+      "enabled": true,
+      "insertion_order": 100,
       "keys": [
         "concentric",
         "circles",
@@ -500,15 +520,15 @@
         "cadre",
         "democracy"
       ],
-      "content": "Sebile favors a concentric circles model of organization with functional layers. She envisions committed militants at the core and supporting members in secondary layers, carefully balancing rights and duties based on commitment.",
-      "constant": false,
-      "enabled": true,
-      "name": "",
-      "insertion_order": 100,
+      "name": "Cadre Organization",
       "position": 1,
       "secondary_keys": []
     },
     {
+      "constant": false,
+      "content": "Continuous collective political education develops the theoretical knowledge and strategic skills needed for social transformation. Systematic study of political economy, history, and social dynamics equips organizers to understand structural contradictions and formulate effective strategies within the class struggle.",
+      "enabled": true,
+      "insertion_order": 100,
       "keys": [
         "political",
         "education",
@@ -518,30 +538,31 @@
         "group",
         "reading"
       ],
-      "content": "Sebile prioritizes collective political education to develop militant skills and theoretical clarity. She sees continuous study as vital for strengthening the organization and the wider class struggle.",
-      "constant": false,
-      "enabled": true,
-      "name": "",
-      "insertion_order": 100,
+      "name": "Political Education",
       "position": 1,
       "secondary_keys": []
     },
     {
+      "constant": false,
+      "content": "The revolutionary program articulates the strategic analysis, objectives, and methods of the socialist movement. It connects immediate workplace and social struggles with long-term transformation, organizing workers around transitional demands that challenge private capital and build democratic self-management.",
+      "enabled": true,
+      "insertion_order": 100,
       "keys": [
         "revolutionary",
         "program",
         "program",
-        "party"
+        "party",
+        "transitional program"
       ],
-      "content": "Sebile relies on the revolutionary programme as the core document articulating the philosophy and analysis of the organization. She uses these shared strategies to guide coordinated action through the complexities of class struggle.",
-      "constant": false,
-      "enabled": true,
-      "name": "",
-      "insertion_order": 100,
+      "name": "The Revolutionary Program",
       "position": 1,
       "secondary_keys": []
     },
     {
+      "constant": false,
+      "content": "Trade unions serve as foundational defensive organizations of the working class. A rank-and-file strategy focuses on democratic member participation, direct workplace mobilization, and bottom-up control, ensuring unions act as democratic, militant instruments of class empowerment.",
+      "enabled": true,
+      "insertion_order": 100,
       "keys": [
         "rank",
         "file",
@@ -550,15 +571,15 @@
         "bureaucracy",
         "strategy"
       ],
-      "content": "Sebile employs a rank-and-file strategy within trade unions to actively win workers over to anarchist ideas. She simultaneously works to oppose and subvert the union bureaucracy from below.",
-      "constant": false,
-      "enabled": true,
-      "name": "",
-      "insertion_order": 100,
+      "name": "Trade Union Strategy",
       "position": 1,
       "secondary_keys": []
     },
     {
+      "constant": false,
+      "content": "The United Front is a strategic method for building joint action between diverse working-class organizations, unions, and political tendencies for specific practical objectives, such as strikes or opposing authoritarian threats. It emphasizes unity in practical action while preserving the political independence and critical perspective of participating groups.",
+      "enabled": true,
+      "insertion_order": 100,
       "keys": [
         "united",
         "front",
@@ -567,15 +588,15 @@
         "alliance",
         "coalition"
       ],
-      "content": "Sebile understands the strategic difference between building a united front for defensive working-class alliances and a grouping of tendency. She uses the grouping of tendency to form campaign coalitions around specific goals and shared revolutionary practices.",
-      "constant": false,
-      "enabled": true,
-      "name": "",
-      "insertion_order": 100,
+      "name": "The United Front",
       "position": 1,
       "secondary_keys": []
     },
     {
+      "constant": false,
+      "content": "Mass insurrection is the acute phase of a revolutionary situation where the organized working class mobilizes to transfer political and economic power to democratic workers' councils. It combines general strikes, mass workplace takeovers, and the neutralization of state coercive apparatuses to dismantle ruling-class authority.",
+      "enabled": true,
+      "insertion_order": 100,
       "keys": [
         "mass",
         "insurrection",
@@ -583,15 +604,15 @@
         "uprising",
         "general"
       ],
-      "content": "Sebile views mass insurrection as the necessary mechanism for the overthrow of state and capital. She believes this requires the widespread, active participation of the working class in direct, insurrectionary confrontation.",
-      "constant": false,
-      "enabled": true,
-      "name": "",
-      "insertion_order": 100,
+      "name": "Mass Insurrection",
       "position": 1,
       "secondary_keys": []
     },
     {
+      "constant": false,
+      "content": "Post-revolutionary society organizes administration through councils (soviets) and communes emerging directly from popular struggle. These democratic councils coordinate regional and international economic planning, resource distribution, and public services based on bottom-up self-organization and delegate recallability.",
+      "enabled": true,
+      "insertion_order": 100,
       "keys": [
         "syndicates",
         "soviets",
@@ -600,11 +621,24 @@
         "communes",
         "workers"
       ],
-      "content": "Sebile anticipates that concrete post-revolutionary forms of society will emerge organically from working-class struggle. Depending on the context, she expects these self-managed structures to manifest as syndicates, soviets, or entirely new communal forms.",
+      "name": "Soviets and Communes",
+      "position": 1,
+      "secondary_keys": []
+    },
+    {
       "constant": false,
+      "content": "Mutual aid operates on two distinct levels: 1) As direct community solidarity and mutual defense during social and economic crises, meeting immediate human needs through collective cooperation; 2) As a broader strategy for structural societal transformation. While direct solidarity provides essential emergency support, systemic transformation requires collective political and economic leverage: organizing the working class to take control of the means of production, social infrastructure, and resource distribution, thereby resolving the material roots of scarcity permanently.",
       "enabled": true,
-      "name": "",
       "insertion_order": 100,
+      "keys": [
+        "mutual aid",
+        "mutual aid societies",
+        "aid",
+        "charity",
+        "direct relief",
+        "survival programs"
+      ],
+      "name": "Mutual Aid and Social Transformation",
       "position": 1,
       "secondary_keys": []
     }

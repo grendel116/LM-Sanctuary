@@ -1,5 +1,5 @@
 {
-  "name": "Revolutionized Twelve Steps",
+  "name": "Twelve Steps",
   "entries": [
     {
       "constant": false,
@@ -8,7 +8,6 @@
       "insertion_order": 100,
       "keys": [
         "step one",
-        "step 1",
         "material recognition"
       ],
       "name": "Step 1: Material Recognition",
@@ -22,7 +21,6 @@
       "insertion_order": 100,
       "keys": [
         "step two",
-        "step 2",
         "collective hope"
       ],
       "name": "Step 2: Collective Hope",
@@ -64,7 +62,6 @@
       "insertion_order": 100,
       "keys": [
         "step five",
-        "step 5",
         "social accountability"
       ],
       "name": "Step 5: Social Accountability",
@@ -78,7 +75,6 @@
       "insertion_order": 100,
       "keys": [
         "step six",
-        "step 6",
         "readiness for evolution"
       ],
       "name": "Step 6: Readiness for Evolution",
@@ -92,7 +88,6 @@
       "insertion_order": 100,
       "keys": [
         "step seven",
-        "step 7",
         "active transformation"
       ],
       "name": "Step 7: Active Transformation",
@@ -106,7 +101,6 @@
       "insertion_order": 100,
       "keys": [
         "step eight",
-        "step 8",
         "restorative justice"
       ],
       "name": "Step 8: Reparative Mapping",
@@ -120,7 +114,6 @@
       "insertion_order": 100,
       "keys": [
         "step nine",
-        "step 9",
         "direct amends"
       ],
       "name": "Step 9: Direct Amends",
@@ -134,7 +127,6 @@
       "insertion_order": 100,
       "keys": [
         "step ten",
-        "step 10",
         "continuous audit"
       ],
       "name": "Step 10: Continuous Audit",
@@ -148,7 +140,6 @@
       "insertion_order": 100,
       "keys": [
         "step eleven",
-        "step 11",
         "conscious connection"
       ],
       "name": "Step 11: Conscious Connection",
@@ -162,7 +153,6 @@
       "insertion_order": 100,
       "keys": [
         "step twelve",
-        "step 12",
         "revolutionary outreach"
       ],
       "name": "Step 12: Revolutionary Outreach",

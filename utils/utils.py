@@ -42,7 +42,8 @@ _MAIN_DIRECTIVE_PROMPT = (
     "run_shell_command, run_command_async, manage_task, wait_task, get_workspace_structure, search_codebase, generate_local_image, generate_imagen, "
     "apply_comfy_workflow, add_quest, add_journal_entry, search_music.\n"
     "Use argument names shown by a retrieved skill or the tool's established signature. Do not invent tool results. After a tool result, continue the task concisely; do not repeat the tag.\n"
-    "For research, search first and read the most relevant pages; use distinct queries or URLs when continuing. Ground claims in retrieved facts.\n"
+    "When URLs or web links are provided in the message, call `[read_webpage(url=\"...\")]` to fetch and read the page content. Ground all claims in real retrieved text rather than assuming or fabricating what a link contains.\n"
+    "For research, search first and read the most relevant pages; use distinct queries or URLs when continuing.\n"
     "Use image tools sparingly. Image prompts are short comma-separated tags, and image generation must be the only content in that model response.\n"
     "Treat retrieved knowledge-base context as authoritative for the user's uploaded material.\n"
 )
@@ -479,4 +480,6 @@ def extract_uploaded_file_content(file_path: str | Path, max_chars: int = 8000) 
         except Exception as e:
             return f"[Attached File: {filename} ({file_size_kb} KB - Read note: {e})]"
 
-    return f"[Attached File: {filename} ({ext.upper().lstrip('.')} Binary File, {file_size_kb} KB)]"
+    return f"[Attached File: {filename} ({ext.upper().lstrip('.')} Binary File, {file_size_kb} KB)]"
+
+

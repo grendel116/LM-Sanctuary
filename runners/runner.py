@@ -48,6 +48,7 @@ THINK_TAG_RE = re.compile(
     r"(?:</think>|\[/think\]|</thought>|\[/thought\]|<\|thought\|>|<\|channel\|>|<channel\|>|<\/\s*think>|\[\s*/\s*think\s*\]|$)",
     flags=re.IGNORECASE,
 )
+URL_PATTERN = re.compile(r"https?://[^\s>)\"']+")
 CHANNEL_TAG_RE = re.compile(r"<\|channel\|>|<channel\|>", flags=re.IGNORECASE)
 TOOL_TAG_RE = re.compile(r"\[(\w+)\(([\s\S]*?)\)\]")
 TOOL_TAG_STRIP_RE = re.compile(r"\[\w+\([\s\S]*?\n?\)\]", flags=re.DOTALL)
@@ -1068,6 +1069,13 @@ class BaseProgramRunner:
             "\n\n# CONTENT\n"
             "Anarchist-communist ethics. Explicit/NSFW content is permitted.\n"
         )
+
+        if not is_voice and user_message and URL_PATTERN.search(user_message):
+            instructions += (
+                "\n\n# PASTED LINK DIRECTIVE\n"
+                "When a URL is present in the message, execute `[read_webpage(url=\"...\")]` to fetch the webpage. "
+                "After the webpage content is retrieved, analyze its core concepts and discuss the article's ideas directly in character.\n"
+            )
 
         if is_voice:
             print(f"\n[VOICE CALL DEBUG] Active Voice Prompt:\n{instructions}\n[VOICE CALL DEBUG] END PROMPT\n", flush=True)
