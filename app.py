@@ -153,12 +153,6 @@ except Exception as e:
 
 def prewarm_caches():
     print(">>> Pre-warming backend caches in background...")
-    try:
-        from core import engine_diffusion
-        engine_diffusion.list_checkpoints()
-        engine_diffusion.list_loras()
-    except Exception as e:
-        print(f"Error prewarming diffusion models: {e}")
 
     # Auto-start high-speed standalone llama-server if configured
     auto_start = os.getenv("AUTO_START_LOCAL_LLM", "true").lower() in ("true", "1", "yes")
@@ -2900,13 +2894,25 @@ def save_program_profile():
         import json
 
         incoming = request.get_json(silent=True) or {}
-        program_id = incoming.get('program_id') or get_active_program()
-        json_path = os.path.normpath(os.path.join(PROGRAMS_DIR, program_id, f"{program_id}.json"))
+        program_id = incoming.get('program_id')
+        if not program_id:
+            return jsonify({'error': 'Missing program_id'}), 400
+
+        program_dir = os.path.normpath(os.path.join(PROGRAMS_DIR, program_id))
+        if not os.path.exists(program_dir):
+            for f in os.listdir(PROGRAMS_DIR):
+                if f.lower() == program_id.lower():
+                    program_id = f
+                    program_dir = os.path.normpath(os.path.join(PROGRAMS_DIR, program_id))
+                    break
+
+        json_path = os.path.normpath(os.path.join(program_dir, f"{program_id}.json"))
 
         # Extract sidecars before writing card
         tts_voice = incoming.pop('tts_voice', None)
         story_mode = incoming.pop('story_mode', None)
         incoming.pop('program_id', None)
+        incoming_exts = incoming.pop('extensions', None)
 
         if tts_voice:
             set_tts_voice_for_program(program_id, tts_voice)
@@ -2926,13 +2932,22 @@ def save_program_profile():
             card_to_write = {
                 'spec': 'chara_card_v3',
                 'spec_version': '3.0',
-                'data': {}
+                'data': existing.get('data', existing) if existing else {}
             }
 
         # Update data payload including story_mode if present
         card_to_write['data'].update(incoming)
         if story_mode is not None:
             card_to_write['data']['story_mode'] = bool(story_mode)
+
+        if incoming_exts:
+            if 'extensions' not in card_to_write['data'] or not isinstance(card_to_write['data']['extensions'], dict):
+                card_to_write['data']['extensions'] = {}
+            for ext_key, ext_val in incoming_exts.items():
+                if isinstance(ext_val, dict) and isinstance(card_to_write['data']['extensions'].get(ext_key), dict):
+                    card_to_write['data']['extensions'][ext_key].update(ext_val)
+                else:
+                    card_to_write['data']['extensions'][ext_key] = ext_val
 
         os.makedirs(os.path.dirname(json_path), exist_ok=True)
         with open(json_path, 'w', encoding='utf-8') as f:
@@ -3454,20 +3469,55 @@ def finalize_imported_program(program_path, program_id, card_json):
 def export_program_card(program_id):
     """Download the program's card as a SillyTavern-compatible JSON file."""
     try:
-        card_path = os.path.join(base_dir, 'core', 'programs', program_id, f'{program_id}.json')
+        from variables.settings import PROGRAMS_DIR
+        program_dir = os.path.normpath(os.path.join(PROGRAMS_DIR, program_id))
+        if not os.path.exists(program_dir):
+            for f in os.listdir(PROGRAMS_DIR):
+                if f.lower() == program_id.lower():
+                    program_id = f
+                    program_dir = os.path.normpath(os.path.join(PROGRAMS_DIR, program_id))
+                    break
+        if not os.path.exists(program_dir):
+            return jsonify({'error': f"Program '{program_id}' not found"}), 404
+
+        card_path = os.path.join(program_dir, f'{program_id}.json')
         if not os.path.exists(card_path):
-            return jsonify({'error': 'Program not found'}), 404
-        with open(card_path, encoding='utf-8') as f:
+            json_candidates = [
+                f for f in os.listdir(program_dir)
+                if f.endswith('.json') and f not in ('theme.json', 'inversion.json', 'databank.json', 'journals.json', 'quest_log.json')
+            ]
+            if json_candidates:
+                card_path = os.path.join(program_dir, json_candidates[0])
+            else:
+                return jsonify({'error': 'Program card JSON not found'}), 404
+
+        with open(card_path, 'r', encoding='utf-8') as f:
             card_data = json.load(f)
+
         name = card_data.get('data', card_data).get('name', program_id)
         safe_name = re.sub(r'[^\w\- ]', '', name).strip().replace(' ', '_') or program_id
-        # Export only ST-spec keys — strip Sanctuary internals from root
-        export_data = {k: v for k, v in card_data.items() if k in ('spec', 'spec_version', 'data')}
+
+        if 'data' in card_data and 'spec' in card_data:
+            export_data = {k: v for k, v in card_data.items() if k in ('spec', 'spec_version', 'data')}
+        elif 'data' in card_data:
+            export_data = {
+                'spec': 'chara_card_v3',
+                'spec_version': '3.0',
+                'data': card_data['data']
+            }
+        else:
+            export_data = {
+                'spec': 'chara_card_v3',
+                'spec_version': '3.0',
+                'data': card_data
+            }
+
         resp = make_response(json.dumps(export_data, indent=2, ensure_ascii=False))
-        resp.headers['Content-Type'] = 'application/json'
+        resp.headers['Content-Type'] = 'application/json; charset=utf-8'
         resp.headers['Content-Disposition'] = f'attachment; filename="{safe_name}.json"'
         return resp
     except Exception as e:
+        traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
 
@@ -3476,21 +3526,43 @@ def export_program_card(program_id):
 def export_program_lorebook(program_id):
     """Download the embedded character_book as a standalone lorebook JSON."""
     try:
-        card_path = os.path.join(base_dir, 'core', 'programs', program_id, f'{program_id}.json')
+        from variables.settings import PROGRAMS_DIR
+        program_dir = os.path.normpath(os.path.join(PROGRAMS_DIR, program_id))
+        if not os.path.exists(program_dir):
+            for f in os.listdir(PROGRAMS_DIR):
+                if f.lower() == program_id.lower():
+                    program_id = f
+                    program_dir = os.path.normpath(os.path.join(PROGRAMS_DIR, program_id))
+                    break
+        if not os.path.exists(program_dir):
+            return jsonify({'error': f"Program '{program_id}' not found"}), 404
+
+        card_path = os.path.join(program_dir, f'{program_id}.json')
         if not os.path.exists(card_path):
-            return jsonify({'error': 'Program not found'}), 404
-        with open(card_path, encoding='utf-8') as f:
+            json_candidates = [
+                f for f in os.listdir(program_dir)
+                if f.endswith('.json') and f not in ('theme.json', 'inversion.json', 'databank.json', 'journals.json', 'quest_log.json')
+            ]
+            if json_candidates:
+                card_path = os.path.join(program_dir, json_candidates[0])
+            else:
+                return jsonify({'error': 'Program card JSON not found'}), 404
+
+        with open(card_path, 'r', encoding='utf-8') as f:
             card_data = json.load(f)
+
         cb = card_data.get('data', card_data).get('character_book')
         if not cb:
-            return jsonify({'error': 'No embedded lorebook found'}), 404
-        name = card_data.get('data', card_data).get('name', program_id)
-        safe_name = re.sub(r'[^\w\- ]', '', name).strip().replace(' ', '_') or program_id
+            return jsonify({'error': 'No embedded lorebook found in this card'}), 404
+
+        name = cb.get('name') or card_data.get('data', card_data).get('name', program_id)
+        safe_name = re.sub(r'[^\w\- ]', '', name).strip().replace(' ', '_') or 'lorebook'
         resp = make_response(json.dumps(cb, indent=2, ensure_ascii=False))
-        resp.headers['Content-Type'] = 'application/json'
+        resp.headers['Content-Type'] = 'application/json; charset=utf-8'
         resp.headers['Content-Disposition'] = f'attachment; filename="{safe_name}_lorebook.json"'
         return resp
     except Exception as e:
+        traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
 

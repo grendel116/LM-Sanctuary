@@ -3022,7 +3022,6 @@ async function selectAssistant(assistantId) {
             profileCacheBuster = Date.now();
             updateProfileImages();
             activeProgramId = data.active || assistantId;
-            currentEditingProgramId = activeProgramId;
             applyTheme(data.active || assistantId, data.theme);
             
             // Re-request history and dynamic configuration
@@ -3137,8 +3136,6 @@ async function openProgramProfileModal(programId) {
         const imgDetails = sanctuary.image_details || {};
         document.getElementById('comp-image-details').value = imgDetails.positive || '';
         document.getElementById('comp-negative-details').value = imgDetails.negative || '';
-        
-        await loadProgramJournals();
     } catch (e) {
         console.error('Error loading program profile:', e);
         showCustomAlert('Error', 'Could not load program profile: ' + e.message);
@@ -3350,9 +3347,69 @@ function switchProgramProfileTab(tab) {
     });
 }
 
-function exportProgramCard() {
+async function downloadFile(url, defaultFilename = 'download.json') {
+    let fileHandle = null;
+    if (typeof window.showSaveFilePicker === 'function') {
+        try {
+            fileHandle = await window.showSaveFilePicker({
+                suggestedName: defaultFilename,
+                types: [{
+                    description: 'JSON Files',
+                    accept: { 'application/json': ['.json'] }
+                }]
+            });
+        } catch (err) {
+            if (err.name === 'AbortError') {
+                return;
+            }
+        }
+    }
+
+    const res = await fetch(url);
+    if (!res.ok) {
+        let errMsg = `Server responded with status ${res.status}`;
+        try {
+            const data = await res.json();
+            if (data.error) errMsg = data.error;
+        } catch (_) {}
+        throw new Error(errMsg);
+    }
+    const blob = await res.blob();
+
+    if (fileHandle) {
+        const writable = await fileHandle.createWritable();
+        await writable.write(blob);
+        await writable.close();
+        return;
+    }
+
+    let filename = defaultFilename;
+    const disp = res.headers.get('Content-Disposition');
+    if (disp && disp.includes('filename=')) {
+        const m = disp.match(/filename=["']?([^"';]+)["']?/);
+        if (m && m[1]) filename = m[1].trim();
+    }
+    const blobUrl = window.URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.style.display = 'none';
+    a.href = blobUrl;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => window.URL.revokeObjectURL(blobUrl), 2000);
+}
+
+async function exportProgramCard() {
     if (!currentEditingProgramId) return;
-    window.location.href = `/api/programs/${encodeURIComponent(currentEditingProgramId)}/export/card`;
+    const progName = (document.getElementById('comp-name')?.value || currentEditingProgramId).trim();
+    const safeName = progName.replace(/[^\w\- ]/g, '').replace(/ /g, '_') || currentEditingProgramId;
+    try {
+        await downloadFile(`/api/programs/${encodeURIComponent(currentEditingProgramId)}/export/card`, `${safeName}.json`);
+    } catch (e) {
+        console.error("Error exporting program card:", e);
+        showCustomAlert("Export Failed", "Could not export program card: " + e.message);
+    }
 }
 
 async function saveProgramProfile() {
@@ -3423,6 +3480,9 @@ async function saveProgramProfile() {
             throw new Error(data.error);
         }
         
+        currentEditingProgramId = targetProgramId;
+        currentEditingProgramOriginalName = newName;
+        
         document.getElementById('program-profile-modal').style.display = 'none';
         
         // If the edited program is currently active, reload active session details
@@ -3439,8 +3499,7 @@ async function saveProgramProfile() {
 }
 
 async function loadProgramJournals() {
-    const progId = (typeof activeProgramId !== 'undefined' && activeProgramId) || currentEditingProgramId || (typeof activeProgramName !== 'undefined' && activeProgramName ? activeProgramName.toLowerCase() : '') || 'sebile';
-    currentEditingProgramId = progId;
+    const progId = (typeof activeProgramId !== 'undefined' && activeProgramId) || (typeof activeProgramName !== 'undefined' && activeProgramName ? activeProgramName.toLowerCase() : '') || 'sebile';
     
     const journalsContainer = document.getElementById('program-journals-list');
     const epicContainer = document.getElementById('program-epic-chronicle-container');
@@ -3579,7 +3638,7 @@ async function loadProgramJournals() {
 }
 
 async function addManualJournalEntry() {
-    const progId = (typeof activeProgramId !== 'undefined' && activeProgramId) || currentEditingProgramId || (typeof activeProgramName !== 'undefined' && activeProgramName ? activeProgramName.toLowerCase() : '') || 'sebile';
+    const progId = (typeof activeProgramId !== 'undefined' && activeProgramId) || (typeof activeProgramName !== 'undefined' && activeProgramName ? activeProgramName.toLowerCase() : '') || 'sebile';
     const kpInput = document.getElementById('journal-keyphrases-input');
     const cInput = document.getElementById('journal-content-input');
     if (!kpInput || !cInput) return;
@@ -3613,7 +3672,7 @@ async function addManualJournalEntry() {
 }
 
 async function deleteProgramJournalEntry(entryId) {
-    const progId = (typeof activeProgramId !== 'undefined' && activeProgramId) || currentEditingProgramId || (typeof activeProgramName !== 'undefined' && activeProgramName ? activeProgramName.toLowerCase() : '') || 'sebile';
+    const progId = (typeof activeProgramId !== 'undefined' && activeProgramId) || (typeof activeProgramName !== 'undefined' && activeProgramName ? activeProgramName.toLowerCase() : '') || 'sebile';
     showCustomConfirm(
         "Delete Memory Entry",
         "Are you sure you want to permanently delete this memory entry? The program will forget this context immediately.",
@@ -7222,13 +7281,11 @@ async function openDataBank() {
     document.getElementById('databank-modal').style.display = 'flex';
     switchDataBankTab('upload');
     loadDataBankFiles();
-    currentEditingProgramId = (typeof activeProgramId !== 'undefined' && activeProgramId) || currentEditingProgramId;
-    if (!currentEditingProgramId) {
+    if (!activeProgramId) {
         try {
             const res = await fetch(`/history?session_id=default&t=${Date.now()}`);
             const data = await res.json();
             if (data.active_program) {
-                currentEditingProgramId = data.active_program;
                 activeProgramId = data.active_program;
             }
         } catch (e) {
@@ -7538,7 +7595,14 @@ function buildLorebookCard(book) {
         exportBtn.title = 'Export embedded lorebook';
         exportBtn.style.cssText = 'width: 26px; height: 26px; border-radius: 6px; flex-shrink: 0;';
         exportBtn.innerHTML = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="display:block"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"></path></svg>`;
-        exportBtn.onclick = e => { e.stopPropagation(); window.location.href = `/api/programs/${encodeURIComponent(book.program_id || '')}/export/lorebook`; };
+        exportBtn.onclick = async e => {
+            e.stopPropagation();
+            try {
+                await downloadFile(`/api/programs/${encodeURIComponent(book.program_id || '')}/export/lorebook`, `${book.program_id || 'lorebook'}_lorebook.json`);
+            } catch (err) {
+                showCustomAlert("Export Error", "Failed to export lorebook: " + err.message);
+            }
+        };
         headerActions.appendChild(exportBtn);
     }
     if (book.source === 'file') {
@@ -7547,7 +7611,14 @@ function buildLorebookCard(book) {
         exportBtn.title = 'Export lorebook';
         exportBtn.style.cssText = 'width: 26px; height: 26px; border-radius: 6px; flex-shrink: 0;';
         exportBtn.innerHTML = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="display:block"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"></path></svg>`;
-        exportBtn.onclick = e => { e.stopPropagation(); window.location.href = `/api/lorebooks/${encodeURIComponent(book.filename)}/export`; };
+        exportBtn.onclick = async e => {
+            e.stopPropagation();
+            try {
+                await downloadFile(`/api/lorebooks/${encodeURIComponent(book.filename)}/export`, book.filename || 'lorebook.json');
+            } catch (err) {
+                showCustomAlert("Export Error", "Failed to export lorebook: " + err.message);
+            }
+        };
         const delBtn = document.createElement('button');
         delBtn.className = 'action-icon-btn';
         delBtn.title = 'Delete lorebook';
