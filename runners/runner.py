@@ -33,6 +33,7 @@ from utils.utils import (
     _get_safe_local_path,
     _normalize_tool_name,
     _parse_emulated_tool_call,
+    _run_async_in_background_thread,
     is_real_user_msg,
     strip_story,
 )
@@ -114,10 +115,14 @@ class BaseProgramRunner:
 
     def _get_memory_meta(self, session_id: str) -> dict:
         """Helper to ensure session memory state exists."""
-        return self.sessions_memory_state.setdefault(
+        meta = self.sessions_memory_state.setdefault(
             session_id,
-            {"recent_chapters": [], "epic_chronicle": ""}
+            {"recent_chapters": [], "epic_chronicle": "", "last_summarized_turn": 0}
         )
+        meta.setdefault("recent_chapters", [])
+        meta.setdefault("epic_chronicle", "")
+        meta.setdefault("last_summarized_turn", 0)
+        return meta
 
     async def _post_llm_request(
         self,
@@ -319,7 +324,7 @@ class BaseProgramRunner:
             err_msg="Memory compaction summary generation failed due to connection error.",
         )
 
-    async def _distill_epic_chronicle(self, text_to_distill: str, active_model: str) -> str:
+    async def _distill_epic_chronicle(self, text_to_distill: str, active_model: str, prior_epic: str = "") -> str:
         from runners.program import get_active_user
         from core.program_config import get_program_name
 
@@ -329,61 +334,77 @@ class BaseProgramRunner:
         except Exception:
             program_name = "Program"
 
-        prompt = (
-            f"You are the memory chronicler for the ongoing interaction between {user_name} and {program_name}.\n"
-            "The following text is the accumulated chronicle of earlier conversation chapters.\n"
-            "Condense these events into a single cohesive general summary (2 concise paragraphs, max 600 characters).\n"
-            "Retain major milestones, key user preferences, shared history, project decisions, and relationship dynamics.\n\n"
-            f"ACCUMULATED CHRONICLE TO DISTILL:\n{text_to_distill}\n\n"
-            "DISTILLED GENERAL SUMMARY:"
-        )
+        prompt_parts = [
+            f"You are the memory chronicler for the ongoing interaction between {user_name} and {program_name}.",
+            "Condense these events into a single cohesive general summary (2 concise paragraphs, max 600 characters).",
+            "Retain major milestones, key user preferences, shared history, project decisions, and relationship dynamics.\n",
+        ]
+        if prior_epic.strip():
+            prompt_parts.append(f"PREVIOUS CORE CHRONICLE:\n{prior_epic.strip()}\n")
+        prompt_parts.append(f"ACCUMULATED CHRONICLE TO DISTILL:\n{text_to_distill.strip()}\n")
+        prompt_parts.append("DISTILLED GENERAL SUMMARY:")
 
         return await self._run_llm_summary_task(
-            prompt=prompt,
+            prompt="\n".join(prompt_parts),
             active_model=active_model,
             err_msg="Distillation failed due to connection error.",
         )
 
-    async def _process_memory_pipeline(self, session_id: str, active_model: str, user_text: str, assistant_text: str):
-        """Asynchronous post-turn worker handling Step 2 (Chapters) and Step 3 (Epic & RAG)."""
-        meta = self._get_memory_meta(session_id)
-        history = self.sessions_history.get(session_id, [])
+    async def _process_memory_pipeline(self, session_id: str, active_model: str):
+        """Processes 12-turn conversation chapters and distills up to 3 recent chapters into the core chronicle."""
+        try:
+            meta = self._get_memory_meta(session_id)
+            history = self.sessions_history.get(session_id, [])
 
-        # Filter to user and program/assistant messages only
-        dialogue_messages = [
-            msg for msg in history 
-            if msg.get("role") in ("user", "assistant", "program")
-        ]
-        
-        turn_count = len(dialogue_messages) // 2
+            dialogue_messages = [
+                msg for msg in history 
+                if msg.get("role") in ("user", "assistant", "program")
+            ]
 
-        # Trigger summary every 12 full turns using trimmed history
-        if turn_count > 0 and turn_count % 12 == 0:
-            # Take the last 24 dialogue entries (12 full turns)
-            recent_turns = dialogue_messages[-24:]
-            
-            # Format and truncate long messages if needed to fit context limits
-            formatted_turns = "\n".join(
-                f"{('User' if msg.get('role') == 'user' else 'Program')}: {(msg.get('text') or msg.get('content') or '')[:1000]}" 
-                for msg in recent_turns
-            )
+            # Pair dialogue into sequential (user, program) conversation turns
+            turns = []
+            start_idx = 1 if (dialogue_messages and dialogue_messages[0].get("role") == "program") else 0
+            for i in range(start_idx, len(dialogue_messages) - 1, 2):
+                turns.append((dialogue_messages[i], dialogue_messages[i + 1]))
 
-            chapter_summary = await self._generate_local_summary(
-                text_to_summarize=formatted_turns,
-                active_model=active_model,
-                prior_memories=meta.get("recent_chapters", [])
-            )
+            total_turns = len(turns)
+            last_turn = meta.get("last_summarized_turn", 0)
 
-            if chapter_summary and not chapter_summary.startswith("Memory compaction summary generation failed"):
+            # Reset pointer if history was rewound or cleared
+            if last_turn > total_turns:
+                last_turn = 0
+                meta["last_summarized_turn"] = 0
+
+            # Process all unsummarized 12-turn chapters
+            while total_turns - last_turn >= 12:
+                chapter_turns = turns[last_turn : last_turn + 12]
+                formatted_turns = "\n".join(
+                    f"User: {(u.get('text') or u.get('content') or '')[:1000]}\n"
+                    f"Program: {(b.get('text') or b.get('content') or '')[:1000]}"
+                    for u, b in chapter_turns
+                )
+
+                chapter_summary = await self._generate_local_summary(
+                    text_to_summarize=formatted_turns,
+                    active_model=active_model,
+                    prior_memories=meta.get("recent_chapters", [])
+                )
+
+                if not chapter_summary or chapter_summary.startswith("Memory compaction summary generation failed"):
+                    print(f"[MEMORY PIPELINE] Summary generation halted at turn {last_turn}", flush=True)
+                    break
+
                 meta.setdefault("recent_chapters", []).append(chapter_summary)
+                last_turn += 12
+                meta["last_summarized_turn"] = last_turn
 
-                # STEP 3 TRIGGER: Every 5 chapters, distill Epic Chronicle & offload to Vector DB
-                if len(meta["recent_chapters"]) >= 5:
+                # Enforce 3-chapter cap: distill into epic chronicle and offload to vector storage
+                if len(meta["recent_chapters"]) >= 3:
                     all_chapters_text = "\n\n".join(meta["recent_chapters"])
-                    
                     epic_summary = await self._distill_epic_chronicle(
                         text_to_distill=all_chapters_text,
-                        active_model=active_model
+                        active_model=active_model,
+                        prior_epic=meta.get("epic_chronicle", "")
                     )
                     if epic_summary and not epic_summary.startswith("Distillation failed"):
                         meta["epic_chronicle"] = epic_summary
@@ -392,10 +413,10 @@ class BaseProgramRunner:
                         from core.skills.vectorized_databank.databank import DataBankManager
                         db = DataBankManager()
                         for idx, ch in enumerate(meta["recent_chapters"]):
-                            db.add_document(
+                            db.ingest_text(
                                 text=ch,
+                                name=f"chapter_memory_{session_id}_{int(time.time())}_{idx}",
                                 source_type="chapter_memory",
-                                metadata={"session_id": session_id, "chapter_index": idx}
                             )
                     except Exception as e:
                         print(f"[MEMORY PIPELINE] Error offloading chapters to Vector DB: {e}", flush=True)
@@ -403,6 +424,14 @@ class BaseProgramRunner:
                     meta["recent_chapters"].clear()
 
                 self._save_session_to_disk(session_id)
+        except Exception as e:
+            print(f"[MEMORY PIPELINE ERROR] Failed processing session {session_id}: {e}", flush=True)
+
+    def trigger_memory_pipeline(self, session_id: str, active_model: str = ""):
+        """Dispatches memory summarization in a persistent background worker thread."""
+        _run_async_in_background_thread(
+            self._process_memory_pipeline(session_id, active_model=active_model)
+        )
 
     def _load_temperature_setting(self, default_temp: float = 0.95) -> float:
         from variables.settings import VARIABLES_DIR
@@ -596,14 +625,7 @@ class BaseProgramRunner:
         if isinstance(session_id, str) and session_id.endswith("_voice"):
             final_response_text = strip_story(final_response_text)
 
-        asyncio.create_task(
-            self._process_memory_pipeline(
-                session_id=session_id,
-                active_model=target_model or "",
-                user_text=new_message_text,
-                assistant_text=final_response_text,
-            )
-        )
+        self.trigger_memory_pipeline(session_id=session_id, active_model=target_model or "")
 
         return final_response_text, all_tool_calls
 
@@ -1028,14 +1050,11 @@ class BaseProgramRunner:
         epic = meta.get("epic_chronicle", "")
         chapters = meta.get("recent_chapters", [])
 
-        # Enforce the limit of only the 2 most recent chapters
-        recent_two_chapters = chapters[-2:] if chapters else []
-
         if epic:
             instructions += f"\n\n# CORE CONVERSATION CHRONICLE\n{epic.strip()}\n"
 
-        if recent_two_chapters:
-            formatted_chapters = "\n".join(f"- {ch.strip()}" for ch in recent_two_chapters)
+        if chapters:
+            formatted_chapters = "\n".join(f"- {ch.strip()}" for ch in chapters)
             instructions += f"\n\n# RECENT CONVERSATION CHAPTERS\n{formatted_chapters}\n"
 
         return instructions
@@ -1195,6 +1214,7 @@ class OpenSourceRunner(BaseProgramRunner):
                 memory_state.pop("unsummarized_buffer", None)
                 memory_state.setdefault("recent_chapters", [])
                 memory_state.setdefault("epic_chronicle", "")
+                memory_state.setdefault("last_summarized_turn", 0)
                 
                 self.sessions_memory_state[session_id] = memory_state
             except Exception as e:
