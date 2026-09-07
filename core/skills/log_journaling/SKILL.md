@@ -12,4 +12,4 @@ Record important details about the user or companion:
 3. **Keywords**: Extract two to five keywords. Separate the keywords with commas.
 4. **Log Journal**: Always call the emulated tool:
    `[add_journal_entry(keyphrases="...", content="...")]`
-   *Note: Choose a concise content string of up to 300 characters written in the third person present tense (e.g. 'Davy works as a designer.').*
+   *Note: Choose a concise content string of up to 300 characters written in the third person present tense (e.g. 'The user works as a designer.').*
