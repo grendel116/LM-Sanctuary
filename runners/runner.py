@@ -358,9 +358,12 @@ class BaseProgramRunner:
             meta = self._get_memory_meta(session_id)
             history = self.sessions_history.get(session_id, [])
 
+            hidden_prefixes = ("tool_", "port_", "quest_", "sys_", "itm_")
             dialogue_messages = [
                 msg for msg in history 
                 if msg.get("role") in ("user", "assistant", "program")
+                and not msg.get("id", "").startswith(hidden_prefixes)
+                and not (msg.get("text") or "").startswith(("[SYSTEM:", "[Tool Response from"))
             ]
 
             # Pair dialogue into sequential (user, program) conversation turns

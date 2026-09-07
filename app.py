@@ -2998,8 +2998,14 @@ def get_program_journals():
                 runner._load_session_from_disk(session_id)
             memory_meta = runner._get_memory_meta(session_id)
 
+        hidden_prefixes = ("tool_", "port_", "quest_", "sys_", "itm_")
         history = runner.sessions_history.get(session_id, [])
-        dialogue = [m for m in history if m.get("role") in ("user", "assistant", "program")]
+        dialogue = [
+            m for m in history 
+            if m.get("role") in ("user", "assistant", "program")
+            and not m.get("id", "").startswith(hidden_prefixes)
+            and not (m.get("text") or "").startswith(("[SYSTEM:", "[Tool Response from"))
+        ]
         turns_count = len(dialogue) // 2
         last_turn = memory_meta.get("last_summarized_turn", 0)
         if turns_count - last_turn >= 12:
