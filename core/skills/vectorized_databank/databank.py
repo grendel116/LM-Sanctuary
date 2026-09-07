@@ -213,16 +213,18 @@ class DataBankManager:
         return self.ingest_text(clean_text, name, "url")
 
     def list_documents(self) -> list:
-        """Lists all documents registered in databank.json."""
+        """Lists all uploaded documents and scraped URLs registered in databank.json."""
         data = self._load_data(self.db_path)
         
         chunk_counts = {}
-        for chunk in data["chunks"]:
+        for chunk in data.get("chunks", []):
             doc_id = chunk["doc_id"]
             chunk_counts[doc_id] = chunk_counts.get(doc_id, 0) + 1
             
         results = []
-        for doc in data["documents"]:
+        for doc in data.get("documents", []):
+            if doc.get("source_type") not in ("file", "url"):
+                continue
             doc_copy = doc.copy()
             doc_copy["chunk_count"] = chunk_counts.get(doc["id"], 0)
             results.append(doc_copy)
@@ -339,24 +341,3 @@ class DataBankManager:
 
         results.sort(key=lambda x: x["score"], reverse=True)
         return results[:top_k]
-
-    def delete_chat_history(self, session_id: str = None) -> bool:
-        """Deletes chat history documents and chunks from the databank on session reset."""
-        data = self._load_data(self.db_path)
-        
-        # Identify documents designated as chat history
-        chat_doc_ids = {
-            doc["id"] for doc in data["documents"] 
-            if doc.get("source_type") == "chat_history"
-        }
-        
-        if not chat_doc_ids:
-            return False
-
-        # Filter out chat history documents and their corresponding vector chunks
-        data["documents"] = [d for d in data["documents"] if d["id"] not in chat_doc_ids]
-        data["chunks"] = [c for c in data["chunks"] if c["doc_id"] not in chat_doc_ids]
-
-        self._save_data(self.db_path, data)
-        print("[Data Bank] Cleaned up chat history on session reset.")
-        return True

@@ -122,6 +122,8 @@ class BaseProgramRunner:
         meta.setdefault("recent_chapters", [])
         meta.setdefault("epic_chronicle", "")
         meta.setdefault("last_summarized_turn", 0)
+        if len(meta["recent_chapters"]) > 2:
+            meta["recent_chapters"] = meta["recent_chapters"][-2:]
         return meta
 
     async def _post_llm_request(
@@ -398,30 +400,16 @@ class BaseProgramRunner:
                 last_turn += 12
                 meta["last_summarized_turn"] = last_turn
 
-                # Enforce 3-chapter cap: distill into epic chronicle and offload to vector storage
-                if len(meta["recent_chapters"]) >= 3:
-                    all_chapters_text = "\n\n".join(meta["recent_chapters"])
+                # Maintain strictly at most 2 recent chapters; distill older chapters into the single epic chronicle
+                while len(meta["recent_chapters"]) > 2:
+                    oldest_chapter = meta["recent_chapters"].pop(0)
                     epic_summary = await self._distill_epic_chronicle(
-                        text_to_distill=all_chapters_text,
+                        text_to_distill=oldest_chapter,
                         active_model=active_model,
                         prior_epic=meta.get("epic_chronicle", "")
                     )
                     if epic_summary and not epic_summary.startswith("Distillation failed"):
                         meta["epic_chronicle"] = epic_summary
-
-                    try:
-                        from core.skills.vectorized_databank.databank import DataBankManager
-                        db = DataBankManager()
-                        for idx, ch in enumerate(meta["recent_chapters"]):
-                            db.ingest_text(
-                                text=ch,
-                                name=f"chapter_memory_{session_id}_{int(time.time())}_{idx}",
-                                source_type="chapter_memory",
-                            )
-                    except Exception as e:
-                        print(f"[MEMORY PIPELINE] Error offloading chapters to Vector DB: {e}", flush=True)
-
-                    meta["recent_chapters"].clear()
 
                 self._save_session_to_disk(session_id)
         except Exception as e:
@@ -1215,6 +1203,8 @@ class OpenSourceRunner(BaseProgramRunner):
                 memory_state.setdefault("recent_chapters", [])
                 memory_state.setdefault("epic_chronicle", "")
                 memory_state.setdefault("last_summarized_turn", 0)
+                if len(memory_state["recent_chapters"]) > 2:
+                    memory_state["recent_chapters"] = memory_state["recent_chapters"][-2:]
                 
                 self.sessions_memory_state[session_id] = memory_state
             except Exception as e:

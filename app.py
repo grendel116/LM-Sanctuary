@@ -3005,9 +3005,13 @@ def get_program_journals():
         if turns_count - last_turn >= 12:
             runner.trigger_memory_pipeline(session_id)
 
+        recent_chapters = memory_meta.get('recent_chapters', [])
+        if len(recent_chapters) > 2:
+            recent_chapters = recent_chapters[-2:]
+
         return jsonify({
             'journals': entries,
-            'recent_chapters': memory_meta.get('recent_chapters', []),
+            'recent_chapters': recent_chapters,
             'epic_chronicle': memory_meta.get('epic_chronicle', '')
         })
     except Exception as e:
