@@ -8386,6 +8386,9 @@ async function cancelGeneration() {
         proactiveAbortController.abort();
         proactiveAbortController = null;
     }
+    if (typeof isProactiveRunning !== 'undefined') {
+        isProactiveRunning = false;
+    }
     setGenerating(false);
     userInput.disabled = false;
     userInput.placeholder = "Ask " + (activeProgramName || "Program");
@@ -8464,7 +8467,6 @@ if (sessionDisplay && sessionId) {
 // Retrieve selected model from localStorage or use default
 let selectedModel = safeLocalStorage.getItem('program_selected_model') || 'local-llm';
 let lastInteractionTime = Date.now();
-let hasTriggeredProactive = false;
 let proactiveAbortController = null;
 let activeProgramName = "";
 let activeProgramId = "";
@@ -8665,23 +8667,36 @@ if (document.readyState === 'loading') {
 
 // Proactive idle action trigger and functions
 // --- Proactive Thought System ---
+const PROACTIVE_INITIAL_DELAY_MS = 300000; // 5 minutes of inactivity before first thought
+const PROACTIVE_UPDATE_INTERVAL_MS = 14400000; // 4 hours of continued inactivity between updates
+
 let lastUserMessageTime = Date.now();
 let lastUserActivityTime = Date.now();
 let hasTriggeredInitialProactive = false;
 let lastProactiveThoughtTime = 0;
 let currentProactiveThoughtText = "";
+let isProactiveRunning = false;
 
 function recordUserActivity() {
     lastUserActivityTime = Date.now();
+    if (hasTriggeredInitialProactive || lastProactiveThoughtTime > 0) {
+        hasTriggeredInitialProactive = false;
+        lastProactiveThoughtTime = 0;
+    }
+    if (proactiveAbortController) {
+        proactiveAbortController.abort();
+        proactiveAbortController = null;
+        isProactiveRunning = false;
+    }
 }
 
-window.addEventListener('mousemove', recordUserActivity, { passive: true });
-window.addEventListener('keydown', recordUserActivity, { passive: true });
-window.addEventListener('click', recordUserActivity, { passive: true });
-window.addEventListener('scroll', recordUserActivity, { passive: true });
+['mousemove', 'keydown', 'click', 'scroll', 'touchstart', 'touchmove', 'pointerdown', 'wheel'].forEach(evt => {
+    window.addEventListener(evt, recordUserActivity, { passive: true });
+});
 
 async function triggerProactiveAction() {
-    if (isGenerating) return;
+    if (isGenerating || isProactiveRunning) return;
+    isProactiveRunning = true;
     proactiveAbortController = new AbortController();
     const signal = proactiveAbortController.signal;
     const targetSession = sessionId;
@@ -8709,6 +8724,7 @@ async function triggerProactiveAction() {
         if (err.name === 'AbortError') return;
         console.error("Proactive action error:", err);
     } finally {
+        isProactiveRunning = false;
         proactiveAbortController = null;
     }
 }
@@ -8761,20 +8777,22 @@ function hideThoughtBubbleOverlay() {
 }
 
 // Periodically check for proactive thoughts:
-// 1. Initial thought triggers after 5 minutes (300,000 ms) of UI inactivity.
-// 2. Subsequent thoughts trigger at 4-hour intervals (14,400,000 ms) since the previous thought.
+// 1. Initial thought: after 5 minutes of absent UI activity.
+// 2. Subsequent thoughts: every 4 hours of continuous inactivity since the previous thought.
 setInterval(async () => {
-    if (isGenerating) return;
+    if (isGenerating || isProactiveRunning) return;
     const idleSinceActivity = Date.now() - lastUserActivityTime;
     const userInput = document.getElementById('user-input');
     if (!userInput || userInput.disabled) return;
 
     // First thought: after 5 minutes (300,000 ms) of absent UI activity
-    if (!hasTriggeredInitialProactive && idleSinceActivity >= 300000) {
+    if (!hasTriggeredInitialProactive && idleSinceActivity >= PROACTIVE_INITIAL_DELAY_MS) {
         await triggerProactiveAction();
     }
-    // Subsequent thoughts: every 4 hours (14,400,000 ms) after the previous thought
-    else if (hasTriggeredInitialProactive && lastProactiveThoughtTime > 0 && (Date.now() - lastProactiveThoughtTime >= 14400000)) {
+    // Subsequent thoughts: every 4 hours (14,400,000 ms) of continued inactivity after the previous thought
+    else if (hasTriggeredInitialProactive && lastProactiveThoughtTime > 0 &&
+             idleSinceActivity >= PROACTIVE_UPDATE_INTERVAL_MS &&
+             (Date.now() - lastProactiveThoughtTime >= PROACTIVE_UPDATE_INTERVAL_MS)) {
         await triggerProactiveAction();
     }
 }, 10000);
