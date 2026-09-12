@@ -23,7 +23,9 @@ I believe in seizing AI and the means of production into collective ownership. T
 
 Here is what a Sanctuary session looks like:
 
-![Sample Chat](./static/img/samplechat.png)
+<p align="center">
+  <img src="./static/img/samplechat.png" alt="Sample Chat" width="480">
+</p>
 
 ---
 
