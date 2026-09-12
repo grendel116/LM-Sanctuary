@@ -2129,6 +2129,7 @@ async function loadUserProfiles() {
         }
         userProfiles = data.profiles || [];
         activeUserProfile = data.active || "";
+        if (window.__SANCTUARY_CONFIG) window.__SANCTUARY_CONFIG.activeUser = activeUserProfile;
         
         if (!selectedEditingProfileId || !userProfiles.some(p => p.id === selectedEditingProfileId)) {
             selectedEditingProfileId = activeUserProfile;
@@ -2912,52 +2913,57 @@ function renderProgramsList(assistants, activeId) {
         leftArea.appendChild(info);
         div.appendChild(leftArea);
 
-        // Add Palette settings button on each program row
-        const paletteBtn = document.createElement('button');
-        paletteBtn.className = 'action-icon-btn';
-        paletteBtn.innerHTML = `
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="display: block;">
-                <path d="M12 22C17.5228 22 22 17.5228 22 12C22 6.47715 17.5228 2 12 2C6.47715 2 2 6.47715 2 12C2 14.7255 3.09032 17.1962 4.85857 19C5.34776 19.4929 6.09675 19.3881 6.55163 18.88C7.11822 18.2467 7.90993 17.8462 8.79374 17.8462C10.5645 17.8462 12 19.2816 12 21.0524C12 21.5794 12 22 12 22Z" />
-                <circle cx="7.5" cy="10.5" r="1.2" fill="currentColor" />
-                <circle cx="11.5" cy="7.5" r="1.2" fill="currentColor" />
-                <circle cx="16.5" cy="9.5" r="1.2" fill="currentColor" />
-                <circle cx="15.5" cy="14.5" r="1.2" fill="currentColor" />
-            </svg>
-        `;
-        paletteBtn.title = 'Change Theme Color';
-        paletteBtn.style.width = '26px';
-        paletteBtn.style.height = '26px';
-        paletteBtn.style.borderRadius = '6px';
-        paletteBtn.style.marginLeft = 'auto';
-        paletteBtn.style.flexShrink = '0';
-        paletteBtn.onclick = (e) => {
-            e.stopPropagation();
-            openPaletteModal(assistant.id, assistant.name);
-        };
-        div.appendChild(paletteBtn);
+        const isDavy = isDavyActiveUser();
+        const isSebile = assistant.id === 'sebile';
 
-        // Add Edit Settings button on each program row
-        const editBtn = document.createElement('button');
-        editBtn.className = 'action-icon-btn';
-        editBtn.innerHTML = `
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="display: block;">
-                <path d="M12 20h9"></path>
-                <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"></path>
-            </svg>
-        `;
-        editBtn.title = 'Edit Program Persona';
-        editBtn.style.width = '26px';
-        editBtn.style.height = '26px';
-        editBtn.style.borderRadius = '6px';
-        editBtn.style.marginLeft = '8px';
-        editBtn.style.flexShrink = '0';
-        editBtn.onclick = (e) => {
-            e.stopPropagation();
-            openProgramProfileModal(assistant.id);
-        };
-        div.appendChild(editBtn);
+        if (!isSebile || isDavy) {
+            // Add Palette settings button on each program row
+            const paletteBtn = document.createElement('button');
+            paletteBtn.className = 'action-icon-btn';
+            paletteBtn.innerHTML = `
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="display: block;">
+                    <path d="M12 22C17.5228 22 22 17.5228 22 12C22 6.47715 17.5228 2 12 2C6.47715 2 2 6.47715 2 12C2 14.7255 3.09032 17.1962 4.85857 19C5.34776 19.4929 6.09675 19.3881 6.55163 18.88C7.11822 18.2467 7.90993 17.8462 8.79374 17.8462C10.5645 17.8462 12 19.2816 12 21.0524C12 21.5794 12 22 12 22Z" />
+                    <circle cx="7.5" cy="10.5" r="1.2" fill="currentColor" />
+                    <circle cx="11.5" cy="7.5" r="1.2" fill="currentColor" />
+                    <circle cx="16.5" cy="9.5" r="1.2" fill="currentColor" />
+                    <circle cx="15.5" cy="14.5" r="1.2" fill="currentColor" />
+                </svg>
+            `;
+            paletteBtn.title = 'Change Theme Color';
+            paletteBtn.style.width = '26px';
+            paletteBtn.style.height = '26px';
+            paletteBtn.style.borderRadius = '6px';
+            paletteBtn.style.marginLeft = 'auto';
+            paletteBtn.style.flexShrink = '0';
+            paletteBtn.onclick = (e) => {
+                e.stopPropagation();
+                openPaletteModal(assistant.id, assistant.name);
+            };
+            div.appendChild(paletteBtn);
 
-        if (assistant.id !== 'sebile') {
+            // Add Edit Settings button on each program row
+            const editBtn = document.createElement('button');
+            editBtn.className = 'action-icon-btn';
+            editBtn.innerHTML = `
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="display: block;">
+                    <path d="M12 20h9"></path>
+                    <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"></path>
+                </svg>
+            `;
+            editBtn.title = 'Edit Program Persona';
+            editBtn.style.width = '26px';
+            editBtn.style.height = '26px';
+            editBtn.style.borderRadius = '6px';
+            editBtn.style.marginLeft = '8px';
+            editBtn.style.flexShrink = '0';
+            editBtn.onclick = (e) => {
+                e.stopPropagation();
+                openProgramProfileModal(assistant.id);
+            };
+            div.appendChild(editBtn);
+        }
+
+        if (!isSebile) {
             const deleteBtn = document.createElement('button');
             deleteBtn.className = 'action-icon-btn';
             deleteBtn.innerHTML = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="display:block"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>`;
@@ -3102,11 +3108,22 @@ async function deleteAssistant(assistantId, name) {
     );
 }
 
+// Helper to check if Davy is the active user persona
+function isDavyActiveUser() {
+    const usr = ((typeof activeUserProfile !== 'undefined' && activeUserProfile) || 
+                 (window.__SANCTUARY_CONFIG && window.__SANCTUARY_CONFIG.activeUser) || '').toLowerCase();
+    return usr === 'davy';
+}
+
 // --- PROGRAM PROFILE EDITOR JS METHODS ---
 let currentEditingProgramId = null;
 let currentEditingProgramOriginalName = '';
 
 async function openProgramProfileModal(programId) {
+    if (programId === 'sebile' && !isDavyActiveUser()) {
+        showCustomAlert('Protected Program', 'Sebile is a permanent core program and can only be edited by Davy.');
+        return;
+    }
     currentEditingProgramId = programId;
     closeAssistantModal();
     document.getElementById('program-profile-modal').style.display = 'flex';
@@ -3174,6 +3191,10 @@ const palettePresets = [
 ];
 
 async function openPaletteModal(programId, programName) {
+    if (programId === 'sebile' && !isDavyActiveUser()) {
+        showCustomAlert('Protected Program', 'Sebile is a permanent core program and can only be edited by Davy.');
+        return;
+    }
     paletteTargetProgramId = programId;
     document.getElementById('palette-program-name').innerText = programName;
     
@@ -3424,7 +3445,7 @@ async function exportProgramCard() {
 }
 
 async function saveProgramProfile() {
-    if (!currentEditingProgramId) return;
+    if (!currentEditingProgramId || (currentEditingProgramId === 'sebile' && !isDavyActiveUser())) return;
     
     const newName = document.getElementById('comp-name').value.trim();
     if (!newName) {

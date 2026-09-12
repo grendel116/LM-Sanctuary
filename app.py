@@ -2651,6 +2651,11 @@ def update_program_palette():
             return jsonify({'error': 'Missing program_id'}), 400
         if not color:
             return jsonify({'error': 'Missing color'}), 400
+
+        if program_id.lower() == 'sebile':
+            from runners.program import get_active_user
+            if get_active_user().lower() != 'davy':
+                return jsonify({'error': 'Cannot modify theme for default program Sebile'}), 400
             
         # Validate hex color
         if not re.match(r'^#[0-9a-fA-F]{6}$', color):
@@ -2744,14 +2749,19 @@ def rename_program():
         if not os.path.exists(old_path):
             return jsonify({'error': f"Program '{program_id}' does not exist"}), 404
             
-        # If the program is sebile, we keep the folder/id as 'sebile' but update the name in sebile.json
+        # Sebile is a permanent core program and can only be renamed/edited by Davy
         if program_id == 'sebile':
+            from runners.program import get_active_user
+            if get_active_user().lower() != 'davy':
+                return jsonify({'error': 'Cannot rename default program Sebile'}), 400
+            
             json_path = os.path.join(old_path, "sebile.json")
             if os.path.exists(json_path):
                 try:
                     with open(json_path, "r", encoding="utf-8") as f:
                         jdata = json.load(f)
-                    jdata["name"] = new_name
+                    data_block = jdata.get("data", jdata)
+                    data_block["name"] = new_name
                     with open(json_path, "w", encoding="utf-8") as f:
                         json.dump(jdata, f, indent=2, ensure_ascii=False)
                 except Exception as e:
@@ -2898,6 +2908,11 @@ def save_program_profile():
         program_id = incoming.get('program_id')
         if not program_id:
             return jsonify({'error': 'Missing program_id'}), 400
+
+        if program_id.lower() == 'sebile':
+            from runners.program import get_active_user
+            if get_active_user().lower() != 'davy':
+                return jsonify({'error': 'Cannot modify default program Sebile'}), 400
 
         program_dir = os.path.normpath(os.path.join(PROGRAMS_DIR, program_id))
         if not os.path.exists(program_dir):
