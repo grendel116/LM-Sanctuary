@@ -1747,22 +1747,33 @@ function applyTheme(programId, theme) {
         if (theme.primary_glow) root.style.setProperty('--primary-glow', theme.primary_glow);
         if (theme.program_bubble) root.style.setProperty('--program-bubble', theme.program_bubble);
         if (theme.send_btn_hover) root.style.setProperty('--send-btn-hover', theme.send_btn_hover);
-        if (theme.accent_green) {
-            root.style.setProperty('--accent-green', theme.accent_green);
+        
+        const actionColor = theme.action_color || theme.accent_green;
+        if (actionColor) {
+            root.style.setProperty('--action-color', actionColor);
+            root.style.setProperty('--accent-green', actionColor);
         }
-        if (theme.quote_blue) root.style.setProperty('--quote-blue', theme.quote_blue);
+        
+        const quoteColor = theme.quote_color || theme.quote_blue;
+        if (quoteColor) {
+            root.style.setProperty('--quote-color', quoteColor);
+            root.style.setProperty('--quote-blue', quoteColor);
+        }
+        
         if (theme.primary_btn_text) root.style.setProperty('--primary-btn-text', theme.primary_btn_text);
     } else {
         // Default theme values
         root.style.setProperty('--main-color', '#8b5cf6');
-        root.style.setProperty('--accent-color-a', '#b19cd9');
-        root.style.setProperty('--accent-color-b', '#79aeff');
+        root.style.setProperty('--accent-color-a', '#cbb2e8');
+        root.style.setProperty('--accent-color-b', '#8b5cf6');
         root.style.setProperty('--primary-accent', '#8b5cf6');
         root.style.setProperty('--primary-glow', 'rgba(139, 92, 246, 0.08)');
         root.style.setProperty('--program-bubble', 'rgba(24, 22, 28, 0.85)');
         root.style.setProperty('--send-btn-hover', 'rgba(45, 38, 56, 0.75)');
-        root.style.setProperty('--accent-green', '#b19cd9');
-        root.style.setProperty('--quote-blue', '#79aeff');
+        root.style.setProperty('--action-color', '#cbb2e8');
+        root.style.setProperty('--quote-color', '#d6c2ef');
+        root.style.setProperty('--accent-green', '#cbb2e8');
+        root.style.setProperty('--quote-blue', '#d6c2ef');
         root.style.setProperty('--primary-btn-text', '#ffffff');
     }
 }

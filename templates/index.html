@@ -36,7 +36,9 @@
         {% if theme.primary_glow %}--primary-glow: {{ theme.primary_glow }};{% endif %}
         {% if theme.program_bubble %}--program-bubble: {{ theme.program_bubble }};{% endif %}
         {% if theme.send_btn_hover %}--send-btn-hover: {{ theme.send_btn_hover }};{% endif %}
-        {% if theme.accent_green %}--accent-green: {{ theme.accent_green }};{% endif %}
+        {% if theme.action_color or theme.accent_green %}--action-color: {{ theme.action_color or theme.accent_green }}; --accent-green: {{ theme.action_color or theme.accent_green }};{% endif %}
+        {% if theme.quote_color or theme.quote_blue %}--quote-color: {{ theme.quote_color or theme.quote_blue }}; --quote-blue: {{ theme.quote_color or theme.quote_blue }};{% endif %}
+        {% if theme.primary_btn_text %}--primary-btn-text: {{ theme.primary_btn_text }};{% endif %}
     }
     </style>
     {% endif %}

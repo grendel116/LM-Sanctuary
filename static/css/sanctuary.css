@@ -42,8 +42,10 @@ Theme overrides (Jinja) remain inline in the HTML template.
     --user-bubble: #1f1f22; /* Neutral Gray Bubble */
     --program-bubble: rgba(24, 22, 28, 0.85); /* Desaturated Dark Purple Program Bubble */
     --send-btn-hover: rgba(45, 38, 56, 0.75); /* Soft Purple Send Button Hover */
-    --accent-green: #b19cd9; /* Soft purple for hover */
-    --quote-blue: #79aeff; /* Gentle moonlit blue for quotations */
+    --action-color: #cbb2e8; /* Soft readable purple for action text/italics */
+    --quote-color: #d6c2ef; /* Luminous readable purple for quotations */
+    --accent-green: var(--action-color); /* Legacy alias */
+    --quote-blue: var(--quote-color); /* Legacy alias */
     --primary-btn-text: #ffffff; /* Contrast text color on purple */
     /* Centralized glass and surface tokens */
     --glass-bg: rgba(20, 20, 25, 0.85);
@@ -961,22 +963,22 @@ header {
     box-sizing: border-box;
 }
 .message-text em {
-    color: var(--accent-green);
+    color: var(--action-color);
     font-style: italic;
 }
 .message-text blockquote {
-    border-left: 3px solid var(--quote-blue);
+    border-left: 3px solid var(--quote-color);
     padding-left: 12px;
     margin: 12px 0;
-    color: var(--quote-blue);
+    color: var(--quote-color);
     font-style: italic;
-    background: rgba(121, 174, 255, 0.05);
+    background: rgba(255, 255, 255, 0.03);
     border-radius: 0 8px 8px 0;
     padding-top: 6px;
     padding-bottom: 6px;
 }
 .dialogue-quote {
-    color: var(--quote-blue);
+    color: var(--quote-color);
 }
 .message-text p {
     margin: 0 0 12px 0;
@@ -2633,7 +2635,7 @@ input.onboarding-input {
     padding: 1px 5px;
     border-radius: 4px;
     font-family: monospace;
-    color: var(--quote-blue);
+    color: var(--quote-color);
 }
 
 #header-status-btn:hover {
@@ -3048,7 +3050,7 @@ input.onboarding-input {
 }
 .voice-call-transcript-turn .turn-speaker.program {
     font-weight: 600;
-    color: var(--quote-blue);
+    color: var(--quote-color);
 }
 .voice-call-controls {
     display: flex;

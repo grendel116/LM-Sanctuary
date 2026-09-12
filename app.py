@@ -7,6 +7,7 @@ import importlib
 import traceback
 import threading
 import uuid
+import colorsys
 import base64
 import socket
 import httpx
@@ -3282,14 +3283,27 @@ def generate_character_theme(main_color, accent_color_a=None, accent_color_b=Non
     g = int(hex_clean[2:4], 16)
     b = int(hex_clean[4:6], 16)
     
+    # Calculate perceived brightness for primary button text contrast
     brightness = (r * 299 + g * 587 + b * 114) / 1000
     btn_text = "#121214" if brightness > 140 else "#ffffff"
     
+    # Convert base color to HLS
+    h, l, s = colorsys.rgb_to_hls(r / 255.0, g / 255.0, b / 255.0)
+    
+    # Dialogue quote color: high lightness (82%) and capped saturation (max 65%) for readability on dark backgrounds
+    quote_s = min(s, 0.65)
+    quote_l = 0.82
+    qr, qg, qb = colorsys.hls_to_rgb(h, quote_l, quote_s)
+    quote_color = f"#{int(round(qr * 255)):02x}{int(round(qg * 255)):02x}{int(round(qb * 255)):02x}"
+    
+    # Action/italics color: medium-high lightness (76%) and capped saturation (max 60%)
+    action_s = min(s, 0.60)
+    action_l = 0.76
+    ar, ag, ab = colorsys.hls_to_rgb(h, action_l, action_s)
+    action_color = f"#{int(round(ar * 255)):02x}{int(round(ag * 255)):02x}{int(round(ab * 255)):02x}"
+    
     if not accent_color_a:
-        accent_r = min(255, int(r + (255 - r) * 0.25))
-        accent_g = min(255, int(g + (255 - g) * 0.25))
-        accent_b = min(255, int(b + (255 - b) * 0.25))
-        accent_color_a = f"#{accent_r:02x}{accent_g:02x}{accent_b:02x}"
+        accent_color_a = action_color
     if not accent_color_b:
         accent_color_b = main_color
         
@@ -3301,8 +3315,10 @@ def generate_character_theme(main_color, accent_color_a=None, accent_color_b=Non
         "primary_glow": f"rgba({r}, {g}, {b}, 0.08)",
         "program_bubble": f"rgba({24 + int(r*0.04)}, {24 + int(g*0.04)}, {28 + int(b*0.04)}, 0.85)",
         "send_btn_hover": f"rgba({20 + int(r*0.12)}, {20 + int(g*0.12)}, {22 + int(b*0.12)}, 0.75)",
-        "accent_green": accent_color_a,
-        "quote_blue": main_color,
+        "quote_color": quote_color,
+        "action_color": action_color,
+        "accent_green": accent_color_a,  # Legacy alias
+        "quote_blue": quote_color,       # Legacy alias
         "primary_btn_text": btn_text
     }
 
