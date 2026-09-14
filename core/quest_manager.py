@@ -55,8 +55,10 @@ def main():
 
     # Save back to quest_log.json
     os.makedirs(os.path.dirname(QUEST_LOG_PATH), exist_ok=True)
-    with open(QUEST_LOG_PATH, 'w', encoding='utf-8') as f:
+    temp_path = QUEST_LOG_PATH + ".tmp"
+    with open(temp_path, 'w', encoding='utf-8') as f:
         json.dump(quests, f, indent=2, ensure_ascii=False)
+    os.replace(temp_path, QUEST_LOG_PATH)
 
     print(json.dumps(quest, indent=2))
 

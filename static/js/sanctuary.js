@@ -5524,6 +5524,10 @@ async function sendMessage() {
 async function continueMessage() {
     if (isGenerating) return;
     hideThoughtBubbleOverlay();
+    currentProactiveThoughtText = "";
+    lastUserMessageTime = Date.now();
+    hasTriggeredInitialProactive = false;
+    lastProactiveThoughtTime = 0;
     
     const messageRows = chatContainer.querySelectorAll('.message-row:not(#welcome-message):not(#onboarding-container)');
     if (messageRows.length === 0) {
@@ -8711,10 +8715,6 @@ let isProactiveRunning = false;
 
 function recordUserActivity() {
     lastUserActivityTime = Date.now();
-    if (hasTriggeredInitialProactive || lastProactiveThoughtTime > 0) {
-        hasTriggeredInitialProactive = false;
-        lastProactiveThoughtTime = 0;
-    }
     if (proactiveAbortController) {
         proactiveAbortController.abort();
         proactiveAbortController = null;
