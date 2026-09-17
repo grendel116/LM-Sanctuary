@@ -69,11 +69,9 @@ Place your local model weights into the `models/` directory for automatic discov
 
 | Model | Recommended Quant | VRAM / RAM Req | Best For |
 | :--- | :--- | :--- | :--- |
-| **Qwen 2.5 7B Instruct** | `Qwen2.5-7B-Instruct-Q4_K_M.gguf` | ~5 GB | General roleplay, coding, and fast tool execution |
-| **Hermes 3 (Llama 3.1 8B)** | `Hermes-3-Llama-3.1-8B-Q4_K_M.gguf` | ~6 GB | Creative storytelling, complex roleplay, and uncensored interactions |
 | **Gemma 2 9B It** | `gemma-2-9b-it-Q4_K_M.gguf` | ~7 GB | Nuanced dialogue, character personas, and knowledge grounding |
 | **Mistral Small 24B (2501)** | `Mistral-Small-24B-Instruct-2501-Q4_K_M.gguf` | ~16 GB | Deep reasoning, intricate multi-character roleplay, and complex code generation |
-| **Qwen 2.5 14B / 32B Instruct** | `Qwen2.5-14B-Instruct-Q4_K_M.gguf` | ~10 GB / ~20 GB | High-fidelity roleplay and advanced autonomous tool use |
+| **Gemma 4 31B It Heretic** | `gemma-4-31B-it-heretic.i1-Q4_K_M.gguf` | ~19–21 GB | Advanced reasoning, uncensored roleplay, deep character dialogue, and complex multi-turn interaction |
 
 ---
 
