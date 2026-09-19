@@ -887,18 +887,27 @@ def history():
         
         state_info = extract_mood(chat_history)
         
-        from core.program_config import program_name, get_program_greeting
-        welcome_message = get_program_greeting()
         active_program = get_active_program()
+        raw_group_meta = getattr(runner, "sessions_group_meta", {}).get(session_id)
+        if raw_group_meta and raw_group_meta.get("is_group"):
+            host_id = raw_group_meta.get("host_id")
+            if host_id and host_id != active_program:
+                active_program = host_id
+                os.environ["ACTIVE_PROGRAM"] = host_id
+                try:
+                    set_active_program(host_id)
+                except Exception as e:
+                    print(f"Error saving active program: {e}")
+
         if session_id and not session_id.endswith('_voice'):
             try:
                 set_active_session(session_id)
             except Exception as e:
                 print(f"Error saving active session: {e}")
         
+        from core.program_config import program_name, get_program_greeting
+        welcome_message = get_program_greeting()
         theme = load_theme(active_program)
-
-        raw_group_meta = getattr(runner, "sessions_group_meta", {}).get(session_id)
         group_meta = enrich_group_meta(raw_group_meta)
 
         return jsonify({
@@ -2660,6 +2669,20 @@ def list_sessions():
             for file in os.listdir(sessions_dir):
                 if file.endswith('.json') and not file.endswith('_voice.json'):
                     session_name = file[:-5]
+                    if session_name.startswith("group_"):
+                        fpath = os.path.join(sessions_dir, file)
+                        try:
+                            with open(fpath, "r", encoding="utf-8") as sf:
+                                sdata = json.load(sf)
+                            gm = sdata.get("group_meta")
+                            if gm and gm.get("host_id") and gm.get("host_id") != active_program:
+                                try:
+                                    os.remove(fpath)
+                                except Exception:
+                                    pass
+                                continue
+                        except Exception:
+                            pass
                     sessions.append(session_name)
         
         # Ensure 'default' is always in the list
@@ -2949,7 +2972,57 @@ def delete_program():
         if not os.path.exists(program_path):
             return jsonify({'error': f"Program '{program_id}' does not exist"}), 404
             
-        # If the deleted program is currently active, switch to Sebile first
+        # 1. Clean up all group sessions hosted by or involving this program across other programs
+        programs_dir = os.path.join(base_dir, 'core', 'programs')
+        if os.path.isdir(programs_dir):
+            for other_prog in os.listdir(programs_dir):
+                other_sessions = os.path.join(programs_dir, other_prog, 'sessions')
+                if not os.path.isdir(other_sessions):
+                    continue
+                for fname in list(os.listdir(other_sessions)):
+                    if fname.startswith('group_') and fname.endswith('.json'):
+                        fpath = os.path.join(other_sessions, fname)
+                        try:
+                            with open(fpath, 'r', encoding='utf-8') as sf:
+                                sdata = json.load(sf)
+                            gm = sdata.get('group_meta', {})
+                            if gm.get('host_id') == program_id:
+                                os.remove(fpath)
+                            elif program_id in gm.get('guest_ids', []):
+                                gm['guest_ids'] = [g for g in gm['guest_ids'] if g != program_id]
+                                sdata['group_meta'] = gm
+                                with open(fpath, 'w', encoding='utf-8') as sf:
+                                    json.dump(sdata, sf, indent=2, ensure_ascii=False)
+                        except Exception as ex:
+                            print(f"Error inspecting/cleaning group session {fname}: {ex}")
+
+        # 2. Clean up in-memory runner states
+        with runner._lock:
+            to_remove = []
+            for sid, gmeta in list(getattr(runner, 'sessions_group_meta', {}).items()):
+                if gmeta.get('host_id') == program_id:
+                    to_remove.append(sid)
+                elif program_id in gmeta.get('guest_ids', []):
+                    gmeta['guest_ids'] = [g for g in gmeta['guest_ids'] if g != program_id]
+
+            for sid in to_remove:
+                runner.sessions_history.pop(sid, None)
+                runner.sessions_group_meta.pop(sid, None)
+                runner.sessions_memory_state.pop(sid, None)
+                runner.sessions_inversion_state.pop(sid, None)
+                try:
+                    from core.skills.vectorized_databank.databank import DataBankManager
+                    DataBankManager().delete_chat_history(sid)
+                except Exception:
+                    pass
+
+        # 3. If active session belongs to deleted program or was a deleted group session, reset to default
+        from runners.program import get_active_session, set_active_session
+        curr_session = get_active_session()
+        if curr_session in to_remove:
+            set_active_session('default')
+
+        # 4. If the deleted program is currently active, switch to Sebile first
         from runners.program import get_active_program, set_active_program
         active_program = get_active_program()
         is_active = (program_id == active_program)
@@ -2957,13 +3030,14 @@ def delete_program():
             os.environ["ACTIVE_PROGRAM"] = "sebile"
             try:
                 set_active_program("sebile")
+                set_active_session("default")
             except Exception as e:
                 print(f"Error resetting active program to sebile: {e}")
                 
             # Reload program config and re-initialize the runner
             reload_program_state()
                  
-        # Delete the program folder recursively
+        # 5. Delete the program folder recursively
         shutil.rmtree(program_path)
         
         return jsonify({'status': 'success', 'switched_to': 'sebile' if is_active else None})

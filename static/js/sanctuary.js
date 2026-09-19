@@ -3432,9 +3432,13 @@ async function deleteAssistant(assistantId, name) {
                 await new Promise(resolve => setTimeout(resolve, 300));
 
                 try {
-                    if (data.switched_to === 'sebile' || activeProgram === assistantId) {
+                    const isGroupHost = (typeof currentGroupMeta !== 'undefined' && currentGroupMeta && currentGroupMeta.host_id === assistantId);
+                    if (data.switched_to === 'sebile' || (typeof activeProgramId !== 'undefined' && activeProgramId === assistantId) || (typeof activeProgram !== 'undefined' && activeProgram === assistantId) || isGroupHost) {
                         selectAssistant('sebile');
                     } else {
+                        if (typeof currentGroupMeta !== 'undefined' && currentGroupMeta && currentGroupMeta.guest_ids) {
+                            currentGroupMeta.guest_ids = currentGroupMeta.guest_ids.filter(id => id !== assistantId);
+                        }
                         const listRes = await fetch('/api/programs');
                         if (listRes.ok) {
                             const listData = await listRes.json();

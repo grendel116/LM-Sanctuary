@@ -738,6 +738,47 @@ class BaseProgramRunner:
         os.makedirs(path, exist_ok=True)
         return path
 
+    def _get_session_path(self, session_id: str) -> str:
+        safe_id = "".join(c for c in session_id if c.isalnum() or c in "-_")
+        group_meta = getattr(self, "sessions_group_meta", {}).get(session_id)
+        if group_meta and group_meta.get("host_id"):
+            return os.path.join(project_root, "core", "programs", group_meta["host_id"], "sessions", f"{safe_id}.json")
+
+        if safe_id.startswith("group_"):
+            programs_dir = os.path.join(project_root, "core", "programs")
+            if os.path.isdir(programs_dir):
+                active = get_active_program()
+                active_file = os.path.join(programs_dir, active, "sessions", f"{safe_id}.json")
+                if os.path.exists(active_file):
+                    try:
+                        with open(active_file, "r", encoding="utf-8") as f:
+                            sdata = json.load(f)
+                        gm = sdata.get("group_meta")
+                        if gm and gm.get("host_id"):
+                            if gm["host_id"] != active:
+                                return os.path.join(programs_dir, gm["host_id"], "sessions", f"{safe_id}.json")
+                            self.sessions_group_meta[session_id] = gm
+                    except Exception:
+                        pass
+                    return active_file
+
+                for prog in os.listdir(programs_dir):
+                    cand = os.path.join(programs_dir, prog, "sessions", f"{safe_id}.json")
+                    if os.path.exists(cand):
+                        try:
+                            with open(cand, "r", encoding="utf-8") as f:
+                                sdata = json.load(f)
+                            gm = sdata.get("group_meta")
+                            if gm and gm.get("host_id"):
+                                self.sessions_group_meta[session_id] = gm
+                                if gm["host_id"] != prog:
+                                    return os.path.join(programs_dir, gm["host_id"], "sessions", f"{safe_id}.json")
+                        except Exception:
+                            pass
+                        return cand
+
+        return os.path.join(self.sessions_dir, f"{safe_id}.json")
+
     async def get_history(self, session_id: str) -> list:
         """Returns the message history for a given session."""
         if session_id not in self.sessions_history:
@@ -1099,8 +1140,7 @@ class BaseProgramRunner:
     def _extract_recent_turns(self, src_session_id: str, program_name: str, limit: int = 6) -> list[str]:
         history = self.sessions_history.get(src_session_id, [])
         if not history:
-            safe_id = "".join(c for c in src_session_id if c.isalnum() or c in "-_")
-            path = os.path.join(self.sessions_dir, f"{safe_id}.json")
+            path = self._get_session_path(src_session_id)
             if os.path.exists(path):
                 try:
                     with open(path, "r", encoding="utf-8") as f:
@@ -1288,10 +1328,6 @@ class OpenSourceRunner(BaseProgramRunner):
 
             return ""
 
-        def _get_session_path(self, session_id: str) -> str:
-            safe_id = "".join(c for c in session_id if c.isalnum() or c in "-_")
-            return os.path.join(self.sessions_dir, f"{safe_id}.json")
-
         def _save_session_to_disk(self, session_id: str):
             with self._lock:
                 try:
@@ -1313,11 +1349,26 @@ class OpenSourceRunner(BaseProgramRunner):
                         data["group_meta"] = self.sessions_group_meta[session_id]
 
                     target_path = self._get_session_path(session_id)
+                    os.makedirs(os.path.dirname(target_path), exist_ok=True)
                     temp_path = target_path + ".tmp"
                     with open(temp_path, "w", encoding="utf-8") as f:
                         json.dump(data, f, indent=2, ensure_ascii=False)
                     
                     os.replace(temp_path, target_path)
+
+                    safe_id = "".join(c for c in session_id if c.isalnum() or c in "-_")
+                    if safe_id.startswith("group_") and session_id in self.sessions_group_meta:
+                        host_id = self.sessions_group_meta[session_id].get("host_id")
+                        guest_ids = self.sessions_group_meta[session_id].get("guest_ids", [])
+                        programs_dir = os.path.join(project_root, "core", "programs")
+                        for gid in guest_ids:
+                            if gid and gid != host_id:
+                                stray_path = os.path.join(programs_dir, gid, "sessions", f"{safe_id}.json")
+                                if os.path.exists(stray_path):
+                                    try:
+                                        os.remove(stray_path)
+                                    except Exception:
+                                        pass
                 except Exception as e:
                     print(f"Error saving OS session {session_id} to disk: {e}")
 
@@ -1733,6 +1784,8 @@ class OpenSourceRunner(BaseProgramRunner):
                     del self.sessions_history[session_id]
                 if session_id in self.sessions_memory_state:
                     del self.sessions_memory_state[session_id]
+                if session_id in self.sessions_group_meta:
+                    del self.sessions_group_meta[session_id]
 
                 path = self._get_session_path(session_id)
                 if os.path.exists(path):
@@ -1740,6 +1793,18 @@ class OpenSourceRunner(BaseProgramRunner):
                         os.remove(path)
                     except Exception as e:
                         print(f"Error deleting OS session file {path}: {e}")
+
+                safe_id = "".join(c for c in session_id if c.isalnum() or c in "-_")
+                if safe_id.startswith("group_"):
+                    programs_dir = os.path.join(project_root, "core", "programs")
+                    if os.path.isdir(programs_dir):
+                        for prog in os.listdir(programs_dir):
+                            stray = os.path.join(programs_dir, prog, "sessions", f"{safe_id}.json")
+                            if os.path.exists(stray):
+                                try:
+                                    os.remove(stray)
+                                except Exception:
+                                    pass
 
                 try:
                     from core.skills.vectorized_databank.databank import DataBankManager
