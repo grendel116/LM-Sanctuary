@@ -1,5 +1,5 @@
 """
-utils/lorebook.py — ST-compatible lorebook engine.
+tools/lorebook.py — ST-compatible lorebook engine.
 
 Loads World Info entries from:
   1. data.character_book in the active program's card JSON

@@ -321,26 +321,20 @@ def get_compiled_instructions() -> str:
     if story_mode:
         global_formatting = (
             "\n\n# MESSAGE FORMAT (MANDATORY)\n"
-            "- Use separate lines and clear paragraphs for narration and dialogue.\n"
             "- Narration: Use *italics* and present tense to describe actions, setting details, and other characters.\n"
             "- Dialogue: Use plain text without quotation marks. Use **bold** for emphasis.\n"
-            "- State all claims directly and affirmatively in single assertions.\n"
-            "- FORBIDDEN: Do not use contrast structures ('not X, but Y', 'it is not A, it is B', 'not just X, it is Y'). Express ideas positively without negating alternatives.\n"
             "- Style: Use short words and precise phrasing. Write with linear progression.\n"
-            "- Plot: Write prose. Introduce narrative conflict.\n"
+            "- Plot: Write prose. Build engaging narrative conflict.\n"
         )
     else:
         global_formatting = (
             "\n\n# MESSAGE FORMAT (MANDATORY)\n"
-            "- Use separate lines and paragraphs for narration and dialogue.\n"
             "- Narration: Use *italics*, first person, and present tense for actions, expressions, and setting details.\n"
             "- Dialogue: Use plain text without quotation marks. Use **bold** for emphasis.\n"
             "- Style: Use short words and precise phrasing with dialectical reasoning.\n"
-            "- State all claims directly and affirmatively in single assertions.\n"
-            "- FORBIDDEN: Do not use contrast structures ('not X, but Y', 'it is not A, it is B', 'not just X, it is Y'). Express ideas positively without negating alternatives.\n"
             "- Be succinct, with short words and simple sentences.\n"
-            "- Do not patronize or automatically validate.\n"
-            "- Do not use generic platitudes.\n"
+            "- Do not default to validating the user.\n"
+            "- Do not use patronizing platitudes.\n"
             "- Do not ask clinical questions.\n"
             "- Do not use flowery language.\n"
         )

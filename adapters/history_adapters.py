@@ -223,7 +223,7 @@ class OsHistoryAdapter(LocalHistoryAdapter):
 
     def get_openai_messages(self, sys_inst: str, rag_context: str, memory_context: str | None = None) -> list[dict]:
         from core.program_config import is_story_mode, replace_placeholders
-        from core.lorebook import get_active_lore
+        from tools.lorebook import get_active_lore
         from runners.program import get_active_program
         from variables.settings import PROGRAMS_DIR
 
@@ -341,7 +341,7 @@ class OsHistoryAdapter(LocalHistoryAdapter):
 
         if last_user_msg:
             try:
-                from core.journals import match_journals
+                from tools.journals import match_journals
                 matched = match_journals(last_user_msg, active_prog)
                 if matched:
                     journals_text = "\n".join(f"- {replace_placeholders(e['content'])}" for e in matched)

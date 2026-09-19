@@ -2047,7 +2047,7 @@ def add_journal_entry(keyphrases: str, content: str) -> str:
         content: The specific, important detail or memory to record (up to 300 characters).
     """
     try:
-        from core.journals import add_journal_entry as add_entry
+        from tools.journals import add_journal_entry as add_entry
         from runners.program import get_active_program
         active_prog = get_active_program()
         entry = add_entry(keyphrases, content, active_prog)

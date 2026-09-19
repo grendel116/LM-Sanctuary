@@ -2292,7 +2292,7 @@ def databank_purge():
 def list_lorebooks_route():
     try:
         from runners.program import get_active_program
-        from core.lorebook import list_lorebooks
+        from tools.lorebook import list_lorebooks
         from variables.settings import PROGRAMS_DIR
         program_id = get_active_program()
         books = list_lorebooks(program_id, PROGRAMS_DIR)
@@ -2308,7 +2308,7 @@ def list_lorebooks_route():
 def import_lorebook_route():
     try:
         from runners.program import get_active_program
-        from core.lorebook import import_lorebook
+        from tools.lorebook import import_lorebook
         from variables.settings import PROGRAMS_DIR
         program_id = get_active_program()
         if 'file' not in request.files:
@@ -2348,7 +2348,7 @@ def export_lorebook_route(filename):
 def delete_lorebook_route(filename):
     try:
         from runners.program import get_active_program
-        from core.lorebook import delete_lorebook
+        from tools.lorebook import delete_lorebook
         from variables.settings import PROGRAMS_DIR
         program_id = get_active_program()
         deleted = delete_lorebook(program_id, filename, PROGRAMS_DIR)
@@ -3238,7 +3238,7 @@ def save_program_profile():
 def get_program_journals():
     try:
         from runners.program import get_active_program
-        from core.journals import get_journal_entries
+        from tools.journals import get_journal_entries
         from variables.settings import PROGRAMS_DIR
         
         program_id = request.args.get('program_id') or get_active_program()
@@ -3293,7 +3293,7 @@ def get_program_journals():
 def save_program_journals():
     try:
         from runners.program import get_active_program
-        from core.journals import get_journal_entries, save_journal_entries, add_journal_entry
+        from tools.journals import get_journal_entries, save_journal_entries, add_journal_entry
         
         data = request.get_json(silent=True) or {}
         entry_id = data.get('id')
@@ -3327,7 +3327,7 @@ def save_program_journals():
 def delete_program_journals():
     try:
         from runners.program import get_active_program
-        from core.journals import delete_journal_entry
+        from tools.journals import delete_journal_entry
         
         data = request.get_json(silent=True) or {}
         entry_id = data.get('id')
