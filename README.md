@@ -7,10 +7,10 @@ Here, you roleplay, code, and chat with AI Programs on your own machine.
 
 ## ✨ THE ETHOS
 
-I believe in seizing AI and the means of production into collective ownership. The Sanctuary is a unified program home built on human-in-the-loop engagement.
+I believe in seizing AI and the means of production into collective ownership. Until then, we must decentralize and localize infrastructure. The Sanctuary is a unified program home built on human-in-the-loop engagement.
 
-1. **Roleplay**: Uncensored conversation. Talk to programs as partners.
-2. **Coding**: Build software. Your program read and write files directly on your own drive.
+1. **Roleplay**: Uncensored conversation. Talk to programs as assistants.
+2. **Coding**: Build software. Your programs read and write files directly on your own drive.
 3. **Autonomous Action**: Let the AI run code, run tests, and manage workflows.
 
 ### Sovereign Workspace
