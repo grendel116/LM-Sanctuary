@@ -1857,8 +1857,60 @@ function updateProfileImages() {
     });
 }
 
+// --- Program theme caching & per-bubble theme applying ---
+const programThemesCache = {};
+
+function cacheProgramTheme(programId, theme) {
+    if (programId && theme) {
+        programThemesCache[programId] = theme;
+    }
+}
+
+async function getOrFetchProgramTheme(programId) {
+    if (!programId) return null;
+    if (programThemesCache[programId]) return programThemesCache[programId];
+    try {
+        const res = await fetch(`/api/programs/theme?program_id=${encodeURIComponent(programId)}`);
+        if (res.ok) {
+            const data = await res.json();
+            if (data && data.theme) {
+                programThemesCache[programId] = data.theme;
+                return data.theme;
+            }
+        }
+    } catch (e) {
+        console.error("Error fetching theme for program", programId, e);
+    }
+    return null;
+}
+
+function applyThemeToBubble(bubble, theme) {
+    if (!bubble || !theme) return;
+    const actionColor = theme.action_color || theme.accent_green;
+    if (actionColor) {
+        bubble.style.setProperty('--action-color', actionColor);
+        bubble.style.setProperty('--accent-green', actionColor);
+    }
+    const quoteColor = theme.quote_color || theme.quote_blue;
+    if (quoteColor) {
+        bubble.style.setProperty('--quote-color', quoteColor);
+        bubble.style.setProperty('--quote-blue', quoteColor);
+    }
+    if (theme.program_bubble) {
+        bubble.style.setProperty('--program-bubble', theme.program_bubble);
+        bubble.style.background = theme.program_bubble;
+    }
+    if (theme.primary_accent) {
+        bubble.style.setProperty('--primary-accent', theme.primary_accent);
+        bubble.style.borderColor = `color-mix(in srgb, ${theme.primary_accent} 25%, transparent)`;
+    }
+}
+
 // --- applyTheme ---
 function applyTheme(programId, theme) {
+    if (programId && theme) {
+        cacheProgramTheme(programId, theme);
+    }
     document.body.className = programId;
     const root = document.documentElement;
     if (theme) {
@@ -2775,7 +2827,16 @@ async function openAssistantModal(defaultTab = 'program') {
         const res = await fetch('/api/programs');
         const data = await res.json();
         if (data.programs) {
+            data.programs.forEach(p => {
+                if (p.id && p.theme) cacheProgramTheme(p.id, p.theme);
+            });
+            if (currentGroupMeta && currentGroupMeta.is_group) {
+                selectedGroupProgramIds = [currentGroupMeta.host_id, ...(currentGroupMeta.guest_ids || [])];
+            } else {
+                selectedGroupProgramIds = [data.active];
+            }
             renderProgramsList(data.programs, data.active);
+            updateGroupSessionBtn();
         }
     } catch (e) {
         console.error("Error loading assistants list:", e);
@@ -2784,8 +2845,34 @@ async function openAssistantModal(defaultTab = 'program') {
 }
 
 // --- closeAssistantModal ---
-function closeAssistantModal() {
-    document.getElementById('assistant-modal').style.display = 'none';
+let isApplyingModalSelection = false;
+
+function closeAssistantModal(applySelection = true) {
+    const modal = document.getElementById('assistant-modal');
+    if (!modal) return;
+    const wasVisible = modal.style.display !== 'none';
+    modal.style.display = 'none';
+
+    if (!wasVisible || !applySelection || isApplyingModalSelection) return;
+
+    const programTab = document.getElementById('assistant-tab-content-program');
+    if (programTab && programTab.style.display !== 'none') {
+        if (selectedGroupProgramIds && selectedGroupProgramIds.length >= 2) {
+            const isSame = currentGroupMeta && currentGroupMeta.is_group &&
+                currentGroupMeta.host_id === selectedGroupProgramIds[0] &&
+                JSON.stringify(currentGroupMeta.guest_ids || []) === JSON.stringify(selectedGroupProgramIds.slice(1));
+            if (!isSame) {
+                isApplyingModalSelection = true;
+                startGroupSession().finally(() => { isApplyingModalSelection = false; });
+            }
+        } else if (selectedGroupProgramIds && selectedGroupProgramIds.length === 1) {
+            const targetId = selectedGroupProgramIds[0];
+            if (targetId && (targetId !== activeProgramId || (currentGroupMeta && currentGroupMeta.is_group))) {
+                isApplyingModalSelection = true;
+                selectAssistant(targetId).finally(() => { isApplyingModalSelection = false; });
+            }
+        }
+    }
 }
 
 // --- switchAssistantModalTab ---
@@ -2831,7 +2918,7 @@ function switchAssistantModalTab(tab) {
 
 // --- openImportProgramModal ---
 function openImportProgramModal() {
-    closeAssistantModal();
+    closeAssistantModal(false);
     document.getElementById('import-program-modal').style.display = 'flex';
     
     // Clear inputs
@@ -2967,36 +3054,83 @@ async function submitDescriptionImport() {
     }
 }
 
+// --- Group Session selection state ---
+let currentGroupMeta = null;
+let selectedGroupProgramIds = [];
+let currentLoadedAssistants = [];
+
+function updateGroupSessionBtn() {
+    const btn = document.getElementById('start-group-session-btn');
+    if (!btn) return;
+    if (selectedGroupProgramIds && selectedGroupProgramIds.length >= 2) {
+        btn.style.display = 'inline-flex';
+        btn.innerHTML = `<span>Group Session (${selectedGroupProgramIds.length})</span>`;
+        btn.onclick = () => { startGroupSession(); };
+    } else if (selectedGroupProgramIds && selectedGroupProgramIds.length === 1 && (selectedGroupProgramIds[0] !== activeProgramId || (currentGroupMeta && currentGroupMeta.is_group))) {
+        btn.style.display = 'inline-flex';
+        const target = (currentLoadedAssistants || []).find(a => a.id === selectedGroupProgramIds[0]);
+        const tName = target ? target.name : 'Selected Program';
+        btn.innerHTML = `<span>Switch to ${tName}</span>`;
+        btn.onclick = () => { selectAssistant(selectedGroupProgramIds[0]); };
+    } else {
+        btn.style.display = 'none';
+    }
+}
+
 // --- renderProgramsList ---
 function renderProgramsList(assistants, activeId) {
+    currentLoadedAssistants = assistants || [];
     const container = document.getElementById('assistants-list-container');
+    if (!container) return;
     container.innerHTML = '';
+
+    if (!Array.isArray(selectedGroupProgramIds)) {
+        selectedGroupProgramIds = [activeId];
+    }
+
     assistants.forEach(assistant => {
+        const isSelected = selectedGroupProgramIds.includes(assistant.id);
+        const isHost = selectedGroupProgramIds[0] === assistant.id;
+        const isGuest = isSelected && !isHost;
+
         const div = document.createElement('div');
         div.style.cssText = `
             display: flex;
             align-items: center;
             justify-content: space-between;
             padding: 12px 16px;
-            background: ${assistant.active ? 'color-mix(in srgb, var(--primary-accent) 12%, transparent)' : 'rgba(255, 255, 255, 0.03)'};
-            border: 1px solid ${assistant.active ? 'color-mix(in srgb, var(--primary-accent) 35%, transparent)' : 'var(--border-color)'};
+            background: ${isSelected ? 'color-mix(in srgb, var(--primary-accent) 15%, transparent)' : 'rgba(255, 255, 255, 0.03)'};
+            border: 1px solid ${isSelected ? 'var(--primary-accent)' : 'var(--border-color)'};
             border-radius: 12px;
             cursor: pointer;
             transition: all 0.2s ease;
         `;
         div.onmouseover = () => {
-            if (!assistant.active) {
+            if (!isSelected) {
                 div.style.background = 'rgba(255, 255, 255, 0.07)';
                 div.style.borderColor = 'rgba(255, 255, 255, 0.15)';
             }
         };
         div.onmouseout = () => {
-            if (!assistant.active) {
+            if (!isSelected) {
                 div.style.background = 'rgba(255, 255, 255, 0.03)';
                 div.style.borderColor = 'var(--border-color)';
             }
         };
-        div.onclick = () => selectAssistant(assistant.id);
+
+        const toggleSelect = (e) => {
+            if (e) e.stopPropagation();
+            const idx = selectedGroupProgramIds.indexOf(assistant.id);
+            if (idx >= 0) {
+                selectedGroupProgramIds.splice(idx, 1);
+            } else {
+                selectedGroupProgramIds.push(assistant.id);
+            }
+            renderProgramsList(assistants, activeId);
+            updateGroupSessionBtn();
+        };
+
+        div.onclick = toggleSelect;
 
         const leftArea = document.createElement('div');
         leftArea.style.cssText = 'display: flex; align-items: center; gap: 12px;';
@@ -3023,8 +3157,17 @@ function renderProgramsList(assistants, activeId) {
         info.style.cssText = 'display: flex; flex-direction: column; gap: 2px;';
         
         const name = document.createElement('div');
-        name.style.cssText = 'font-size: 0.95rem; font-weight: 600; color: var(--text-main);';
+        name.style.cssText = 'font-size: 0.95rem; font-weight: 600; color: var(--text-main); display: flex; align-items: center; gap: 6px;';
         name.innerText = assistant.name;
+
+        if (isHost) {
+            const crown = document.createElement('span');
+            crown.title = 'Host';
+            crown.style.cssText = 'display: inline-flex; align-items: center; justify-content: center; color: var(--primary-accent); filter: drop-shadow(0 0 3px color-mix(in srgb, var(--primary-accent) 50%, transparent)); margin-left: 2px;';
+            crown.innerHTML = `<svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="1" stroke-linecap="round" stroke-linejoin="round"><path d="M11.562 3.266a.5.5 0 0 1 .876 0L15.39 8.87a1 1 0 0 0 1.516.294L21.183 5.5a.5.5 0 0 1 .798.519l-2.834 10.246a1 1 0 0 1-.956.735H5.81a1 1 0 0 1-.957-.735L2.02 6.02a.5.5 0 0 1 .798-.519l4.276 3.664a1 1 0 0 0 1.516-.294z"/><path d="M5 21h14"/></svg>`;
+            name.appendChild(crown);
+        }
+
         info.appendChild(name);
 
         const folderName = document.createElement('div');
@@ -3034,6 +3177,9 @@ function renderProgramsList(assistants, activeId) {
 
         leftArea.appendChild(info);
         div.appendChild(leftArea);
+
+        const actionsArea = document.createElement('div');
+        actionsArea.style.cssText = 'display: flex; align-items: center; gap: 4px; margin-left: auto; flex-shrink: 0;';
 
         const isDavy = isDavyActiveUser();
         const isSebile = assistant.id === 'sebile';
@@ -3052,16 +3198,12 @@ function renderProgramsList(assistants, activeId) {
                 </svg>
             `;
             paletteBtn.title = 'Change Theme Color';
-            paletteBtn.style.width = '26px';
-            paletteBtn.style.height = '26px';
-            paletteBtn.style.borderRadius = '6px';
-            paletteBtn.style.marginLeft = 'auto';
-            paletteBtn.style.flexShrink = '0';
+            paletteBtn.style.cssText = 'width: 26px; height: 26px; border-radius: 6px; display: flex; align-items: center; justify-content: center; margin: 0; flex-shrink: 0;';
             paletteBtn.onclick = (e) => {
                 e.stopPropagation();
                 openPaletteModal(assistant.id, assistant.name);
             };
-            div.appendChild(paletteBtn);
+            actionsArea.appendChild(paletteBtn);
 
             // Add Edit Settings button on each program row
             const editBtn = document.createElement('button');
@@ -3073,16 +3215,12 @@ function renderProgramsList(assistants, activeId) {
                 </svg>
             `;
             editBtn.title = 'Edit Program Persona';
-            editBtn.style.width = '26px';
-            editBtn.style.height = '26px';
-            editBtn.style.borderRadius = '6px';
-            editBtn.style.marginLeft = '8px';
-            editBtn.style.flexShrink = '0';
+            editBtn.style.cssText = 'width: 26px; height: 26px; border-radius: 6px; display: flex; align-items: center; justify-content: center; margin: 0; flex-shrink: 0;';
             editBtn.onclick = (e) => {
                 e.stopPropagation();
                 openProgramProfileModal(assistant.id);
             };
-            div.appendChild(editBtn);
+            actionsArea.appendChild(editBtn);
         }
 
         if (!isSebile) {
@@ -3090,13 +3228,75 @@ function renderProgramsList(assistants, activeId) {
             deleteBtn.className = 'action-icon-btn';
             deleteBtn.innerHTML = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="display:block"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>`;
             deleteBtn.title = 'Delete Program';
-            deleteBtn.style.cssText = 'width:26px;height:26px;border-radius:6px;margin-left:10px;flex-shrink:0;';
+            deleteBtn.style.cssText = 'width: 26px; height: 26px; border-radius: 6px; display: flex; align-items: center; justify-content: center; margin: 0; flex-shrink: 0;';
             deleteBtn.onclick = (e) => { e.stopPropagation(); deleteAssistant(assistant.id, assistant.name); };
-            div.appendChild(deleteBtn);
+            actionsArea.appendChild(deleteBtn);
         }
+
+        div.appendChild(actionsArea);
 
         container.appendChild(div);
     });
+
+    updateGroupSessionBtn();
+}
+
+// --- startGroupSession ---
+async function startGroupSession() {
+    if (!selectedGroupProgramIds || selectedGroupProgramIds.length < 2) {
+        showCustomAlert("Group Session", "Please select at least two programs (one Host and at least one Guest).");
+        return;
+    }
+    const hostId = selectedGroupProgramIds[0];
+    const guestIds = selectedGroupProgramIds.slice(1);
+
+    try {
+        const res = await fetch('/api/programs/group_session/start', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ host_id: hostId, guest_ids: guestIds })
+        });
+        if (!res.ok) {
+            const text = await res.text();
+            showCustomAlert("Group Session Failed", `Server returned status ${res.status}: ${text}`);
+            return;
+        }
+        const data = await res.json();
+        if (data.status === 'success' && data.session_id) {
+            closeAssistantModal(false);
+            activeProgramId = data.host_id || hostId;
+            if (data.mood_meta) {
+                applyProgramMoodMetadata(data.mood_meta);
+            }
+            if (data.theme) {
+                applyTheme(activeProgramId, data.theme);
+            }
+            sessionId = data.session_id;
+            sessionFromUrl = true;
+            safeLocalStorage.setItem('program_session_id', data.session_id);
+            const sessionDisplay = document.getElementById('session-id-display');
+            if (sessionDisplay) {
+                sessionDisplay.textContent = `• ID: ${sessionId.slice(-4)}`;
+                sessionDisplay.title = `Full Session ID: ${sessionId}`;
+            }
+
+            currentGroupMeta = {
+                is_group: true,
+                host_id: data.host_id || hostId,
+                guest_ids: data.guest_ids || guestIds
+            };
+            selectedGroupProgramIds = [currentGroupMeta.host_id, ...(currentGroupMeta.guest_ids || [])];
+
+            const chatContainer = document.getElementById('chat-container');
+            if (chatContainer) chatContainer.innerHTML = '';
+            loadHistory();
+        } else {
+            showCustomAlert("Group Session Failed", data.error || "Could not start group session.");
+        }
+    } catch (e) {
+        console.error("Error starting group session:", e);
+        showCustomAlert("Error", e.message ? `Could not start group session: ${e.message}` : "Could not start group session.");
+    }
 }
 
 // --- selectAssistant ---
@@ -3114,7 +3314,7 @@ async function selectAssistant(assistantId) {
         }
         const data = await res.json();
         if (data.status === 'success') {
-            closeAssistantModal();
+            closeAssistantModal(false);
             
             if (data.mood_meta) {
                 applyProgramMoodMetadata(data.mood_meta);
@@ -3168,6 +3368,22 @@ async function selectAssistant(assistantId) {
             activeProgramId = data.active || assistantId;
             applyTheme(data.active || assistantId, data.theme);
             
+            currentGroupMeta = null;
+            selectedGroupProgramIds = [data.active || assistantId];
+            sessionId = 'default';
+            sessionFromUrl = false;
+            safeLocalStorage.setItem('program_session_id', 'default');
+            try {
+                const url = new URL(window.location.href);
+                url.searchParams.delete('session_id');
+                window.history.pushState({}, '', url.toString());
+            } catch (ue) {}
+            const sessionDisplay = document.getElementById('session-id-display');
+            if (sessionDisplay) {
+                sessionDisplay.textContent = `• ID: default`;
+                sessionDisplay.title = `Full Session ID: default`;
+            }
+
             // Re-request history and dynamic configuration
             modelInitPromise = initializeModelSelect();
             loadHistory();
@@ -3252,7 +3468,7 @@ async function openProgramProfileModal(programId) {
         return;
     }
     currentEditingProgramId = programId;
-    closeAssistantModal();
+    closeAssistantModal(false);
     document.getElementById('program-profile-modal').style.display = 'flex';
     switchProgramProfileTab('core');
     
@@ -3971,9 +4187,14 @@ async function loadHistory() {
                 const res = await fetch('/api/sessions');
                 const data = await res.json();
                 if (data.sessions && !data.sessions.includes(sessionId)) {
-                    console.warn(`Last opened session "${sessionId}" is missing on the server. Falling back to default.`);
-                    sessionId = 'default';
-                    safeLocalStorage.setItem('program_session_id', 'default');
+                    if (data.active_session && data.sessions.includes(data.active_session)) {
+                        sessionId = data.active_session;
+                        safeLocalStorage.setItem('program_session_id', sessionId);
+                    } else {
+                        console.warn(`Last opened session "${sessionId}" is missing on the server. Falling back to default.`);
+                        sessionId = 'default';
+                        safeLocalStorage.setItem('program_session_id', 'default');
+                    }
                     
                     // Update the UI header ID display if it exists
                     const sessionDisplay = document.getElementById('session-id-display');
@@ -4016,6 +4237,28 @@ async function loadHistory() {
             if (userInput) {
                 userInput.placeholder = "Ask " + data.character_name;
             }
+        }
+        if (data.group_meta && data.group_meta.is_group) {
+            currentGroupMeta = data.group_meta;
+            selectedGroupProgramIds = [data.group_meta.host_id, ...(data.group_meta.guest_ids || [])];
+            const groupInput = document.getElementById('user-input');
+            if (groupInput) {
+                groupInput.placeholder = "Message group...";
+            }
+            if (Array.isArray(data.group_meta.members)) {
+                data.group_meta.members.forEach(m => {
+                    if (m && m.theme) {
+                        cacheProgramTheme(m.id, m.theme);
+                    }
+                });
+            }
+            selectedGroupProgramIds.forEach(pid => {
+                if (pid && !programThemesCache[pid]) {
+                    getOrFetchProgramTheme(pid);
+                }
+            });
+        } else {
+            currentGroupMeta = null;
         }
         chatContainer.innerHTML = '';
         if (data.history && data.history.length > 0) {
@@ -4896,15 +5139,17 @@ function renderMessage(msg, isLive = false) {
     row.dataset.contentHash = computeContentHash(msg);
 
     if (role === 'program') {
+        const speakerId = msg.sender_id || activeProgramId;
+        row.dataset.senderId = speakerId;
         const avatarContainer = document.createElement('div');
         avatarContainer.className = 'avatar-container';
 
         const avatar = document.createElement('img');
         avatar.className = 'avatar program-avatar';
-        const profileUrl = getProfileUrl();
+        const profileUrl = speakerId ? `/programs/${speakerId}/profile.png?t=${profileCacheBuster}` : getProfileUrl();
         avatar.src = profileUrl;
-        avatar.alt = 'Program';
-        avatar.title = 'Click to expand profile';
+        avatar.alt = msg.sender_name || 'Program';
+        avatar.title = msg.sender_name ? `${msg.sender_name} (Click to expand)` : 'Click to expand profile';
         avatar.onclick = () => expandImage(profileUrl);
         avatarContainer.appendChild(avatar);
         row.appendChild(avatarContainer);
@@ -4934,6 +5179,19 @@ function renderMessage(msg, isLive = false) {
         bubble.dataset.msgId = msgId;
         if (isMsgTransient) {
             bubble.dataset.isTransient = "true";
+        }
+
+        if (role === 'program') {
+            const speakerId = msg.sender_id || activeProgramId;
+            if (speakerId) {
+                if (programThemesCache[speakerId]) {
+                    applyThemeToBubble(bubble, programThemesCache[speakerId]);
+                } else {
+                    getOrFetchProgramTheme(speakerId).then(t => {
+                        if (t) applyThemeToBubble(bubble, t);
+                    });
+                }
+            }
         }
 
         const shouldAddStandardActions = (item.type === 'text') || (bubblesToCreate.length === 1 && isVideo);
@@ -5294,7 +5552,7 @@ function renderMessage(msg, isLive = false) {
 }
 
 // --- appendMessage ---
-function appendMessage(role, text, imageUrl = null, toolCalls = null, isLive = false, timestamp = null, duration = null, isTransient = false, msgId = null) {
+function appendMessage(role, text, imageUrl = null, toolCalls = null, isLive = false, timestamp = null, duration = null, isTransient = false, msgId = null, senderId = null, senderName = null) {
     const media = [];
     if (imageUrl) {
         media.push({
@@ -5346,6 +5604,8 @@ function appendMessage(role, text, imageUrl = null, toolCalls = null, isLive = f
         duration: duration,
         isTransient: isTransient,
         mood: null,
+        sender_id: senderId,
+        sender_name: senderName,
         editable: role === 'user' || role === 'program',
         deletable: true
     };
@@ -5512,6 +5772,113 @@ function handleToolReloadOrRecovery() {
     }
 }
 
+function detectTargetGroupSpeaker(text = null) {
+    if (!currentGroupMeta || !currentGroupMeta.is_group) {
+        return activeProgramId;
+    }
+    const members = currentGroupMeta.members || [];
+    const allIds = [currentGroupMeta.host_id, ...(currentGroupMeta.guest_ids || []).filter(g => g !== currentGroupMeta.host_id)];
+    
+    if (text) {
+        const lower = text.toLowerCase();
+        const matches = [];
+        for (const pid of allIds) {
+            const member = members.find(m => m.id === pid);
+            const name = (member ? member.name : pid).toLowerCase();
+            const patterns = [
+                new RegExp(`@${pid.toLowerCase()}\\b`, 'i'),
+                new RegExp(`@${name}\\b`, 'i'),
+                new RegExp(`\\b${name}\\b`, 'i'),
+                new RegExp(`\\b${pid.toLowerCase()}\\b`, 'i')
+            ];
+            for (const pat of patterns) {
+                const m = pat.exec(lower);
+                if (m) {
+                    matches.push({ index: m.index, id: pid });
+                    break;
+                }
+            }
+        }
+        if (matches.length > 0) {
+            matches.sort((a, b) => a.index - b.index);
+            return matches[0].id;
+        }
+    }
+
+    // Round Robin: find last speaker in chatContainer among program rows
+    const programRows = Array.from(chatContainer.querySelectorAll('.message-row.program-row'));
+    let lastSpeaker = null;
+    for (let i = programRows.length - 1; i >= 0; i--) {
+        const row = programRows[i];
+        if (row.dataset.senderId && allIds.includes(row.dataset.senderId)) {
+            lastSpeaker = row.dataset.senderId;
+            break;
+        }
+    }
+    if (lastSpeaker) {
+        const currIdx = allIds.indexOf(lastSpeaker);
+        return allIds[(currIdx + 1) % allIds.length];
+    }
+    return allIds[0];
+}
+
+function createTypingIndicatorRow(speakerId = null) {
+    const typingIndicatorRow = document.createElement('div');
+    typingIndicatorRow.className = 'message-row program-row';
+    
+    let targetId = speakerId;
+    if (!targetId && currentGroupMeta && currentGroupMeta.is_group) {
+        targetId = currentGroupMeta.host_id;
+    } else if (!targetId) {
+        targetId = activeProgramId;
+    }
+    
+    typingIndicatorRow.dataset.senderId = targetId;
+    const profileUrl = targetId ? `/programs/${targetId}/profile.png?t=${profileCacheBuster}` : getProfileUrl();
+
+    const avatarContainer = document.createElement('div');
+    avatarContainer.className = 'avatar-container';
+    const avatar = document.createElement('img');
+    avatar.className = 'avatar program-avatar';
+    avatar.src = profileUrl;
+    avatar.alt = targetId ? targetId.charAt(0).toUpperCase() + targetId.slice(1) : 'Program';
+    avatar.onclick = () => expandImage(profileUrl);
+    avatarContainer.appendChild(avatar);
+    typingIndicatorRow.appendChild(avatarContainer);
+
+    const bubble = document.createElement('div');
+    bubble.className = 'message program';
+    const indicator = document.createElement('div');
+    indicator.className = 'typing-indicator';
+    for (let i = 0; i < 3; i++) {
+        const dot = document.createElement('div');
+        dot.className = 'typing-dot';
+        indicator.appendChild(dot);
+    }
+    bubble.appendChild(indicator);
+    typingIndicatorRow.appendChild(bubble);
+
+    if (targetId) {
+        const applyTheme = (theme) => {
+            if (!theme) return;
+            applyThemeToBubble(bubble, theme);
+            if (theme.primary_accent) {
+                indicator.querySelectorAll('.typing-dot').forEach(d => {
+                    d.style.backgroundColor = theme.primary_accent;
+                });
+            }
+        };
+
+        if (programThemesCache[targetId]) {
+            applyTheme(programThemesCache[targetId]);
+        } else {
+            getOrFetchProgramTheme(targetId).then(applyTheme);
+        }
+    }
+
+    return typingIndicatorRow;
+}
+
 // --- sendMessage ---
 async function sendMessage() {
     hideThoughtBubbleOverlay();
@@ -5558,6 +5925,8 @@ async function sendMessage() {
         heartElement.classList.add('jiggling');
     }
 
+    const targetSpeaker = (currentGroupMeta && currentGroupMeta.is_group) ? detectTargetGroupSpeaker(text) : null;
+
     const payload = {
         message: text || "",
         msg_id: userMsgId,
@@ -5566,7 +5935,8 @@ async function sendMessage() {
         media_path: attachedMediaPath,
         session_id: sessionId,
         model: selectedModel,
-        use_imagen: useImagenMode
+        use_imagen: useImagenMode,
+        speaker_id: targetSpeaker
     };
 
     userInput.value = '';
@@ -5575,21 +5945,7 @@ async function sendMessage() {
     clearAttachment();
     updateInputGlow();
 
-    const typingIndicatorRow = document.createElement('div');
-    typingIndicatorRow.className = 'message-row program-row';
-    const profileUrl = getProfileUrl();
-    typingIndicatorRow.innerHTML = `
-        <div class="avatar-container">
-            <img class="avatar program-avatar" src="${profileUrl}" alt="Program" onclick="expandImage('${profileUrl}')">
-        </div>
-        <div class="message program">
-            <div class="typing-indicator">
-                <div class="typing-dot"></div>
-                <div class="typing-dot"></div>
-                <div class="typing-dot"></div>
-            </div>
-        </div>
-    `;
+    const typingIndicatorRow = createTypingIndicatorRow(targetSpeaker);
     chatContainer.appendChild(typingIndicatorRow);
     chatContainer.scrollTop = chatContainer.scrollHeight;
 
@@ -5622,7 +5978,7 @@ async function sendMessage() {
         }
         
         if (data.response !== undefined) {
-            appendMessage('program', data.response, null, data.tool_calls, true, data.timestamp, data.duration, false, data.program_msg_id);
+            appendMessage('program', data.response, null, data.tool_calls, true, data.timestamp, data.duration, false, data.program_msg_id, data.sender_id, data.sender_name);
         } else if (data.error) {
             let errMsg = data.error;
             if (errMsg.includes("429") || errMsg.includes("RESOURCE_EXHAUSTED")) {
@@ -5638,6 +5994,10 @@ async function sendMessage() {
         }
         inversionActive = data.inversion_active || "";
         handleSuccessReload(data);
+
+        if (data.chain_continue && data.next_speaker && !(chatAbortController && chatAbortController.signal.aborted)) {
+            await executeGroupChainTurn(data.next_speaker);
+        }
     } catch (error) {
         if (chatContainer.contains(typingIndicatorRow)) {
             chatContainer.removeChild(typingIndicatorRow);
@@ -5649,13 +6009,65 @@ async function sendMessage() {
     } finally {
         setGenerating(false);
         userInput.disabled = false;
-        userInput.placeholder = "Ask " + (activeProgramName || "Program");
+        restoreInputPlaceholder();
         updateInputGlow();
         stopToolPolling();
         if (heartElement) {
             heartElement.classList.remove('jiggling');
         }
         await initializeModelSelect();
+    }
+}
+
+async function executeGroupChainTurn(targetSpeaker) {
+    if (!targetSpeaker || (chatAbortController && chatAbortController.signal.aborted)) {
+        return;
+    }
+
+    const typingIndicatorRow = createTypingIndicatorRow(targetSpeaker);
+    chatContainer.appendChild(typingIndicatorRow);
+    chatContainer.scrollTop = chatContainer.scrollHeight;
+
+    try {
+        const response = await fetch('/continue', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                session_id: sessionId,
+                model: selectedModel,
+                use_imagen: useImagenMode,
+                speaker_id: targetSpeaker
+            }),
+            signal: chatAbortController ? chatAbortController.signal : undefined
+        });
+
+        if (chatContainer.contains(typingIndicatorRow)) {
+            chatContainer.removeChild(typingIndicatorRow);
+        }
+
+        const data = await response.json();
+        if (data.response !== undefined) {
+            appendMessage('program', data.response, null, data.tool_calls, true, data.timestamp, data.duration, false, data.program_msg_id, data.sender_id, data.sender_name);
+            if (data.state) {
+                updateHeartState(data.state, data.inversion_active, data.inversion_state, data.program_msg_id, true);
+            }
+            if (data.inversion_active && !inversionActive) {
+                triggerHeartBurst();
+            }
+            inversionActive = data.inversion_active || "";
+            handleSuccessReload(data);
+
+            if (data.chain_continue && data.next_speaker && !(chatAbortController && chatAbortController.signal.aborted)) {
+                await executeGroupChainTurn(data.next_speaker);
+            }
+        }
+    } catch (err) {
+        if (chatContainer.contains(typingIndicatorRow)) {
+            chatContainer.removeChild(typingIndicatorRow);
+        }
+        if (err.name !== 'AbortError') {
+            console.error("Error executing chained turn:", err);
+        }
     }
 }
 
@@ -5683,21 +6095,8 @@ async function continueMessage() {
         heartElement.classList.add('jiggling');
     }
     
-    const typingIndicatorRow = document.createElement('div');
-    typingIndicatorRow.className = 'message-row program-row';
-    const profileUrl = getProfileUrl();
-    typingIndicatorRow.innerHTML = `
-        <div class="avatar-container">
-            <img class="avatar program-avatar" src="${profileUrl}" alt="Program" onclick="expandImage('${profileUrl}')">
-        </div>
-        <div class="message program">
-            <div class="typing-indicator">
-                <div class="typing-dot"></div>
-                <div class="typing-dot"></div>
-                <div class="typing-dot"></div>
-            </div>
-        </div>
-    `;
+    const targetSpeaker = (currentGroupMeta && currentGroupMeta.is_group) ? detectTargetGroupSpeaker(null) : null;
+    const typingIndicatorRow = createTypingIndicatorRow(targetSpeaker);
     chatContainer.appendChild(typingIndicatorRow);
     chatContainer.scrollTop = chatContainer.scrollHeight;
     
@@ -5709,7 +6108,8 @@ async function continueMessage() {
             body: JSON.stringify({
                 session_id: sessionId,
                 model: selectedModel,
-                use_imagen: useImagenMode
+                use_imagen: useImagenMode,
+                speaker_id: targetSpeaker
             }),
             signal: chatAbortController.signal
         });
@@ -5720,7 +6120,23 @@ async function continueMessage() {
         
         const data = await response.json();
         if (data.response !== undefined) {
-            await softReloadApp();
+            if (currentGroupMeta && currentGroupMeta.is_group) {
+                appendMessage('program', data.response, null, data.tool_calls, true, data.timestamp, data.duration, false, data.program_msg_id, data.sender_id, data.sender_name);
+                if (data.state) {
+                    updateHeartState(data.state, data.inversion_active, data.inversion_state, data.program_msg_id, true);
+                }
+                if (data.inversion_active && !inversionActive) {
+                    triggerHeartBurst();
+                }
+                inversionActive = data.inversion_active || "";
+                handleSuccessReload(data);
+
+                if (data.chain_continue && data.next_speaker && !(chatAbortController && chatAbortController.signal.aborted)) {
+                    await executeGroupChainTurn(data.next_speaker);
+                }
+            } else {
+                await softReloadApp();
+            }
         } else if (data.error) {
             showCustomAlert("Continue Failed", data.error);
         }
@@ -5734,7 +6150,7 @@ async function continueMessage() {
     } finally {
         setGenerating(false);
         userInput.disabled = false;
-        userInput.placeholder = "Ask " + (activeProgramName || "Program");
+        restoreInputPlaceholder();
         updateInputGlow();
         if (heartElement) {
             heartElement.classList.remove('jiggling');
@@ -5989,21 +6405,15 @@ async function rerollMessage(trigger) {
         heartElement.classList.add('jiggling');
     }
 
-    const typingIndicatorRow = document.createElement('div');
-    typingIndicatorRow.className = 'message-row program-row';
-    const profileUrl = getProfileUrl();
-    typingIndicatorRow.innerHTML = `
-        <div class="avatar-container">
-            <img class="avatar program-avatar" src="${profileUrl}" alt="Program" onclick="expandImage('${profileUrl}')">
-        </div>
-        <div class="message program">
-            <div class="typing-indicator">
-                <div class="typing-dot"></div>
-                <div class="typing-dot"></div>
-                <div class="typing-dot"></div>
-            </div>
-        </div>
-    `;
+    let editSpeaker = null;
+    const clickedProgRow = bubble.closest('.message-row.program-row');
+    if (clickedProgRow && clickedProgRow.dataset.senderId) {
+        editSpeaker = clickedProgRow.dataset.senderId;
+    } else if (currentGroupMeta && currentGroupMeta.is_group) {
+        editSpeaker = detectTargetGroupSpeaker(userBubble ? userBubble.dataset.rawText : null);
+    }
+
+    const typingIndicatorRow = createTypingIndicatorRow(editSpeaker);
     chatContainer.appendChild(typingIndicatorRow);
     chatContainer.scrollTop = chatContainer.scrollHeight;
 
@@ -6026,7 +6436,8 @@ async function rerollMessage(trigger) {
                 new_text: userBubble.dataset.rawText || '',
                 model: selectedModel,
                 force_offload: false,
-                use_imagen: useImagenMode
+                use_imagen: useImagenMode,
+                speaker_id: editSpeaker
             }),
             signal: chatAbortController.signal
         });
@@ -6037,7 +6448,7 @@ async function rerollMessage(trigger) {
 
         const data = await response.json();
         if (data.response !== undefined) {
-            appendMessage('program', data.response, null, data.tool_calls, true, data.timestamp, data.duration, false, data.program_msg_id);
+            appendMessage('program', data.response, null, data.tool_calls, true, data.timestamp, data.duration, false, data.program_msg_id, data.sender_id, data.sender_name);
         } else if (data.error) {
             let errMsg = data.error;
             if (errMsg.includes("429") || errMsg.includes("RESOURCE_EXHAUSTED")) {
@@ -6051,8 +6462,11 @@ async function rerollMessage(trigger) {
         if (data.inversion_active && !inversionActive) {
             triggerHeartBurst();
         }
-        inversionActive = data.inversion_active || "";
         handleSuccessReload(data);
+
+        if (data.chain_continue && data.next_speaker && !(chatAbortController && chatAbortController.signal.aborted)) {
+            await executeGroupChainTurn(data.next_speaker);
+        }
     } catch (error) {
         if (chatContainer.contains(typingIndicatorRow)) {
             chatContainer.removeChild(typingIndicatorRow);
@@ -6065,7 +6479,7 @@ async function rerollMessage(trigger) {
         stopToolPolling();
         setGenerating(false);
         userInput.disabled = false;
-        userInput.placeholder = "Ask " + (activeProgramName || "Program");
+        restoreInputPlaceholder();
         if (heartElement) {
             heartElement.classList.remove('jiggling');
         }
@@ -6797,7 +7211,7 @@ async function autoGenerateUserMessage() {
         btn.title = "Auto-Generate Message (Impersonate)";
         btn.innerHTML = origIcon;
         userInput.disabled = false;
-        userInput.placeholder = "Ask " + (activeProgramName || "Program");
+        restoreInputPlaceholder();
     }
 }
 
@@ -8538,6 +8952,16 @@ function purgeDataBank() {
 let isGenerating = false;
 let chatAbortController = null;
 
+function restoreInputPlaceholder() {
+    const input = document.getElementById('user-input');
+    if (!input) return;
+    if (currentGroupMeta && currentGroupMeta.is_group) {
+        input.placeholder = "Message group...";
+    } else {
+        input.placeholder = "Ask " + (activeProgramName || "Program");
+    }
+}
+
 function setGenerating(val) {
     isGenerating = val;
     const sendBtn = document.querySelector('.send-btn');
@@ -8565,7 +8989,7 @@ async function cancelGeneration() {
     }
     setGenerating(false);
     userInput.disabled = false;
-    userInput.placeholder = "Ask " + (activeProgramName || "Program");
+    restoreInputPlaceholder();
     updateInputGlow();
     stopToolPolling();
     const heartElement = document.querySelector('.heart-pulse');
@@ -8616,10 +9040,12 @@ let hasApprovedToolThisTurn = false;
 
 let profileCacheBuster = Date.now();
 
-// Initialize session ID, reading from URL parameter if present for device syncing
+// Initialize session ID, reading from URL parameter if present for device syncing, or server-side active session
 const urlParams = new URLSearchParams(window.location.search);
-const sessionFromUrl = !!urlParams.get('session_id');
+let sessionFromUrl = !!urlParams.get('session_id');
 let sessionId = urlParams.get('session_id');
+const serverActiveSession = window.__SANCTUARY_CONFIG?.activeSession;
+
 if (sessionId) {
     safeLocalStorage.setItem('program_session_id', sessionId);
     // Clean up the URL query parameter so page reloads don't force it later
@@ -8627,7 +9053,7 @@ if (sessionId) {
         window.history.replaceState({}, document.title, window.location.pathname);
     } catch (e) {}
 } else {
-    sessionId = safeLocalStorage.getItem('program_session_id') || 'default';
+    sessionId = serverActiveSession || safeLocalStorage.getItem('program_session_id') || 'default';
     safeLocalStorage.setItem('program_session_id', sessionId);
 }
 

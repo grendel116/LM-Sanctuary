@@ -5,7 +5,7 @@ summary: "Log appointments, tasks, and schedules using [add_quest(title=\"...\",
 retrieval: vector
 triggers: appointment, meeting, schedule, reminder, chore, task, quest, calendar, deadline
 ---
-# SKILL: The Companion Quest System
+# SKILL: The Program Quest System
 Coordinate schedule/appointments:
 1. **Trigger**: Automatically call the add_quest tool when chores, appointments, tasks, or scheduling are discussed in chat.
 2. **Define a Quest**: Frame as adventure with Title, Objective, Coordinates (Address), Time Window, and optional Reminder alert offset (in minutes).

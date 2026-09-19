@@ -25,7 +25,7 @@ variables/*
 variables/user_profiles/*
 !variables/user_profiles/builder.md
 
-# Ignore all companion profiles under core/programs except the default Sebile program template
+# Ignore all program profiles under core/programs except the default Sebile program template
 core/programs/*
 !core/programs/sebile/
 !core/programs/sparkle.mp3

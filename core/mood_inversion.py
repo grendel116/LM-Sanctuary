@@ -23,6 +23,7 @@ STANDARD_MOOD_EMOJIS = {
     "excited": "⚡",
     "intense": "🔥",
     "sad": "💧",
+    "jealous": "💚",
     "analytical": "🔬",
     "focused": "🎯",
     "playful": "✨",
@@ -30,16 +31,6 @@ STANDARD_MOOD_EMOJIS = {
     "vulnerable": "💧",
     "baseline": "✨",
     "calm": "🌊",
-}
-
-# Lexicon for fast local sentiment classification
-MOOD_KEYWORDS = {
-    "intimate": ["love", "tender", "gentle", "sweet", "cherish", "embrace", "warmth", "caress", "softly", "affection", "darling", "beloved", "cushion", "starlight"],
-    "excited": ["excited", "thrilled", "amazing", "wonderful", "laugh", "smile", "delight", "bright", "celebrate", "eager", "haha", "yay", "cheer"],
-    "intense": ["intense", "urgent", "danger", "fierce", "battle", "struggle", "rage", "strike", "clash", "fury", "flame", "critical", "violent"],
-    "sad": ["sad", "sorrow", "grief", "mourn", "weep", "tear", "regret", "loss", "pain", "melancholy", "hurt", "despair", "lonely"],
-    "analytical": ["analyze", "dialectic", "materialism", "theory", "empirical", "logic", "synthesis", "capital", "structure", "critique", "system", "evaluate", "method"],
-    "focused": ["focus", "target", "plan", "execute", "task", "code", "inspect", "implement", "organize", "solve", "precise", "direct", "work"],
 }
 
 # Sequential CMYK channel modulation functions
@@ -264,37 +255,50 @@ def get_directive(programs_dir: str, program_id: str, mood_name: str) -> str:
     return str(val) if val else ""
 
 
-def analyze_sentiment_fast(text: str, program_id: str | None = None) -> dict:
-    """Classify mood strictly among the active program's defined moods."""
-    pid = _resolve_program_id(program_id)
-    meta = get_program_mood_metadata(pid)
-    valid_moods = set(meta["moods"].keys())
+def parse_mood_tag(text: str) -> tuple[str, str, float]:
+    """Parse self-declared mood and intensity tag from the model's output.
 
-    if not text or not text.strip():
-        return meta["baseline"].copy()
+    Returns:
+        (clean_text, mood_name, intensity)
+    """
+    if not text:
+        return "", "baseline", 0.0
 
-    # Check for explicit tags like [mood: intimate]
-    tag_match = re.search(r"\[mood:\s*(\w+)\]", text, re.IGNORECASE)
-    if tag_match:
-        tag_name = tag_match.group(1).lower()
-        if tag_name in valid_moods:
-            return mood_details(tag_name, 0.8, program_id=pid)
+    # Match <mood ... /> or <mood ...>...</mood> or <mood ...> or [mood: ...]
+    xml_match = re.search(r'<mood\b([^>]*?)(?:/>|>.*?</mood>|>|$)', text, re.IGNORECASE | re.DOTALL)
+    bracket_match = re.search(r'\[mood:\s*([^\]]+)\]', text, re.IGNORECASE)
 
-    text_lower = text.lower()
-    scores = {}
-    for mood in valid_moods:
-        keywords = MOOD_KEYWORDS.get(mood, [])
-        score = sum(1 for kw in keywords if re.search(rf"\b{re.escape(kw)}\b", text_lower))
-        if score > 0:
-            scores[mood] = score
+    tag_str = None
+    attrs = ""
+    if xml_match:
+        tag_str = xml_match.group(0)
+        attrs = xml_match.group(1)
+    elif bracket_match:
+        tag_str = bracket_match.group(0)
+        attrs = bracket_match.group(1)
 
-    if not scores:
-        return meta["baseline"].copy()
+    if not tag_str:
+        return text.strip(), "baseline", 0.0
 
-    best_mood = max(scores, key=scores.get)
-    max_count = scores[best_mood]
-    intensity = min(1.0, 0.3 + (max_count * 0.15))
-    return mood_details(best_mood, intensity, program_id=pid)
+    # Extract mood name
+    name_m = re.search(r'(?:name|mood)\s*=\s*["\']?([a-zA-Z_]+)["\']?', attrs, re.IGNORECASE)
+    if name_m:
+        mood_name = name_m.group(1).lower().strip()
+    else:
+        word_m = re.search(r'\b([a-zA-Z_]+)\b', attrs)
+        mood_name = word_m.group(1).lower().strip() if word_m else "baseline"
+
+    # Extract intensity (supports 85%, 0.85, 85, etc.)
+    int_m = re.search(r'(?:intensity\s*=\s*["\']?|[\s,:]|^)([\d\.]+)(%?)', attrs, re.IGNORECASE)
+    if int_m:
+        raw_val = float(int_m.group(1))
+        is_percent = int_m.group(2) == "%" or raw_val > 1.0
+        intensity = raw_val / 100.0 if is_percent else raw_val
+    else:
+        intensity = 0.0 if mood_name in ("baseline", "serene", "calm") else 0.75
+
+    clean_text = text.replace(tag_str, "").strip()
+    return clean_text, mood_name, max(0.0, min(1.0, round(intensity, 2)))
 
 
 def mood_details(name: str, intensity: float, program_id: str | None = None) -> dict:
@@ -315,11 +319,56 @@ def mood_details(name: str, intensity: float, program_id: str | None = None) -> 
 
 
 def extract_and_strip_mood(text: str, program_id: str | None = None) -> tuple[str, dict]:
-    """Strip bracketed mood directives and classify emotional state."""
-    clean_text = re.sub(r"\[mood:\s*\w+\]", "", text, flags=re.IGNORECASE).strip()
-    return clean_text, analyze_sentiment_fast(text, program_id=program_id)
+    """Extract self-declared mood tag from text and map directly to program mood metadata."""
+    clean_text, raw_mood, intensity = parse_mood_tag(text)
+    pid = _resolve_program_id(program_id)
+    meta = get_program_mood_metadata(pid)
+
+    if raw_mood in meta["moods"]:
+        mood_name = raw_mood
+    elif raw_mood in ("serene", "calm", "baseline", "neutral", "default"):
+        mood_name = "baseline"
+        intensity = 0.0
+    else:
+        mood_name = "baseline"
+        intensity = 0.0
+
+    details = mood_details(mood_name, intensity, program_id=pid)
+    return clean_text, details
 
 
 def analyze_emotional_state(text: str, program_id: str | None = None) -> dict:
-    """Analyze emotional state for the specified or active program."""
-    return analyze_sentiment_fast(text, program_id=program_id)
+    """Analyze emotional state directly from the text's self-declared mood tag."""
+    _, details = extract_and_strip_mood(text, program_id=program_id)
+    return details
+
+
+def analyze_sentiment_fast(text: str, program_id: str | None = None) -> dict:
+    """Fast emotional state resolution via direct tag declaration."""
+    return analyze_emotional_state(text, program_id=program_id)
+
+
+def get_mood_declaration_prompt(program_id: str | None = None) -> str:
+    """Affirmative directive instructing the model to declare its emotional state from its defined inversion schema."""
+    pid = _resolve_program_id(program_id)
+    inversion_dict = load_program_inversion(pid) or {}
+
+    mood_lines = ['- "serene": Calm, baseline, reflective, or neutral (0% intensity).']
+    for mood, desc in inversion_dict.items():
+        if isinstance(desc, dict):
+            desc = desc.get("directive", "")
+        desc_text = f": {desc.strip()}" if desc else ""
+        mood_lines.append(f'- "{mood}"{desc_text}')
+
+    mood_options_text = "\n".join(mood_lines)
+
+    return (
+        "\n\n# EMOTIONAL STATE DECLARATION (MANDATORY)\n"
+        "At the very end of your response, declare your current emotional state and intensity as a tag on its own line:\n"
+        '<mood name="[mood]" intensity="[0-100%]"/>\n\n'
+        "Your available emotional states:\n"
+        f"{mood_options_text}\n\n"
+        "Select the mood matching your authentic disposition and declare your percentage on that spectrum.\n"
+        'Example: <mood name="excited" intensity="85%"/>\n'
+        'Example for neutral/calm: <mood name="serene" intensity="0%"/>\n'
+    )

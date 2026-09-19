@@ -82,6 +82,95 @@ def get_http_client() -> httpx.AsyncClient:
         _http_client_loop = current_loop
     return _http_client
 
+
+def detect_addressed_speaker(text: str, candidate_ids: list[str], exclude_id: str = None) -> str | None:
+    """Detects if text explicitly addresses one of the candidate program IDs or names.
+    Returns the first addressed candidate ID, or None.
+    """
+    if not text or not candidate_ids:
+        return None
+    from core.program_config import _load_card_data
+    lower_text = text.lower()
+    matches = []
+
+    for pid in candidate_ids:
+        if exclude_id and pid == exclude_id:
+            continue
+        c = _load_card_data(pid)
+        name = (c.get("name") or pid).lower()
+
+        # Check name boundary or @tag
+        for pattern in (
+            rf"@{re.escape(pid.lower())}\b",
+            rf"@{re.escape(name)}\b",
+            rf"\b{re.escape(name)}\b",
+            rf"\b{re.escape(pid.lower())}\b"
+        ):
+            m = re.search(pattern, lower_text)
+            if m:
+                matches.append((m.start(), pid))
+                break
+
+    if matches:
+        matches.sort(key=lambda x: x[0])
+        return matches[0][1]
+    return None
+
+def clean_group_speaker_response(text: str, speaker_id: str = None, group_meta: dict = None) -> str:
+    """Sanitizes LLM output in group sessions:
+    - Strips leading speaker tags for the active speaker.
+    - If the LLM mistakenly generated other characters before the active speaker's turn,
+      extracts the active speaker's actual turn.
+    - Truncates at the boundary where the LLM attempts to puppet another room participant.
+    """
+    if not text:
+        return text
+
+    from core.program_config import _load_card_data
+    from runners.program import get_active_user
+
+    sp_name = ""
+    if speaker_id:
+        sp_card = _load_card_data(speaker_id)
+        sp_name = (sp_card.get("name") if sp_card else speaker_id).strip()
+
+    is_group = bool(group_meta and group_meta.get("is_group"))
+    if not is_group:
+        if sp_name:
+            text = re.sub(rf"^(?:\[?{re.escape(sp_name)}\]?:?\s*)", "", text, flags=re.IGNORECASE).strip()
+        return text
+
+    all_ids = [group_meta.get("host_id")] + group_meta.get("guest_ids", [])
+    other_names = []
+    for pid in all_ids:
+        if pid and pid != speaker_id:
+            c = _load_card_data(pid)
+            nm = (c.get("name") if c else pid).strip()
+            if nm and nm not in other_names:
+                other_names.append(nm)
+
+    user_name = get_active_user().replace("_", " ").title().strip()
+    if user_name and user_name not in other_names:
+        other_names.append(user_name)
+
+    # 1. If the generation started with another member (puppeting) but includes the active speaker later:
+    if sp_name:
+        speaker_split = re.split(rf"\n+\s*(?:\[{re.escape(sp_name)}\]:?|{re.escape(sp_name)}:\s*)", text, maxsplit=1, flags=re.IGNORECASE)
+        if len(speaker_split) > 1:
+            text = speaker_split[1].strip()
+
+    # 2. Strip leading active speaker tag if present
+    if sp_name:
+        text = re.sub(rf"^(?:\[?{re.escape(sp_name)}\]?:?\s*)", "", text, flags=re.IGNORECASE).strip()
+
+    # 3. Truncate at any point where another room member is puppeted
+    if other_names:
+        escaped_others = [re.escape(n) for n in other_names]
+        puppet_regex = rf"\n+\s*(?:\[(?:{'|'.join(escaped_others)})\]:?|(?:{'|'.join(escaped_others)}):\s*)"
+        text = re.split(puppet_regex, text, maxsplit=1, flags=re.IGNORECASE)[0].strip()
+
+    return text
+
 def _trim_context_messages(messages: list[dict], max_chars: int = 26000) -> list[dict]:
     """Fast context trimming calculation to remain within token/char budget."""
     total_chars = sum(len(m.get("content") or "") for m in messages)
@@ -112,6 +201,7 @@ class BaseProgramRunner:
         self.sessions_history: dict = {}
         self.sessions_inversion_state: dict = {}
         self.sessions_memory_state: dict = {}  # Tracks chapters and epic chronicles
+        self.sessions_group_meta: dict = {}  # Tracks group session participants (host & guests)
 
     def _get_memory_meta(self, session_id: str) -> dict:
         """Helper to ensure session memory state exists."""
@@ -470,6 +560,7 @@ class BaseProgramRunner:
         rag_context: str,
         new_message_text: str,
         invocation_id: str,
+        speaker_id: str = None,
     ) -> tuple[str, list]:
         max_iterations = 5
         iteration = 0
@@ -482,7 +573,7 @@ class BaseProgramRunner:
 
             # --- STAGE 1: LOCAL PREPROCESSING ---
             sys_instructions = self._get_system_instructions(
-                session_id, inversion_directive, user_message=new_message_text
+                session_id, inversion_directive, user_message=new_message_text, speaker_id=speaker_id
             )
             messages = adapter.get_openai_messages(sys_instructions, rag_context)
             messages = _trim_context_messages(messages, max_chars=26000)
@@ -562,6 +653,17 @@ class BaseProgramRunner:
                     for m, (parsed_args, output) in zip(matches, raw_results)
                 ]
 
+                # Check guest tool restrictions for group sessions
+                group_meta = self.sessions_group_meta.get(session_id)
+                if group_meta and speaker_id and speaker_id != group_meta.get("host_id"):
+                    # Guest program speaking: block add_journal_entry to avoid contaminating host memory
+                    filtered_results = []
+                    for t_name, t_args, t_output in results:
+                        if t_name == "add_journal_entry":
+                            t_output = "Error: Journal logging is reserved for the Host program during Group Sessions."
+                        filtered_results.append((t_name, t_args, t_output))
+                    results = filtered_results
+
                 tool_calls = []
                 for idx, (t_name, t_args, t_output) in enumerate(results):
                     tool_calls.extend(_build_tool_calls_pair(t_name, t_args, t_output, len(all_tool_calls) + idx))
@@ -594,10 +696,14 @@ class BaseProgramRunner:
                         is_portrait_turn = any(k in msg_lower for k in ("portrait", "draw", "picture", "image", "photo", "selfie", "generate_program_portrait", "generate_local_image"))
                         if is_portrait_turn:
                             final_response_text = ""
-                    adapter.append_assistant_message(final_response_text, all_tool_calls, invocation_id)
+                    bot_msg = adapter.append_assistant_message(final_response_text, all_tool_calls, invocation_id, speaker_id=speaker_id)
+                    if bot_msg and isinstance(bot_msg, dict) and "text" in bot_msg:
+                        final_response_text = bot_msg["text"]
                     break
 
-                adapter.append_assistant_message(clean_text, tool_calls, invocation_id, intermediate=True)
+                group_meta = getattr(self, "sessions_group_meta", {}).get(session_id)
+                clean_text = clean_group_speaker_response(clean_text, speaker_id, group_meta)
+                adapter.append_assistant_message(clean_text, tool_calls, invocation_id, intermediate=True, speaker_id=speaker_id)
                 adapter.append_tool_events(results, invocation_id)
 
                 if clean_text:
@@ -605,10 +711,15 @@ class BaseProgramRunner:
 
                 continue
             else:
+                group_meta = getattr(self, "sessions_group_meta", {}).get(session_id)
+                bot_response_text = clean_group_speaker_response(bot_response_text, speaker_id, group_meta)
+
                 clean_text = bot_response_text.strip()
                 final_response_text = clean_text if clean_text else final_response_text
 
-                adapter.append_assistant_message(final_response_text, all_tool_calls, invocation_id)
+                bot_msg = adapter.append_assistant_message(final_response_text, all_tool_calls, invocation_id, speaker_id=speaker_id)
+                if bot_msg and isinstance(bot_msg, dict) and "text" in bot_msg:
+                    final_response_text = bot_msg["text"]
                 break
 
         adapter.post_process_thoughts(invocation_id)
@@ -633,7 +744,7 @@ class BaseProgramRunner:
             self._load_session_from_disk(session_id)
         return self.sessions_history.get(session_id, [])
     
-    async def run_async(self, session_id: str, new_message_text: str, image_data: str = None, image_mime: str = None, model: str = None, media_path: str = None, msg_id: str = None) -> tuple:
+    async def run_async(self, session_id: str, new_message_text: str, image_data: str = None, image_mime: str = None, model: str = None, media_path: str = None, msg_id: str = None, speaker_id: str = None) -> tuple:
             """Main execution entry point for handling user input and running the LLM loop."""
             # Ensure session history is loaded
             if session_id not in self.sessions_history:
@@ -668,12 +779,13 @@ class BaseProgramRunner:
                     inversion_directive=inversion_directive,
                     rag_context=rag_context,
                     new_message_text=new_message_text,
-                    invocation_id=user_msg["id"]
+                    invocation_id=user_msg["id"],
+                    speaker_id=speaker_id,
                 )
             finally:
                 self._save_session_to_disk(session_id)
 
-    async def edit_turn(self, session_id: str, msg_id: str, new_text: str = None, model: str = None) -> tuple:
+    async def edit_turn(self, session_id: str, msg_id: str, new_text: str = None, model: str = None, speaker_id: str = None) -> tuple:
         """Edits an existing turn, truncates subsequent history, and re-runs generation."""
         if session_id not in self.sessions_history:
             return "", []
@@ -711,7 +823,8 @@ class BaseProgramRunner:
             inversion_directive=inversion_directive,
             rag_context="",
             new_message_text=edited_msg,
-            invocation_id=msg_id
+            invocation_id=msg_id,
+            speaker_id=speaker_id
         )
 
     async def reset_session(self, session_id: str):
@@ -1053,7 +1166,7 @@ class BaseProgramRunner:
 
         return instructions
 
-    def _get_system_instructions(self, session_id: str, inversion_directive: str = None, user_message: str = None) -> str:
+    def _get_system_instructions(self, session_id: str, inversion_directive: str = None, user_message: str = None, speaker_id: str = None) -> str:
         from core.program_config import get_compiled_instructions, get_program_name, is_story_mode, set_inversion_directive
 
         try:
@@ -1062,9 +1175,23 @@ class BaseProgramRunner:
             program_name = "Program"
 
         is_voice = isinstance(session_id, str) and session_id.endswith("_voice")
+        group_meta = getattr(self, "sessions_group_meta", {}).get(session_id)
 
         if is_voice:
             instructions = self._build_voice_prompt(session_id, program_name)
+        elif group_meta and group_meta.get("is_group"):
+            host_id = group_meta.get("host_id")
+            guest_ids = group_meta.get("guest_ids", [])
+            active_speaker = speaker_id or host_id
+            from core.program_config import compile_speaker_instructions
+            instructions = compile_speaker_instructions(active_speaker, host_id, guest_ids)
+            instructions = self._inject_system_memories(instructions, session_id)
+
+            if "CONCISENESS" not in instructions and "brief, succinct, and natural" not in instructions:
+                instructions += (
+                    "\n\n# STYLE\n"
+                    "Be brief and natural. No monologues, lectures, or forced questions. Ask questions only if contextually natural.\n"
+                )
         else:
             if inversion_directive is not None:
                 set_inversion_directive(inversion_directive)
@@ -1182,6 +1309,9 @@ class OpenSourceRunner(BaseProgramRunner):
                         "inversion_state": inversion_state,
                         "memory_state": memory_meta,
                     }
+                    if session_id in self.sessions_group_meta:
+                        data["group_meta"] = self.sessions_group_meta[session_id]
+
                     target_path = self._get_session_path(session_id)
                     temp_path = target_path + ".tmp"
                     with open(temp_path, "w", encoding="utf-8") as f:
@@ -1202,6 +1332,8 @@ class OpenSourceRunner(BaseProgramRunner):
                     
                 self.sessions_history[session_id] = data.get("messages", [])
                 self.sessions_inversion_state[session_id] = data.get("inversion_state", new_state(get_active_program()))
+                if "group_meta" in data:
+                    self.sessions_group_meta[session_id] = data["group_meta"]
                 
                 memory_state = data.get("memory_state", {})
                 # Strip legacy unsummarized_buffer if loading an older default.json
@@ -1231,6 +1363,11 @@ class OpenSourceRunner(BaseProgramRunner):
                     from core.program_config import get_program_greeting, replace_placeholders
 
                     if greeting := replace_placeholders(get_program_greeting()).strip():
+                        group_meta = getattr(self, "sessions_group_meta", {}).get(session_id)
+                        host_id = group_meta.get("host_id") if group_meta else get_active_program()
+                        from core.program_config import _load_card_data
+                        host_card = _load_card_data(host_id)
+                        host_name = host_card.get("name") if host_card else host_id.title()
                         starting_msg = {
                             "id": f"first_mes_{uuid.uuid4().hex}",
                             "role": "program",
@@ -1239,6 +1376,8 @@ class OpenSourceRunner(BaseProgramRunner):
                             "inversion_active": "",
                             "mood": None,
                             "timestamp": time.time(),
+                            "sender_id": host_id,
+                            "sender_name": host_name,
                         }
                         history.insert(0, starting_msg)
                         self._save_session_to_disk(session_id)
@@ -1319,6 +1458,11 @@ class OpenSourceRunner(BaseProgramRunner):
                     m.setdefault("prompt", image_prompt)
 
             role = msg.get("role", "user")
+            sender_id = msg.get("sender_id")
+            sender_name = msg.get("sender_name")
+            if not sender_id and role == "program":
+                sender_id = get_active_program()
+
             return {
                 "id": msg.get("id", ""),
                 "role": role,
@@ -1329,6 +1473,8 @@ class OpenSourceRunner(BaseProgramRunner):
                 "timestamp": msg.get("timestamp"),
                 "mood": msg.get("mood"),
                 "inversion_active": msg.get("inversion_active", ""),
+                "sender_id": sender_id,
+                "sender_name": sender_name,
                 "editable": role in ("user", "program"),
                 "deletable": True,
             }
@@ -1385,6 +1531,7 @@ class OpenSourceRunner(BaseProgramRunner):
             model: str = None,
             media_path: str = None,
             msg_id: str = None,
+            speaker_id: str = None,
         ) -> tuple:
             with self._lock:
                 self._load_session_from_disk(session_id)
@@ -1399,6 +1546,7 @@ class OpenSourceRunner(BaseProgramRunner):
                         model=model,
                         media_path=media_path,
                         msg_id=msg_id,
+                        speaker_id=speaker_id,
                     )
                 finally:
                     self._save_session_to_disk(session_id)
@@ -1412,6 +1560,7 @@ class OpenSourceRunner(BaseProgramRunner):
             model: str = None,
             media_path: str = None,
             msg_id: str = None,
+            speaker_id: str = None,
         ) -> tuple:
             if session_id not in self.sessions_history:
                 self._load_session_from_disk(session_id)
@@ -1475,6 +1624,29 @@ class OpenSourceRunner(BaseProgramRunner):
                 self, session_id, file_path_resolved, image_data, image_mime, query_vector=query_vector_embedding
             )
 
+            # Resolve active speaker for turn in group session
+            group_meta = getattr(self, "sessions_group_meta", {}).get(session_id)
+            if group_meta and group_meta.get("is_group"):
+                host_id = group_meta.get("host_id")
+                guest_ids = group_meta.get("guest_ids", [])
+                all_ids = [host_id] + [g for g in guest_ids if g != host_id]
+
+                if not speaker_id:
+                    matched_speaker = detect_addressed_speaker(new_message_text, all_ids)
+                    if matched_speaker:
+                        speaker_id = matched_speaker
+                    else:
+                        last_speaker = None
+                        for m in reversed(history[:-1]):
+                            if m.get("role") == "program" and m.get("sender_id"):
+                                last_speaker = m.get("sender_id")
+                                break
+                        if last_speaker in all_ids:
+                            curr_idx = all_ids.index(last_speaker)
+                            speaker_id = all_ids[(curr_idx + 1) % len(all_ids)]
+                        else:
+                            speaker_id = host_id
+
             res = await self._execute_local_llm_loop(
                 session_id=session_id,
                 adapter=adapter,
@@ -1483,6 +1655,7 @@ class OpenSourceRunner(BaseProgramRunner):
                 rag_context=rag_context,
                 new_message_text=new_message_text,
                 invocation_id="",
+                speaker_id=speaker_id,
             )
 
             bot_response_text, tool_calls = res
@@ -1512,6 +1685,7 @@ class OpenSourceRunner(BaseProgramRunner):
             new_text: str = None,
             model: str = None,
             force_offload: bool = False,
+            speaker_id: str = None,
         ) -> tuple:
             if session_id not in self.sessions_history:
                 self._load_session_from_disk(session_id)
@@ -1547,6 +1721,7 @@ class OpenSourceRunner(BaseProgramRunner):
                 model=model,
                 media_path=media_path,
                 msg_id=msg_id,
+                speaker_id=speaker_id,
             )
 
             self._save_session_to_disk(session_id)

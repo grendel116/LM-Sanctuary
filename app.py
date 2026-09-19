@@ -37,8 +37,10 @@ load_dotenv(dotenv_path=env_path, override=True)
 # 2. Application imports
 from adapters import comfy_manager
 from runners.runner import cancelled_sessions, voice_call_sessions, OpenSourceRunner
-from runners.program import get_active_program, get_active_user, _load_settings
+from runners.program import get_active_program, set_active_program, get_active_user, set_active_user, get_active_session, set_active_session, _load_settings
 from variables.settings import LOCAL_SERVER_URL, get_local_server_headers, VARIABLES_DIR, PROGRAMS_DIR
+
+os.environ["ACTIVE_PROGRAM"] = get_active_program()
 
 app = Flask(__name__)
 
@@ -287,8 +289,28 @@ def sanitize_response(response_text: str, session_id: str, program_msg_id: str) 
     """Cleans or processes the generated response text before sending it to the client."""
     if not response_text:
         return ""
-    # Add any necessary text cleaning or pass-through logic here
-    return response_text
+    from core.mood_inversion import extract_and_strip_mood
+    clean_text, _ = extract_and_strip_mood(response_text)
+    return clean_text
+
+def enrich_group_meta(group_meta):
+    if not group_meta or not group_meta.get("is_group"):
+        return group_meta
+    from core.program_config import _load_card_data
+    all_ids = [group_meta.get("host_id")] + [g for g in group_meta.get("guest_ids", []) if g != group_meta.get("host_id")]
+    members = []
+    for pid in all_ids:
+        if pid:
+            c = _load_card_data(pid)
+            th = load_theme(pid)
+            members.append({
+                "id": pid,
+                "name": (c.get("name") if c else pid.title()).strip(),
+                "theme": th
+            })
+    enriched = dict(group_meta)
+    enriched["members"] = members
+    return enriched
 
 
 def build_generation_response(response_text, tool_calls, session_id, user_msg_id, program_msg_id, started_at):
@@ -298,11 +320,73 @@ def build_generation_response(response_text, tool_calls, session_id, user_msg_id
     inversion_mode = asyncio.run(runner._get_inversion_mode(session_id, history=chat_history))
 
     program_timestamp = None
+    program_sender_id = None
+    program_sender_name = None
     if program_msg_id:
         for message in reversed(chat_history):
             if message.get('id') == program_msg_id:
                 program_timestamp = message.get('timestamp')
+                program_sender_id = message.get('sender_id')
+                program_sender_name = message.get('sender_name')
                 break
+
+    chain_continue = False
+    next_speaker_id = None
+
+    group_meta = getattr(runner, "sessions_group_meta", {}).get(session_id)
+    if group_meta and group_meta.get("is_group"):
+        host_id = group_meta.get("host_id")
+        guest_ids = group_meta.get("guest_ids", [])
+        all_ids = [host_id] + [g for g in guest_ids if g != host_id]
+
+        if len(all_ids) > 1:
+            from runners.runner import is_real_user_msg, detect_addressed_speaker
+
+            consecutive_assistant_count = 0
+            last_real_user_msg = None
+            for m in reversed(chat_history):
+                if is_real_user_msg(m):
+                    last_real_user_msg = m
+                    break
+                if m.get("role") == "program":
+                    consecutive_assistant_count += 1
+
+            MAX_CHAIN_TURNS = 10
+            if consecutive_assistant_count < MAX_CHAIN_TURNS:
+                current_speaker = program_sender_id or (chat_history[-1].get("sender_id") if chat_history else None)
+
+                # 1. Check if the current speaker's text explicitly addressed another program in the room
+                addressed_by_speaker = detect_addressed_speaker(response_text, all_ids, exclude_id=current_speaker)
+                if addressed_by_speaker:
+                    chain_continue = True
+                    next_speaker_id = addressed_by_speaker
+                else:
+                    # 2. Check if user addressed a specific program in their last message
+                    user_addressed = None
+                    if last_real_user_msg:
+                        user_text = last_real_user_msg.get("text") or ""
+                        if not user_text.startswith("[System:"):
+                            user_addressed = detect_addressed_speaker(user_text, all_ids)
+
+                    # Round Robin if user did not address anyone specific
+                    if not user_addressed:
+                        speakers_in_round = set()
+                        for m in reversed(chat_history):
+                            if is_real_user_msg(m):
+                                break
+                            if m.get("role") == "program" and m.get("sender_id"):
+                                speakers_in_round.add(m.get("sender_id"))
+
+                        unspoken = [pid for pid in all_ids if pid not in speakers_in_round]
+                        if unspoken:
+                            chain_continue = True
+                            next_speaker_id = unspoken[0]
+                        else:
+                            chain_continue = False
+                            next_speaker_id = None
+                    else:
+                        chain_continue = False
+                        next_speaker_id = None
 
     return jsonify({
         'response': response_text,
@@ -313,7 +397,11 @@ def build_generation_response(response_text, tool_calls, session_id, user_msg_id
         'timestamp': program_timestamp or time.time(),
         'duration': round(time.time() - started_at, 1),
         'user_msg_id': user_msg_id,
-        'program_msg_id': program_msg_id
+        'program_msg_id': program_msg_id,
+        'sender_id': program_sender_id,
+        'sender_name': program_sender_name,
+        'chain_continue': chain_continue,
+        'next_speaker': next_speaker_id,
     })
 
 
@@ -347,7 +435,8 @@ def index():
     local_ip = get_local_ip()
     tts_auto_speak = os.getenv("TTS_AUTO_SPEAK", "false").lower() == "true"
     tts_provider = os.getenv("TTS_PROVIDER", "local").lower()
-    active_program = os.getenv("ACTIVE_PROGRAM", "sebile")
+    active_program = get_active_program()
+    active_session = get_active_session()
     theme = load_theme(active_program)
 
     active_user = get_active_user()
@@ -359,7 +448,7 @@ def index():
     from core.mood_inversion import get_program_mood_metadata
     welcome_message = get_program_greeting()
     program_moods = get_program_mood_metadata(active_program)
-    response = make_response(render_template('index.html', local_ip=local_ip, tts_auto_speak=tts_auto_speak, tts_provider=tts_provider, active_program=active_program, theme=theme, active_user=active_user, welcome_message=welcome_message, program_moods=program_moods))
+    response = make_response(render_template('index.html', local_ip=local_ip, tts_auto_speak=tts_auto_speak, tts_provider=tts_provider, active_program=active_program, active_session=active_session, theme=theme, active_user=active_user, welcome_message=welcome_message, program_moods=program_moods))
     response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
     return response
 
@@ -800,9 +889,17 @@ def history():
         
         from core.program_config import program_name, get_program_greeting
         welcome_message = get_program_greeting()
-        active_program = os.environ.get("ACTIVE_PROGRAM", "sebile")
+        active_program = get_active_program()
+        if session_id and not session_id.endswith('_voice'):
+            try:
+                set_active_session(session_id)
+            except Exception as e:
+                print(f"Error saving active session: {e}")
         
         theme = load_theme(active_program)
+
+        raw_group_meta = getattr(runner, "sessions_group_meta", {}).get(session_id)
+        group_meta = enrich_group_meta(raw_group_meta)
 
         return jsonify({
             'history': chat_history,
@@ -812,7 +909,8 @@ def history():
             'character_name': program_name,
             'active_program': active_program,
             'theme': theme,
-            'welcome_message': welcome_message
+            'welcome_message': welcome_message,
+            'group_meta': group_meta
         })
     except Exception as e:
         print(f"Error getting history: {e}")
@@ -879,6 +977,7 @@ def chat():
 
     try:
         msg_id = request.json.get('msg_id')
+        speaker_id = request.json.get('speaker_id')
         response_text, tool_calls, user_msg_id, program_msg_id = asyncio.run(
             runner.run_async(
                 session_id=session_id,
@@ -887,7 +986,8 @@ def chat():
                 image_mime=image_mime,
                 model=selected_model,
                 media_path=media_path,
-                msg_id=msg_id
+                msg_id=msg_id,
+                speaker_id=speaker_id
             )
         )
         return build_generation_response(
@@ -932,13 +1032,15 @@ def edit():
     start_time = time.time()
 
     try:
+        speaker_id = request.json.get('speaker_id')
         response_text, tool_calls, user_msg_id, program_msg_id = asyncio.run(
             runner.edit_turn(
                 session_id=session_id,
                 msg_id=msg_id,
                 new_text=new_text,
                 model=selected_model,
-                force_offload=force_offload
+                force_offload=force_offload,
+                speaker_id=speaker_id
             )
         )
         return build_generation_response(
@@ -1094,6 +1196,50 @@ def continue_generation():
         last_msg = history[-1]
         last_role = 'user' if last_msg.get('role') == 'user' else 'program'
         
+        group_meta = getattr(runner, "sessions_group_meta", {}).get(session_id)
+        is_group = bool(group_meta and group_meta.get("is_group"))
+
+        if is_group:
+            host_id = group_meta.get("host_id")
+            guest_ids = group_meta.get("guest_ids", [])
+            all_ids = [host_id] + [g for g in guest_ids if g != host_id]
+
+            target_speaker = request.json.get('speaker_id')
+            if target_speaker and target_speaker in all_ids:
+                next_speaker = target_speaker
+            else:
+                last_speaker = None
+                for m in reversed(history):
+                    if m.get("role") == "program" and m.get("sender_id"):
+                        last_speaker = m.get("sender_id")
+                        break
+
+                if last_speaker in all_ids:
+                    curr_idx = all_ids.index(last_speaker)
+                    next_speaker = all_ids[(curr_idx + 1) % len(all_ids)]
+                else:
+                    next_speaker = all_ids[1] if len(all_ids) > 1 else all_ids[0]
+
+            from core.program_config import _load_card_data
+            next_card = _load_card_data(next_speaker)
+            next_name = next_card.get("name") if next_card else next_speaker.title()
+
+            prompt = f"[System: Speak in character as {next_name}. React or reply naturally to what was just said in the room.]"
+
+            response_text, tool_calls, user_msg_id, program_msg_id = asyncio.run(runner.run_async(
+                session_id=session_id,
+                new_message_text=prompt,
+                model=model,
+                speaker_id=next_speaker
+            ))
+
+            if user_msg_id:
+                asyncio.run(runner.delete_message_at(session_id, user_msg_id))
+
+            return build_generation_response(
+                response_text, tool_calls, session_id, None, program_msg_id, start_time
+            )
+
         if last_role == 'program':
             last_program_text = last_msg.get('text', '')
             
@@ -2505,7 +2651,8 @@ END:VCALENDAR"""
 @requires_auth
 def list_sessions():
     try:
-        active_program = os.environ.get("ACTIVE_PROGRAM", "sebile")
+        active_program = get_active_program()
+        active_session = get_active_session()
         sessions_dir = os.path.join(base_dir, "core", "programs", active_program, "sessions")
         
         sessions = []
@@ -2524,7 +2671,8 @@ def list_sessions():
             
         return jsonify({
             'status': 'success',
-            'sessions': sessions
+            'sessions': sessions,
+            'active_session': active_session
         })
     except Exception as e:
         print(f"Error listing sessions: {e}")
@@ -2564,6 +2712,7 @@ def list_programs():
                         'name': program_name,
                         'active': folder == active_program,
                         'theme_color': theme_color,
+                        'theme': tdata,
                         'has_profile': has_profile
                     })
         return jsonify({'programs': programs, 'active': active_program})
@@ -2588,8 +2737,8 @@ def select_program():
         
         # Update active program settings
         try:
-            from runners.program import set_active_program
             set_active_program(program_id)
+            set_active_session('default')
         except Exception as e:
             print(f"Error persisting ACTIVE_PROGRAM: {e}")
         
@@ -2627,6 +2776,92 @@ def select_program():
                 traceback.print_exc(file=lf)
         except Exception:
             pass
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/programs/group_session/start', methods=['POST'])
+@requires_auth
+def start_group_session():
+    try:
+        data = request.get_json(silent=True) or {}
+        host_id = data.get('host_id')
+        guest_ids = data.get('guest_ids', [])
+
+        if not host_id:
+            return jsonify({'error': 'Missing host_id'}), 400
+
+        host_path = os.path.join(base_dir, 'core', 'programs', host_id)
+        if not os.path.exists(host_path):
+            return jsonify({'error': f"Host program '{host_id}' does not exist"}), 404
+
+        # Validate guest programs exist
+        valid_guests = []
+        for gid in guest_ids:
+            if gid != host_id and os.path.exists(os.path.join(base_dir, 'core', 'programs', gid)):
+                if gid not in valid_guests:
+                    valid_guests.append(gid)
+
+        # Set active program to Host so theme, heart pulse, and mood belonging stay intact
+        os.environ["ACTIVE_PROGRAM"] = host_id
+        try:
+            from runners.program import set_active_program
+            set_active_program(host_id)
+        except Exception as e:
+            print(f"Error persisting ACTIVE_PROGRAM to host: {e}")
+
+        reload_program_state()
+        if hasattr(runner, 'sessions_inversion_state'):
+            runner.sessions_inversion_state.clear()
+
+        # Create new unique group session ID under the Host
+        safe_time = int(time.time())
+        session_id = f"group_{safe_time}"
+
+        # Initialize session file under host's sessions directory with group metadata
+        sessions_dir = os.path.join(host_path, "sessions")
+        os.makedirs(sessions_dir, exist_ok=True)
+        session_file = os.path.join(sessions_dir, f"{session_id}.json")
+
+        from core.mood_inversion import new_state
+        initial_data = {
+            "group_meta": {
+                "is_group": True,
+                "host_id": host_id,
+                "guest_ids": valid_guests,
+            },
+            "messages": [],
+            "inversion_state": new_state(host_id),
+            "memory_state": {"recent_chapters": [], "epic_chronicle": "", "last_summarized_turn": 0}
+        }
+
+        with open(session_file, "w", encoding="utf-8") as f:
+            json.dump(initial_data, f, indent=2, ensure_ascii=False)
+
+        try:
+            set_active_session(session_id)
+        except Exception as e:
+            print(f"Error persisting active session: {e}")
+
+        if hasattr(runner, "sessions_group_meta"):
+            runner.sessions_group_meta[session_id] = initial_data["group_meta"]
+
+        theme = load_theme(host_id)
+        from core.mood_inversion import get_program_mood_metadata
+        mood_meta = get_program_mood_metadata(host_id)
+        from core.program_config import program_name
+
+        return jsonify({
+            'status': 'success',
+            'session_id': session_id,
+            'host_id': host_id,
+            'guest_ids': valid_guests,
+            'character_name': program_name,
+            'theme': theme,
+            'mood_meta': mood_meta
+        })
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
 

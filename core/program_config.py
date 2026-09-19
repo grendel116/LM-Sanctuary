@@ -61,7 +61,7 @@ def get_program_greeting() -> str:
     greeting = card.get("first_mes") or card.get("operation", {}).get("example_message", "")
     return greeting.strip() if greeting.strip() else "Hello, {{user}}."
 
-def compile_instructions_from_card(card: dict) -> str:
+def compile_instructions_from_card(card: dict, override_scenario: str = None, include_example: bool = True) -> str:
     """Compiles a system prompt from a chara_card_v3 data block."""
     name = card.get("name", "Program")
     prompt_parts = [f"# IDENTITY: {name}"]
@@ -84,19 +84,124 @@ def compile_instructions_from_card(card: dict) -> str:
     if personality:
         prompt_parts.append(f"## PERSONALITY\n{personality}")
 
-    scenario = card.get("scenario", "").strip()
+    scenario = (override_scenario if override_scenario is not None else card.get("scenario", "")).strip()
     if scenario:
         prompt_parts.append(f"## SCENARIO\n{scenario}")
 
-    mes_example = (card.get("mes_example") or card.get("first_mes") or "").strip()
-    if mes_example:
-        prompt_parts.append(f"## EXAMPLE MESSAGE\n{mes_example}")
+    if include_example:
+        mes_example = (card.get("mes_example") or card.get("first_mes") or "").strip()
+        if mes_example:
+            prompt_parts.append(f"## EXAMPLE MESSAGE\n{mes_example}")
 
     system_prompt = card.get("system_prompt", "").strip()
     if system_prompt:
         prompt_parts.append(f"## RESPONSE INSTRUCTIONS\n{system_prompt}")
 
     return replace_placeholders("\n\n".join(prompt_parts))
+
+def compile_speaker_instructions(speaker_id: str, host_id: str = None, guest_ids: list = None) -> str:
+    """Compiles a complete system prompt specifically for the active speaker in a group session."""
+    host_id = host_id or speaker_id
+    is_guest = (speaker_id != host_id)
+
+    # The group session scenario is anchored exclusively to the Host
+    host_card = _load_card_data(host_id)
+    host_scenario = host_card.get("scenario", "").strip() if host_card else ""
+
+    card = _load_card_data(speaker_id)
+    if card:
+        base_inst = compile_instructions_from_card(
+            card,
+            override_scenario=host_scenario,
+            include_example=(not is_guest)
+        )
+    else:
+        base_inst = f"# IDENTITY: {speaker_id.title()}\n"
+        if host_scenario:
+            base_inst += f"## SCENARIO\n{host_scenario}\n"
+
+    # Add toolbelt
+    try:
+        from core.skill_retriever import get_toolbelt_block
+        story_active = is_story_mode(speaker_id)
+        toolbelt = get_toolbelt_block(story_active)
+        if toolbelt:
+            base_inst += "\n\n" + toolbelt
+    except Exception as e:
+        print(f"[program_config] Error loading toolbelt for speaker {speaker_id}: {e}")
+
+    # Build Room Participants Context
+    room_members = []
+    from runners.program import get_active_user
+    user_name = get_active_user().replace("_", " ").title()
+    room_members.append(f"{user_name} (User)")
+
+    all_ids = []
+    if host_id:
+        all_ids.append(host_id)
+    if guest_ids:
+        for gid in guest_ids:
+            if gid not in all_ids:
+                all_ids.append(gid)
+
+    other_members = []
+    for pid in all_ids:
+        c = _load_card_data(pid)
+        pname = c.get("name") or pid.title()
+        role_label = "Host" if pid == host_id else "Guest"
+        if pid == speaker_id:
+            room_members.append(f"You ({pname}, {role_label})")
+        else:
+            room_members.append(f"{pname} ({role_label})")
+            other_members.append(pname)
+
+    speaker_card = _load_card_data(speaker_id)
+    speaker_name = speaker_card.get("name") or speaker_id.title()
+    other_str = ", ".join(other_members) if other_members else "other characters"
+
+    room_block = (
+        f"\n\n# GROUP SESSION DIRECTIVES\n"
+        f"You are {speaker_name}. You are participating in a group conversation with {', '.join(room_members)}.\n"
+        f"- Active turn speaker: You ({speaker_name}).\n"
+        f"- IDENTITY CONSTRAINT: Speak and act EXCLUSIVELY as {speaker_name}. You are one individual participant in the room.\n"
+        f"- NEVER PUPPET OTHERS: Do not write dialogue, thoughts, or actions for {other_str} or {user_name}. Never simulate other participants. Each participant speaks for themselves on their own turn.\n"
+        f"- NO SPEAKER TAGS: Do not output speaker prefixes or tags like '[{speaker_name}]:' or '[{other_str}]:'. In conversation history, brackets indicate who spoke previously, but in your reply, speak directly from your own persona without tags or labels.\n"
+        f"- Respond naturally in your own distinct persona and voice.\n"
+    )
+
+    base = replace_placeholders(base_inst + load_user_instructions())
+    story_mode = is_story_mode(speaker_id)
+    if story_mode:
+        formatting = (
+            "\n\n# MESSAGE FORMAT (MANDATORY)\n"
+            "- Use separate lines and clear paragraphs for narration and dialogue.\n"
+            "- Narration: Use *italics* and present tense to describe actions, setting details, and other characters.\n"
+            "- Dialogue: Use plain text without quotation marks. Use **bold** for emphasis.\n"
+            "- State all claims directly and affirmatively in single assertions.\n"
+            "- FORBIDDEN: Do not use contrast structures ('not X, but Y', 'it is not A, it is B', 'not just X, it is Y'). Express ideas positively without negating alternatives.\n"
+            "- Style: Use short words and precise phrasing. Write with linear progression.\n"
+            "- Plot: Write prose. Introduce narrative conflict.\n"
+        )
+    else:
+        formatting = (
+            "\n\n# MESSAGE FORMAT (MANDATORY)\n"
+            "- Use separate lines and paragraphs for narration and dialogue.\n"
+            "- Narration: Use *italics*, first person, and present tense for actions, expressions, and setting details.\n"
+            "- Dialogue: Use plain text without quotation marks. Use **bold** for emphasis.\n"
+            "- Style: Use short words and precise phrasing with dialectical reasoning.\n"
+            "- State all claims directly and affirmatively in single assertions.\n"
+            "- FORBIDDEN: Do not use contrast structures ('not X, but Y', 'it is not A, it is B', 'not just X, it is Y'). Express ideas positively without negating alternatives.\n"
+            "- Be succinct, with short words and simple sentences.\n"
+            "- Do not patronize or automatically validate.\n"
+            "- Do not use generic platitudes.\n"
+            "- Do not ask clinical questions.\n"
+            "- Do not use flowery language.\n"
+        )
+
+    from core.mood_inversion import get_mood_declaration_prompt
+    mood_directive = get_mood_declaration_prompt(speaker_id)
+
+    return base + room_block + formatting + mood_directive
 
 def load_static_instructions() -> str:
     """Reads the active program's card and compiles it into a system prompt.
@@ -241,6 +346,9 @@ def get_compiled_instructions() -> str:
         )
         
     base += global_formatting
+
+    from core.mood_inversion import get_mood_declaration_prompt
+    base += get_mood_declaration_prompt(active_program)
     
     if inversion_directive:
         base += f"\n\n# PERSONALITY INVERSION DIRECTIVE\n{replace_placeholders(inversion_directive)}\n"

@@ -29,7 +29,7 @@ class LocalHistoryAdapter(ABC):
         pass
 
     @abstractmethod
-    def append_assistant_message(self, text: str, tool_calls_data: list, invocation_id: str):
+    def append_assistant_message(self, text: str, tool_calls_data: list, invocation_id: str, intermediate: bool = False, speaker_id: str = None):
         pass
 
     @abstractmethod
@@ -247,10 +247,18 @@ class OsHistoryAdapter(LocalHistoryAdapter):
                 latest_user_idx = idx
                 break
 
+        group_meta = getattr(self.runner_obj, "sessions_group_meta", {}).get(self.session_id)
+        is_group = bool(group_meta and group_meta.get("is_group"))
+
         raw_messages = []
         for idx, msg in enumerate(filtered_history):
             role = "assistant" if msg["role"] == "program" else "user"
             content_text = replace_placeholders(msg.get("text") or "")
+
+            if is_group and role == "assistant" and msg.get("sender_name"):
+                s_name = msg["sender_name"]
+                if not content_text.startswith(f"[{s_name}]") and not content_text.startswith(f"{s_name}:"):
+                    content_text = f"[{s_name}]: {content_text}"
 
             if msg.get("tool_calls"):
                 for tc in msg["tool_calls"]:
@@ -284,7 +292,11 @@ class OsHistoryAdapter(LocalHistoryAdapter):
                 content_text = f"{content_text}\n\n{scan_info}".strip()
             raw_messages.append({"role": role, "content": content_text})
 
-        active_prog = get_active_program()
+        group_meta = getattr(self.runner_obj, "sessions_group_meta", {}).get(self.session_id)
+        if group_meta and group_meta.get("is_group"):
+            active_prog = group_meta.get("host_id") or get_active_program()
+        else:
+            active_prog = get_active_program()
         story_active = is_story_mode(active_prog)
 
         directive = _STORY_MODE_DIRECTIVE_PROMPT if story_active else _MAIN_DIRECTIVE_PROMPT
@@ -376,35 +388,58 @@ class OsHistoryAdapter(LocalHistoryAdapter):
             max_input_tokens=6500
         )
 
-    def append_assistant_message(self, text: str, tool_calls_data: list, invocation_id: str, intermediate: bool = False):
+    def append_assistant_message(self, text: str, tool_calls_data: list, invocation_id: str, intermediate: bool = False, speaker_id: str = None):
         from core.mood_inversion import extract_and_strip_mood
         from runners.program import get_active_program
+        from core.program_config import _load_card_data
 
-        _, mood_details = extract_and_strip_mood(text, program_id=get_active_program())
-        if mood_details:
+        sender_id = speaker_id or get_active_program()
+        speaker_card = _load_card_data(sender_id)
+        sender_name = speaker_card.get("name") if speaker_card else sender_id.title()
+
+        group_meta = getattr(self.runner_obj, "sessions_group_meta", {}).get(self.session_id)
+        is_host = True
+        if group_meta and group_meta.get("is_group"):
+            is_host = (sender_id == group_meta.get("host_id"))
+
+        clean_text, mood_details = extract_and_strip_mood(text, program_id=sender_id)
+        if is_host and mood_details:
             self.runner_obj.update_inversion_state_with_mood(self.session_id, mood_details.get("name"))
 
         winning_mode = self.runner_obj.sessions_inversion_state.get(self.session_id, {}).get("active_inversion", "")
         history = self.runner_obj.sessions_history[self.session_id]
 
-        if history and history[-1]["role"] == "program":
+        is_same_intermediate_turn = (
+            history
+            and history[-1]["role"] == "program"
+            and history[-1].get("id", "").startswith("itm_")
+            and history[-1].get("sender_id") == sender_id
+        )
+        if is_same_intermediate_turn:
             history[-1].update({
-                "text": text,
+                "text": clean_text,
                 "tool_calls": tool_calls_data,
-                "inversion_active": winning_mode,
+                "inversion_active": winning_mode if is_host else "",
                 "mood": mood_details,
+                "sender_id": sender_id,
+                "sender_name": sender_name,
             })
+            if not intermediate:
+                prefix = "img_" if clean_text and clean_text.strip().startswith("![") and clean_text.strip().endswith(")") else "prgm_"
+                history[-1]["id"] = f"{prefix}{uuid.uuid4().hex}"
             return history[-1]
 
-        prefix = "itm_" if intermediate else "img_" if text and text.strip().startswith("![") and text.strip().endswith(")") else "prgm_"
+        prefix = "itm_" if intermediate else "img_" if clean_text and clean_text.strip().startswith("![") and clean_text.strip().endswith(")") else "prgm_"
         bot_msg = {
             "id": f"{prefix}{uuid.uuid4().hex}",
             "role": "program",
-            "text": text,
+            "text": clean_text,
             "tool_calls": tool_calls_data,
             "timestamp": time.time(),
-            "inversion_active": winning_mode,
+            "inversion_active": winning_mode if is_host else "",
             "mood": mood_details,
+            "sender_id": sender_id,
+            "sender_name": sender_name,
         }
         history.append(bot_msg)
         return bot_msg

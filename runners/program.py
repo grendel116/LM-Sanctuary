@@ -88,6 +88,15 @@ def set_active_program(program_id: str):
     settings["folders"] = [default_folder]
     _save_settings(settings)
 
+def get_active_session() -> str:
+    settings = _load_settings()
+    return settings.get("active_session", "default")
+
+def set_active_session(session_id: str):
+    settings = _load_settings()
+    settings["active_session"] = session_id
+    _save_settings(settings)
+
 def get_active_user() -> str:
     # Determine active user from settings first
     settings = _load_settings()
