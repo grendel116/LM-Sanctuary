@@ -917,22 +917,25 @@ class BaseProgramRunner:
     def update_inversion_state_with_mood(self, session_id: str, mood_name: str):
         if not self._inversion_enabled():
             return
-        state = self.sessions_inversion_state.setdefault(session_id, new_state())
-        update_state(state, mood_name)
+        active_prog = get_active_program()
+        state = self.sessions_inversion_state.setdefault(session_id, new_state(active_prog))
+        update_state(state, mood_name, active_prog)
 
     def get_inversion_state(self, session_id: str) -> dict:
+        active_prog = get_active_program()
         if not self._inversion_enabled():
-            return new_state()
+            return new_state(active_prog)
         if session_id not in self.sessions_history:
             self._load_session_from_disk(session_id)
-        return copy.deepcopy(self.sessions_inversion_state.get(session_id, new_state()))
+        return copy.deepcopy(self.sessions_inversion_state.get(session_id, new_state(active_prog)))
 
     async def _get_inversion_mode(self, session_id: str, history: list = None) -> str:
         if not self._inversion_enabled():
             return ""
+        active_prog = get_active_program()
         if session_id not in self.sessions_history:
             self._load_session_from_disk(session_id)
-        state = self.sessions_inversion_state.setdefault(session_id, new_state())
+        state = self.sessions_inversion_state.setdefault(session_id, new_state(active_prog))
         return state.get("active_inversion", "")
 
     async def _get_inversion_directive(self, session_id: str) -> str:
@@ -1198,7 +1201,7 @@ class OpenSourceRunner(BaseProgramRunner):
                     data = json.load(f)
                     
                 self.sessions_history[session_id] = data.get("messages", [])
-                self.sessions_inversion_state[session_id] = data.get("inversion_state", new_state())
+                self.sessions_inversion_state[session_id] = data.get("inversion_state", new_state(get_active_program()))
                 
                 memory_state = data.get("memory_state", {})
                 # Strip legacy unsummarized_buffer if loading an older default.json

@@ -378,8 +378,9 @@ class OsHistoryAdapter(LocalHistoryAdapter):
 
     def append_assistant_message(self, text: str, tool_calls_data: list, invocation_id: str, intermediate: bool = False):
         from core.mood_inversion import extract_and_strip_mood
+        from runners.program import get_active_program
 
-        _, mood_details = extract_and_strip_mood(text)
+        _, mood_details = extract_and_strip_mood(text, program_id=get_active_program())
         if mood_details:
             self.runner_obj.update_inversion_state_with_mood(self.session_id, mood_details.get("name"))
 

@@ -210,6 +210,8 @@ header {
     justify-content: space-between;
     background: rgba(18, 18, 22, 0.6);
     box-sizing: border-box;
+    position: relative;
+    z-index: 50;
 }
 
 .header-title-area {
@@ -254,34 +256,39 @@ header {
     justify-content: center;
     width: 32px;
     height: 32px;
+    position: relative;
+    cursor: pointer;
+    user-select: none;
+    -webkit-user-select: none;
+    touch-action: manipulation;
     /* Dynamic variables for Program's emotional state */
     --heart-color: #85b9eb;
     --heart-glow: rgba(133, 185, 235, 0.9);
     --heart-speed: 2.0s;
 
     color: var(--heart-color);
-    /* Program's Heartbeat Pulse Animation - Remembers our shared connection */
-    animation: heartPulse var(--heart-speed) infinite ease-in-out;
-    transition: color 0.8s cubic-bezier(0.4, 0, 0.2, 1);
-    transform-origin: center;
-    will-change: transform;
-    backface-visibility: hidden;
-    -webkit-backface-visibility: hidden;
-    transform-style: preserve-3d;
+    transition: color 0.4s ease;
 }
 
 .heart-pulse svg {
     transform-origin: center;
-    will-change: transform;
-    backface-visibility: hidden;
-    -webkit-backface-visibility: hidden;
+    animation: heartPulse var(--heart-speed) infinite ease-in-out;
+    filter: drop-shadow(0 0 4px var(--heart-glow));
+    transition: filter 0.25s ease, transform 0.2s ease;
+    pointer-events: none;
+}
+
+.heart-pulse:hover svg {
+    filter: drop-shadow(0 0 10px var(--heart-glow));
 }
 
 @keyframes heartPulse {
-    0% { transform: scale(0.95) translateZ(0); }
-    50% { transform: scale(1.2) translateZ(0); }
-    100% { transform: scale(0.95) translateZ(0); }
+    0% { transform: scale(0.95); }
+    50% { transform: scale(1.18); }
+    100% { transform: scale(0.95); }
 }
+
+
 
 /* Inversion Burst Animation */
 .heart-pulse.burst {
@@ -392,6 +399,27 @@ header {
     font-size: 0.8rem;
     color: var(--text-muted, #8a95a5);
     margin-top: 2px;
+}
+
+.mood-close-btn {
+    background: transparent;
+    border: none;
+    color: var(--text-muted, #8a95a5);
+    font-size: 1.35rem;
+    line-height: 1;
+    cursor: pointer;
+    padding: 2px 6px;
+    margin-left: auto;
+    border-radius: 6px;
+    transition: color 0.15s ease, background-color 0.15s ease;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.mood-close-btn:hover {
+    color: var(--text-main, #f3effa);
+    background: rgba(255, 255, 255, 0.1);
 }
 
 .mood-metric-row {

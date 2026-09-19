@@ -258,7 +258,7 @@ def find_image_sidecar_json(image_filename, active_program):
 
 
 def extract_mood(chat_history):
-    """Extract mood from the latest program message, defaulting to neutral."""
+    """Extract mood from the latest program message, defaulting to program baseline."""
     for msg in reversed(chat_history):
         if msg.get('role') == 'program':
             mood = msg.get('mood')
@@ -266,7 +266,8 @@ def extract_mood(chat_history):
                 return mood
             break
     from core.mood_inversion import analyze_emotional_state
-    return analyze_emotional_state("")
+    from runners.program import get_active_program
+    return analyze_emotional_state("", program_id=get_active_program())
 
 
 def prepare_generation_request(session_id, use_imagen=False, is_voice_call=False):
@@ -355,8 +356,10 @@ def index():
         active_user = request.authorization.username
 
     from core.program_config import get_program_greeting
+    from core.mood_inversion import get_program_mood_metadata
     welcome_message = get_program_greeting()
-    response = make_response(render_template('index.html', local_ip=local_ip, tts_auto_speak=tts_auto_speak, tts_provider=tts_provider, active_program=active_program, theme=theme, active_user=active_user, welcome_message=welcome_message))
+    program_moods = get_program_mood_metadata(active_program)
+    response = make_response(render_template('index.html', local_ip=local_ip, tts_auto_speak=tts_auto_speak, tts_provider=tts_provider, active_program=active_program, theme=theme, active_user=active_user, welcome_message=welcome_message, program_moods=program_moods))
     response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
     return response
 
@@ -2602,13 +2605,17 @@ def select_program():
         if os.path.exists(profile_path):
             has_profile = True
 
+        from core.mood_inversion import get_program_mood_metadata
+        mood_meta = get_program_mood_metadata(program_id)
+
         from core.program_config import program_name
         return jsonify({
             'status': 'success',
             'active': program_id,
             'character_name': program_name,
             'theme': theme,
-            'has_profile': has_profile
+            'has_profile': has_profile,
+            'mood_meta': mood_meta
         })
     except Exception as e:
         import traceback
@@ -2628,12 +2635,15 @@ def select_program():
 def get_program_theme_route():
     try:
         from runners.program import get_active_program
+        from core.mood_inversion import get_program_mood_metadata
         program_id = request.args.get('program_id') or get_active_program()
         theme_data = load_theme(program_id)
+        mood_meta = get_program_mood_metadata(program_id)
         return jsonify({
             'status': 'success',
             'program_id': program_id,
-            'theme': theme_data
+            'theme': theme_data,
+            'mood_meta': mood_meta
         })
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -2672,12 +2682,15 @@ def update_program_palette():
             json.dump(theme_data, tf, indent=2, ensure_ascii=False)
             
         _theme_cache[program_id] = theme_data
+        from core.mood_inversion import get_program_mood_metadata
+        mood_meta = get_program_mood_metadata(program_id)
 
         return jsonify({
             'status': 'success',
             'program_id': program_id,
             'color': color,
-            'theme': theme_data
+            'theme': theme_data,
+            'mood_meta': mood_meta
         })
     except Exception as e:
         import traceback

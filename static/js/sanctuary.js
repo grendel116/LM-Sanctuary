@@ -337,20 +337,58 @@ if (userInput) {
 let ttsAutoSpeak = appConfig.ttsAutoSpeak || false;
 const ttsProvider = appConfig.ttsProvider || "local";
 // Mood and Emotional State Metadata
-const MOOD_META = {
-    intimate: { emoji: "🌸", label: "Deep Intimacy", desc: "Warm & Blushing", color: "#c084fc" },
-    excited: { emoji: "⚡", label: "Playful Excitement", desc: "Fast & Energetic", color: "#a78bfa" },
-    calm: { emoji: "🌊", label: "Thoughtful Serenity", desc: "Calm & Balanced", color: "#818cf8" },
-    intense: { emoji: "🔥", label: "Radical Determination", desc: "Sharp & Focused", color: "#f472b6" },
-    sad: { emoji: "💧", label: "Concerned Sadness", desc: "Dim & Attuned", color: "#94a3b8" },
-    analytical: { emoji: "🔬", label: "Analytical Inquiry", desc: "Logical & Dissecting", color: "#60a5fa" },
-    focused: { emoji: "🎯", label: "Methodical Focus", desc: "Concise & Task-Oriented", color: "#9370db" }
-};
+// Dynamic Program Mood Registry & CMYK Palette State
+let activeProgramMoods = (window.__SANCTUARY_CONFIG && window.__SANCTUARY_CONFIG.programMoods) || null;
+let MOOD_META = {};
+
+function applyProgramMoodMetadata(moodMeta) {
+    if (!moodMeta) return;
+    activeProgramMoods = moodMeta;
+    MOOD_META = {};
+
+    // Register baseline resting state
+    if (moodMeta.baseline) {
+        MOOD_META.baseline = {
+            emoji: moodMeta.baseline.emoji || "✨",
+            label: moodMeta.baseline.label || "Serene",
+            desc: "Resting & Balanced",
+            color: moodMeta.baseline.color || "#38bdf8",
+            glow: moodMeta.baseline.glow || "rgba(56, 189, 248, 0.85)"
+        };
+        MOOD_META.calm = MOOD_META.baseline;
+    }
+
+    // Register program moods modulated via CMYK
+    if (moodMeta.moods) {
+        for (const [key, m] of Object.entries(moodMeta.moods)) {
+            MOOD_META[key] = {
+                emoji: m.emoji || "✨",
+                label: m.label || key.charAt(0).toUpperCase() + key.slice(1),
+                desc: m.directive || `${m.label || key} state`,
+                color: m.color || "#38bdf8",
+                glow: m.glow || "rgba(56, 189, 248, 0.85)"
+            };
+        }
+    }
+}
+
+if (activeProgramMoods) {
+    applyProgramMoodMetadata(activeProgramMoods);
+}
+
+function getMoodMeta(moodName) {
+    if (!moodName) return MOOD_META.baseline || { emoji: "✨", label: "Serene", color: "#38bdf8" };
+    return MOOD_META[moodName] || MOOD_META.baseline || MOOD_META.calm || {
+        emoji: "✨",
+        label: moodName.charAt(0).toUpperCase() + moodName.slice(1),
+        color: "#38bdf8"
+    };
+}
 
 let latestInversionState = {
     active_inversion: "",
     inversion_consecutive_turns: 0,
-    mood_tally: { intimate: 0, excited: 0, intense: 0, sad: 0, analytical: 0, focused: 0 }
+    mood_tally: (activeProgramMoods && activeProgramMoods.moods) ? Object.keys(activeProgramMoods.moods).reduce((acc, k) => { acc[k] = 0; return acc; }, {}) : {}
 };
 
 function getStoredMoodHistory() {
@@ -368,7 +406,7 @@ function syncMoodHistoryFromChat(history) {
     const moodList = [];
     for (const msg of history) {
         if (msg && (msg.role === 'program' || msg.role === 'model') && msg.mood && msg.mood.name) {
-            const meta = MOOD_META[msg.mood.name] || MOOD_META.calm;
+            const meta = getMoodMeta(msg.mood.name);
             moodList.push({
                 name: msg.mood.name,
                 emoji: meta.emoji,
@@ -392,7 +430,7 @@ function pushMoodToHistory(moodState, msgId = null) {
         if (msgId && list.length > 0 && list[list.length - 1].id === msgId) {
             return;
         }
-        const meta = MOOD_META[moodState.name] || MOOD_META.calm;
+        const meta = getMoodMeta(moodState.name);
         list.push({
             name: moodState.name,
             emoji: meta.emoji,
@@ -409,16 +447,23 @@ function pushMoodToHistory(moodState, msgId = null) {
 }
 
 let currentHeartState = {
-    name: "calm",
-    color: "#818cf8",
-    glow: "rgba(129, 140, 248, 0.85)",
+    name: "baseline",
+    color: (activeProgramMoods && activeProgramMoods.baseline && activeProgramMoods.baseline.color) || "#38bdf8",
+    glow: (activeProgramMoods && activeProgramMoods.baseline && activeProgramMoods.baseline.glow) || "rgba(56, 189, 248, 0.85)",
     speed: "2.0s",
     intensity: 0.0
 };
 
-function showMoodStatusPopup() {
+function getMoodModalElement() {
+    return document.getElementById('mood-modal');
+}
+
+function renderMoodModal() {
+    const body = document.getElementById('mood-modal-body');
+    if (!body) return;
+
     const name = activeProgramName || "Program";
-    const meta = MOOD_META[currentHeartState.name] || MOOD_META.calm;
+    const meta = getMoodMeta(currentHeartState.name);
     const intensityPercent = Math.round((currentHeartState.intensity || 0) * 100);
 
     const historyList = getStoredMoodHistory();
@@ -432,25 +477,38 @@ function showMoodStatusPopup() {
         }
     }
 
-    const popupHtml = `
+    let inversionNotice = "";
+    const activeInv = latestInversionState.active_inversion || inversionActive;
+    if (activeInv) {
+        const invMeta = getMoodMeta(activeInv);
+        inversionNotice = `
+            <div style="font-size: 0.78rem; padding: 8px 12px; border-radius: 8px; background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.1); color: ${invMeta.color || '#f472b6'}; font-weight: 500;">
+                ⚡ Inversion Active: <strong>${invMeta.label || activeInv}</strong>
+            </div>
+        `;
+    }
+
+    body.innerHTML = `
         <div class="mood-status-card" style="--card-glow: ${currentHeartState.glow || meta.color};">
             <div class="mood-header-box">
                 <div class="mood-header-emoji">${meta.emoji}</div>
                 <div class="mood-header-info">
-                    <div class="mood-header-prefix">${name}'s Mood</div>
-                    <div class="mood-header-title">${meta.label}</div>
+                    <div class="mood-header-prefix">${name}'s State</div>
+                    <div class="mood-header-title" style="color: ${currentHeartState.color || meta.color};">${meta.label}</div>
                 </div>
             </div>
 
             <div class="mood-metric-row">
                 <div class="mood-metric-header">
                     <span>Emotional Intensity</span>
-                    <span class="mood-metric-value">${intensityPercent}%</span>
+                    <span class="mood-metric-value" style="color: ${currentHeartState.color || meta.color};">${intensityPercent}%</span>
                 </div>
                 <div class="mood-progress-track">
                     <div class="mood-progress-fill" style="width: ${intensityPercent}%; background: linear-gradient(90deg, #9370db, ${currentHeartState.color || meta.color}); box-shadow: 0 0 8px ${currentHeartState.glow || 'rgba(147, 112, 219, 0.4)'};"></div>
                 </div>
             </div>
+
+            ${inversionNotice}
 
             <div class="mood-trail-container">
                 <span class="mood-trail-label">Recent Moods:</span>
@@ -460,21 +518,80 @@ function showMoodStatusPopup() {
             </div>
         </div>
     `;
-
-    showCustomAlert("", popupHtml);
 }
 
-function initHeartPulse() {
-    const heartElement = document.querySelector('.heart-pulse');
-    if (heartElement) {
-        heartElement.style.cursor = 'pointer';
-        heartElement.addEventListener('click', () => {
-            showMoodStatusPopup();
-        });
-        heartElement.addEventListener('dblclick', () => {
-            triggerHeartBurst();
-        });
+function openMoodModal() {
+    const modal = getMoodModalElement();
+    if (!modal) return;
+    renderMoodModal();
+    modal.style.display = 'flex';
+}
+
+function closeMoodModal() {
+    const modal = getMoodModalElement();
+    if (modal) {
+        modal.style.display = 'none';
     }
+}
+
+function toggleMoodModal() {
+    const modal = getMoodModalElement();
+    if (modal && modal.style.display === 'flex') {
+        closeMoodModal();
+    } else {
+        openMoodModal();
+    }
+}
+
+function showMoodStatusPopup() {
+    toggleMoodModal();
+}
+
+let heartClickTimer = null;
+
+function initHeartPulse() {
+    const heartElement = document.getElementById('header-heart-pulse') || document.querySelector('.heart-pulse');
+    if (!heartElement) return;
+
+    heartElement.removeAttribute('title');
+    heartElement.style.cursor = 'pointer';
+
+    heartElement.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (heartClickTimer !== null) {
+            clearTimeout(heartClickTimer);
+            heartClickTimer = null;
+            return;
+        }
+        heartClickTimer = setTimeout(() => {
+            heartClickTimer = null;
+            toggleMoodModal();
+        }, 220);
+    });
+
+    heartElement.addEventListener('dblclick', (e) => {
+        e.stopPropagation();
+        if (heartClickTimer !== null) {
+            clearTimeout(heartClickTimer);
+            heartClickTimer = null;
+        }
+        closeMoodModal();
+        triggerHeartBurst();
+    });
+
+    heartElement.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            e.stopPropagation();
+            toggleMoodModal();
+        }
+    });
+
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') {
+            closeMoodModal();
+        }
+    });
 }
 if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', initHeartPulse);
@@ -1629,13 +1746,18 @@ function updateHeartState(state, activeInversion, inversionState, msgId = null, 
     
     // Add dynamic description to title tooltips
     const name = activeProgramName || "Program";
-    const meta = MOOD_META[state.name] || MOOD_META.calm;
+    const meta = getMoodMeta(state.name);
     let title = `${name}'s Mood: ${meta.label}`;
     if (resolvedInversion) {
-        const invMeta = MOOD_META[resolvedInversion] || { label: resolvedInversion };
+        const invMeta = getMoodMeta(resolvedInversion);
         title += ` • Inversion Active: ${invMeta.label || resolvedInversion}`;
     }
-    heartElement.title = title;
+    heartElement.setAttribute('aria-label', title);
+    heartElement.removeAttribute('title');
+    const modal = document.getElementById('mood-modal');
+    if (modal && modal.style.display === 'flex') {
+        renderMoodModal();
+    }
 }
 
 // --- triggerHeartBurst ---
@@ -2994,21 +3116,26 @@ async function selectAssistant(assistantId) {
         if (data.status === 'success') {
             closeAssistantModal();
             
-            // Reset heart animation class and state to default calm baseline
+            if (data.mood_meta) {
+                applyProgramMoodMetadata(data.mood_meta);
+            }
+            
+            // Reset heart animation class and state to program baseline
             const heartElement = document.getElementById('header-heart-pulse') || document.querySelector('.heart-pulse');
             if (heartElement) {
                 heartElement.classList.remove('jiggling', 'burst');
+                const baseColor = (data.mood_meta && data.mood_meta.base_color) || (data.theme && data.theme.main_color) || "#38bdf8";
                 currentHeartState = {
-                    name: "calm",
-                    color: "#85b9eb",
-                    glow: "rgba(133, 185, 235, 0.9)",
+                    name: "baseline",
+                    color: baseColor,
+                    glow: (data.mood_meta && data.mood_meta.baseline && data.mood_meta.baseline.glow) || "rgba(56, 189, 248, 0.85)",
                     speed: "2.0s",
                     intensity: 0.0
                 };
                 latestInversionState = {
                     active_inversion: "",
                     inversion_consecutive_turns: 0,
-                    mood_tally: { intimate: 0, excited: 0, intense: 0, sad: 0, analytical: 0, focused: 0 }
+                    mood_tally: (data.mood_meta && data.mood_meta.moods) ? Object.keys(data.mood_meta.moods).reduce((acc, k) => { acc[k] = 0; return acc; }, {}) : {}
                 };
                 updateHeartState(currentHeartState, "", latestInversionState);
             }
@@ -3343,6 +3470,17 @@ async function saveProgramPalette() {
                 (activeProgramName && activeProgramName.toLowerCase().replace(/[^a-z0-9]/g, '') === paletteTargetProgramId.toLowerCase().replace(/[^a-z0-9]/g, ''));
             if (isMatch) {
                 applyTheme(paletteTargetProgramId, data.theme);
+                if (data.mood_meta) {
+                    applyProgramMoodMetadata(data.mood_meta);
+                    currentHeartState = {
+                        name: "baseline",
+                        color: data.mood_meta.base_color || "#38bdf8",
+                        glow: (data.mood_meta.baseline && data.mood_meta.baseline.glow) || "rgba(56, 189, 248, 0.85)",
+                        speed: "2.0s",
+                        intensity: 0.0
+                    };
+                    updateHeartState(currentHeartState, "", latestInversionState);
+                }
             }
             
             document.getElementById('palette-modal').style.display = 'none';

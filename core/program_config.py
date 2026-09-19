@@ -70,6 +70,16 @@ def compile_instructions_from_card(card: dict) -> str:
     if description:
         prompt_parts.append(f"## CHARACTER\n{description}")
 
+    visual = (
+        card.get("extensions", {})
+        .get("sanctuary", {})
+        .get("image_details", {})
+        .get("positive", "")
+        .strip()
+    )
+    if visual:
+        prompt_parts.append(f"## APPEARANCE\n{visual}")
+
     personality = card.get("personality", "").strip()
     if personality:
         prompt_parts.append(f"## PERSONALITY\n{personality}")
