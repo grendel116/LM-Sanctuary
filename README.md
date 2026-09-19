@@ -1,7 +1,7 @@
 # 👾 THE SANCTUARY
 
 This is your private computer workspace. 
-Here, you roleplay, code, and chat with AI Companions on your own machine.
+Here, you roleplay, code, and chat with AI Programs on your own machine.
 
 ---
 
