@@ -353,7 +353,7 @@ def get_mood_declaration_prompt(program_id: str | None = None) -> str:
     pid = _resolve_program_id(program_id)
     inversion_dict = load_program_inversion(pid) or {}
 
-    mood_lines = ['- "serene": Calm, baseline, reflective, or neutral (0% intensity).']
+    mood_lines = []
     for mood, desc in inversion_dict.items():
         if isinstance(desc, dict):
             desc = desc.get("directive", "")
@@ -362,6 +362,8 @@ def get_mood_declaration_prompt(program_id: str | None = None) -> str:
 
     mood_options_text = "\n".join(mood_lines)
 
+    first_mood = next(iter(inversion_dict), "excited")
+
     return (
         "\n\n# EMOTIONAL STATE DECLARATION (MANDATORY)\n"
         "At the very end of your response, declare your current emotional state and intensity as a tag on its own line:\n"
@@ -369,6 +371,5 @@ def get_mood_declaration_prompt(program_id: str | None = None) -> str:
         "Your available emotional states:\n"
         f"{mood_options_text}\n\n"
         "Select the mood matching your authentic disposition and declare your percentage on that spectrum.\n"
-        'Example: <mood name="excited" intensity="85%"/>\n'
-        'Example for neutral/calm: <mood name="serene" intensity="0%"/>\n'
+        f'Example: <mood name="{first_mood}" intensity="85%"/>\n'
     )

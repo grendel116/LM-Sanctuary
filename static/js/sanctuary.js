@@ -406,6 +406,11 @@ function syncMoodHistoryFromChat(history) {
     const moodList = [];
     for (const msg of history) {
         if (msg && (msg.role === 'program' || msg.role === 'model') && msg.mood && msg.mood.name) {
+            const msgId = msg.id || '';
+            const msgText = (msg.text || '').trim();
+            if (msgId.startsWith('img_') || (msgText.startsWith('![') && msgText.endsWith(')'))) {
+                continue;
+            }
             const meta = getMoodMeta(msg.mood.name);
             moodList.push({
                 name: msg.mood.name,
@@ -413,7 +418,7 @@ function syncMoodHistoryFromChat(history) {
                 color: msg.mood.color || meta.color,
                 label: meta.label,
                 intensity: msg.mood.intensity || 0,
-                id: msg.id || ''
+                id: msgId
             });
         }
     }
@@ -425,6 +430,7 @@ function syncMoodHistoryFromChat(history) {
 
 function pushMoodToHistory(moodState, msgId = null) {
     if (!moodState || !moodState.name) return;
+    if (msgId && msgId.startsWith('img_')) return;
     try {
         const list = getStoredMoodHistory();
         if (msgId && list.length > 0 && list[list.length - 1].id === msgId) {
@@ -2389,10 +2395,11 @@ function renderUserProfilesList() {
         nameDiv.innerText = prof.name;
 
         if (isActive) {
-            const activeBadge = document.createElement('span');
-            activeBadge.style.cssText = 'font-size: 0.65rem; padding: 2px 6px; border-radius: 10px; background: rgba(56, 189, 248, 0.15); color: var(--primary-accent); border: 1px solid rgba(56, 189, 248, 0.3); font-weight: 500;';
-            activeBadge.innerText = 'Active';
-            nameDiv.appendChild(activeBadge);
+            const crown = document.createElement('span');
+            crown.title = 'Active Profile';
+            crown.style.cssText = 'display: inline-flex; align-items: center; justify-content: center; color: var(--primary-accent); filter: drop-shadow(0 0 3px color-mix(in srgb, var(--primary-accent) 50%, transparent)); margin-left: 2px;';
+            crown.innerHTML = `<svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="1" stroke-linecap="round" stroke-linejoin="round"><path d="M11.562 3.266a.5.5 0 0 1 .876 0L15.39 8.87a1 1 0 0 0 1.516.294L21.183 5.5a.5.5 0 0 1 .798.519l-2.834 10.246a1 1 0 0 1-.956.735H5.81a1 1 0 0 1-.957-.735L2.02 6.02a.5.5 0 0 1 .798-.519l4.276 3.664a1 1 0 0 0 1.516-.294z"/><path d="M5 21h14"/></svg>`;
+            nameDiv.appendChild(crown);
         }
 
         info.appendChild(nameDiv);
@@ -2741,12 +2748,7 @@ function updateDeleteSessionButtonLabel() {
 }
 
 function onChatSessionSelectChange() {
-    const select = document.getElementById('chat-sessions-select');
-    if (select) {
-        const selected = select.value;
-        updateDeleteSessionButtonLabel();
-        window.location.href = `?session_id=${encodeURIComponent(selected)}`;
-    }
+    updateDeleteSessionButtonLabel();
 }
 
 function createNewChatSession() {
@@ -2800,9 +2802,7 @@ function deleteSelectedChatSession() {
                 });
                 const data = await res.json();
                 if (data.status === 'success') {
-                    showCustomAlert("Deleted", "Chat session deleted successfully.", () => {
-                        window.location.href = '?session_id=default';
-                    });
+                    await loadChatSessions();
                 } else {
                     throw new Error(data.error || "Failed to delete.");
                 }
@@ -2856,6 +2856,8 @@ function closeAssistantModal(applySelection = true) {
     if (!wasVisible || !applySelection || isApplyingModalSelection) return;
 
     const programTab = document.getElementById('assistant-tab-content-program');
+    const sessionsTab = document.getElementById('assistant-tab-content-sessions');
+
     if (programTab && programTab.style.display !== 'none') {
         if (selectedGroupProgramIds && selectedGroupProgramIds.length >= 2) {
             const isSame = currentGroupMeta && currentGroupMeta.is_group &&
@@ -2871,6 +2873,11 @@ function closeAssistantModal(applySelection = true) {
                 isApplyingModalSelection = true;
                 selectAssistant(targetId).finally(() => { isApplyingModalSelection = false; });
             }
+        }
+    } else if (sessionsTab && sessionsTab.style.display !== 'none') {
+        const select = document.getElementById('chat-sessions-select');
+        if (select && select.value !== sessionId) {
+            window.location.href = `?session_id=${encodeURIComponent(select.value)}`;
         }
     }
 }

@@ -260,9 +260,13 @@ def find_image_sidecar_json(image_filename, active_program):
 
 
 def extract_mood(chat_history):
-    """Extract mood from the latest program message, defaulting to program baseline."""
+    """Extract mood from the latest text program message, skipping image generations."""
     for msg in reversed(chat_history):
         if msg.get('role') == 'program':
+            msg_id = msg.get('id', '')
+            text = (msg.get('text') or '').strip()
+            if msg_id.startswith('img_') or (text.startswith('![') and text.endswith(')')):
+                continue
             mood = msg.get('mood')
             if mood:
                 return mood

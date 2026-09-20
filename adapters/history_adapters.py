@@ -402,7 +402,13 @@ class OsHistoryAdapter(LocalHistoryAdapter):
         if group_meta and group_meta.get("is_group"):
             is_host = (sender_id == group_meta.get("host_id"))
 
+        clean_text = text.strip() if text else ""
+        is_image_turn = bool(clean_text and clean_text.startswith("![") and clean_text.endswith(")"))
+
         clean_text, mood_details = extract_and_strip_mood(text, program_id=sender_id)
+        if is_image_turn:
+            mood_details = None
+
         if is_host and mood_details:
             self.runner_obj.update_inversion_state_with_mood(self.session_id, mood_details.get("name"))
 

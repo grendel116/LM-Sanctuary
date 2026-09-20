@@ -11,10 +11,11 @@ from variables.settings import BANNED_WORDS_FILE
 
 DEFAULT_BIAS_WEIGHT = -100.0
 
-# Strict pattern for 'not X, [it's] Y' or 'not A; B' contrast structures
+# Strict pattern for 'not X, [it's] Y', 'not A; B', and 'didn't just X; they Y' contrast structures
 ANTITHESIS_PATTERN = re.compile(
     r"\b(?:it's|it\s+is|that's|that\s+is|this\s+is|you're|you\s+are)\s+not\s+[^;,.!?]+[;,]?\s*(?:it's|it\s+is|that's|that\s+is|this\s+is|you're|you\s+are|there's)\b"
-    r"|\bnot\s+a\s+[^;,.!?]+[;,]\s*(?:it's|it\s+is|this\s+is|that's|that\s+is|you're|you\s+are)\b",
+    r"|\bnot\s+a\s+[^;,.!?]+[;,]\s*(?:it's|it\s+is|this\s+is|that's|that\s+is|you're|you\s+are)\b"
+    r"|\b(?:they|he|she|it|we|i|you)\s+(?:didn't|did\s+not|doesn't|does\s+not)\s+just\s+[^;,.!?]+[;,]?\s*(?:they|he|she|it|we|i|you)\b",
     re.IGNORECASE
 )
 
@@ -216,7 +217,7 @@ async def _rewrite_single_sentence(sentence: str, llm_call_func, target_model: s
         instructions.append(f"- Replace these forbidden words: {words_str}.")
 
     if has_antithesis:
-        instructions.append("- Convert 'not X, it is Y' contrast structures into direct, positive assertions.")
+        instructions.append("- Convert contrast structures (such as 'not X, it is Y' or 'didn't just X; they Y') into direct, positive assertions.")
 
     rules_text = "\n".join(instructions)
     prompt = f"""[INST] Rewrite this single sentence adhering strictly to these rules:
