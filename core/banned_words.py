@@ -15,7 +15,8 @@ DEFAULT_BIAS_WEIGHT = -100.0
 ANTITHESIS_PATTERN = re.compile(
     r"\b(?:it|that|this|there|you|they|he|she|we|i)\s+(?:isn't|aren't|wasn't|weren't|is\s+not|are\s+not|was\s+not|were\s+not|ain't|'s\s+not|'re\s+not)\s+[^;,.!?]+[;,—–-]?\s*(?:it's|it\s+is|that's|that\s+is|this\s+is|you're|you\s+are|they're|they\s+are|he's|he\s+is|she's|she\s+is|we're|we\s+are|there's|there\s+is|it\s+was|that\s+was|this\s+was|they\s+were|we\s+were|he\s+was|she\s+was|instead|rather)\b"
     r"|\bnot\s+(?:a|an|just|only|merely|simply)\s+[^;,.!?]+[;,—–-]?\s*(?:it's|it\s+is|that's|that\s+is|this\s+is|there's|there\s+is|but\s+also|but\s+rather|rather|instead)\b"
-    r"|\b(?:they|he|she|it|we|i|you)\s+(?:didn't|did\s+not|doesn't|does\s+not|don't|do\s+not)\s+just\s+[^;,.!?]+[;,—–-]?\s*(?:they|he|she|it|we|i|you)\b",
+    r"|\b(?:they|he|she|it|we|i|you)\s+(?:didn't|did\s+not|doesn't|does\s+not|don't|do\s+not)\s+just\s+[^;,.!?]+[;,—–-]?\s*(?:they|he|she|it|we|i|you)\b"
+    r"|\b(?:didn't|did\s+not|doesn't|does\s+not|don't|do\s+not)\s+see\s+[^;,.!?]+[;,—–-]?\s*(?:it|that|this|they|he|she|we|i)\s+(?:sees?|saw)\b",
     re.IGNORECASE
 )
 
