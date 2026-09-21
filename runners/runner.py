@@ -923,7 +923,7 @@ class BaseProgramRunner:
             self._save_session_to_disk(session_id)
             return True
 
-    async def append_message_to_session(self, session_id: str, role: str, text: str, msg_id: str = None) -> bool:
+    async def append_message_to_session(self, session_id: str, role: str, text: str, msg_id: str = None, sender_id: str = None, sender_name: str = None) -> bool:
         """Appends a new raw message to the session history."""
         with self._lock:
             if session_id not in self.sessions_history:
@@ -953,12 +953,22 @@ class BaseProgramRunner:
                     prefix = "usr_"
                 msg_id = f"{prefix}{uuid.uuid4().hex}"
 
+            from runners.program import get_active_program
+            from core.program_config import _load_card_data
+            active_prog = get_active_program() or "sebile"
+            card = _load_card_data(active_prog)
+            prog_name = card.get("name") or active_prog.title()
+
             msg = {
                 "id": msg_id,
                 "role": role,
                 "text": text,
                 "timestamp": time.time(),
             }
+            if role == "program":
+                msg["sender_id"] = sender_id or active_prog
+                msg["sender_name"] = sender_name or prog_name
+
             self.sessions_history[session_id].append(msg)
             self._save_session_to_disk(session_id)
             return True

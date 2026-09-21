@@ -1372,6 +1372,8 @@ def delete_image():
         return jsonify({'error': str(e)}), 500
 
 
+_image_mutex = threading.Lock()
+
 @app.route('/regenerate_image', methods=['POST'])
 @requires_auth
 def regenerate_image():
@@ -1390,61 +1392,64 @@ def regenerate_image():
         from urllib.parse import urlparse
         old_image_url = urlparse(old_image_url).path
 
-    if not prompt:
-        import os
-        filename = os.path.basename(old_image_url)
-        # 1. Try to find the prompt in the program sidecar JSON file (most reliable and clean)
-        try:
-            from runners.program import get_active_program
-            active_program = get_active_program()
-            filename_only = os.path.basename(old_image_url)
-            json_path = find_image_sidecar_json(filename_only, active_program)
-
-            if json_path and os.path.exists(json_path):
-                with open(json_path, 'r', encoding='utf-8') as f:
-                    meta = json.load(f)
-                    prompt = meta.get('prompt')
-                    if prompt:
-                        print(f"[DEBUG REROLL] Found prompt in sidecar JSON: {prompt}")
-        except Exception as je:
-            print(f"Error reading sidecar JSON: {je}")
-
-        # 2. Check session history for prompt
-        if not prompt:
-            try:
-                chat_history = asyncio.run(runner.get_history(session_id))
-                for msg in chat_history:
-                    tool_calls = msg.get('tool_calls', [])
-                    if not tool_calls:
-                        continue
-                    calls = {}
-                    for tc in tool_calls:
-                        if tc.get('type') == 'call' and tc.get('name') == 'generate_program_portrait':
-                            call_id = tc.get('id')
-                            args = tc.get('args', {})
-                            p = args.get('prompt')
-                            if call_id and p:
-                                calls[call_id] = p
-                    for tc in tool_calls:
-                        if tc.get('type') == 'response' and tc.get('name') == 'generate_program_portrait':
-                            call_id = tc.get('id')
-                            response_val = tc.get('response', '')
-                            if call_id in calls and filename in response_val:
-                                prompt = calls[call_id]
-                                print(f"[DEBUG REROLL] Found prompt in history matching filename '{filename}': {prompt}")
-                                break
-                    if prompt:
-                        break
-            except Exception as he:
-                print(f"Error scanning session history for prompt: {he}")
-
-        if not prompt:
-            return jsonify({'error': 'Original prompt not found. Unable to regenerate image.'}), 400
-
-    if session_id in cancelled_sessions:
-        return jsonify({'error': 'Image regeneration cancelled by user.'}), 400
+    if not _image_mutex.acquire(blocking=True, timeout=120.0):
+        return jsonify({'error': 'Image generation engine is currently busy. Please retry in a moment.'}), 429
 
     try:
+        if not prompt:
+            import os
+            filename = os.path.basename(old_image_url)
+            # 1. Try to find the prompt in the program sidecar JSON file (most reliable and clean)
+            try:
+                from runners.program import get_active_program
+                active_program = get_active_program()
+                filename_only = os.path.basename(old_image_url)
+                json_path = find_image_sidecar_json(filename_only, active_program)
+
+                if json_path and os.path.exists(json_path):
+                    with open(json_path, 'r', encoding='utf-8') as f:
+                        meta = json.load(f)
+                        prompt = meta.get('prompt')
+                        if prompt:
+                            print(f"[DEBUG REROLL] Found prompt in sidecar JSON: {prompt}")
+            except Exception as je:
+                print(f"Error reading sidecar JSON: {je}")
+
+            # 2. Check session history for prompt
+            if not prompt:
+                try:
+                    chat_history = asyncio.run(runner.get_history(session_id))
+                    for msg in chat_history:
+                        tool_calls = msg.get('tool_calls', [])
+                        if not tool_calls:
+                            continue
+                        calls = {}
+                        for tc in tool_calls:
+                            if tc.get('type') == 'call' and tc.get('name') == 'generate_program_portrait':
+                                call_id = tc.get('id')
+                                args = tc.get('args', {})
+                                p = args.get('prompt')
+                                if call_id and p:
+                                    calls[call_id] = p
+                        for tc in tool_calls:
+                            if tc.get('type') == 'response' and tc.get('name') == 'generate_program_portrait':
+                                call_id = tc.get('id')
+                                response_val = tc.get('response', '')
+                                if call_id in calls and filename in response_val:
+                                    prompt = calls[call_id]
+                                    print(f"[DEBUG REROLL] Found prompt in history matching filename '{filename}': {prompt}")
+                                    break
+                        if prompt:
+                            break
+                except Exception as he:
+                    print(f"Error scanning session history for prompt: {he}")
+
+            if not prompt:
+                return jsonify({'error': 'Original prompt not found. Unable to regenerate image.'}), 400
+
+        if session_id in cancelled_sessions:
+            return jsonify({'error': 'Image regeneration cancelled by user.'}), 400
+
         import tools.tools as tools
         tools.current_session_id.set(session_id)
         with tools.session_tool_calls_lock:
@@ -1478,6 +1483,8 @@ def regenerate_image():
     except Exception as e:
         print(f"Error regenerating image in session {session_id}: {e}")
         return jsonify({'error': str(e)}), 500
+    finally:
+        _image_mutex.release()
 
 def extract_portrait_tags_from_context(session_id: str, custom_prompt: str = "") -> str:
     """Extracts comma-separated visual tags from the latest conversation and character context
@@ -1557,6 +1564,9 @@ def api_generate_portrait():
     from runners.runner import cancelled_sessions
     cancelled_sessions.discard(session_id)
 
+    if not _image_mutex.acquire(blocking=True, timeout=120.0):
+        return jsonify({'error': 'Image generation engine is currently busy. Please retry in a moment.'}), 429
+
     try:
         if session_id in cancelled_sessions:
             return jsonify({'error': 'Portrait generation cancelled by user.'}), 400
@@ -1586,8 +1596,14 @@ def api_generate_portrait():
         if new_markdown.startswith("![") and new_markdown.endswith(")"):
             new_image_url = new_markdown.split("(", 1)[1][:-1]
 
-        # Append directly to session history as an image message
-        asyncio.run(runner.append_message_to_session(session_id, "program", new_markdown))
+        from runners.program import get_active_program
+        from core.program_config import _load_card_data
+        active_prog = get_active_program() or "sebile"
+        card = _load_card_data(active_prog)
+        prog_name = card.get("name") or active_prog.title()
+
+        # Append directly to session history as an image message preserving character identity
+        asyncio.run(runner.append_message_to_session(session_id, "program", new_markdown, sender_id=active_prog, sender_name=prog_name))
 
         return jsonify({
             'status': 'success',
@@ -1597,6 +1613,8 @@ def api_generate_portrait():
     except Exception as e:
         print(f"Error generating direct portrait: {e}")
         return jsonify({'error': str(e)}), 500
+    finally:
+        _image_mutex.release()
 
 
 import threading
@@ -3683,12 +3701,12 @@ def generate_character_json(
     Output a single JSON object with EXACTLY these keys:
     {{
     "description": "2-4 sentence narrative bio. No physical appearance.",
-    "personality": "One word (e.g. Devoted, Sassy, Stoic).",
+    "personality": "1-3 descriptive tags (e.g. Stoic, Loyal, Guarded).",
     "scenario": "Short scene-setting sentence (one sentence).",
     "first_mes": "In-character opening message (1-2 sentences, first person).",
     "system_prompt": "Concise response style directive (e.g. contractions, tone, length).",
-    "image_positive": "Comma-separated Stable Diffusion tags for ONLY physical appearance (e.g. silver hair, purple eyes, fair skin).",
-    "image_negative": "Comma-separated SD negative tags to exclude (e.g. extra limbs, bad anatomy).",
+    "image_positive": "Comma-separated tags for intrinsic physical traits only: hair color/style, eye color, face/skin, body build, and simple base garments (e.g. silver hair, purple eyes, fair skin, simple tunic). Do not include weapons, armor, accessories, quality buzzwords, backgrounds, poses, or narrative items.",
+    "image_negative": "Comma-separated tags for undesired physical traits and rendering artifacts (e.g. extra limbs, bad anatomy, deformed, mutated hands). Do not include story, armor, or narrative elements.",
     "main_color": "#RRGGBB — a hex color representing this character.",
     "inversion": {{
         "intimate": "How they behave when intimate/warm.",
@@ -3719,7 +3737,7 @@ def generate_character_json(
                 {"role": "user", "content": prompt},
             ],
             "temperature": 0.4,
-            "max_tokens": 512,
+            "max_tokens": 1536,
         }
 
         try:
