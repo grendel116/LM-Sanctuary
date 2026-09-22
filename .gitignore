@@ -77,6 +77,16 @@ VideoWorkflow.json
 # Local Binaries
 utils/llama-bin/
 
-# Comfy Engine runtime temp and custom nodes
+# Comfy Engine runtime temp, IO, and custom nodes
+temp/
+**/temp/
 core/comfy_engine/temp/
+core/comfy_engine/output/
+core/comfy_engine/input/
 core/comfy_engine/custom_nodes/
+core/comfy_engine/**/*.png
+core/comfy_engine/**/*.jpg
+core/comfy_engine/**/*.jpeg
+core/comfy_engine/**/*.webp
+core/comfy_engine/**/*.gif
+core/comfy_engine/**/*.bmp

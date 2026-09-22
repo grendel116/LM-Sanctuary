@@ -55,10 +55,16 @@ def start_flask_server(port: int, ssl_context=None):
 
 
 def on_closed():
-    """Immediately stops local server and exits process on window close."""
+    """Immediately stops servers, clears temp directories, and exits process on window close."""
     try:
         from runners import local_server
         local_server.stop_local_server()
+    except Exception:
+        pass
+    try:
+        from adapters import comfy_manager
+        comfy_manager.stop_comfy_server()
+        comfy_manager.clear_temp_directories()
     except Exception:
         pass
     os._exit(0)

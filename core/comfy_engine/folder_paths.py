@@ -66,9 +66,23 @@ folder_names_and_paths["optical_flow"] = ([os.path.join(models_dir, "optical_flo
 
 folder_names_and_paths["detection"] = ([os.path.join(models_dir, "detection")], supported_pt_extensions)
 
-output_directory = os.path.join(base_path, "output")
-temp_directory = os.path.join(base_path, "temp")
-input_directory = os.path.join(base_path, "input")
+import tempfile
+
+if getattr(args, "output_directory", None):
+    output_directory = os.path.abspath(args.output_directory)
+else:
+    output_directory = os.path.join(base_path, "output")
+
+if getattr(args, "temp_directory", None):
+    temp_directory = os.path.abspath(args.temp_directory)
+else:
+    temp_directory = os.path.join(tempfile.gettempdir(), "comfy_temp")
+
+if getattr(args, "input_directory", None):
+    input_directory = os.path.abspath(args.input_directory)
+else:
+    input_directory = os.path.join(base_path, "input")
+
 user_directory = os.path.join(base_path, "user")
 
 filename_list_cache: dict[str, tuple[list[str], dict[str, float], float]] = {}

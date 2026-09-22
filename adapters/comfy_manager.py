@@ -363,7 +363,9 @@ def start_comfy_server():
         except Exception:
             listen_ip = "127.0.0.1"
 
-        cmd = [venv_python, main_py, "--listen", listen_ip, "--port", str(COMFYUI_PORT)]
+        import tempfile
+        comfy_temp_dir = os.path.join(tempfile.gettempdir(), "comfy_temp")
+        cmd = [venv_python, main_py, "--listen", listen_ip, "--port", str(COMFYUI_PORT), "--temp-directory", comfy_temp_dir]
         
         if cuda_supported:
             pass
@@ -935,10 +937,57 @@ def trigger_checkpoint_download(url, filename):
     thread.start()
     return True, "Checkpoint download started in background."
 
+def clear_temp_directories():
+    """Cleans up temporary working directories created by the application and ComfyUI."""
+    import shutil
+    import tempfile
+    from variables.settings import BASE_DIR
+
+    # 1. ComfyUI temp folder in OS temp
+    comfy_temp = os.path.join(tempfile.gettempdir(), "comfy_temp")
+    if os.path.exists(comfy_temp):
+        try:
+            shutil.rmtree(comfy_temp, ignore_errors=True)
+        except Exception:
+            pass
+
+    # 2. Workspace temp_uploads folder
+    temp_uploads = os.path.join(BASE_DIR, "temp_uploads")
+    if os.path.exists(temp_uploads):
+        try:
+            for item in os.listdir(temp_uploads):
+                item_path = os.path.join(temp_uploads, item)
+                if os.path.isfile(item_path):
+                    try:
+                        os.remove(item_path)
+                    except Exception:
+                        pass
+                elif os.path.isdir(item_path):
+                    shutil.rmtree(item_path, ignore_errors=True)
+        except Exception:
+            pass
+
+    # 3. ComfyUI engine temp folder if created
+    comfy_engine_temp = os.path.join(BASE_DIR, "core", "comfy_engine", "temp")
+    if os.path.exists(comfy_engine_temp):
+        try:
+            shutil.rmtree(comfy_engine_temp, ignore_errors=True)
+        except Exception:
+            pass
+
+    # 4. Project temp folder if created
+    project_temp = os.path.join(BASE_DIR, "temp")
+    if os.path.exists(project_temp):
+        try:
+            shutil.rmtree(project_temp, ignore_errors=True)
+        except Exception:
+            pass
+
 def _atexit_comfy_clean():
     # If Flask reloader is active, let the parent process handle cleanup on Ctrl+C
     # so we don't kill ComfyUI on child process reloads.
     if os.environ.get('WERKZEUG_RUN_MAIN') == 'true':
+        clear_temp_directories()
         return
     try:
         if check_comfy_running(force_refresh=True):
@@ -946,5 +995,8 @@ def _atexit_comfy_clean():
             stop_comfy_server()
     except Exception:
         pass
+    clear_temp_directories()
 
 atexit.register(_atexit_comfy_clean)
+# Clean up any leftover temp files on initial module load / app startup
+clear_temp_directories()
