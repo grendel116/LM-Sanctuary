@@ -227,6 +227,10 @@ def ensure_daemon_running(timeout: float = 60.0) -> bool:
         env["DIFFUSION_WORKER"] = "1"
         env["PYTHONPATH"] = root_dir + os.pathsep + env.get("PYTHONPATH", "")
 
+        logs_dir = os.path.join(root_dir, "logs")
+        os.makedirs(logs_dir, exist_ok=True)
+        daemon_log = open(os.path.join(logs_dir, "diffusion_daemon.log"), "a", encoding="utf-8")
+
         if os.name == 'nt':
             si = subprocess.STARTUPINFO()
             si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
@@ -236,6 +240,8 @@ def ensure_daemon_running(timeout: float = 60.0) -> bool:
                 [py_exe, os.path.abspath(__file__), "--server"],
                 env=env,
                 cwd=root_dir,
+                stdout=daemon_log,
+                stderr=daemon_log,
                 startupinfo=si,
                 creationflags=flags
             )
@@ -243,7 +249,9 @@ def ensure_daemon_running(timeout: float = 60.0) -> bool:
             _daemon_proc = subprocess.Popen(
                 [py_exe, os.path.abspath(__file__), "--server"],
                 env=env,
-                cwd=root_dir
+                cwd=root_dir,
+                stdout=daemon_log,
+                stderr=daemon_log
             )
 
         start_t = time.time()
@@ -285,12 +293,18 @@ def unload_diffusion_models():
         if os.name == 'nt':
             try:
                 flags = subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0x08000000
-                subprocess.run(
-                    ["powershell", "-Command", "Get-Process -Name python -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -like '*--server*' -and $_.CommandLine -like '*engine_diffusion*' } | Stop-Process -Force"],
-                    creationflags=flags,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL
-                )
+                output = subprocess.check_output("netstat -ano", shell=True, creationflags=flags).decode('utf-8', errors='ignore')
+                for line in output.splitlines():
+                    if f":{DIFFUSION_DAEMON_PORT}" in line and "LISTENING" in line:
+                        parts = line.strip().split()
+                        if len(parts) >= 5:
+                            pid = int(parts[-1])
+                            try:
+                                import psutil
+                                proc = psutil.Process(pid)
+                                proc.kill()
+                            except Exception:
+                                subprocess.run(["taskkill", "/F", "/PID", str(pid)], creationflags=flags, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             except Exception:
                 pass
 
@@ -298,7 +312,6 @@ def unload_diffusion_models():
         _active_checkpoint = None
 
         gc.collect()
-        time.sleep(0.5)
 
 
 def execute_workflow_graph(
@@ -621,6 +634,7 @@ def generate_portrait_image(
         raise RuntimeError("Failed to start persistent diffusion daemon.")
 
     import urllib.request
+    import urllib.error
 
     payload = {
         "prompt": prompt,
@@ -645,12 +659,37 @@ def generate_portrait_image(
         method="POST"
     )
 
-    with urllib.request.urlopen(req, timeout=300) as resp:
-        res_json = json.loads(resp.read().decode("utf-8"))
-        if res_json.get("status") == "ok":
-            return res_json.get("path", "")
-        else:
-            raise RuntimeError(res_json.get("error", "Unknown diffusion error"))
+    for attempt in range(2):
+        try:
+            with urllib.request.urlopen(req, timeout=300) as resp:
+                res_json = json.loads(resp.read().decode("utf-8"))
+                if res_json.get("status") == "ok":
+                    return res_json.get("path", "")
+                else:
+                    raise RuntimeError(res_json.get("error", "Unknown diffusion error"))
+        except urllib.error.HTTPError as http_err:
+            try:
+                err_body = json.loads(http_err.read().decode("utf-8"))
+                detail = err_body.get("error", str(http_err))
+            except Exception:
+                detail = str(http_err)
+
+            # If DirectML GPU device was suspended/removed by OS during LLM usage, restart daemon and retry once
+            is_device_err = any(k in detail.lower() for k in ("suspended", "deviceremoved", "device removed", "dxgi_error", "reset"))
+            if attempt == 0 and is_device_err:
+                print(f"[engine_diffusion] GPU device was suspended ({detail}). Restarting daemon for clean GPU context...", flush=True)
+                unload_diffusion_models()
+                if ensure_daemon_running():
+                    continue
+
+            raise RuntimeError(f"Diffusion error: {detail}") from http_err
+        except Exception as conn_err:
+            if attempt == 0:
+                print(f"[engine_diffusion] Connection to daemon failed ({conn_err}). Restarting daemon...", flush=True)
+                unload_diffusion_models()
+                if ensure_daemon_running():
+                    continue
+            raise conn_err
 
 
 if __name__ == "__main__":

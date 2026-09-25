@@ -342,7 +342,7 @@ class OsHistoryAdapter(LocalHistoryAdapter):
         if last_user_msg:
             try:
                 from tools.journals import match_journals
-                matched = match_journals(last_user_msg, active_prog)
+                matched = match_journals(last_user_msg, active_prog, query_vector=self.query_vector)
                 if matched:
                     journals_text = "\n".join(f"- {replace_placeholders(e['content'])}" for e in matched)
                     post_blocks.append(f"<recalled_journals>\n{journals_text}\n</recalled_journals>")

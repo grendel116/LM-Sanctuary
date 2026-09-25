@@ -420,12 +420,16 @@ def ensure_server_online(model_key=None, timeout=120.0) -> bool:
         return False
 
     start_wait = time.time()
+    poll_interval = 0.25
     while time.time() - start_wait < timeout:
-        time.sleep(1.0)
-        if is_model_loaded(model_key):
-            return True
-        current_status = check_local_server_status()
-        if current_status is False and _proc and _proc.poll() is not None:
+        time.sleep(poll_interval)
+        poll_interval = min(poll_interval * 2, 1.0)
+        status = check_local_server_status()
+        if status is True:
+            # Server healthy — verify correct model is loaded
+            if is_model_loaded(model_key):
+                return True
+        elif status is False and _proc and _proc.poll() is not None:
             print(f"[Local LLM] Server process exited during startup with code {_proc.poll()}.", flush=True)
             return False
 
@@ -449,12 +453,15 @@ async def ensure_server_online_async(model_key=None, timeout=120.0) -> bool:
         return False
 
     start_wait = time.time()
+    poll_interval = 0.25
     while time.time() - start_wait < timeout:
-        await asyncio.sleep(1.0)
-        if is_model_loaded(model_key):
-            return True
-        current_status = check_local_server_status()
-        if current_status is False and _proc and _proc.poll() is not None:
+        await asyncio.sleep(poll_interval)
+        poll_interval = min(poll_interval * 2, 1.0)
+        status = check_local_server_status()
+        if status is True:
+            if is_model_loaded(model_key):
+                return True
+        elif status is False and _proc and _proc.poll() is not None:
             print(f"[Local LLM] Server process exited during startup with code {_proc.poll()}.", flush=True)
             return False
 

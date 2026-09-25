@@ -46,6 +46,15 @@ def add_journal_entry(keyphrases_str: str, content: str, program_id: str = None)
         "content": content.strip()[:300],  # Keep it small and focused (max 300 chars)
         "timestamp": time.time()
     }
+
+    # Pre-embed content for fast vector similarity during retrieval
+    try:
+        from core.skills.vectorized_databank.databank import get_embedding_model
+        vec = get_embedding_model().encode(entry["content"])
+        entry["vector"] = vec.tolist()
+    except Exception:
+        pass
+
     entries.append(entry)
     save_journal_entries(entries, program_id)
     return entry
@@ -59,7 +68,7 @@ def delete_journal_entry(entry_id: str, program_id: str = None) -> bool:
         return True
     return False
 
-def match_journals(user_message: str, program_id: str = None) -> list:
+def match_journals(user_message: str, program_id: str = None, query_vector=None) -> list:
     """Finds top 3 matching journal entries using keyword matching and semantic similarity."""
     if not user_message:
         return []
@@ -103,24 +112,38 @@ def match_journals(user_message: str, program_id: str = None) -> list:
     if matched:
         return [item[1] for item in matched[:3]]
     
-    # Semantic return: vector similarity when keyword matching finds nothing
+    # Semantic fallback: vector similarity using pre-stored or batch-computed vectors
     try:
         import numpy as np
         from core.skills.vectorized_databank.databank import get_embedding_model
-        model = get_embedding_model()
-        query_vec = model.encode(user_message)
-        query_norm = np.linalg.norm(query_vec)
+
+        if query_vector is None:
+            query_vector = get_embedding_model().encode(user_message)
+        query_norm = np.linalg.norm(query_vector)
         if query_norm > 0:
+            # Batch-encode any entries missing a stored vector
+            missing_indices = [i for i, e in enumerate(entries) if e.get("content") and not e.get("vector")]
+            if missing_indices:
+                model = get_embedding_model()
+                missing_texts = [entries[i]["content"] for i in missing_indices]
+                vecs = model.encode(missing_texts)
+                needs_save = False
+                for idx, vec in zip(missing_indices, vecs):
+                    entries[idx]["vector"] = vec.tolist()
+                    needs_save = True
+                if needs_save:
+                    save_journal_entries(entries, program_id)
+
             semantic_matched = []
             for entry in entries:
-                content = entry.get("content", "")
-                if not content:
+                stored_vec = entry.get("vector")
+                if not stored_vec or not entry.get("content"):
                     continue
-                content_vec = model.encode(content)
+                content_vec = np.array(stored_vec)
                 content_norm = np.linalg.norm(content_vec)
                 if content_norm == 0:
                     continue
-                similarity = float(np.dot(query_vec, content_vec) / (query_norm * content_norm))
+                similarity = float(np.dot(query_vector, content_vec) / (query_norm * content_norm))
                 if similarity >= 0.25:
                     semantic_matched.append((similarity, entry))
             

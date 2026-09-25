@@ -18,25 +18,32 @@ def start_img() -> bool:
     """
     global _current_mode
     with _orchestrator_lock:
-        if _current_mode == "IMG":
+        from runners import local_server
+        from core import engine_diffusion
+
+        llm_online = local_server.check_local_server_status()
+        daemon_online = engine_diffusion.check_daemon_status()
+
+        # If already in image mode with LLM stopped and daemon running, nothing to do
+        if _current_mode == "IMG" and not llm_online and daemon_online:
             return True
 
-        print("[VRAM Orchestrator] Switching to Image Mode: Stopping local LLM and starting diffusion daemon...", flush=True)
-        try:
-            from adapters import local_llm_manager
-            local_llm_manager.stop_server()
-        except Exception as e:
-            print(f"[VRAM Orchestrator] Note stopping local LLM: {e}", flush=True)
+        print("[VRAM Orchestrator] Switching to Image Mode: Stopping local LLM and activating diffusion engine...", flush=True)
+        if llm_online or _current_mode != "IMG":
+            try:
+                from adapters import local_llm_manager
+                local_llm_manager.stop_server()
+            except Exception as e:
+                print(f"[VRAM Orchestrator] Note stopping local LLM: {e}", flush=True)
+
+            try:
+                from runners import engine_llm
+                if engine_llm.is_loaded():
+                    engine_llm.unload_model()
+            except Exception:
+                pass
 
         try:
-            from runners import engine_llm
-            if engine_llm.is_loaded():
-                engine_llm.unload_model()
-        except Exception:
-            pass
-
-        try:
-            from core import engine_diffusion
             engine_diffusion.ensure_daemon_running()
         except Exception as e:
             print(f"[VRAM Orchestrator] Note starting diffusion daemon: {e}", flush=True)
@@ -57,7 +64,15 @@ def start_llm(model_key: Optional[str] = None, timeout: float = 120.0) -> bool:
 
         print(f"[VRAM Orchestrator] Switching to Text Mode (model: {model_key or 'default'})...", flush=True)
 
-        # 1. Clear diffusion caches so GPU memory is 100% available for LLM
+        # 1a. Stop standalone ComfyUI server if running (port 8188)
+        try:
+            from adapters import comfy_manager
+            if comfy_manager.check_comfy_running(force_refresh=True):
+                comfy_manager.stop_comfy_server()
+        except Exception as e:
+            print(f"[VRAM Orchestrator] Note stopping ComfyUI server: {e}", flush=True)
+
+        # 1b. Clear diffusion caches so GPU memory is 100% available for LLM
         try:
             from core import engine_diffusion
             engine_diffusion.unload_diffusion_models()
@@ -79,6 +94,14 @@ async def start_llm_async(model_key: Optional[str] = None, timeout: float = 120.
         return True
 
     print(f"[VRAM Orchestrator] Switching to Text Mode async (model: {model_key or 'default'})...", flush=True)
+
+    # 1a. Stop standalone ComfyUI server if running (port 8188)
+    try:
+        from adapters import comfy_manager
+        if comfy_manager.check_comfy_running(force_refresh=True):
+            comfy_manager.stop_comfy_server()
+    except Exception as e:
+        print(f"[VRAM Orchestrator] Note stopping ComfyUI server: {e}", flush=True)
 
     try:
         from core import engine_diffusion

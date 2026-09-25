@@ -1184,6 +1184,25 @@ def apply_comfy_workflow(workflow_path: str, parameters: dict, save_path: str, s
     populated_workflow = replace_placeholders(workflow)
     comfy_url = COMFYUI_SERVER_URL
 
+    # Ensure LLM is offloaded and ComfyUI is running before submitting workflow
+    try:
+        from adapters.vram_orchestrator import start_img
+        start_img()
+    except Exception as e:
+        print(f"[apply_comfy_workflow] VRAM orchestration note: {e}", flush=True)
+
+    from adapters.comfy_manager import check_comfy_running, start_comfy_server
+    if not check_comfy_running(force_refresh=True):
+        print("[apply_comfy_workflow] ComfyUI offline. Starting server...", flush=True)
+        start_comfy_server()
+        import time as _time
+        for _ in range(30):
+            _time.sleep(2.0)
+            if check_comfy_running(force_refresh=True):
+                break
+        else:
+            return "Error: ComfyUI server failed to start within 60 seconds."
+
     def _cancel_comfy_job(pid: str):
         """Tell ComfyUI to interrupt the running job and remove it from the queue."""
         try:
