@@ -28,10 +28,8 @@ _POS_TARGETS = (
 _DELIMITERS = r"(?:[;,:\u2013\u2014-]|--)"
 
 ANTITHESIS_PATTERN = re.compile(
-    rf"\b(?:{_PRONOUNS}\s+)?{_NEG_VERBS}\s+[^;:.!?]+{_DELIMITERS}?\s*(?:{_POS_TARGETS})\b"
-    rf"|\bnot\s+(?:a|an|just|only|merely|simply)\s+[^;:.!?]+{_DELIMITERS}?\s*(?:{_POS_TARGETS}|but\s+\w+)\b"
-    rf"|\b(?:{_PRONOUNS}\s+)?(?:didn'?t|did\s+not|doesn'?t|does\s+not|don'?t|do\s+not)\s+just\s+[^;:.!?]+{_DELIMITERS}?\s*{_PRONOUNS}\b"
-    rf"|\b(?:{_PRONOUNS}\s+)?(?:didn'?t|did\s+not|doesn'?t|does\s+not|don'?t|do\s+not)\s+see\s+[^;:.!?]+{_DELIMITERS}?\s*{_PRONOUNS}\s+(?:sees?|saw)\b",
+    rf"\b(?:{_PRONOUNS}\s+)?{_NEG_VERBS}\s+[^;:.!?]+(?:{_DELIMITERS}\s*(?:{_PRONOUNS}|{_POS_TARGETS})|{_DELIMITERS}?\s*(?:{_POS_TARGETS}))\b"
+    rf"|\bnot\s+(?:a|an|just|only|merely|simply)\s+[^;:.!?]+{_DELIMITERS}?\s*(?:{_POS_TARGETS}|but\s+\w+|{_PRONOUNS})\b",
     re.IGNORECASE
 )
 
