@@ -12,11 +12,26 @@ from variables.settings import BANNED_WORDS_FILE
 DEFAULT_BIAS_WEIGHT = -100.0
 
 # Pattern for negative-positive contrast cliches (e.g., "it's not X; it's Y", "it isn't X; it's Y", "wasn't just a...; it was a...", "not just X, but Y")
+_PRONOUNS = r"(?:it|that|this|there|you|they|he|she|we|i)"
+_NEG_VERBS = (
+    r"(?:isn'?t|aren'?t|wasn'?t|weren'?t|is\s+not|are\s+not|was\s+not|were\s+not|ain'?t|'s\s+not|'re\s+not|"
+    r"didn'?t|did\s+not|doesn'?t|does\s+not|don'?t|do\s+not|"
+    r"hasn'?t|has\s+not|haven'?t|have\s+not|hadn'?t|had\s+not|"
+    r"won'?t|will\s+not|wouldn'?t|would\s+not|can'?t|cannot|can\s+not|couldn'?t|could\s+not|shouldn'?t|should\s+not)"
+)
+_POS_TARGETS = (
+    r"(?:it'?s|it\s+is|that'?s|that\s+is|this\s+is|you'?re|you\s+are|they'?re|they\s+are|he'?s|he\s+is|she'?s|she\s+is|we'?re|we\s+are|there'?s|there\s+is|what'?s|what\s+is|"
+    r"it\s+was|that\s+was|this\s+was|there\s+was|they\s+were|we\s+were|he\s+was|she\s+was|you\s+were|"
+    r"we'?ve|they'?ve|you'?ve|i'?ve|we\s+have|they\s+have|you\s+have|i\s+have|"
+    r"but\s+also|but\s+rather|but\s+instead|but\s+it'?s|but\s+it\s+is|instead|rather)"
+)
+_DELIMITERS = r"(?:[;,:\u2013\u2014-]|--)"
+
 ANTITHESIS_PATTERN = re.compile(
-    r"\b(?:(?:it|that|this|there|you|they|he|she|we|i)\s+)?(?:isn't|aren't|wasn't|weren't|is\s+not|are\s+not|was\s+not|were\s+not|ain't|'s\s+not|'re\s+not)\s+[^;,.!?]+[;,—–-]?\s*(?:it's|it\s+is|that's|that\s+is|this\s+is|you're|you\s+are|they're|they\s+are|he's|he\s+is|she's|she\s+is|we're|we\s+are|there's|there\s+is|it\s+was|that\s+was|this\s+was|they\s+were|we\s+were|he\s+was|she\s+was|instead|rather)\b"
-    r"|\bnot\s+(?:a|an|just|only|merely|simply)\s+[^;,.!?]+[;,—–-]?\s*(?:it's|it\s+is|that's|that\s+is|this\s+is|there's|there\s+is|it\s+was|that\s+was|this\s+was|there\s+was|they\s+were|we\s+were|he\s+was|she\s+was|but\s+also|but\s+rather|rather|instead)\b"
-    r"|\b(?:(?:they|he|she|it|we|i|you)\s+)?(?:didn't|did\s+not|doesn't|does\s+not|don't|do\s+not)\s+just\s+[^;,.!?]+[;,—–-]?\s*(?:they|he|she|it|we|i|you)\b"
-    r"|\b(?:(?:they|he|she|it|we|i|you)\s+)?(?:didn't|did\s+not|doesn't|does\s+not|don't|do\s+not)\s+see\s+[^;,.!?]+[;,—–-]?\s*(?:it|that|this|they|he|she|we|i)\s+(?:sees?|saw)\b",
+    rf"\b(?:{_PRONOUNS}\s+)?{_NEG_VERBS}\s+[^;:.!?]+{_DELIMITERS}?\s*(?:{_POS_TARGETS})\b"
+    rf"|\bnot\s+(?:a|an|just|only|merely|simply)\s+[^;:.!?]+{_DELIMITERS}?\s*(?:{_POS_TARGETS}|but\s+\w+)\b"
+    rf"|\b(?:{_PRONOUNS}\s+)?(?:didn'?t|did\s+not|doesn'?t|does\s+not|don'?t|do\s+not)\s+just\s+[^;:.!?]+{_DELIMITERS}?\s*{_PRONOUNS}\b"
+    rf"|\b(?:{_PRONOUNS}\s+)?(?:didn'?t|did\s+not|doesn'?t|does\s+not|don'?t|do\s+not)\s+see\s+[^;:.!?]+{_DELIMITERS}?\s*{_PRONOUNS}\s+(?:sees?|saw)\b",
     re.IGNORECASE
 )
 
@@ -42,6 +57,7 @@ def load_banned_words() -> list[str]:
                     _cached_words = [str(w).strip().lower() for w in banned if str(w).strip()]
             _cached_words_mtime = mtime
             _cached_regex = None
+            _cached_token_ids = set()
         return _cached_words
     except Exception as e:
         print(f"[BANNED WORDS] Error loading {BANNED_WORDS_FILE}: {e}", flush=True)
@@ -99,11 +115,12 @@ def _get_token_cache_path() -> str:
 
 def _load_token_cache() -> set[int]:
     cache_path = _get_token_cache_path()
-    if os.path.exists(cache_path):
+    if os.path.exists(cache_path) and os.path.exists(BANNED_WORDS_FILE):
         try:
-            with open(cache_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                return set(data.get("token_ids", []))
+            if os.path.getmtime(cache_path) >= os.path.getmtime(BANNED_WORDS_FILE):
+                with open(cache_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    return set(data.get("token_ids", []))
         except Exception:
             pass
     return set()
