@@ -3441,6 +3441,38 @@ def delete_program_journals():
         return jsonify({'error': str(e)}), 500
 
 
+@app.route('/api/programs/journals/summary/save', methods=['POST'])
+@requires_auth
+def save_program_summary():
+    try:
+        data = request.get_json(silent=True) or {}
+        session_id = data.get('session_id', 'default')
+        summary = data.get('summary', data.get('epic_chronicle', '')).strip()
+
+        asyncio.run(runner.update_epic_chronicle(session_id, summary))
+        return jsonify({'status': 'success', 'epic_chronicle': summary})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/programs/journals/recent_chapters/save', methods=['POST'])
+@requires_auth
+def save_program_recent_chapter():
+    try:
+        data = request.get_json(silent=True) or {}
+        session_id = data.get('session_id', 'default')
+        index = int(data.get('index', 0))
+        content = data.get('content', data.get('summary', '')).strip()
+
+        success = asyncio.run(runner.update_recent_chapter(session_id, index, content))
+        if success:
+            return jsonify({'status': 'success', 'content': content})
+        else:
+            return jsonify({'error': 'Chapter index out of range or not found'}), 404
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
 @app.route('/api/user_profiles', methods=['GET'])
 @requires_auth
 def list_user_profiles():

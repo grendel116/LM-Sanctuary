@@ -1026,6 +1026,31 @@ class BaseProgramRunner:
 
         return False
 
+    async def update_epic_chronicle(self, session_id: str, chronicle: str) -> bool:
+        """Updates the full conversation epic chronicle for a session and saves to disk."""
+        if session_id not in self.sessions_history:
+            self._load_session_from_disk(session_id)
+
+        with self._lock:
+            meta = self._get_memory_meta(session_id)
+            meta["epic_chronicle"] = chronicle.strip()
+            self._save_session_to_disk(session_id)
+            return True
+
+    async def update_recent_chapter(self, session_id: str, chapter_index: int, content: str) -> bool:
+        """Updates a specific recent chapter summary for a session and saves to disk."""
+        if session_id not in self.sessions_history:
+            self._load_session_from_disk(session_id)
+
+        with self._lock:
+            meta = self._get_memory_meta(session_id)
+            chapters = meta.setdefault("recent_chapters", [])
+            if 0 <= chapter_index < len(chapters):
+                chapters[chapter_index] = content.strip()
+                self._save_session_to_disk(session_id)
+                return True
+        return False
+
     async def update_message_text(self, session_id: str, msg_id: str, new_text: str) -> bool:
         """Finds a message by its ID and updates its text."""
         # Ensure session is loaded in memory

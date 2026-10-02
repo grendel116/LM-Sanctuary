@@ -3895,6 +3895,281 @@ async function saveProgramProfile() {
     }
 }
 
+let currentEpicChronicleRaw = '';
+let isEditingEpicChronicle = false;
+
+function renderEpicChronicleView() {
+    const epicContainer = document.getElementById('program-epic-chronicle-container');
+    const editBtn = document.getElementById('edit-epic-chronicle-btn');
+    if (!epicContainer) return;
+    
+    if (editBtn) editBtn.style.display = 'flex';
+    epicContainer.innerHTML = '';
+    
+    const userDisplayName = getUserDisplayName();
+    const programDisplayName = (typeof activeProgramName !== 'undefined' && activeProgramName) ? activeProgramName : 'Program';
+    
+    const chronicle = (currentEpicChronicleRaw || '').trim();
+    if (chronicle) {
+        const card = document.createElement('div');
+        card.className = 'list-entry-row';
+        card.style.borderLeft = '3px solid var(--primary-accent)';
+        
+        const contentEl = document.createElement('div');
+        contentEl.className = 'list-entry-content';
+        contentEl.style.fontSize = '0.82rem';
+        contentEl.style.lineHeight = '1.5';
+        contentEl.style.color = 'var(--text-main)';
+        contentEl.style.whiteSpace = 'pre-wrap';
+        let cleanChronicle = chronicle.replace(/\{\{user\}\}/gi, userDisplayName).replace(/\{\{char\}\}/gi, programDisplayName);
+        contentEl.textContent = cleanChronicle;
+        
+        card.appendChild(contentEl);
+        epicContainer.appendChild(card);
+    } else {
+        epicContainer.innerHTML = '<div class="empty-state">No full conversation summary compiled yet.</div>';
+    }
+}
+
+function startEditEpicChronicle() {
+    const epicContainer = document.getElementById('program-epic-chronicle-container');
+    const editBtn = document.getElementById('edit-epic-chronicle-btn');
+    if (!epicContainer) return;
+    
+    isEditingEpicChronicle = true;
+    if (editBtn) editBtn.style.display = 'none';
+    
+    epicContainer.innerHTML = `
+        <div class="list-entry-row" style="border-left: 3px solid var(--primary-accent); padding: 10px;">
+            <textarea id="epic-chronicle-edit-textarea" class="edit-textarea" style="width: 100%; min-height: 120px; font-size: 0.82rem; line-height: 1.5; padding: 10px; box-sizing: border-box; resize: vertical;" placeholder="Enter full conversation summary..."></textarea>
+            <div class="edit-btn-group" style="margin-top: 8px;">
+                <button type="button" onclick="cancelEditEpicChronicle()" class="edit-btn edit-cancel-btn">Cancel</button>
+                <button type="button" onclick="saveEpicChronicle()" id="save-epic-chronicle-btn" class="edit-btn edit-save-btn">Save</button>
+            </div>
+        </div>
+    `;
+    
+    const textarea = document.getElementById('epic-chronicle-edit-textarea');
+    if (textarea) {
+        textarea.value = currentEpicChronicleRaw || '';
+        
+        const adjustHeight = () => {
+            textarea.style.height = 'auto';
+            textarea.style.height = Math.max(120, textarea.scrollHeight) + 'px';
+        };
+        adjustHeight();
+        textarea.addEventListener('input', adjustHeight);
+        textarea.focus();
+        textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+        
+        textarea.addEventListener('keydown', (e) => {
+            if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+                e.preventDefault();
+                saveEpicChronicle();
+            } else if (e.key === 'Escape') {
+                e.preventDefault();
+                cancelEditEpicChronicle();
+            }
+        });
+    }
+}
+
+function cancelEditEpicChronicle() {
+    isEditingEpicChronicle = false;
+    renderEpicChronicleView();
+}
+
+async function saveEpicChronicle() {
+    const textarea = document.getElementById('epic-chronicle-edit-textarea');
+    const saveBtn = document.getElementById('save-epic-chronicle-btn');
+    if (!textarea) return;
+    
+    const newSummary = textarea.value.trim();
+    const progId = (typeof activeProgramId !== 'undefined' && activeProgramId) || (typeof activeProgramName !== 'undefined' && activeProgramName ? activeProgramName.toLowerCase() : '') || 'sebile';
+    const activeSession = (typeof sessionId !== 'undefined' && sessionId) ? sessionId : ((typeof currentSessionId !== 'undefined' && currentSessionId) ? currentSessionId : 'default');
+    
+    if (saveBtn) {
+        saveBtn.disabled = true;
+        saveBtn.textContent = 'Saving...';
+    }
+    
+    try {
+        const res = await fetch('/api/programs/journals/summary/save', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                program_id: progId,
+                session_id: activeSession,
+                summary: newSummary
+            })
+        });
+        const data = await res.json();
+        if (data.error) throw new Error(data.error);
+        
+        currentEpicChronicleRaw = newSummary;
+        isEditingEpicChronicle = false;
+        renderEpicChronicleView();
+    } catch (e) {
+        console.error("Error saving epic chronicle:", e);
+        showCustomAlert("Error", "Could not save Full Summary: " + e.message);
+        if (saveBtn) {
+            saveBtn.disabled = false;
+            saveBtn.textContent = 'Save';
+        }
+    }
+}
+
+let currentRecentChaptersRaw = [];
+let editingChapterIndex = null;
+
+function renderRecentChaptersView() {
+    const chaptersContainer = document.getElementById('program-chapters-list');
+    if (!chaptersContainer) return;
+    chaptersContainer.innerHTML = '';
+    
+    const userDisplayName = getUserDisplayName();
+    const programDisplayName = (typeof activeProgramName !== 'undefined' && activeProgramName) ? activeProgramName : 'Program';
+    
+    if (!currentRecentChaptersRaw || currentRecentChaptersRaw.length === 0) {
+        chaptersContainer.innerHTML = '<div class="empty-state">No recent summaries compiled yet (distilled every 12 conversation turns).</div>';
+        return;
+    }
+    
+    currentRecentChaptersRaw.forEach((chText, idx) => {
+        const row = document.createElement('div');
+        row.className = 'list-entry-row';
+        row.id = `recent-chapter-row-${idx}`;
+        
+        if (editingChapterIndex === idx) {
+            row.style.padding = '10px';
+            row.innerHTML = `
+                <div class="list-entry-header" style="margin-bottom: 8px;">
+                    <span style="color: var(--primary-accent); font-weight: 600; font-size: 0.72rem;">Editing Summary ${idx + 1}</span>
+                </div>
+                <textarea id="recent-chapter-edit-textarea-${idx}" class="edit-textarea" style="width: 100%; min-height: 90px; font-size: 0.8rem; line-height: 1.4; padding: 10px; box-sizing: border-box; resize: vertical;" placeholder="Enter recent summary..."></textarea>
+                <div class="edit-btn-group" style="margin-top: 8px;">
+                    <button type="button" onclick="cancelEditRecentChapter()" class="edit-btn edit-cancel-btn">Cancel</button>
+                    <button type="button" onclick="saveRecentChapter(${idx})" id="save-recent-chapter-btn-${idx}" class="edit-btn edit-save-btn">Save</button>
+                </div>
+            `;
+            chaptersContainer.appendChild(row);
+            
+            const textarea = document.getElementById(`recent-chapter-edit-textarea-${idx}`);
+            if (textarea) {
+                textarea.value = chText || '';
+                const adjustHeight = () => {
+                    textarea.style.height = 'auto';
+                    textarea.style.height = Math.max(90, textarea.scrollHeight) + 'px';
+                };
+                adjustHeight();
+                textarea.addEventListener('input', adjustHeight);
+                textarea.focus();
+                textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+                textarea.addEventListener('keydown', (e) => {
+                    if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+                        e.preventDefault();
+                        saveRecentChapter(idx);
+                    } else if (e.key === 'Escape') {
+                        e.preventDefault();
+                        cancelEditRecentChapter();
+                    }
+                });
+            }
+        } else {
+            const header = document.createElement('div');
+            header.className = 'list-entry-header';
+            
+            const tag = document.createElement('span');
+            tag.style.color = 'var(--primary-accent)';
+            tag.style.fontWeight = '600';
+            tag.style.fontSize = '0.72rem';
+            tag.textContent = `Summary ${idx + 1}`;
+            header.appendChild(tag);
+            
+            const editBtn = document.createElement('button');
+            editBtn.className = 'action-icon-btn';
+            editBtn.title = `Edit Summary ${idx + 1}`;
+            editBtn.style.width = '26px';
+            editBtn.style.height = '26px';
+            editBtn.style.borderRadius = '6px';
+            editBtn.style.flexShrink = '0';
+            editBtn.innerHTML = `
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M12 20h9"></path>
+                    <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"></path>
+                </svg>
+            `;
+            editBtn.onclick = () => startEditRecentChapter(idx);
+            header.appendChild(editBtn);
+            
+            row.appendChild(header);
+            
+            const contentEl = document.createElement('div');
+            contentEl.className = 'list-entry-content';
+            contentEl.style.fontSize = '0.8rem';
+            contentEl.style.lineHeight = '1.4';
+            contentEl.style.whiteSpace = 'pre-wrap';
+            let displayContent = (chText || '').trim();
+            displayContent = displayContent.replace(/\{\{user\}\}/gi, userDisplayName).replace(/\{\{char\}\}/gi, programDisplayName);
+            contentEl.textContent = displayContent;
+            row.appendChild(contentEl);
+            
+            chaptersContainer.appendChild(row);
+        }
+    });
+}
+
+function startEditRecentChapter(idx) {
+    editingChapterIndex = idx;
+    renderRecentChaptersView();
+}
+
+function cancelEditRecentChapter() {
+    editingChapterIndex = null;
+    renderRecentChaptersView();
+}
+
+async function saveRecentChapter(idx) {
+    const textarea = document.getElementById(`recent-chapter-edit-textarea-${idx}`);
+    const saveBtn = document.getElementById(`save-recent-chapter-btn-${idx}`);
+    if (!textarea) return;
+    
+    const newContent = textarea.value.trim();
+    const progId = (typeof activeProgramId !== 'undefined' && activeProgramId) || (typeof activeProgramName !== 'undefined' && activeProgramName ? activeProgramName.toLowerCase() : '') || 'sebile';
+    const activeSession = (typeof sessionId !== 'undefined' && sessionId) ? sessionId : ((typeof currentSessionId !== 'undefined' && currentSessionId) ? currentSessionId : 'default');
+    
+    if (saveBtn) {
+        saveBtn.disabled = true;
+        saveBtn.textContent = 'Saving...';
+    }
+    
+    try {
+        const res = await fetch('/api/programs/journals/recent_chapters/save', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                program_id: progId,
+                session_id: activeSession,
+                index: idx,
+                content: newContent
+            })
+        });
+        const data = await res.json();
+        if (data.error) throw new Error(data.error);
+        
+        currentRecentChaptersRaw[idx] = newContent;
+        editingChapterIndex = null;
+        renderRecentChaptersView();
+    } catch (e) {
+        console.error("Error saving recent chapter:", e);
+        showCustomAlert("Error", "Could not save summary: " + e.message);
+        if (saveBtn) {
+            saveBtn.disabled = false;
+            saveBtn.textContent = 'Save';
+        }
+    }
+}
+
 async function loadProgramJournals() {
     const progId = (typeof activeProgramId !== 'undefined' && activeProgramId) || (typeof activeProgramName !== 'undefined' && activeProgramName ? activeProgramName.toLowerCase() : '') || 'sebile';
     
@@ -3917,61 +4192,17 @@ async function loadProgramJournals() {
 
         // 1. Render Full Summary
         if (epicContainer) {
-            epicContainer.innerHTML = '';
-            const chronicle = (data.epic_chronicle || '').trim();
-            if (chronicle) {
-                const card = document.createElement('div');
-                card.className = 'list-entry-row';
-                card.style.borderLeft = '3px solid var(--primary-accent)';
-                
-                const contentEl = document.createElement('div');
-                contentEl.className = 'list-entry-content';
-                contentEl.style.fontSize = '0.82rem';
-                contentEl.style.lineHeight = '1.5';
-                contentEl.style.color = 'var(--text-main)';
-                let cleanChronicle = chronicle.replace(/\{\{user\}\}/gi, userDisplayName).replace(/\{\{char\}\}/gi, programDisplayName);
-                contentEl.textContent = cleanChronicle;
-                
-                card.appendChild(contentEl);
-                epicContainer.appendChild(card);
-            } else {
-                epicContainer.innerHTML = '<div class="empty-state">No full conversation summary compiled yet.</div>';
+            currentEpicChronicleRaw = (data.epic_chronicle || '').trim();
+            if (!isEditingEpicChronicle) {
+                renderEpicChronicleView();
             }
         }
 
         // 2. Render Recent Summaries
         if (chaptersContainer) {
-            chaptersContainer.innerHTML = '';
-            const chapters = data.recent_chapters || [];
-            if (chapters.length === 0) {
-                chaptersContainer.innerHTML = '<div class="empty-state">No recent summaries compiled yet (distilled every 12 conversation turns).</div>';
-            } else {
-                chapters.forEach((chText, idx) => {
-                    const row = document.createElement('div');
-                    row.className = 'list-entry-row';
-                    
-                    const header = document.createElement('div');
-                    header.className = 'list-entry-header';
-                    
-                    const tag = document.createElement('span');
-                    tag.style.color = 'var(--primary-accent)';
-                    tag.style.fontWeight = '600';
-                    tag.style.fontSize = '0.72rem';
-                    tag.textContent = `Summary ${idx + 1}`;
-                    header.appendChild(tag);
-                    row.appendChild(header);
-                    
-                    const contentEl = document.createElement('div');
-                    contentEl.className = 'list-entry-content';
-                    contentEl.style.fontSize = '0.8rem';
-                    contentEl.style.lineHeight = '1.4';
-                    let displayContent = (chText || '').trim();
-                    displayContent = displayContent.replace(/\{\{user\}\}/gi, userDisplayName).replace(/\{\{char\}\}/gi, programDisplayName);
-                    contentEl.textContent = displayContent;
-                    row.appendChild(contentEl);
-                    
-                    chaptersContainer.appendChild(row);
-                });
+            currentRecentChaptersRaw = data.recent_chapters || [];
+            if (editingChapterIndex === null) {
+                renderRecentChaptersView();
             }
         }
 
@@ -7896,6 +8127,8 @@ async function openDataBank() {
 
 // --- closeDataBank ---
 function closeDataBank() {
+    isEditingEpicChronicle = false;
+    editingChapterIndex = null;
     document.getElementById('databank-modal').style.display = 'none';
 }
 
