@@ -9,6 +9,7 @@ import os
 import sys
 import gc
 import json
+import copy
 import time
 import random
 import threading
@@ -24,18 +25,46 @@ _COMFY_NODE_CACHE: Dict[Tuple[Any, ...], Any] = {}
 root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
 
+def _persist_checkpoint_to_env(checkpoint_name: str) -> None:
+    """Updates COMFYUI_CHECKPOINT in the .env configuration file."""
+    try:
+        env_file = os.path.join(root_dir, ".env")
+        if not os.path.exists(env_file):
+            return
+        with open(env_file, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+        updated = False
+        for i, line in enumerate(lines):
+            if line.strip().startswith("COMFYUI_CHECKPOINT="):
+                lines[i] = f"COMFYUI_CHECKPOINT={checkpoint_name}\n"
+                updated = True
+                break
+        if not updated:
+            lines.append(f"\nCOMFYUI_CHECKPOINT={checkpoint_name}\n")
+        with open(env_file, "w", encoding="utf-8") as f:
+            f.writelines(lines)
+    except Exception as e:
+        print(f"[engine_diffusion] Warning persisting checkpoint to .env: {e}")
+
+
 def resolve_checkpoint_path(checkpoint_name: Optional[str] = None) -> str:
-    """Resolves the absolute path to the requested or default checkpoint model."""
-    if checkpoint_name and os.path.exists(checkpoint_name):
+    """Resolves the absolute path to the requested, active, or configured checkpoint model."""
+    if not checkpoint_name:
+        checkpoint_name = _active_checkpoint or os.getenv("COMFYUI_CHECKPOINT")
+
+    if checkpoint_name and os.path.isabs(checkpoint_name) and os.path.exists(checkpoint_name):
         return checkpoint_name
 
     candidates = []
     if checkpoint_name:
         candidates.append(os.path.join(CHECKPOINTS_DIR, checkpoint_name))
         candidates.append(os.path.join(MODELS_DIR, checkpoint_name))
+        candidates.append(os.path.join(MODELS_DIR, "checkpoints", checkpoint_name))
 
-    candidates.append(os.path.join(CHECKPOINTS_DIR, "WAI_illustrious-SDXL_16.safetensors"))
-    candidates.append(os.path.join(CHECKPOINTS_DIR, "sd_xl_base_1.0.safetensors"))
+    env_ckpt = os.getenv("COMFYUI_CHECKPOINT")
+    if env_ckpt and env_ckpt != checkpoint_name:
+        candidates.append(os.path.join(CHECKPOINTS_DIR, env_ckpt))
+        candidates.append(os.path.join(MODELS_DIR, env_ckpt))
 
     for path in candidates:
         if os.path.exists(path):
@@ -43,10 +72,15 @@ def resolve_checkpoint_path(checkpoint_name: Optional[str] = None) -> str:
 
     if os.path.exists(CHECKPOINTS_DIR):
         for f in os.listdir(CHECKPOINTS_DIR):
-            if f.lower().endswith((".safetensors", ".ckpt")):
+            if f.lower().endswith((".safetensors", ".ckpt")) and not f.startswith("."):
                 return os.path.join(CHECKPOINTS_DIR, f)
 
-    raise FileNotFoundError(f"No checkpoint models found in {CHECKPOINTS_DIR}.")
+    if os.path.exists(MODELS_DIR):
+        for f in os.listdir(MODELS_DIR):
+            if f.lower().endswith((".safetensors", ".ckpt")) and not f.startswith("."):
+                return os.path.join(MODELS_DIR, f)
+
+    raise FileNotFoundError(f"No checkpoint models found in {CHECKPOINTS_DIR} or {MODELS_DIR}.")
 
 
 def resolve_lora_path(lora_name: str) -> Optional[str]:
@@ -174,20 +208,44 @@ def get_active_checkpoint() -> Optional[str]:
     global _active_checkpoint
     if _active_checkpoint and os.path.exists(_active_checkpoint):
         return os.path.basename(_active_checkpoint)
+
+    env_ckpt = os.getenv("COMFYUI_CHECKPOINT")
+    if env_ckpt:
+        try:
+            resolved = resolve_checkpoint_path(env_ckpt)
+            if resolved and os.path.exists(resolved):
+                _active_checkpoint = resolved
+                return os.path.basename(resolved)
+        except Exception:
+            pass
+
     ckpts = list_checkpoints()
     for c in ckpts:
         if "illustrious" in c["filename"].lower() or "sdxl" in c["filename"].lower():
+            _active_checkpoint = c["path"]
             return c["filename"]
-    return ckpts[0]["filename"] if ckpts else None
+    if ckpts:
+        _active_checkpoint = ckpts[0]["path"]
+        return ckpts[0]["filename"]
+    return None
 
 
 def set_active_checkpoint(checkpoint_name: str) -> bool:
-    """Sets the active diffusion checkpoint."""
-    global _active_checkpoint
+    """Sets the active diffusion checkpoint and persists it to environment and .env."""
+    global _active_checkpoint, _COMFY_NODE_CACHE
     try:
         resolved = resolve_checkpoint_path(checkpoint_name)
         _active_checkpoint = resolved
-        print(f"[engine_diffusion] Active checkpoint set to: {resolved}")
+        filename = os.path.basename(resolved)
+        os.environ["COMFYUI_CHECKPOINT"] = filename
+        
+        # Clear cached checkpoint node if switched
+        for key in list(_COMFY_NODE_CACHE.keys()):
+            if key[0] == "CheckpointLoaderSimple" and key[1] != filename:
+                del _COMFY_NODE_CACHE[key]
+
+        _persist_checkpoint_to_env(filename)
+        print(f"[engine_diffusion] Active checkpoint set to: {filename}")
         return True
     except Exception as e:
         print(f"[engine_diffusion] Failed to set active checkpoint: {e}")
@@ -345,17 +403,30 @@ def execute_workflow_graph(
 
     if isinstance(workflow_path_or_dict, str):
         with open(workflow_path_or_dict, "r", encoding="utf-8") as f:
-            wf_str = f.read()
+            graph = json.load(f)
+    elif isinstance(workflow_path_or_dict, dict):
+        graph = copy.deepcopy(workflow_path_or_dict)
     else:
-        wf_str = json.dumps(workflow_path_or_dict)
+        graph = json.loads(str(workflow_path_or_dict))
 
     if replacements:
-        for k, v in replacements.items():
-            if k == "%seed%":
-                wf_str = wf_str.replace(f'"{k}"', str(v))
-            wf_str = wf_str.replace(k, str(v))
+        def apply_replacements(val: Any) -> Any:
+            if isinstance(val, dict):
+                return {k: apply_replacements(v) for k, v in val.items()}
+            elif isinstance(val, list):
+                return [apply_replacements(item) for item in val]
+            elif isinstance(val, str):
+                res = val
+                for k, v in replacements.items():
+                    if res == k:
+                        return v
+                    if k in res:
+                        res = res.replace(k, str(v) if v is not None else "")
+                return res
+            return val
 
-    graph: Dict[str, Any] = json.loads(wf_str)
+        graph = apply_replacements(graph)
+
     executed_outputs: Dict[str, Any] = {}
 
     def get_input_val(val: Any) -> Any:
@@ -523,18 +594,21 @@ def _generate_portrait_image_inprocess(
     workflow_path: Optional[str] = None,
     save_path: Optional[str] = None
 ) -> str:
-    """Internal implementation executing workflow graph with GPU acceleration."""
-    if seed is None or seed < 0:
-        seed = random.randint(1, 2147483647)
+    if seed is None:
+        seed = random.randint(1, 1125899906842624)
 
     wf_file = workflow_path or os.getenv("COMFYUI_IMAGE_WORKFLOW", "core/skills/portrait_generation/ImageWorkflow.json")
     if not os.path.isabs(wf_file):
         wf_file = os.path.normpath(os.path.join(root_dir, wf_file))
 
-    selected_checkpoint = checkpoint or "WAI_illustrious-SDXL_16.safetensors"
+    active_ckpt = checkpoint or get_active_checkpoint() or os.getenv("COMFYUI_CHECKPOINT")
+    try:
+        selected_checkpoint = os.path.basename(resolve_checkpoint_path(active_ckpt))
+    except Exception:
+        selected_checkpoint = active_ckpt or "sd_xl_base_1.0.safetensors"
 
     if os.path.exists(wf_file):
-        print(f"[engine_diffusion] Adapting dynamically to workflow: {wf_file}")
+        print(f"[engine_diffusion] Adapting dynamically to workflow: {wf_file} with checkpoint: {selected_checkpoint}")
         replacements = {
             "%prompt%": prompt,
             "%negative_prompt%": negative_prompt,

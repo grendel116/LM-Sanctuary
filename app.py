@@ -566,6 +566,12 @@ def crop_profile_picture():
         if not source_image or w <= 0 or h <= 0:
             return jsonify({'error': 'Invalid crop parameters'}), 400
         
+        # Strip query parameters and decode URL encoding
+        if '?' in source_image:
+            source_image = source_image.split('?')[0]
+        from urllib.parse import unquote
+        source_image = unquote(source_image)
+
         program_id = data.get('program_id') or get_active_program()
         program_dir = os.path.join(PROGRAMS_DIR, program_id)
         
@@ -4491,7 +4497,10 @@ def select_native_checkpoint():
         data = request.get_json() or {}
         ckpt_name = data.get("checkpoint_name", "")
         success = engine_diffusion.set_active_checkpoint(ckpt_name)
-        return jsonify({"success": success, "active_checkpoint": engine_diffusion.get_active_checkpoint()})
+        active_ckpt = engine_diffusion.get_active_checkpoint()
+        if active_ckpt:
+            os.environ["COMFYUI_CHECKPOINT"] = active_ckpt
+        return jsonify({"success": success, "active_checkpoint": active_ckpt})
     except Exception as e:
         return jsonify({"success": False, "message": str(e)}), 500
 
@@ -4681,7 +4690,103 @@ def comfy_checkpoint_download_status():
 
 # Prewarming is now handled on the first request inside start_prewarm_on_first_request()
 
+def assign_job_object():
+    """Binds the current process and all child processes to a Windows Job Object configured to terminate all child processes on exit."""
+    import sys
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.windll.kernel32
+        h_job = kernel32.CreateJobObjectW(None, None)
+        if not h_job:
+            return
+
+        class JOBOBJECT_BASIC_LIMIT_INFORMATION(ctypes.Structure):
+            _fields_ = [
+                ("PerProcessUserTimeLimit", wintypes.LARGE_INTEGER),
+                ("PerJobUserTimeLimit", wintypes.LARGE_INTEGER),
+                ("LimitFlags", wintypes.DWORD),
+                ("MinimumWorkingSetSize", ctypes.c_size_t),
+                ("MaximumWorkingSetSize", ctypes.c_size_t),
+                ("ActiveProcessLimit", wintypes.DWORD),
+                ("Affinity", ctypes.POINTER(ctypes.c_ulong)),
+                ("PriorityClass", wintypes.DWORD),
+                ("SchedulingClass", wintypes.DWORD),
+            ]
+
+        class IO_COUNTERS(ctypes.Structure):
+            _fields_ = [
+                ("ReadOperationCount", wintypes.ULARGE_INTEGER),
+                ("WriteOperationCount", wintypes.ULARGE_INTEGER),
+                ("OtherOperationCount", wintypes.ULARGE_INTEGER),
+                ("ReadTransferCount", wintypes.ULARGE_INTEGER),
+                ("WriteTransferCount", wintypes.ULARGE_INTEGER),
+                ("OtherTransferCount", wintypes.ULARGE_INTEGER),
+            ]
+
+        class JOBOBJECT_EXTENDED_LIMIT_INFORMATION(ctypes.Structure):
+            _fields_ = [
+                ("BasicLimitInformation", JOBOBJECT_BASIC_LIMIT_INFORMATION),
+                ("IoCounters", IO_COUNTERS),
+                ("ProcessMemoryLimit", ctypes.c_size_t),
+                ("JobMemoryLimit", ctypes.c_size_t),
+                ("PeakProcessMemoryLimit", ctypes.c_size_t),
+                ("PeakJobMemoryLimit", ctypes.c_size_t),
+            ]
+
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
+        JobObjectExtendedLimitInformation = 9
+
+        info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
+        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+
+        success = kernel32.SetInformationJobObject(
+            h_job,
+            JobObjectExtendedLimitInformation,
+            ctypes.byref(info),
+            ctypes.sizeof(info)
+        )
+        if success:
+            current_proc = kernel32.GetCurrentProcess()
+            kernel32.AssignProcessToJobObject(h_job, current_proc)
+    except Exception:
+        pass
+
+
+def _cleanup_all_processes(*args, **kwargs):
+    try:
+        from runners import local_server
+        local_server.stop_local_server()
+    except Exception:
+        pass
+    try:
+        from adapters import comfy_manager
+        comfy_manager.stop_comfy_server()
+        comfy_manager.clear_temp_directories()
+    except Exception:
+        pass
+    try:
+        from core import engine_diffusion
+        engine_diffusion.unload_diffusion_models()
+    except Exception:
+        pass
+
+
 if __name__ == '__main__':
+    import atexit
+    import signal
+
+    assign_job_object()
+    atexit.register(_cleanup_all_processes)
+    try:
+        signal.signal(signal.SIGINT, _cleanup_all_processes)
+        signal.signal(signal.SIGTERM, _cleanup_all_processes)
+    except Exception:
+        pass
+
     host = os.getenv('HOST', '0.0.0.0')
     port = int(os.getenv('PORT', '5000'))
     

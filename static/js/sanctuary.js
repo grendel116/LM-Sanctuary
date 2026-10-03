@@ -7159,82 +7159,94 @@ let cropSourcePath = '';
 function setCurrentImageAsProfile(event) {
     if (event) event.stopPropagation();
     const currentSrc = galleryImages[currentGalleryIndex];
-    if (isProfileImage(currentSrc)) return;
+    if (!currentSrc || isProfileImage(currentSrc)) return;
 
     closeModal();
     cropSourcePath = currentSrc;
 
     const cropModal = document.getElementById('crop-modal');
-    const cropImg = document.getElementById('crop-image-element');
+    const container = document.getElementById('crop-container');
     
-    if (cropModal && cropImg) {
+    if (cropModal && container) {
         if (profileCropper) {
-            profileCropper.destroy();
+            try {
+                profileCropper.destroy();
+            } catch (e) {}
             profileCropper = null;
         }
+
+        // Clean slate for the crop container to ensure CropperJS attaches to a pristine element
+        container.innerHTML = '';
+        container.style.width = '';
+        container.style.height = '';
+
+        const cropImg = document.createElement('img');
+        cropImg.id = 'crop-image-element';
+        cropImg.style.maxWidth = '100%';
+        cropImg.style.display = 'block';
+        container.appendChild(cropImg);
 
         cropModal.style.display = 'flex';
         
         const initCropper = () => {
-            const container = document.getElementById('crop-container');
-            if (container && cropImg.naturalWidth && cropImg.naturalHeight) {
-                const aspect = cropImg.naturalWidth / cropImg.naturalHeight;
-                const padding = window.innerWidth <= 768 ? 40 : 60;
-                const availWidth = cropModal.querySelector('.modal-card').clientWidth - padding;
-                const availHeight = window.innerHeight * 0.5;
-                
-                let finalWidth = availWidth;
-                let finalHeight = finalWidth / aspect;
-                
-                if (finalHeight > availHeight) {
-                    finalHeight = availHeight;
-                    finalWidth = finalHeight * aspect;
-                }
-                
-                container.style.width = `${finalWidth}px`;
-                container.style.height = `${finalHeight}px`;
-            }
-            setTimeout(() => {
-                if (profileCropper) {
+            if (profileCropper) {
+                try {
                     profileCropper.destroy();
+                } catch (e) {}
+                profileCropper = null;
+            }
+
+            const aspect = (cropImg.naturalWidth && cropImg.naturalHeight) ? (cropImg.naturalWidth / cropImg.naturalHeight) : 1;
+            const padding = window.innerWidth <= 768 ? 40 : 60;
+            const modalCard = cropModal.querySelector('.modal-card');
+            const availWidth = (modalCard ? modalCard.clientWidth : 360) - padding;
+            const availHeight = window.innerHeight * 0.5;
+            
+            let finalWidth = availWidth > 0 ? availWidth : 300;
+            let finalHeight = finalWidth / aspect;
+            
+            if (finalHeight > availHeight) {
+                finalHeight = availHeight;
+                finalWidth = finalHeight * aspect;
+            }
+            
+            container.style.width = `${finalWidth}px`;
+            container.style.height = `${finalHeight}px`;
+
+            profileCropper = new Cropper(cropImg, {
+                aspectRatio: 1,
+                viewMode: 1,
+                dragMode: 'move',
+                autoCropArea: 0.8,
+                restore: false,
+                guides: true,
+                center: true,
+                highlight: true,
+                cropBoxMovable: true,
+                cropBoxResizable: true,
+                toggleDragModeOnDblclick: false,
+                checkCrossOrigin: false,
+                background: false,
+                ready() {
+                    const canvasData = profileCropper.getCanvasData();
+                    const size = Math.min(canvasData.width, canvasData.height) * 0.8;
+                    profileCropper.setCropBoxData({
+                        left: canvasData.left + (canvasData.width - size) / 2,
+                        top: canvasData.top + (canvasData.height - size) / 2,
+                        width: size,
+                        height: size
+                    });
                 }
-                profileCropper = new Cropper(cropImg, {
-                    aspectRatio: 1,
-                    viewMode: 1,
-                    dragMode: 'move',
-                    autoCropArea: 0.8,
-                    restore: false,
-                    guides: true,
-                    center: true,
-                    highlight: true,
-                    cropBoxMovable: true,
-                    cropBoxResizable: true,
-                    toggleDragModeOnDblclick: false,
-                    checkCrossOrigin: false,
-                    background: false,
-                    ready() {
-                        const canvasData = profileCropper.getCanvasData();
-                        const size = Math.min(canvasData.width, canvasData.height) * 0.8;
-                        profileCropper.setCropBoxData({
-                            left: canvasData.left + (canvasData.width - size) / 2,
-                            top: canvasData.top + (canvasData.height - size) / 2,
-                            width: size,
-                            height: size
-                        });
-                    }
-                });
-            }, 100);
+            });
         };
 
-        cropImg.onload = function() {
+        cropImg.onload = () => {
             initCropper();
-            cropImg.onload = null;
         };
         cropImg.src = currentSrc;
 
         if (cropImg.complete && cropImg.naturalWidth !== 0) {
             initCropper();
-            cropImg.onload = null;
         }
     }
 }
@@ -7246,11 +7258,14 @@ function closeCropModal(event) {
         cropModal.style.display = 'none';
     }
     if (profileCropper) {
-        profileCropper.destroy();
+        try {
+            profileCropper.destroy();
+        } catch (e) {}
         profileCropper = null;
     }
     const container = document.getElementById('crop-container');
     if (container) {
+        container.innerHTML = '<img id="crop-image-element" style="max-width: 100%; display: block;">';
         container.style.width = '';
         container.style.height = '';
     }
