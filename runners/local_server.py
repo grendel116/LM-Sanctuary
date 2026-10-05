@@ -3,8 +3,9 @@ import time
 import zipfile
 import subprocess
 import requests
-import atexit
 import threading
+
+from utils import lifecycle
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LLAMA_BIN_DIR = os.path.join(BASE_DIR, "utils", "llama-bin")
@@ -265,9 +266,9 @@ def start_local_server(model_key=None):
                 si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
                 si.wShowWindow = 0
                 flags = subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0x08000000
-                _proc = subprocess.Popen(cmd, stdout=log_fd, stderr=log_fd, startupinfo=si, creationflags=flags, shell=False)
+                _proc = lifecycle.track(subprocess.Popen(cmd, stdout=log_fd, stderr=log_fd, startupinfo=si, creationflags=flags, shell=False))
             else:
-                _proc = subprocess.Popen(cmd, stdout=log_fd, stderr=log_fd, shell=False)
+                _proc = lifecycle.track(subprocess.Popen(cmd, stdout=log_fd, stderr=log_fd, shell=False))
                 
         with _start_lock:
             _starting = True
@@ -466,13 +467,4 @@ async def ensure_server_online_async(model_key=None, timeout=120.0) -> bool:
             return False
 
     print(f"[Local LLM] Server startup timed out after {timeout}s.", flush=True)
-    return False
-
-def _atexit_clean():
-    # If Flask reloader is active, let the parent process handle cleanup on Ctrl+C
-    # so we don't kill the server on child process reloads.
-    if os.environ.get('WERKZEUG_RUN_MAIN') == 'true':
-        return
-    stop_local_server()
-
-atexit.register(_atexit_clean)
+    return False

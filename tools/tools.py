@@ -10,6 +10,7 @@ import concurrent.futures
 import requests
 
 from variables.settings import COMFYUI_SERVER_URL, COMFYUI_CHECKPOINT, COMFYUI_VAE, VARIABLES_DIR
+from utils import lifecycle
 
 _search_executor = concurrent.futures.ThreadPoolExecutor(max_workers=10)
 
@@ -1696,7 +1697,7 @@ def run_command_async(command: str) -> str:
 
         task_id = f"task_{int(time.time())}_{uuid.uuid4().hex[:4]}"
         
-        process = subprocess.Popen(
+        process = lifecycle.track(subprocess.Popen(
             command,
             shell=True,
             stdout=subprocess.PIPE,
@@ -1706,7 +1707,7 @@ def run_command_async(command: str) -> str:
             encoding="utf-8",
             errors="replace",
             bufsize=1
-        )
+        ))
         
         stdout_log = []
         stderr_log = []

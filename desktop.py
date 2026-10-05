@@ -8,9 +8,9 @@ import time
 import socket
 import threading
 import urllib.request
-import atexit
-import signal
 import webview
+
+from utils import lifecycle
 
 # Configure WebView2 arguments for audio/mic capabilities
 os.environ["WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"] = (
@@ -19,71 +19,6 @@ os.environ["WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"] = (
     "--enable-features=SpeechRecognition,MediaStream "
     "--unsafely-treat-insecure-origin-as-secure=http://127.0.0.1:5000,http://localhost:5000"
 )
-
-
-def assign_job_object():
-    """Binds the current process and all child processes to a Windows Job Object configured to terminate all child processes on exit."""
-    if sys.platform != "win32":
-        return
-    try:
-        import ctypes
-        from ctypes import wintypes
-
-        kernel32 = ctypes.windll.kernel32
-        h_job = kernel32.CreateJobObjectW(None, None)
-        if not h_job:
-            return
-
-        class JOBOBJECT_BASIC_LIMIT_INFORMATION(ctypes.Structure):
-            _fields_ = [
-                ("PerProcessUserTimeLimit", wintypes.LARGE_INTEGER),
-                ("PerJobUserTimeLimit", wintypes.LARGE_INTEGER),
-                ("LimitFlags", wintypes.DWORD),
-                ("MinimumWorkingSetSize", ctypes.c_size_t),
-                ("MaximumWorkingSetSize", ctypes.c_size_t),
-                ("ActiveProcessLimit", wintypes.DWORD),
-                ("Affinity", ctypes.POINTER(ctypes.c_ulong)),
-                ("PriorityClass", wintypes.DWORD),
-                ("SchedulingClass", wintypes.DWORD),
-            ]
-
-        class IO_COUNTERS(ctypes.Structure):
-            _fields_ = [
-                ("ReadOperationCount", wintypes.ULARGE_INTEGER),
-                ("WriteOperationCount", wintypes.ULARGE_INTEGER),
-                ("OtherOperationCount", wintypes.ULARGE_INTEGER),
-                ("ReadTransferCount", wintypes.ULARGE_INTEGER),
-                ("WriteTransferCount", wintypes.ULARGE_INTEGER),
-                ("OtherTransferCount", wintypes.ULARGE_INTEGER),
-            ]
-
-        class JOBOBJECT_EXTENDED_LIMIT_INFORMATION(ctypes.Structure):
-            _fields_ = [
-                ("BasicLimitInformation", JOBOBJECT_BASIC_LIMIT_INFORMATION),
-                ("IoCounters", IO_COUNTERS),
-                ("ProcessMemoryLimit", ctypes.c_size_t),
-                ("JobMemoryLimit", ctypes.c_size_t),
-                ("PeakProcessMemoryLimit", ctypes.c_size_t),
-                ("PeakJobMemoryLimit", ctypes.c_size_t),
-            ]
-
-        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
-        JobObjectExtendedLimitInformation = 9
-
-        info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
-        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
-
-        success = kernel32.SetInformationJobObject(
-            h_job,
-            JobObjectExtendedLimitInformation,
-            ctypes.byref(info),
-            ctypes.sizeof(info)
-        )
-        if success:
-            current_proc = kernel32.GetCurrentProcess()
-            kernel32.AssignProcessToJobObject(h_job, current_proc)
-    except Exception:
-        pass
 
 
 def find_available_port(default_port: int = 5000) -> int:
@@ -121,52 +56,8 @@ def start_flask_server(port: int, ssl_context=None):
     app.run(host='0.0.0.0', port=port, ssl_context=ssl_context, debug=False, use_reloader=False, threaded=True)
 
 
-_cleanup_lock = threading.Lock()
-_has_cleaned_up = False
-
-
-def cleanup_and_exit(*args, **kwargs):
-    """Immediately stops all background servers, unloads models, clears temp files, and exits process."""
-    global _has_cleaned_up
-    with _cleanup_lock:
-        if _has_cleaned_up:
-            return
-        _has_cleaned_up = True
-
-    try:
-        from runners import local_server
-        local_server.stop_local_server()
-    except Exception:
-        pass
-    try:
-        from adapters import comfy_manager
-        comfy_manager.stop_comfy_server()
-        comfy_manager.clear_temp_directories()
-    except Exception:
-        pass
-    try:
-        from core import engine_diffusion
-        engine_diffusion.unload_diffusion_models()
-    except Exception:
-        pass
-    if sys.platform == "win32":
-        try:
-            import subprocess
-            flags = subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0x08000000
-            subprocess.run(["taskkill", "/F", "/IM", "llama-server.exe"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=flags)
-        except Exception:
-            pass
-    os._exit(0)
-
-
 def main():
-    assign_job_object()
-    atexit.register(cleanup_and_exit)
-    try:
-        signal.signal(signal.SIGINT, cleanup_and_exit)
-        signal.signal(signal.SIGTERM, cleanup_and_exit)
-    except Exception:
-        pass
+    lifecycle.install()
 
     if sys.platform == "win32":
         try:
@@ -196,7 +87,7 @@ def main():
         sys.exit(1)
 
     # Launch native desktop window
-    window = webview.create_window(
+    webview.create_window(
         title="LM-Sanctuary",
         url=server_url,
         width=1320,
@@ -206,13 +97,15 @@ def main():
         text_select=True
     )
 
-    window.events.closing += cleanup_and_exit
-    window.events.closed += cleanup_and_exit
+    # Blocks until the window closes. Shutdown runs after the window is gone, so the UI never hangs on exit.
     if sys.platform == "win32":
         webview.start(gui='edgechromium', debug=False)
     else:
         webview.start(debug=False)
-    cleanup_and_exit()
+
+    lifecycle.shutdown()
+    # Children are stopped; exit immediately rather than waiting on lingering request/stream threads.
+    os._exit(0)
 
 
 if __name__ == "__main__":

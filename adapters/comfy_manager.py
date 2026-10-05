@@ -4,7 +4,8 @@ import threading
 import requests
 import json
 import time
-import atexit
+
+from utils import lifecycle
 
 # Headless ComfyUI Manager
 
@@ -391,7 +392,7 @@ def start_comfy_server():
         env["PYTORCH_HIP_ALLOC_CONF"] = "expandable_segments:True,max_split_size_mb:512"
         env["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True,max_split_size_mb:512"
         with open(log_file, "a", encoding="utf-8") as log_fd:
-            subprocess.Popen(cmd, stdout=log_fd, stderr=log_fd, env=env, shell=False)
+            lifecycle.track(subprocess.Popen(cmd, stdout=log_fd, stderr=log_fd, env=env, shell=False))
         
         # Set starting flag and launch background wait thread
         with _start_lock:
@@ -983,20 +984,5 @@ def clear_temp_directories():
         except Exception:
             pass
 
-def _atexit_comfy_clean():
-    # If Flask reloader is active, let the parent process handle cleanup on Ctrl+C
-    # so we don't kill ComfyUI on child process reloads.
-    if os.environ.get('WERKZEUG_RUN_MAIN') == 'true':
-        clear_temp_directories()
-        return
-    try:
-        if check_comfy_running(force_refresh=True):
-            print(">>> Stopping ComfyUI server on application exit...", flush=True)
-            stop_comfy_server()
-    except Exception:
-        pass
-    clear_temp_directories()
-
-atexit.register(_atexit_comfy_clean)
 # Clean up any leftover temp files on initial module load / app startup
 clear_temp_directories()

@@ -18,6 +18,7 @@ from typing import List, Dict, Any, Optional, Tuple
 
 import torch
 from variables.settings import CHECKPOINTS_DIR, LORAS_DIR, VAE_DIR, MODELS_DIR
+from utils import lifecycle
 
 _diffusion_lock = threading.Lock()
 _active_checkpoint: Optional[str] = None
@@ -287,30 +288,23 @@ def ensure_daemon_running(timeout: float = 60.0) -> bool:
 
         logs_dir = os.path.join(root_dir, "logs")
         os.makedirs(logs_dir, exist_ok=True)
-        daemon_log = open(os.path.join(logs_dir, "diffusion_daemon.log"), "a", encoding="utf-8")
-
+        popen_kwargs = {}
         if os.name == 'nt':
             si = subprocess.STARTUPINFO()
             si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
             si.wShowWindow = 0
-            flags = subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0x08000000
-            _daemon_proc = subprocess.Popen(
+            popen_kwargs["startupinfo"] = si
+            popen_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0x08000000
+
+        with open(os.path.join(logs_dir, "diffusion_daemon.log"), "a", encoding="utf-8") as daemon_log:
+            _daemon_proc = lifecycle.track(subprocess.Popen(
                 [py_exe, os.path.abspath(__file__), "--server"],
                 env=env,
                 cwd=root_dir,
                 stdout=daemon_log,
                 stderr=daemon_log,
-                startupinfo=si,
-                creationflags=flags
-            )
-        else:
-            _daemon_proc = subprocess.Popen(
-                [py_exe, os.path.abspath(__file__), "--server"],
-                env=env,
-                cwd=root_dir,
-                stdout=daemon_log,
-                stderr=daemon_log
-            )
+                **popen_kwargs
+            ))
 
         start_t = time.time()
         while time.time() - start_t < timeout:
