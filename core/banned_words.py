@@ -28,7 +28,7 @@ _POS_TARGETS = (
 _DELIMITERS = r"(?:[;,:\u2013\u2014-]|--)"
 
 ANTITHESIS_PATTERN = re.compile(
-    rf"\b(?:{_PRONOUNS}\s+)?{_NEG_VERBS}\s+[^;:.!?]+(?:{_DELIMITERS}\s*(?:{_PRONOUNS}|{_POS_TARGETS})|{_DELIMITERS}?\s*(?:{_POS_TARGETS}))\b"
+    rf"\b(?:{_PRONOUNS}\s+)?{_NEG_VERBS}\s+[^;:.!?]+(?:{_DELIMITERS}\s*(?:{_POS_TARGETS}|{_PRONOUNS}(?:\s+\w+)?)|{_DELIMITERS}?\s*(?:{_POS_TARGETS}))\b"
     rf"|\bnot\s+(?:a|an|just|only|merely|simply)\s+[^;:.!?]+{_DELIMITERS}?\s*(?:{_POS_TARGETS}|but\s+\w+|{_PRONOUNS})\b",
     re.IGNORECASE
 )
