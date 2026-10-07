@@ -69,17 +69,34 @@ def get_banned_word_variants() -> set[str]:
         clean = word.strip().lower()
         if not clean:
             continue
-        forms = {
-            clean,
-            f"{clean}s",
-            f"{clean}es",
-            f"{clean}ed",
-            f"{clean}ing",
-            f"{clean}ly",
-            f"{clean}er",
-            f"{clean}est",
-            f"{clean}y",
-        }
+        forms = {clean}
+        if clean.endswith(("s", "sh", "ch", "x", "z")):
+            forms.add(f"{clean}es")
+        elif clean.endswith("y") and len(clean) > 1 and clean[-2] not in "aeiou":
+            forms.add(f"{clean[:-1]}ies")
+        else:
+            forms.add(f"{clean}s")
+
+        if clean.endswith("e"):
+            forms.add(f"{clean}d")
+            if not clean.endswith(("ee", "oe", "ye")):
+                forms.add(f"{clean[:-1]}ing")
+            else:
+                forms.add(f"{clean}ing")
+            forms.add(f"{clean}r")
+            forms.add(f"{clean}st")
+        elif clean.endswith("y") and len(clean) > 1 and clean[-2] not in "aeiou":
+            forms.add(f"{clean[:-1]}ied")
+            forms.add(f"{clean}ing")
+        else:
+            forms.add(f"{clean}ed")
+            forms.add(f"{clean}ing")
+            forms.add(f"{clean}er")
+            forms.add(f"{clean}est")
+
+        if not clean.endswith("ly"):
+            forms.add(f"{clean}ly")
+
         for form in forms:
             variants.update([
                 form,
@@ -103,7 +120,7 @@ def get_banned_words_regex() -> Optional[re.Pattern]:
 
     # Build pattern covering base words and common suffixes
     escaped = [re.escape(w) for w in words]
-    pattern = r"\b(?:" + "|".join(escaped) + r")(?:s|es|ed|ing|ly|er|est|y)?\b"
+    pattern = r"\b(?:" + "|".join(escaped) + r")(?:s|es|ed|ing|ly|er|est)?\b"
     _cached_regex = re.compile(pattern, re.IGNORECASE)
     return _cached_regex
 
@@ -111,72 +128,165 @@ def _get_token_cache_path() -> str:
     base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     return os.path.join(base_dir, "variables", ".banned_tokens_cache.json")
 
-def _load_token_cache() -> set[int]:
+def _load_token_cache(model_key: str = None) -> set[int]:
     cache_path = _get_token_cache_path()
     if os.path.exists(cache_path) and os.path.exists(BANNED_WORDS_FILE):
         try:
             if os.path.getmtime(cache_path) >= os.path.getmtime(BANNED_WORDS_FILE):
                 with open(cache_path, "r", encoding="utf-8") as f:
                     data = json.load(f)
+                    cached_model = data.get("model")
+                    if model_key and cached_model and cached_model != model_key:
+                        return set()
                     return set(data.get("token_ids", []))
         except Exception:
             pass
     return set()
 
-def _save_token_cache(token_ids: set[int]):
+def _save_token_cache(token_ids: set[int], model_key: str = None):
     cache_path = _get_token_cache_path()
     try:
+        data = {"token_ids": sorted(list(token_ids))}
+        if model_key:
+            data["model"] = model_key
         with open(cache_path, "w", encoding="utf-8") as f:
-            json.dump({"token_ids": sorted(list(token_ids))}, f)
+            json.dump(data, f)
     except Exception:
         pass
 
-def resolve_token_ids(server_url: str = None) -> set[int]:
-    """Resolves single-token IDs for banned words via the server /tokenize endpoint."""
+def _find_default_gguf_path() -> Optional[str]:
+    model_name = os.getenv("LOCAL_MODEL_NAME", "")
+    if not model_name:
+        return None
+    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    user_profile = os.environ.get("USERPROFILE") or os.path.expanduser("~")
+    candidates = [
+        os.path.join(base_dir, "models", model_name),
+        os.path.join(user_profile, ".lmstudio", "models", model_name),
+        model_name,
+    ]
+    for p in candidates:
+        if os.path.isfile(p):
+            return os.path.normpath(p)
+    return None
+
+def resolve_tokens_from_gguf(gguf_path: str, variants: set[str]) -> set[int]:
+    """Extracts exact single-token IDs from a GGUF model for the given word variants."""
+    if not gguf_path or not os.path.isfile(gguf_path) or not variants:
+        return set()
+
+    # Priority 1: In-process via llama_cpp (fast, vocab_only=True without VRAM allocation)
+    try:
+        import llama_cpp
+        params = llama_cpp.llama_model_default_params()
+        params.vocab_only = True
+        model = llama_cpp.llama_model_load_from_file(gguf_path.encode("utf-8"), params)
+        if model:
+            try:
+                vocab = llama_cpp.llama_model_get_vocab(model)
+                single_ids = set()
+                for v in variants:
+                    vb = v.encode("utf-8")
+                    n_max = len(vb) + 2
+                    tokens = (llama_cpp.llama_token * n_max)()
+                    n = llama_cpp.llama_tokenize(vocab, vb, len(vb), tokens, n_max, False, False)
+                    if n == 1:
+                        single_ids.add(int(tokens[0]))
+                return single_ids
+            finally:
+                llama_cpp.llama_model_free(model)
+    except Exception as e:
+        print(f"[BANNED WORDS] llama_cpp vocab tokenization note: {e}", flush=True)
+
+    # Priority 2: Standalone llama-tokenize binary (line-by-line single-token verification)
+    try:
+        import subprocess
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        tok_exe = os.path.join(base_dir, "utils", "llama-bin", "llama-tokenize.exe" if os.name == "nt" else "llama-tokenize")
+        if os.path.isfile(tok_exe):
+            sorted_variants = sorted(list(variants))
+            payload = "\n".join(sorted_variants) + "\n"
+            flags = subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0x08000000
+            out = subprocess.check_output(
+                [tok_exe, "-m", gguf_path, "-p", payload, "--no-bos"],
+                stderr=subprocess.DEVNULL,
+                text=True,
+                creationflags=flags if os.name == "nt" else 0
+            )
+            tokens_by_line = []
+            curr_tokens = []
+            for line in out.splitlines():
+                m = re.match(r"^\s*(\d+)\s*->", line)
+                if m:
+                    tid = int(m.group(1))
+                    if tid == 107:
+                        tokens_by_line.append(curr_tokens)
+                        curr_tokens = []
+                    else:
+                        curr_tokens.append(tid)
+            if curr_tokens:
+                tokens_by_line.append(curr_tokens)
+
+            return {toks[0] for toks in tokens_by_line if len(toks) == 1}
+    except Exception as e:
+        print(f"[BANNED WORDS] llama-tokenize CLI fallback note: {e}", flush=True)
+
+    return set()
+
+def resolve_tokens_from_server(server_url: str, variants: set[str]) -> set[int]:
+    """Resolves single-token IDs via running llama-server /tokenize endpoint."""
+    if not server_url or not variants:
+        return set()
+    base_url = server_url.split("/v1/")[0].rstrip("/")
+    tokenize_url = f"{base_url}/tokenize"
+    import requests
+    single_ids = set()
+    for v in variants:
+        try:
+            resp = requests.post(tokenize_url, json={"content": v}, timeout=0.5)
+            if resp.status_code == 200:
+                toks = resp.json().get("tokens", [])
+                if len(toks) == 1:
+                    single_ids.add(int(toks[0]))
+        except Exception:
+            break
+    return single_ids
+
+def resolve_token_ids(server_url: str = None, gguf_path: str = None) -> set[int]:
+    """Resolves single-token IDs for banned words."""
     global _cached_token_ids
     if _cached_token_ids:
         return _cached_token_ids
 
-    # Try loading disk cache first
-    cached_disk = _load_token_cache()
+    if not gguf_path:
+        gguf_path = _find_default_gguf_path()
+
+    model_key = os.path.basename(gguf_path) if gguf_path else None
+    cached_disk = _load_token_cache(model_key)
     if cached_disk:
         _cached_token_ids = cached_disk
-
-    if not server_url:
-        server_url = os.environ.get("LOCAL_SERVER_URL", "http://127.0.0.1:1234/v1/chat/completions")
-
-    # Determine base server URL (e.g. http://127.0.0.1:1234)
-    base_url = server_url.split("/v1/")[0].rstrip("/")
-    tokenize_url = f"{base_url}/tokenize"
+        return _cached_token_ids
 
     variants = get_banned_word_variants()
     if not variants:
-        return _cached_token_ids
+        return set()
 
-    import requests
-    resolved = set(_cached_token_ids)
-    try:
-        for v in variants:
-            try:
-                resp = requests.post(tokenize_url, json={"content": v}, timeout=1.0)
-                if resp.status_code == 200:
-                    toks = resp.json().get("tokens", [])
-                    if len(toks) == 1:
-                        resolved.add(int(toks[0]))
-            except Exception:
-                break
+    resolved = set()
+    if gguf_path and os.path.isfile(gguf_path):
+        resolved = resolve_tokens_from_gguf(gguf_path, variants)
 
-        if resolved:
-            _cached_token_ids = resolved
-            _save_token_cache(resolved)
-    except Exception as e:
-        print(f"[BANNED WORDS] Warning during token resolution: {e}", flush=True)
+    if not resolved and server_url:
+        resolved = resolve_tokens_from_server(server_url, variants)
+
+    if resolved:
+        _cached_token_ids = resolved
+        _save_token_cache(resolved, model_key)
 
     return _cached_token_ids
 
-def get_logit_bias_dict(server_url: str = None, bias_weight: float = DEFAULT_BIAS_WEIGHT) -> dict[str, float]:
+def get_logit_bias_dict(server_url: str = None, bias_weight: float = DEFAULT_BIAS_WEIGHT, gguf_path: str = None) -> dict[str, float]:
     """Returns logit_bias dictionary {token_id_str: bias_weight} for OpenAI API requests."""
-    token_ids = resolve_token_ids(server_url)
+    token_ids = resolve_token_ids(server_url=server_url, gguf_path=gguf_path)
     if not token_ids:
         return {}
     return {str(t_id): float(bias_weight) for t_id in token_ids}
@@ -186,37 +296,12 @@ def generate_llama_cli_args(gguf_path: str = None, bias_weight: float = None) ->
     if bias_weight is None:
         bias_weight = DEFAULT_BIAS_WEIGHT
 
-    token_ids = _load_token_cache()
-
-    # If cache is empty and gguf_path is provided, try llama-tokenize.exe
-    if not token_ids and gguf_path and os.path.isfile(gguf_path):
-        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        tok_exe = os.path.join(base_dir, "utils", "llama-bin", "llama-tokenize.exe" if os.name == 'nt' else "llama-tokenize")
-        if os.path.isfile(tok_exe):
-            try:
-                import subprocess
-                variants = get_banned_word_variants()
-                # Run batch tokenization in chunks
-                chunk = " ".join(variants)
-                flags = subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0x08000000
-                out = subprocess.check_output(
-                    [tok_exe, "-m", gguf_path, "-p", chunk, "--ids", "--no-bos"],
-                    stderr=subprocess.DEVNULL,
-                    text=True,
-                    creationflags=flags if os.name == 'nt' else 0
-                ).strip()
-                parsed = json.loads(out)
-                if isinstance(parsed, list):
-                    token_ids = set(parsed)
-                    _save_token_cache(token_ids)
-            except Exception as e:
-                print(f"[BANNED WORDS] Tokenization via binary skipped: {e}", flush=True)
-
+    token_ids = resolve_token_ids(gguf_path=gguf_path)
     if not token_ids:
         return []
 
     sign_str = "" if bias_weight < 0 else "+"
-    bias_str = ",".join(f"{t_id}{sign_str}{bias_weight}" for t_id in token_ids)
+    bias_str = ",".join(f"{t_id}{sign_str}{bias_weight}" for t_id in sorted(token_ids))
     return ["--logit-bias", bias_str]
 
 async def _rewrite_single_sentence(sentence: str, llm_call_func, target_model: str, banned_regex) -> str:

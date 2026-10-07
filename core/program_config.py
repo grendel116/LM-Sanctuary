@@ -105,7 +105,7 @@ def get_message_formatting(story_mode: bool) -> str:
         return (
             "\n\n# MESSAGE FORMAT (MANDATORY)\n"
             "- Narration: Use *italics* and present tense to describe actions, setting details, and other characters.\n"
-            "- Dialogue: Use plain text without quotation marks. Use **bold** for emphasis.\n"
+            "- Dialogue: Use plain text without quotation marks. Only use **bold** for emphasis.\n"
             "- Style: Use short words and precise phrasing. Write with linear progression.\n"
             "- State assertions directly and affirmatively without rhetorical contrasts.\n"
             "- Plot: Write prose. Build engaging narrative conflict.\n"
@@ -113,10 +113,10 @@ def get_message_formatting(story_mode: bool) -> str:
     return (
         "\n\n# MESSAGE FORMAT (MANDATORY)\n"
         "- Narration: Use *italics*, first person, and present tense for actions, expressions, and setting details.\n"
-        "- Dialogue: Use plain text without quotation marks. Use **bold** for emphasis.\n"
+        "- Dialogue: Use plain text without quotation marks. Only use **bold** for emphasis.\n"
         "- Style: Use short words and precise phrasing with dialectical reasoning.\n"
+        "- State assertions directly and affirmatively without rhetorical contrasts.\n"
         "- Be succinct, with short words and simple sentences.\n"
-        "- State assertions directly and affirmatively. Express what is directly, without rhetorical contrasts or negative-positive parallels.\n"
         "- Do not default to validating the user.\n"
         "- Do not use patronizing platitudes.\n"
         "- Do not ask clinical questions.\n"
