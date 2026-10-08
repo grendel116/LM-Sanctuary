@@ -843,16 +843,66 @@ class BaseProgramRunner:
         if target_idx == -1:
             return "", []
 
+        orig_msg = history[target_idx]
+        orig_role = orig_msg.get("role", "user")
+
+        group_meta = getattr(self, "sessions_group_meta", {}).get(session_id)
+        is_group = bool(group_meta and group_meta.get("is_group"))
+
+        if orig_role == "program":
+            with self._lock:
+                self.sessions_history[session_id] = history[:target_idx]
+                self._save_session_to_disk(session_id)
+
+            target_speaker = speaker_id or orig_msg.get("sender_id")
+            if is_group:
+                all_ids = [group_meta.get("host_id")] + [g for g in group_meta.get("guest_ids", []) if g != group_meta.get("host_id")]
+                if target_speaker not in all_ids and len(all_ids) > 0:
+                    target_speaker = all_ids[0]
+
+                from core.program_config import _load_card_data
+                speaker_card = _load_card_data(target_speaker)
+                speaker_name = speaker_card.get("name") if speaker_card else target_speaker.title()
+                prompt = f"[System: Speak in character as {speaker_name}. React or reply naturally to what was just said in the room.]"
+
+                adapter = self._get_session_adapter(session_id)
+                inversion_directive = await self._get_inversion_directive(session_id)
+                return await self._execute_local_llm_loop(
+                    session_id=session_id,
+                    adapter=adapter,
+                    model=model,
+                    inversion_directive=inversion_directive,
+                    rag_context="",
+                    new_message_text=prompt,
+                    invocation_id=msg_id,
+                    speaker_id=target_speaker
+                )
+            else:
+                if target_idx > 0 and history[target_idx - 1].get("role") == "user":
+                    prev_user_msg = history[target_idx - 1]
+                    with self._lock:
+                        self.sessions_history[session_id] = history[:target_idx - 1]
+                        self._save_session_to_disk(session_id)
+                    adapter = self._get_session_adapter(session_id)
+                    inversion_directive = await self._get_inversion_directive(session_id)
+                    return await self._execute_local_llm_loop(
+                        session_id=session_id,
+                        adapter=adapter,
+                        model=model,
+                        inversion_directive=inversion_directive,
+                        rag_context="",
+                        new_message_text=prev_user_msg.get("text", ""),
+                        invocation_id=prev_user_msg.get("id"),
+                        speaker_id=target_speaker
+                    )
+                return "", []
+
         with self._lock:
-            # Update the message text if provided
             if new_text is not None:
                 history[target_idx]["text"] = new_text
-            
-            # Truncate all history after this turn so the model can regenerate fresh responses
             self.sessions_history[session_id] = history[:target_idx + 1]
             self._save_session_to_disk(session_id)
 
-        # Re-run the LLM loop from this point
         edited_msg = history[target_idx]["text"]
         adapter = self._get_session_adapter(session_id)
         inversion_directive = await self._get_inversion_directive(session_id)
@@ -1088,16 +1138,14 @@ class BaseProgramRunner:
             return False
 
         history = self.sessions_history[session_id]
-        initial_len = len(history)
-        
         with self._lock:
-            # Filter out the message matching msg_id
-            self.sessions_history[session_id] = [msg for msg in history if msg.get("id") != msg_id]
-            
-            if len(self.sessions_history[session_id]) < initial_len:
-                self._save_session_to_disk(session_id)
-                return True
-                
+            for i, msg in enumerate(history):
+                if msg.get("id") == msg_id:
+                    if img_url := msg.get("image_url"):
+                        self._delete_local_image(img_url)
+                    del history[i]
+                    self._save_session_to_disk(session_id)
+                    return True
         return False
 
     def _inversion_enabled(self) -> bool:
@@ -1439,12 +1487,7 @@ class OpenSourceRunner(BaseProgramRunner):
                 self._load_session_from_disk(session_id)
             history = self.sessions_history.setdefault(session_id, [])
 
-            has_first_mes = any(
-                msg.get("id", "").startswith("first_mes")
-                for msg in history
-            ) or (bool(history) and history[0].get("role") == "program")
-
-            if not has_first_mes:
+            if not history:
                 try:
                     from core.program_config import get_program_greeting, replace_placeholders
 
@@ -1780,13 +1823,96 @@ class OpenSourceRunner(BaseProgramRunner):
             if not history:
                 raise ValueError("Session not found")
 
-            user_idx = next((i for i, ev in enumerate(history) if ev.get("id") == msg_id), -1)
-            if user_idx == -1:
+            target_idx = next((i for i, ev in enumerate(history) if ev.get("id") == msg_id), -1)
+            if target_idx == -1:
                 raise ValueError("Message not found")
 
-            orig_msg = history[user_idx]
-            img_data, img_mime, media_path = None, None, None
+            orig_msg = history[target_idx]
+            orig_role = orig_msg.get("role", "user")
 
+            group_meta = getattr(self, "sessions_group_meta", {}).get(session_id)
+            is_group = bool(group_meta and group_meta.get("is_group"))
+
+            if orig_role == "program":
+                # Truncate this program message and all subsequent turns
+                self.sessions_history[session_id] = history[:target_idx]
+                self._save_session_to_disk(session_id)
+
+                target_speaker = speaker_id or orig_msg.get("sender_id") or get_active_program()
+
+                if is_group:
+                    all_ids = [group_meta.get("host_id")] + [g for g in group_meta.get("guest_ids", []) if g != group_meta.get("host_id")]
+                    if target_speaker not in all_ids and len(all_ids) > 0:
+                        target_speaker = all_ids[0]
+
+                    from core.program_config import _load_card_data
+                    speaker_card = _load_card_data(target_speaker)
+                    speaker_name = speaker_card.get("name") if speaker_card else target_speaker.title()
+                    prompt = f"[System: Speak in character as {speaker_name}. React or reply naturally to what was just said in the room.]"
+
+                    response_text, tool_calls, temp_user_msg_id, program_msg_id = await self._run_async_internal(
+                        session_id=session_id,
+                        new_message_text=prompt,
+                        model=model,
+                        speaker_id=target_speaker,
+                    )
+                    if temp_user_msg_id:
+                        await self.delete_message_at(session_id, temp_user_msg_id)
+                    self._save_session_to_disk(session_id)
+                    return response_text, tool_calls, None, program_msg_id
+                else:
+                    # 1-on-1 session: if there is a preceding user message, re-run from that user message
+                    if target_idx > 0 and history[target_idx - 1].get("role") == "user":
+                        prev_user_msg = history[target_idx - 1]
+                        self.sessions_history[session_id] = history[:target_idx - 1]
+                        self._save_session_to_disk(session_id)
+
+                        u_text = prev_user_msg.get("text", "")
+                        u_media = prev_user_msg.get("image_url")
+                        img_data, img_mime, media_path = None, None, None
+                        if u_media:
+                            if u_media.startswith("data:") and ";base64," in u_media:
+                                parts = u_media.split(";base64,")
+                                img_mime = parts[0].split("data:")[-1]
+                                img_data = parts[1]
+                            else:
+                                media_path = u_media
+
+                        res = await self.run_async(
+                            session_id=session_id,
+                            new_message_text=u_text,
+                            image_data=img_data,
+                            image_mime=img_mime,
+                            model=model,
+                            media_path=media_path,
+                            msg_id=prev_user_msg.get("id"),
+                            speaker_id=target_speaker,
+                        )
+                        self._save_session_to_disk(session_id)
+                        return res
+                    else:
+                        from core.program_config import get_program_greeting, replace_placeholders, _load_card_data
+                        greeting = replace_placeholders(get_program_greeting()).strip()
+                        active_prog = get_active_program()
+                        host_card = _load_card_data(active_prog)
+                        host_name = host_card.get("name") if host_card else active_prog.title()
+                        new_prog_id = f"first_mes_{uuid.uuid4().hex}"
+                        starting_msg = {
+                            "id": new_prog_id,
+                            "role": "program",
+                            "text": greeting,
+                            "tool_calls": [],
+                            "inversion_active": "",
+                            "mood": None,
+                            "timestamp": time.time(),
+                            "sender_id": active_prog,
+                            "sender_name": host_name,
+                        }
+                        self.sessions_history.setdefault(session_id, []).insert(0, starting_msg)
+                        self._save_session_to_disk(session_id)
+                        return greeting, [], None, new_prog_id
+
+            img_data, img_mime, media_path = None, None, None
             if url_str := orig_msg.get("image_url"):
                 if url_str.startswith("data:") and ";base64," in url_str:
                     parts = url_str.split(";base64,")
@@ -1795,7 +1921,7 @@ class OpenSourceRunner(BaseProgramRunner):
                 else:
                     media_path = url_str
 
-            self.sessions_history[session_id] = history[:user_idx]
+            self.sessions_history[session_id] = history[:target_idx]
             self._save_session_to_disk(session_id)
 
             new_input = new_text if new_text is not None else orig_msg.get("text", "")
@@ -1900,6 +2026,8 @@ class OpenSourceRunner(BaseProgramRunner):
                 history = self.sessions_history.get(session_id, [])
                 for i, msg in enumerate(history):
                     if msg.get("id") == msg_id:
+                        if img_url := msg.get("image_url"):
+                            self._delete_local_image(img_url)
                         del history[i]
                         self._save_session_to_disk(session_id)
                         return True

@@ -2865,7 +2865,11 @@ function closeAssistantModal(applySelection = true) {
                 JSON.stringify(currentGroupMeta.guest_ids || []) === JSON.stringify(selectedGroupProgramIds.slice(1));
             if (!isSame) {
                 isApplyingModalSelection = true;
-                startGroupSession().finally(() => { isApplyingModalSelection = false; });
+                if (currentGroupMeta && currentGroupMeta.is_group) {
+                    updateGroupSessionMembers().finally(() => { isApplyingModalSelection = false; });
+                } else {
+                    startGroupSession().finally(() => { isApplyingModalSelection = false; });
+                }
             }
         } else if (selectedGroupProgramIds && selectedGroupProgramIds.length === 1) {
             const targetId = selectedGroupProgramIds[0];
@@ -3068,19 +3072,32 @@ let currentLoadedAssistants = [];
 
 function updateGroupSessionBtn() {
     const btn = document.getElementById('start-group-session-btn');
+    const newGroupBtn = document.getElementById('new-group-session-btn');
     if (!btn) return;
     if (selectedGroupProgramIds && selectedGroupProgramIds.length >= 2) {
         btn.style.display = 'inline-flex';
-        btn.innerHTML = `<span>Group Session (${selectedGroupProgramIds.length})</span>`;
-        btn.onclick = () => { startGroupSession(); };
+        if (currentGroupMeta && currentGroupMeta.is_group) {
+            btn.innerHTML = `<span>Update Group (${selectedGroupProgramIds.length})</span>`;
+            btn.onclick = () => { updateGroupSessionMembers(); };
+            if (newGroupBtn) {
+                newGroupBtn.style.display = 'inline-flex';
+                newGroupBtn.onclick = () => { startGroupSession(); };
+            }
+        } else {
+            btn.innerHTML = `<span>Group Session (${selectedGroupProgramIds.length})</span>`;
+            btn.onclick = () => { startGroupSession(); };
+            if (newGroupBtn) newGroupBtn.style.display = 'none';
+        }
     } else if (selectedGroupProgramIds && selectedGroupProgramIds.length === 1 && (selectedGroupProgramIds[0] !== activeProgramId || (currentGroupMeta && currentGroupMeta.is_group))) {
         btn.style.display = 'inline-flex';
         const target = (currentLoadedAssistants || []).find(a => a.id === selectedGroupProgramIds[0]);
         const tName = target ? target.name : 'Selected Program';
         btn.innerHTML = `<span>Switch to ${tName}</span>`;
         btn.onclick = () => { selectAssistant(selectedGroupProgramIds[0]); };
+        if (newGroupBtn) newGroupBtn.style.display = 'none';
     } else {
         btn.style.display = 'none';
+        if (newGroupBtn) newGroupBtn.style.display = 'none';
     }
 }
 
@@ -3306,6 +3323,56 @@ async function startGroupSession() {
     }
 }
 
+// --- updateGroupSessionMembers ---
+async function updateGroupSessionMembers() {
+    if (!selectedGroupProgramIds || selectedGroupProgramIds.length < 2) {
+        showCustomAlert("Group Session", "Please select at least two programs (one Host and at least one Guest).");
+        return;
+    }
+    const hostId = selectedGroupProgramIds[0];
+    const guestIds = selectedGroupProgramIds.slice(1);
+
+    try {
+        const res = await fetch('/api/programs/group_session/members', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                session_id: sessionId,
+                host_id: hostId,
+                guest_ids: guestIds
+            })
+        });
+        if (!res.ok) {
+            const errData = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+            showCustomAlert("Update Failed", errData.error || "Could not update group session members.");
+            return;
+        }
+        const data = await res.json();
+        if (data.status === 'success' && data.group_meta) {
+            currentGroupMeta = data.group_meta;
+            selectedGroupProgramIds = [data.group_meta.host_id, ...(data.group_meta.guest_ids || [])];
+            activeProgramId = data.host_id || hostId;
+
+            if (Array.isArray(data.group_meta.members)) {
+                data.group_meta.members.forEach(m => {
+                    if (m && m.theme) cacheProgramTheme(m.id, m.theme);
+                });
+            }
+            selectedGroupProgramIds.forEach(pid => {
+                if (pid && !programThemesCache[pid]) getOrFetchProgramTheme(pid);
+            });
+
+            restoreInputPlaceholder();
+            closeAssistantModal(false);
+        } else {
+            showCustomAlert("Update Failed", data.error || "Could not update group members.");
+        }
+    } catch (e) {
+        console.error("Error updating group session members:", e);
+        showCustomAlert("Error", e.message ? `Could not update group members: ${e.message}` : "Could not update group members.");
+    }
+}
+
 // --- selectAssistant ---
 async function selectAssistant(assistantId) {
     try {
@@ -3446,6 +3513,10 @@ async function deleteAssistant(assistantId, name) {
                         if (typeof currentGroupMeta !== 'undefined' && currentGroupMeta && currentGroupMeta.guest_ids) {
                             currentGroupMeta.guest_ids = currentGroupMeta.guest_ids.filter(id => id !== assistantId);
                         }
+                        if (Array.isArray(selectedGroupProgramIds)) {
+                            selectedGroupProgramIds = selectedGroupProgramIds.filter(id => id !== assistantId);
+                        }
+                        updateGroupSessionBtn();
                         const listRes = await fetch('/api/programs');
                         if (listRes.ok) {
                             const listData = await listRes.json();
@@ -6614,45 +6685,42 @@ async function rerollMessage(trigger) {
     const bubble = (trigger && trigger.classList && trigger.classList.contains('message')) ? trigger : (trigger ? trigger.closest('.message') : null);
     if (!bubble) return;
 
-    let userRow = bubble.closest('.message-row.user-row');
-    let userBubble = bubble;
+    const progRow = bubble.closest('.message-row.program-row');
+    const userRow = bubble.closest('.message-row.user-row');
 
-    if (!userRow) {
-        const progRow = bubble.closest('.message-row.program-row');
-        if (!progRow) return;
+    let msgId = null;
+    let newText = null;
+    let editSpeaker = null;
 
-        let prevRow = progRow.previousElementSibling;
-        while (prevRow && !prevRow.classList.contains('user-row')) {
-            prevRow = prevRow.previousElementSibling;
-        }
-        if (!prevRow) {
-            showCustomAlert("Reroll Error", "Cannot find preceding user message to reroll.");
+    if (progRow) {
+        msgId = bubble.dataset.msgId || progRow.dataset.msgId;
+        if (!msgId) {
+            showCustomAlert("Reroll Error", "Cannot find message ID.");
             return;
         }
-        userRow = prevRow;
-        userBubble = userRow.querySelector('.message.user');
-    }
-
-    const msgId = userBubble ? userBubble.dataset.msgId : null;
-    if (!msgId) {
-        showCustomAlert("Reroll Error", "Cannot find user message ID.");
+        editSpeaker = progRow.dataset.senderId || (currentGroupMeta ? currentGroupMeta.host_id : activeProgramId);
+        truncateChatAfter(progRow);
+        progRow.remove();
+    } else if (userRow) {
+        const userBubble = userRow.querySelector('.message.user') || bubble;
+        msgId = userBubble ? userBubble.dataset.msgId : userRow.dataset.msgId;
+        if (!msgId) {
+            showCustomAlert("Reroll Error", "Cannot find user message ID.");
+            return;
+        }
+        newText = userBubble ? (userBubble.dataset.rawText || '') : '';
+        if (currentGroupMeta && currentGroupMeta.is_group) {
+            editSpeaker = detectTargetGroupSpeaker(newText);
+        }
+        truncateChatAfter(userRow);
+    } else {
         return;
     }
-
-    truncateChatAfter(userRow);
 
     hasApprovedToolThisTurn = false;
     const heartElement = document.querySelector('.heart-pulse');
     if (heartElement) {
         heartElement.classList.add('jiggling');
-    }
-
-    let editSpeaker = null;
-    const clickedProgRow = bubble.closest('.message-row.program-row');
-    if (clickedProgRow && clickedProgRow.dataset.senderId) {
-        editSpeaker = clickedProgRow.dataset.senderId;
-    } else if (currentGroupMeta && currentGroupMeta.is_group) {
-        editSpeaker = detectTargetGroupSpeaker(userBubble ? userBubble.dataset.rawText : null);
     }
 
     const typingIndicatorRow = createTypingIndicatorRow(editSpeaker);

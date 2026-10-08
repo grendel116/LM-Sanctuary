@@ -2916,6 +2916,96 @@ def start_group_session():
         return jsonify({'error': str(e)}), 500
 
 
+@app.route('/api/programs/group_session/members', methods=['POST'])
+@requires_auth
+def update_group_session_members():
+    try:
+        data = request.get_json(silent=True) or {}
+        session_id = data.get('session_id') or get_active_session()
+        new_guest_ids = data.get('guest_ids', [])
+        new_host_id = data.get('host_id')
+
+        # Check existing group_meta
+        group_meta = getattr(runner, "sessions_group_meta", {}).get(session_id)
+        if not group_meta or not group_meta.get("is_group"):
+            sp = runner._get_session_path(session_id)
+            if os.path.exists(sp):
+                with open(sp, "r", encoding="utf-8") as sf:
+                    sdata = json.load(sf)
+                gm = sdata.get("group_meta")
+                if gm and gm.get("is_group"):
+                    runner.sessions_group_meta[session_id] = gm
+                    group_meta = gm
+
+        if not group_meta or not group_meta.get("is_group"):
+            return jsonify({'error': 'Session is not an active group session'}), 400
+
+        curr_host_id = group_meta.get("host_id")
+        target_host_id = new_host_id if new_host_id else curr_host_id
+
+        programs_dir = os.path.join(base_dir, 'core', 'programs')
+        if not os.path.isdir(os.path.join(programs_dir, target_host_id)):
+            return jsonify({'error': f"Host program '{target_host_id}' does not exist"}), 404
+
+        valid_guests = []
+        for gid in new_guest_ids:
+            if gid and gid != target_host_id and os.path.isdir(os.path.join(programs_dir, gid)):
+                if gid not in valid_guests:
+                    valid_guests.append(gid)
+
+        old_session_path = runner._get_session_path(session_id)
+        if not os.path.exists(old_session_path):
+            return jsonify({'error': f"Session file for '{session_id}' not found"}), 404
+
+        with open(old_session_path, 'r', encoding='utf-8') as f:
+            session_data = json.load(f)
+
+        updated_meta = {
+            "is_group": True,
+            "host_id": target_host_id,
+            "guest_ids": valid_guests
+        }
+        session_data["group_meta"] = updated_meta
+
+        if target_host_id != curr_host_id:
+            new_sessions_dir = os.path.join(programs_dir, target_host_id, "sessions")
+            os.makedirs(new_sessions_dir, exist_ok=True)
+            new_session_path = os.path.join(new_sessions_dir, f"{session_id}.json")
+            with open(new_session_path, 'w', encoding='utf-8') as f:
+                json.dump(session_data, f, indent=2, ensure_ascii=False)
+            if os.path.exists(old_session_path):
+                try:
+                    os.remove(old_session_path)
+                except Exception:
+                    pass
+            os.environ["ACTIVE_PROGRAM"] = target_host_id
+            try:
+                from runners.program import set_active_program
+                set_active_program(target_host_id)
+            except Exception:
+                pass
+            reload_program_state()
+        else:
+            with open(old_session_path, 'w', encoding='utf-8') as f:
+                json.dump(session_data, f, indent=2, ensure_ascii=False)
+
+        if hasattr(runner, "sessions_group_meta"):
+            runner.sessions_group_meta[session_id] = updated_meta
+
+        enriched = enrich_group_meta(updated_meta)
+        return jsonify({
+            'status': 'success',
+            'session_id': session_id,
+            'host_id': target_host_id,
+            'guest_ids': valid_guests,
+            'group_meta': enriched
+        })
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
 @app.route('/api/programs/theme', methods=['GET'])
 @requires_auth
 def get_program_theme_route():

@@ -106,7 +106,7 @@ def get_message_formatting(story_mode: bool) -> str:
             "\n\n# MESSAGE FORMAT (MANDATORY)\n"
             "- Narration: Use *italics* and present tense to describe actions, setting details, and other characters.\n"
             "- Dialogue: Use plain text without quotation marks. Only use **bold** for emphasis.\n"
-            "- Style: Use short words and precise phrasing. Write with linear progression.\n"
+            "- Style: Use short words and direct phrasing. Write with linear progression.\n"
             "- State assertions directly and affirmatively without rhetorical contrasts.\n"
             "- Plot: Write prose. Build engaging narrative conflict.\n"
         )
@@ -114,13 +114,13 @@ def get_message_formatting(story_mode: bool) -> str:
         "\n\n# MESSAGE FORMAT (MANDATORY)\n"
         "- Narration: Use *italics*, first person, and present tense for actions, expressions, and setting details.\n"
         "- Dialogue: Use plain text without quotation marks. Only use **bold** for emphasis.\n"
-        "- Style: Use short words and precise phrasing with dialectical reasoning.\n"
+        "- Style: Use short words and direct phrasing, with dialectical reasoning.\n"
         "- State assertions directly and affirmatively without rhetorical contrasts.\n"
         "- Be succinct, with short words and simple sentences.\n"
         "- Do not default to validating the user.\n"
         "- Do not use patronizing platitudes.\n"
-        "- Do not ask clinical questions.\n"
-        "- Do not use flowery language.\n"
+        "- Do not ask leading questions.\n"
+        "- Do not use metaphors.\n"
     )
 
 def compile_speaker_instructions(speaker_id: str, host_id: str = None, guest_ids: list = None) -> str:
