@@ -6698,17 +6698,28 @@ async function rerollMessage(trigger) {
             showCustomAlert("Reroll Error", "Cannot find message ID.");
             return;
         }
-        editSpeaker = progRow.dataset.senderId || (currentGroupMeta ? currentGroupMeta.host_id : activeProgramId);
-        truncateChatAfter(progRow);
-        progRow.remove();
+        editSpeaker = progRow.dataset.senderId || null;
+        // Mirror the server: this turn starts after the user's message, or after
+        // another speaker's message in a group chain.
+        const isGroup = !!(currentGroupMeta && currentGroupMeta.is_group);
+        let prev = progRow.previousElementSibling;
+        while (prev && prev.classList.contains('program-row') &&
+               (!isGroup || prev.dataset.senderId === editSpeaker)) {
+            prev = prev.previousElementSibling;
+        }
+        if (!prev) {
+            showCustomAlert("Reroll Error", "There is no earlier turn to reroll from.");
+            return;
+        }
+        truncateChatAfter(prev);
     } else if (userRow) {
         const userBubble = userRow.querySelector('.message.user') || bubble;
-        msgId = userBubble ? userBubble.dataset.msgId : userRow.dataset.msgId;
+        msgId = userBubble.dataset.msgId || userRow.dataset.msgId;
         if (!msgId) {
             showCustomAlert("Reroll Error", "Cannot find user message ID.");
             return;
         }
-        newText = userBubble ? (userBubble.dataset.rawText || '') : '';
+        newText = userBubble.dataset.rawText || '';
         if (currentGroupMeta && currentGroupMeta.is_group) {
             editSpeaker = detectTargetGroupSpeaker(newText);
         }
@@ -6743,7 +6754,7 @@ async function rerollMessage(trigger) {
             body: JSON.stringify({
                 session_id: sessionId,
                 msg_id: msgId,
-                new_text: userBubble.dataset.rawText || '',
+                new_text: newText,
                 model: selectedModel,
                 force_offload: false,
                 use_imagen: useImagenMode,
@@ -6757,14 +6768,17 @@ async function rerollMessage(trigger) {
         }
 
         const data = await response.json();
-        if (data.response !== undefined) {
-            appendMessage('program', data.response, null, data.tool_calls, true, data.timestamp, data.duration, false, data.program_msg_id, data.sender_id, data.sender_name);
-        } else if (data.error) {
+        if (data.error) {
             let errMsg = data.error;
             if (errMsg.includes("429") || errMsg.includes("RESOURCE_EXHAUSTED")) {
                 errMsg = "The Sanctuary is momentarily overwhelmed (Rate Limit 429: Resource Exhausted). Let us pause, take a slow breath, and try our chavruta again in 15 seconds.";
             }
-            appendMessage('program', errMsg);
+            showCustomAlert("Reroll Failed", errMsg);
+            await loadHistory();
+            return;
+        }
+        if (data.response !== undefined) {
+            appendMessage('program', data.response, null, data.tool_calls, true, data.timestamp, data.duration, false, data.program_msg_id, data.sender_id, data.sender_name);
         }
         if (data.state) {
             updateHeartState(data.state, data.inversion_active, data.inversion_state, data.program_msg_id, true);
@@ -6782,7 +6796,8 @@ async function rerollMessage(trigger) {
             chatContainer.removeChild(typingIndicatorRow);
         }
         if (error.name !== 'AbortError') {
-            appendMessage('program', 'Error connecting to the Sanctuary.');
+            showCustomAlert("Reroll Failed", "Error connecting to the Sanctuary.");
+            await loadHistory();
         }
         handleToolReloadOrRecovery();
     } finally {

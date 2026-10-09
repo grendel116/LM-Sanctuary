@@ -1239,21 +1239,9 @@ def continue_generation():
                 else:
                     next_speaker = all_ids[1] if len(all_ids) > 1 else all_ids[0]
 
-            from core.program_config import _load_card_data
-            next_card = _load_card_data(next_speaker)
-            next_name = next_card.get("name") if next_card else next_speaker.title()
-
-            prompt = f"[System: Speak in character as {next_name}. React or reply naturally to what was just said in the room.]"
-
-            response_text, tool_calls, user_msg_id, program_msg_id = asyncio.run(runner.run_async(
-                session_id=session_id,
-                new_message_text=prompt,
-                model=model,
-                speaker_id=next_speaker
-            ))
-
-            if user_msg_id:
-                asyncio.run(runner.delete_message_at(session_id, user_msg_id))
+            response_text, tool_calls, _, program_msg_id = asyncio.run(
+                runner.continue_as_speaker(session_id, next_speaker, model)
+            )
 
             return build_generation_response(
                 response_text, tool_calls, session_id, None, program_msg_id, start_time
