@@ -196,12 +196,14 @@ def _trim_context_messages(messages: list[dict], max_chars: int = 26000) -> list
     return system_msgs + list(reversed(trimmed_chat))
 
 class BaseProgramRunner:
-    def __init__(self, app_name: str = "Sanctuary"):
+    def __init__(self, app_name: str = "Sanctuary", program_id: str = None):
         self.app_name = app_name
+        self.program_id = program_id or get_active_program()
         self.sessions_history: dict = {}
         self.sessions_inversion_state: dict = {}
         self.sessions_memory_state: dict = {}  # Tracks chapters and epic chronicles
         self.sessions_group_meta: dict = {}  # Tracks group session participants (host & guests)
+        self.sessions_program: dict = {}  # Tracks program owner for each session
 
     def _get_memory_meta(self, session_id: str) -> dict:
         """Helper to ensure session memory state exists."""
@@ -442,9 +444,12 @@ class BaseProgramRunner:
             err_msg="Distillation failed due to connection error.",
         )
 
-    async def _process_memory_pipeline(self, session_id: str, active_model: str):
+    async def _process_memory_pipeline(self, session_id: str, active_model: str, program_id: str = None):
         """Processes 12-turn conversation chapters and distills up to 3 recent chapters into the core chronicle."""
         try:
+            prog = program_id or getattr(self, "sessions_program", {}).get(session_id) or getattr(self, "program_id", None) or get_active_program()
+            if hasattr(self, "sessions_program"):
+                self.sessions_program[session_id] = prog
             meta = self._get_memory_meta(session_id)
             history = self.sessions_history.get(session_id, [])
 
@@ -508,10 +513,11 @@ class BaseProgramRunner:
         except Exception as e:
             print(f"[MEMORY PIPELINE ERROR] Failed processing session {session_id}: {e}", flush=True)
 
-    def trigger_memory_pipeline(self, session_id: str, active_model: str = ""):
+    def trigger_memory_pipeline(self, session_id: str, active_model: str = "", program_id: str = None):
         """Dispatches memory summarization in a persistent background worker thread."""
+        prog = program_id or getattr(self, "sessions_program", {}).get(session_id) or getattr(self, "program_id", None) or get_active_program()
         _run_async_in_background_thread(
-            self._process_memory_pipeline(session_id, active_model=active_model)
+            self._process_memory_pipeline(session_id, active_model=active_model, program_id=prog)
         )
 
     def _load_temperature_setting(self, default_temp: float = 0.95) -> float:
@@ -727,18 +733,19 @@ class BaseProgramRunner:
         if isinstance(session_id, str) and session_id.endswith("_voice"):
             final_response_text = strip_story(final_response_text)
 
-        self.trigger_memory_pipeline(session_id=session_id, active_model=target_model or "")
+        prog = getattr(self, "sessions_program", {}).get(session_id) or getattr(self, "program_id", None) or get_active_program()
+        self.trigger_memory_pipeline(session_id=session_id, active_model=target_model or "", program_id=prog)
 
         return final_response_text, all_tool_calls
 
     @property
     def sessions_dir(self) -> str:
-        active_program = get_active_program()
-        path = os.path.join(project_root, "core", "programs", active_program, "sessions")
+        prog = getattr(self, "program_id", None) or get_active_program()
+        path = os.path.join(project_root, "core", "programs", prog, "sessions")
         os.makedirs(path, exist_ok=True)
         return path
 
-    def _get_session_path(self, session_id: str) -> str:
+    def _get_session_path(self, session_id: str, program_id: str = None) -> str:
         safe_id = "".join(c for c in session_id if c.isalnum() or c in "-_")
         group_meta = getattr(self, "sessions_group_meta", {}).get(session_id)
         if group_meta and group_meta.get("host_id"):
@@ -747,7 +754,7 @@ class BaseProgramRunner:
         if safe_id.startswith("group_"):
             programs_dir = os.path.join(project_root, "core", "programs")
             if os.path.isdir(programs_dir):
-                active = get_active_program()
+                active = program_id or getattr(self, "program_id", None) or get_active_program()
                 active_file = os.path.join(programs_dir, active, "sessions", f"{safe_id}.json")
                 if os.path.exists(active_file):
                     try:
@@ -762,8 +769,8 @@ class BaseProgramRunner:
                         pass
                     return active_file
 
-                for prog in os.listdir(programs_dir):
-                    cand = os.path.join(programs_dir, prog, "sessions", f"{safe_id}.json")
+                for prog_name in os.listdir(programs_dir):
+                    cand = os.path.join(programs_dir, prog_name, "sessions", f"{safe_id}.json")
                     if os.path.exists(cand):
                         try:
                             with open(cand, "r", encoding="utf-8") as f:
@@ -771,13 +778,16 @@ class BaseProgramRunner:
                             gm = sdata.get("group_meta")
                             if gm and gm.get("host_id"):
                                 self.sessions_group_meta[session_id] = gm
-                                if gm["host_id"] != prog:
+                                if gm["host_id"] != prog_name:
                                     return os.path.join(programs_dir, gm["host_id"], "sessions", f"{safe_id}.json")
                         except Exception:
                             pass
                         return cand
 
-        return os.path.join(self.sessions_dir, f"{safe_id}.json")
+        prog = program_id or getattr(self, "sessions_program", {}).get(session_id) or getattr(self, "program_id", None) or get_active_program()
+        target_dir = os.path.join(project_root, "core", "programs", prog, "sessions")
+        os.makedirs(target_dir, exist_ok=True)
+        return os.path.join(target_dir, f"{safe_id}.json")
 
     async def get_history(self, session_id: str) -> list:
         """Returns the message history for a given session."""
@@ -1300,11 +1310,12 @@ class OpenSourceRunner(BaseProgramRunner):
         directly from the program's JSON profile.
         """
 
-        def __init__(self, app_name="Sanctuary"):
-            super().__init__(app_name)
+        def __init__(self, app_name="Sanctuary", program_id=None):
+            super().__init__(app_name, program_id=program_id)
             self.sessions_history = {}
             self.sessions_inversion_state = {}
             self.sessions_memory_state = {}
+            self.sessions_program = {}
             self._lock = threading.RLock()
 
         async def generate_impersonation(
@@ -1364,6 +1375,7 @@ class OpenSourceRunner(BaseProgramRunner):
         def _save_session_to_disk(self, session_id: str):
             with self._lock:
                 try:
+                    prog = getattr(self, "sessions_program", {}).get(session_id) or getattr(self, "program_id", None) or get_active_program()
                     memory_meta = self._get_memory_meta(session_id)
                     memory_meta.pop("unsummarized_buffer", None)
 
@@ -1381,7 +1393,7 @@ class OpenSourceRunner(BaseProgramRunner):
                     if session_id in self.sessions_group_meta:
                         data["group_meta"] = self.sessions_group_meta[session_id]
 
-                    target_path = self._get_session_path(session_id)
+                    target_path = self._get_session_path(session_id, program_id=prog)
                     os.makedirs(os.path.dirname(target_path), exist_ok=True)
                     temp_path = target_path + ".tmp"
                     with open(temp_path, "w", encoding="utf-8") as f:
@@ -1406,7 +1418,8 @@ class OpenSourceRunner(BaseProgramRunner):
                     print(f"Error saving OS session {session_id} to disk: {e}")
 
         def _load_session_from_disk(self, session_id: str):
-            path = self._get_session_path(session_id)
+            prog = getattr(self, "sessions_program", {}).get(session_id) or getattr(self, "program_id", None) or get_active_program()
+            path = self._get_session_path(session_id, program_id=prog)
             if not os.path.exists(path):
                 return
 
@@ -1415,7 +1428,8 @@ class OpenSourceRunner(BaseProgramRunner):
                     data = json.load(f)
                     
                 self.sessions_history[session_id] = data.get("messages", [])
-                self.sessions_inversion_state[session_id] = data.get("inversion_state", new_state(get_active_program()))
+                self.sessions_program[session_id] = prog
+                self.sessions_inversion_state[session_id] = data.get("inversion_state", new_state(prog))
                 if "group_meta" in data:
                     self.sessions_group_meta[session_id] = data["group_meta"]
                 
@@ -1441,12 +1455,13 @@ class OpenSourceRunner(BaseProgramRunner):
                 try:
                     from core.program_config import get_program_greeting, replace_placeholders
 
-                    if greeting := replace_placeholders(get_program_greeting()).strip():
-                        group_meta = getattr(self, "sessions_group_meta", {}).get(session_id)
-                        host_id = group_meta.get("host_id") if group_meta else get_active_program()
-                        from core.program_config import _load_card_data
-                        host_card = _load_card_data(host_id)
-                        host_name = host_card.get("name") if host_card else host_id.title()
+                    prog = getattr(self, "sessions_program", {}).get(session_id) or getattr(self, "program_id", None) or get_active_program()
+                    group_meta = getattr(self, "sessions_group_meta", {}).get(session_id)
+                    host_id = group_meta.get("host_id") if group_meta else prog
+                    from core.program_config import _load_card_data
+                    host_card = _load_card_data(host_id)
+                    host_name = host_card.get("name") if host_card else host_id.title()
+                    if greeting := replace_placeholders(get_program_greeting(host_id)).strip():
                         starting_msg = {
                             "id": f"first_mes_{uuid.uuid4().hex}",
                             "role": "program",

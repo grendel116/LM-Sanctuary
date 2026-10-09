@@ -174,33 +174,55 @@ class OsHistoryAdapter(LocalHistoryAdapter):
         """
         CHAR_BUDGET = max_input_tokens * 4
 
-        # 1. Isolate user/assistant turns and latest query (Tier 1 & Tier 2 candidate)
+        # 1. Isolate non-system chat turns
         chat_turns = [m for m in raw_messages if m.get("role") != "system"]
-        latest_user_turn = chat_turns.pop() if chat_turns else None
 
-        # Apply post-injection payload directly to the latest user message (Tier 1 Core)
-        if latest_user_turn and post_injection:
-            if isinstance(latest_user_turn["content"], str):
-                latest_user_turn["content"] += f"\n\n{post_injection}"
-            elif isinstance(latest_user_turn["content"], list):
-                latest_user_turn["content"].append({"type": "text", "text": f"\n\n{post_injection}"})
+        # 2. Locate the actual latest user message to attach post_injection
+        latest_user_idx = None
+        for i in range(len(chat_turns) - 1, -1, -1):
+            if chat_turns[i].get("role") == "user":
+                latest_user_idx = i
+                break
 
-        # Calculate base Tier 1 core footprint
-        latest_user_len = sum(
-            len(item.get("text", "")) if isinstance(item, dict) else len(item)
-            for item in (latest_user_turn["content"] if isinstance(latest_user_turn["content"], list) else [latest_user_turn["content"]])
-        ) if latest_user_turn else 0
+        # Attach post-injection payload strictly to the latest user message
+        # If no user message exists in history, append it to system content
+        if post_injection:
+            if latest_user_idx is not None:
+                user_turn = chat_turns[latest_user_idx]
+                if isinstance(user_turn.get("content"), str):
+                    user_turn["content"] = f"{user_turn['content']}\n\n{post_injection}"
+                elif isinstance(user_turn.get("content"), list):
+                    user_turn["content"].append({"type": "text", "text": f"\n\n{post_injection}"})
+            else:
+                system_content = f"{system_content.strip()}\n\n{post_injection}"
+
+        # 3. Calculate Tier 1 core footprint
+        latest_user_len = 0
+        if latest_user_idx is not None:
+            user_content = chat_turns[latest_user_idx].get("content")
+            if isinstance(user_content, list):
+                latest_user_len = sum(
+                    len(item.get("text", "")) if isinstance(item, dict) else len(item)
+                    for item in user_content
+                )
+            elif isinstance(user_content, str):
+                latest_user_len = len(user_content)
 
         tier1_base_len = len(system_content) + latest_user_len
         remaining_budget = CHAR_BUDGET - tier1_base_len
 
-        # 2. Add Tier 2: Truncate chat history from oldest to newest to fit remaining budget
+        # 4. Truncate chat history from newest to oldest to fit remaining budget
         trimmed_chat_turns = []
         accumulated_chat_chars = 0
 
-        for turn in reversed(chat_turns):
-            turn_text = turn["content"] if isinstance(turn["content"], str) else "".join(
-                item.get("text", "") for item in turn["content"] if isinstance(item, dict)
+        for i in range(len(chat_turns) - 1, -1, -1):
+            turn = chat_turns[i]
+            if i == latest_user_idx:
+                trimmed_chat_turns.insert(0, turn)
+                continue
+
+            turn_text = turn["content"] if isinstance(turn.get("content"), str) else "".join(
+                item.get("text", "") for item in turn.get("content", []) if isinstance(item, dict)
             )
             turn_len = len(turn_text)
 
@@ -210,14 +232,9 @@ class OsHistoryAdapter(LocalHistoryAdapter):
             else:
                 break
 
-        # 3. Assemble final OpenAI message array
+        # 5. Assemble final OpenAI message array
         final_messages = [{"role": "system", "content": system_content.strip()}]
         final_messages.extend(trimmed_chat_turns)
-        
-        if latest_user_turn:
-            final_messages.append(latest_user_turn)
-        elif post_injection:
-            final_messages.append({"role": "user", "content": post_injection})
 
         return _merge_consecutive_messages(final_messages)
 

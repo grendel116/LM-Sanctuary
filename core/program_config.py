@@ -52,10 +52,10 @@ def replace_placeholders(text: str) -> str:
     text = re.sub(r'(?i)\{\{char\}\}', comp_name, text)
     return text
 
-def get_program_greeting() -> str:
+def get_program_greeting(program_id: str = None) -> str:
     """Returns the program's first message from the card, defaulting to a standard greeting."""
     from runners.program import get_active_program
-    active_program = get_active_program()
+    active_program = program_id or get_active_program()
     card = _load_card_data(active_program)
     # v3: data.first_mes / legacy: operation.example_message
     greeting = card.get("first_mes") or card.get("operation", {}).get("example_message", "")

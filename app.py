@@ -93,7 +93,8 @@ def read_program_card(program_id: str) -> dict:
 
 def init_runner():
     global runner
-    runner = OpenSourceRunner(app_name="Sanctuary")
+    active_prog = get_active_program()
+    runner = OpenSourceRunner(app_name="Sanctuary", program_id=active_prog)
     print(">>> Starting Sanctuary using decoupled OPEN-SOURCE Runner backend!")
 
 _prewarm_started = False
@@ -624,8 +625,21 @@ def serve_sparkle_mp3():
 @app.route('/images/<path:filename>')
 @requires_auth
 def serve_image(filename):
-    active_program = os.getenv("ACTIVE_PROGRAM", "sebile")
-    program_dir = os.path.join('core', 'programs', active_program)
+    from runners.program import get_active_program
+    active_program = get_active_program() or os.getenv("ACTIVE_PROGRAM", "sebile")
+    program_dir = os.path.join(base_dir, 'core', 'programs', active_program)
+    candidate_path = os.path.join(program_dir, filename)
+    if os.path.exists(candidate_path):
+        return send_from_directory(program_dir, filename)
+
+    programs_root = os.path.join(base_dir, 'core', 'programs')
+    if os.path.isdir(programs_root):
+        for prog in os.listdir(programs_root):
+            alt_dir = os.path.join(programs_root, prog)
+            alt_path = os.path.join(alt_dir, filename)
+            if os.path.isfile(alt_path):
+                return send_from_directory(alt_dir, filename)
+
     return send_from_directory(program_dir, filename)
 
 @app.route('/api/get_image_prompt', methods=['GET'])
@@ -2781,6 +2795,8 @@ def select_program():
         except Exception as e:
             print(f"Error persisting ACTIVE_PROGRAM: {e}")
         
+        global _cached_active_program
+        _cached_active_program = program_id
 
         reload_program_state()
         if hasattr(runner, 'sessions_inversion_state'):
