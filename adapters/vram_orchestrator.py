@@ -14,7 +14,7 @@ _current_mode: Optional[str] = None  # "LLM" | "IMG" | None
 
 def start_img() -> bool:
     """Activates Image Mode by suspending the local LLM server and starting the persistent
-    diffusion daemon. Diffusion models remain cached across image generations until Text Mode is explicitly activated.
+    diffusion worker. Diffusion models remain cached across image generations until Text Mode is explicitly activated.
     """
     global _current_mode
     with _orchestrator_lock:
@@ -22,10 +22,10 @@ def start_img() -> bool:
         from core import engine_diffusion
 
         llm_online = local_server.check_local_server_status()
-        daemon_online = engine_diffusion.check_daemon_status()
+        server_online = engine_diffusion.check_server_status()
 
-        # If already in image mode with LLM stopped and daemon running, nothing to do
-        if _current_mode == "IMG" and not llm_online and daemon_online:
+        # If already in image mode with LLM stopped and diffusion worker running, nothing to do
+        if _current_mode == "IMG" and not llm_online and server_online:
             return True
 
         print("[VRAM Orchestrator] Switching to Image Mode: Stopping local LLM and activating diffusion engine...", flush=True)
@@ -44,9 +44,9 @@ def start_img() -> bool:
                 pass
 
         try:
-            engine_diffusion.ensure_daemon_running()
+            engine_diffusion.ensure_server_running()
         except Exception as e:
-            print(f"[VRAM Orchestrator] Note starting diffusion daemon: {e}", flush=True)
+            print(f"[VRAM Orchestrator] Note starting diffusion worker: {e}", flush=True)
 
         _current_mode = "IMG"
         return True

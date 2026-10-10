@@ -240,9 +240,9 @@ def set_active_checkpoint(checkpoint_name: str) -> bool:
         filename = os.path.basename(resolved)
         os.environ["COMFYUI_CHECKPOINT"] = filename
         
-        # Clear cached checkpoint node if switched
+        # Clear cached checkpoint and dependent LoRAs if switched
         for key in list(_COMFY_NODE_CACHE.keys()):
-            if key[0] == "CheckpointLoaderSimple" and key[1] != filename:
+            if key[0] in ("CheckpointLoaderSimple", "LoraLoader"):
                 del _COMFY_NODE_CACHE[key]
 
         _persist_checkpoint_to_env(filename)
@@ -253,34 +253,75 @@ def set_active_checkpoint(checkpoint_name: str) -> bool:
         return False
 
 
-DIFFUSION_DAEMON_PORT = 8189
-DIFFUSION_DAEMON_URL = f"http://127.0.0.1:{DIFFUSION_DAEMON_PORT}"
-_daemon_proc: Optional[subprocess.Popen] = None
-_daemon_lock = threading.Lock()
+DIFFUSION_SERVER_PORT = 8189
+DIFFUSION_SERVER_URL = f"http://127.0.0.1:{DIFFUSION_SERVER_PORT}"
+# Retain aliases for backward compatibility
+DIFFUSION_DAEMON_PORT = DIFFUSION_SERVER_PORT
+DIFFUSION_DAEMON_URL = DIFFUSION_SERVER_URL
+
+_server_proc: Optional[subprocess.Popen] = None
+_daemon_proc = _server_proc
+_server_lock = threading.Lock()
+_daemon_lock = _server_lock
 
 
-def check_daemon_status() -> bool:
-    """Checks if the persistent diffusion daemon is online."""
+def _cleanup_stale_port_process(port: int):
+    """Terminates any stale process listening on the specified port."""
+    if os.name != 'nt':
+        return
+    try:
+        flags = subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0x08000000
+        output = subprocess.check_output("netstat -ano", shell=True, creationflags=flags).decode('utf-8', errors='ignore')
+        for line in output.splitlines():
+            if f":{port}" in line and "LISTENING" in line:
+                parts = line.strip().split()
+                if len(parts) >= 5:
+                    pid = int(parts[-1])
+                    if pid != os.getpid():
+                        try:
+                            import psutil
+                            proc = psutil.Process(pid)
+                            proc.kill()
+                        except Exception:
+                            subprocess.run(["taskkill", "/F", "/PID", str(pid)], creationflags=flags, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
+
+
+def check_server_status() -> bool:
+    """Checks if the diffusion server worker is online."""
     try:
         import urllib.request
-        req = urllib.request.Request(f"{DIFFUSION_DAEMON_URL}/health", method="GET")
-        with urllib.request.urlopen(req, timeout=1.0) as resp:
+        req = urllib.request.Request(f"{DIFFUSION_SERVER_URL}/health", method="GET")
+        with urllib.request.urlopen(req, timeout=1.5) as resp:
             return resp.status == 200
     except Exception:
         return False
 
 
-def ensure_daemon_running(timeout: float = 60.0) -> bool:
-    """Starts the persistent diffusion daemon if not already running."""
-    global _daemon_proc
-    if check_daemon_status():
+check_daemon_status = check_server_status
+
+
+def ensure_server_running(timeout: float = 60.0) -> bool:
+    """Starts the diffusion server worker if not already running."""
+    global _server_proc, _daemon_proc
+    if _server_proc is not None and _server_proc.poll() is None:
         return True
 
-    with _daemon_lock:
-        if check_daemon_status():
+    if check_server_status():
+        return True
+
+    with _server_lock:
+        if _server_proc is not None and _server_proc.poll() is None:
             return True
 
-        print("[engine_diffusion] Starting persistent diffusion daemon...", flush=True)
+        if check_server_status():
+            return True
+
+        # Ensure no zombie process occupies the port before launching a new worker
+        _cleanup_stale_port_process(DIFFUSION_SERVER_PORT)
+
+        print("[engine_diffusion] Starting persistent diffusion server worker...", flush=True)
         py_exe = sys.executable
         env = os.environ.copy()
         env["DIFFUSION_WORKER"] = "1"
@@ -297,7 +338,7 @@ def ensure_daemon_running(timeout: float = 60.0) -> bool:
             popen_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0x08000000
 
         with open(os.path.join(logs_dir, "diffusion_daemon.log"), "a", encoding="utf-8") as daemon_log:
-            _daemon_proc = lifecycle.track(subprocess.Popen(
+            _server_proc = lifecycle.track(subprocess.Popen(
                 [py_exe, os.path.abspath(__file__), "--server"],
                 env=env,
                 cwd=root_dir,
@@ -305,60 +346,50 @@ def ensure_daemon_running(timeout: float = 60.0) -> bool:
                 stderr=daemon_log,
                 **popen_kwargs
             ))
+            _daemon_proc = _server_proc
 
         start_t = time.time()
         while time.time() - start_t < timeout:
             time.sleep(0.5)
-            if check_daemon_status():
-                print("[engine_diffusion] Persistent diffusion daemon is ready.", flush=True)
+            if check_server_status():
+                print("[engine_diffusion] Persistent diffusion server worker is ready.", flush=True)
                 return True
-            if _daemon_proc and _daemon_proc.poll() is not None:
-                print(f"[engine_diffusion] Daemon exited prematurely with code {_daemon_proc.poll()}.", flush=True)
+            if _server_proc and _server_proc.poll() is not None:
+                print(f"[engine_diffusion] Server worker exited prematurely with code {_server_proc.poll()}.", flush=True)
                 return False
 
-        print("[engine_diffusion] Daemon startup timed out.", flush=True)
+        print("[engine_diffusion] Server worker startup timed out.", flush=True)
         return False
 
 
+ensure_daemon_running = ensure_server_running
+
+
 def unload_diffusion_models():
-    """Unloads the persistent diffusion daemon, releasing 100% of GPU VRAM back to the OS."""
-    global _daemon_proc, _COMFY_NODE_CACHE, _active_checkpoint
-    with _daemon_lock:
+    """Unloads the diffusion server worker, releasing 100% of GPU VRAM back to the OS."""
+    global _server_proc, _daemon_proc, _COMFY_NODE_CACHE, _active_checkpoint
+    with _server_lock:
         try:
             import urllib.request
-            req = urllib.request.Request(f"{DIFFUSION_DAEMON_URL}/shutdown", method="POST", data=b"{}")
-            urllib.request.urlopen(req, timeout=1.0)
+            req = urllib.request.Request(f"{DIFFUSION_SERVER_URL}/shutdown", method="POST", data=b"{}")
+            urllib.request.urlopen(req, timeout=1.5)
         except Exception:
             pass
 
-        if _daemon_proc is not None:
+        if _server_proc is not None:
             try:
-                _daemon_proc.terminate()
-                _daemon_proc.wait(timeout=2.0)
+                _server_proc.terminate()
+                _server_proc.wait(timeout=2.0)
             except Exception:
                 try:
-                    _daemon_proc.kill()
+                    _server_proc.kill()
+                    _server_proc.wait(timeout=1.0)
                 except Exception:
                     pass
+            _server_proc = None
             _daemon_proc = None
 
-        if os.name == 'nt':
-            try:
-                flags = subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0x08000000
-                output = subprocess.check_output("netstat -ano", shell=True, creationflags=flags).decode('utf-8', errors='ignore')
-                for line in output.splitlines():
-                    if f":{DIFFUSION_DAEMON_PORT}" in line and "LISTENING" in line:
-                        parts = line.strip().split()
-                        if len(parts) >= 5:
-                            pid = int(parts[-1])
-                            try:
-                                import psutil
-                                proc = psutil.Process(pid)
-                                proc.kill()
-                            except Exception:
-                                subprocess.run(["taskkill", "/F", "/PID", str(pid)], creationflags=flags, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            except Exception:
-                pass
+        _cleanup_stale_port_process(DIFFUSION_SERVER_PORT)
 
         _COMFY_NODE_CACHE.clear()
         _active_checkpoint = None
@@ -465,6 +496,11 @@ def execute_workflow_graph(
                 executed_outputs[node_id] = _COMFY_NODE_CACHE[cache_key]
                 return executed_outputs[node_id]
 
+            # Invalidate older models and dependent LoRAs when switching checkpoints
+            for k in list(_COMFY_NODE_CACHE.keys()):
+                if k[0] in ("CheckpointLoaderSimple", "LoraLoader"):
+                    del _COMFY_NODE_CACHE[k]
+
             outs = func(**resolved_inputs)
             _COMFY_NODE_CACHE[cache_key] = outs
             executed_outputs[node_id] = outs
@@ -510,6 +546,11 @@ def execute_workflow_graph(
                 mm.soft_empty_cache()
             except Exception:
                 pass
+            if torch.cuda.is_available():
+                try:
+                    torch.cuda.empty_cache()
+                except Exception:
+                    pass
             try:
                 import torch_directml
                 if hasattr(torch_directml, "empty_cache"):
@@ -558,13 +599,27 @@ def execute_workflow_graph(
             os.makedirs(os.path.dirname(save_path), exist_ok=True)
             result_image.save(save_path)
             print(f"[engine_diffusion] Image saved dynamically to {save_path}")
+        del img_array
 
-    # Free intermediate node outputs from memory
+    # Explicitly release GPU tensor references and flush caches
     executed_outputs.clear()
+    del final_images
     gc.collect()
     try:
         import comfy.model_management as mm
         mm.soft_empty_cache()
+        mm.cleanup_models_gc()
+    except Exception:
+        pass
+    if torch.cuda.is_available():
+        try:
+            torch.cuda.empty_cache()
+        except Exception:
+            pass
+    try:
+        import torch_directml
+        if hasattr(torch_directml, "empty_cache"):
+            torch_directml.empty_cache()
     except Exception:
         pass
 
@@ -698,8 +753,8 @@ def generate_portrait_image(
             save_path=save_path
         )
 
-    if not ensure_daemon_running():
-        raise RuntimeError("Failed to start persistent diffusion daemon.")
+    if not ensure_server_running():
+        raise RuntimeError("Failed to start persistent diffusion server worker.")
 
     import urllib.request
     import urllib.error
@@ -720,14 +775,14 @@ def generate_portrait_image(
     }
 
     req_data = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(
-        f"{DIFFUSION_DAEMON_URL}/generate",
-        data=req_data,
-        headers={"Content-Type": "application/json"},
-        method="POST"
-    )
 
     for attempt in range(2):
+        req = urllib.request.Request(
+            f"{DIFFUSION_SERVER_URL}/generate",
+            data=req_data,
+            headers={"Content-Type": "application/json"},
+            method="POST"
+        )
         try:
             with urllib.request.urlopen(req, timeout=300) as resp:
                 res_json = json.loads(resp.read().decode("utf-8"))
@@ -742,33 +797,36 @@ def generate_portrait_image(
             except Exception:
                 detail = str(http_err)
 
-            # If DirectML GPU device was suspended/removed by OS during LLM usage, restart daemon and retry once
+            # If DirectML GPU device was suspended/removed by OS during LLM usage, restart worker and retry once
             is_device_err = any(k in detail.lower() for k in ("suspended", "deviceremoved", "device removed", "dxgi_error", "reset"))
             if attempt == 0 and is_device_err:
-                print(f"[engine_diffusion] GPU device was suspended ({detail}). Restarting daemon for clean GPU context...", flush=True)
+                print(f"[engine_diffusion] GPU device was suspended ({detail}). Restarting worker for clean GPU context...", flush=True)
                 unload_diffusion_models()
-                if ensure_daemon_running():
+                if ensure_server_running():
                     continue
 
             raise RuntimeError(f"Diffusion error: {detail}") from http_err
         except Exception as conn_err:
             if attempt == 0:
-                print(f"[engine_diffusion] Connection to daemon failed ({conn_err}). Restarting daemon...", flush=True)
+                print(f"[engine_diffusion] Connection to worker failed ({conn_err}). Restarting worker...", flush=True)
                 unload_diffusion_models()
-                if ensure_daemon_running():
+                if ensure_server_running():
                     continue
             raise conn_err
 
 
 if __name__ == "__main__":
     import argparse
-    from http.server import HTTPServer, BaseHTTPRequestHandler
+    from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--server", action="store_true", help="Run as HTTP diffusion daemon")
+    parser.add_argument("--server", action="store_true", help="Run as HTTP diffusion worker")
     args = parser.parse_args()
 
     if args.server:
+        _worker_generation_lock = threading.Lock()
+        _worker_is_generating = False
+
         class DiffusionHandler(BaseHTTPRequestHandler):
             def log_message(self, format, *args):
                 pass  # Suppress access logs
@@ -778,27 +836,33 @@ if __name__ == "__main__":
                     self.send_response(200)
                     self.send_header("Content-Type", "application/json")
                     self.end_headers()
-                    self.wfile.write(b'{"status":"ready"}')
+                    status_text = "busy" if _worker_is_generating else "ready"
+                    self.wfile.write(json.dumps({"status": status_text, "generating": _worker_is_generating}).encode("utf-8"))
                 else:
                     self.send_response(404)
                     self.end_headers()
 
             def do_POST(self):
+                global _worker_is_generating
                 if self.path == "/generate":
                     content_len = int(self.headers.get("Content-Length", 0))
                     body = self.rfile.read(content_len)
-                    try:
-                        cfg = json.loads(body.decode("utf-8"))
-                        out_path = _generate_portrait_image_inprocess(**cfg)
-                        self.send_response(200)
-                        self.send_header("Content-Type", "application/json")
-                        self.end_headers()
-                        self.wfile.write(json.dumps({"status": "ok", "path": out_path}).encode("utf-8"))
-                    except Exception as ex:
-                        self.send_response(500)
-                        self.send_header("Content-Type", "application/json")
-                        self.end_headers()
-                        self.wfile.write(json.dumps({"status": "error", "error": str(ex)}).encode("utf-8"))
+                    with _worker_generation_lock:
+                        _worker_is_generating = True
+                        try:
+                            cfg = json.loads(body.decode("utf-8"))
+                            out_path = _generate_portrait_image_inprocess(**cfg)
+                            self.send_response(200)
+                            self.send_header("Content-Type", "application/json")
+                            self.end_headers()
+                            self.wfile.write(json.dumps({"status": "ok", "path": out_path}).encode("utf-8"))
+                        except Exception as ex:
+                            self.send_response(500)
+                            self.send_header("Content-Type", "application/json")
+                            self.end_headers()
+                            self.wfile.write(json.dumps({"status": "error", "error": str(ex)}).encode("utf-8"))
+                        finally:
+                            _worker_is_generating = False
                 elif self.path == "/shutdown":
                     self.send_response(200)
                     self.send_header("Content-Type", "application/json")
@@ -809,8 +873,9 @@ if __name__ == "__main__":
                     self.send_response(404)
                     self.end_headers()
 
-        server = HTTPServer(("127.0.0.1", DIFFUSION_DAEMON_PORT), DiffusionHandler)
-        print(f"[engine_diffusion daemon] Listening on http://127.0.0.1:{DIFFUSION_DAEMON_PORT}", flush=True)
+        server = ThreadingHTTPServer(("127.0.0.1", DIFFUSION_SERVER_PORT), DiffusionHandler)
+        server.daemon_threads = True
+        print(f"[engine_diffusion server] Listening on http://127.0.0.1:{DIFFUSION_SERVER_PORT}", flush=True)
         try:
             server.serve_forever()
         except KeyboardInterrupt:

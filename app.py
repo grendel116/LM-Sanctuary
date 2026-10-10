@@ -1400,7 +1400,7 @@ def regenerate_image():
         from urllib.parse import urlparse
         old_image_url = urlparse(old_image_url).path
 
-    if not _image_mutex.acquire(blocking=True, timeout=120.0):
+    if not _image_mutex.acquire(blocking=True, timeout=300.0):
         return jsonify({'error': 'Image generation engine is currently busy. Please retry in a moment.'}), 429
 
     try:
@@ -1572,7 +1572,7 @@ def api_generate_portrait():
     from runners.runner import cancelled_sessions
     cancelled_sessions.discard(session_id)
 
-    if not _image_mutex.acquire(blocking=True, timeout=120.0):
+    if not _image_mutex.acquire(blocking=True, timeout=300.0):
         return jsonify({'error': 'Image generation engine is currently busy. Please retry in a moment.'}), 429
 
     try:
