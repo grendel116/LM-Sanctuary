@@ -9526,6 +9526,14 @@ let touchEndY = 0;
 
 // Bind keyboard navigation globally
 document.addEventListener('keydown', (event) => {
+    if ((event.ctrlKey || event.metaKey) && event.shiftKey && !event.altKey && (event.key === 'R' || event.key === 'r')) {
+        if (window.pywebview) {
+            event.preventDefault();
+            reloadApp(false, true);
+            return;
+        }
+    }
+
     const modal = document.getElementById('image-modal');
     if (modal && modal.style.display === 'flex') {
         if (event.key === 'ArrowLeft') {

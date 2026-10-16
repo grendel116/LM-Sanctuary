@@ -238,11 +238,19 @@ def load_dynamic_runtime_context() -> str:
         f"- Current Day: {now.strftime('%A, %B %d, %Y')}\n"
     )
     
+    try:
+        from tools.tools import get_project_folders
+        folders_str = ", ".join(get_project_folders())
+    except Exception:
+        folders_str = ""
+    folders_line = f"- Workspace Folders: {folders_str}\n" if folders_str else ""
+
     env_block = (
         "### SYSTEM ENVIRONMENT CONTEXT\n"
         "- Active Engine Backend: open-source local runner\n"
         f"- Host OS: Windows\n"
         f"- Active Python Executable: {sys.executable}\n"
+        f"{folders_line}"
     )
     
     return (

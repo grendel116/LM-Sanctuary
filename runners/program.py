@@ -74,7 +74,8 @@ def get_active_program() -> str:
 
     if needs_update:
         settings["active_program"] = active_prog
-        settings["folders"] = [target_folder]
+        extra_folders = [f for f in current_folders[1:] if os.path.normpath(f) != target_folder]
+        settings["folders"] = [target_folder] + extra_folders
         _save_settings(settings)
         print(f"[Settings] Synced active program '{active_prog}' and folder '{target_folder}' to project settings")
 
@@ -85,7 +86,9 @@ def set_active_program(program_id: str):
     settings = _load_settings()
     settings["active_program"] = program_id
     default_folder = os.path.normpath(os.path.join(PARENT_DIR, 'core', 'programs', program_id))
-    settings["folders"] = [default_folder]
+    current_folders = settings.get("folders", [])
+    extra_folders = [f for f in current_folders[1:] if os.path.normpath(f) != default_folder]
+    settings["folders"] = [default_folder] + extra_folders
     _save_settings(settings)
 
 def get_active_session() -> str:

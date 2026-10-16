@@ -1,6 +1,7 @@
 import os
 import time
 import uuid
+import fnmatch
 import subprocess
 import functools
 import threading
@@ -22,6 +23,7 @@ current_use_imagen = contextvars.ContextVar('current_use_imagen', default=False)
 session_tool_calls = {}
 background_tasks = {}
 session_tool_calls_lock = threading.Lock()
+tasks_lock = threading.Lock()
 
 tools_dir = os.path.dirname(os.path.abspath(__file__))
 root_dir = os.path.dirname(tools_dir)  # This correctly sets the root directory
@@ -107,18 +109,69 @@ def get_project_folders() -> list:
         pass
     return folders
 
+def _get_prioritized_folders() -> list:
+    folders = get_project_folders()
+    if len(folders) > 1:
+        return folders[1:] + [folders[0]]
+    return folders
+
 def resolve_workspace_path(path: str) -> str:
-    normalized = os.path.normpath(path)
+    cleaned = (path or "").strip()
+    if cleaned.startswith("[") and "]" in cleaned:
+        bracket_end = cleaned.find("]")
+        prefix_tag = cleaned[1:bracket_end].strip()
+        rest = cleaned[bracket_end + 1:].strip().lstrip("/\\")
+        cleaned = os.path.join(prefix_tag, rest) if rest else prefix_tag
+
+    normalized = os.path.normpath(cleaned)
     if os.path.isabs(normalized):
         return normalized
-        
-    folders = get_project_folders()
-    for folder in folders:
-        candidate = os.path.normpath(os.path.join(folder, path))
+
+    prioritized = _get_prioritized_folders()
+
+    for folder in prioritized:
+        if os.path.basename(folder).lower() == normalized.lower():
+            return os.path.normpath(folder)
+        candidate = os.path.normpath(os.path.join(folder, normalized))
         if os.path.exists(candidate):
             return candidate
-            
-    return os.path.normpath(os.path.join(folders[0], path))
+        folder_base = os.path.basename(folder).lower()
+        norm_parts = normalized.split(os.sep)
+        if norm_parts and norm_parts[0].lower() == folder_base and len(norm_parts) > 1:
+            stripped_candidate = os.path.normpath(os.path.join(folder, *norm_parts[1:]))
+            if os.path.exists(stripped_candidate):
+                return stripped_candidate
+
+    root_candidate = os.path.normpath(os.path.join(root_dir, normalized))
+    if os.path.exists(root_candidate):
+        return root_candidate
+
+    norm_parts = normalized.split(os.sep)
+    if norm_parts:
+        first_part = norm_parts[0].lower()
+        if first_part == "scratch":
+            folders = get_project_folders()
+            return os.path.normpath(os.path.join(folders[0], normalized))
+        for folder in prioritized:
+            if os.path.basename(folder).lower() == first_part:
+                if len(norm_parts) > 1:
+                    return os.path.normpath(os.path.join(folder, *norm_parts[1:]))
+                return os.path.normpath(folder)
+
+    return os.path.normpath(os.path.join(prioritized[0], normalized))
+
+def resolve_workspace_cwd(cwd: str = "") -> str:
+    if cwd and cwd.strip():
+        resolved = resolve_workspace_path(cwd.strip())
+        if os.path.isdir(resolved):
+            return resolved
+        parent = os.path.dirname(resolved)
+        if parent and os.path.isdir(parent):
+            return parent
+    folders = get_project_folders()
+    if len(folders) > 1 and os.path.isdir(folders[1]):
+        return os.path.normpath(folders[1])
+    return root_dir
 
 # Global memory dict to hold tool confirmation states for mobile/web human-in-the-loop approvals
 pending_tool_calls = {}
@@ -744,18 +797,24 @@ def google_search(query: str) -> str:
 # ==============================================================================
 
 @track_tool_activity
-def read_file(path: str) -> str:
-    """Reads the contents of a file at the specified path.
+def read_file(path: str, start_line: int = None, end_line: int = None) -> str:
+    """Reads the contents of a file at the specified path with 1-indexed line numbers.
     Supports plain text, markdown, code files, PDFs, DOCX, and XLSX files.
 
     Args:
-        path: The file path to read (absolute or relative to current directory).
+        path: The file path to read (absolute or relative to workspace folders).
+        start_line: Optional 1-indexed starting line number.
+        end_line: Optional 1-indexed ending line number (inclusive).
 
     Returns:
-        The content of the file or an error message.
+        The line-numbered content of the file or an error message.
     """
     try:
         normalized_path = resolve_workspace_path(path)
+        if not os.path.exists(normalized_path):
+            return f"Error reading file '{path}': File not found at '{normalized_path}'."
+        if os.path.isdir(normalized_path):
+            return f"Error reading file '{path}': '{normalized_path}' is a directory. Use get_workspace_structure(path=\"{path}\") or find_files(path=\"{path}\") instead."
         path_lower = normalized_path.lower()
         
         # PDF File Handling
@@ -823,7 +882,35 @@ def read_file(path: str) -> str:
             
         # Standard Text / Source Code Files
         with open(normalized_path, "r", encoding="utf-8", errors="replace") as f:
-            return f.read()
+            all_lines = f.readlines()
+
+        total_lines = len(all_lines)
+        if total_lines == 0:
+            return f"File: {normalized_path} (Empty file, 0 lines)"
+
+        max_lines_per_read = 300
+        s = max(1, int(start_line)) if start_line is not None else 1
+        if s > total_lines:
+            return f"Error: start_line ({s}) exceeds total lines ({total_lines}) in '{normalized_path}'."
+
+        if end_line is not None:
+            e = min(total_lines, max(s, int(end_line)))
+            if e - s + 1 > max_lines_per_read:
+                e = s + max_lines_per_read - 1
+        else:
+            e = min(total_lines, s + max_lines_per_read - 1)
+
+        numbered_lines = [
+            f"{idx}: {all_lines[idx - 1].rstrip(chr(13) + chr(10))}"
+            for idx in range(s, e + 1)
+        ]
+        header = f"File: {normalized_path} (Lines {s}-{e} of {total_lines})\n"
+        body = "\n".join(numbered_lines)
+        if e < total_lines:
+            next_start = e + 1
+            next_end = min(total_lines, e + max_lines_per_read)
+            body += f"\n\n... [Showing lines {s}-{e} of {total_lines}. Call read_file(path=\"{path}\", start_line={next_start}, end_line={next_end}) to view more.]"
+        return header + body
 
     except Exception as e:
         return f"Error reading file '{path}': {e}"
@@ -841,17 +928,17 @@ def write_file(path: str, content: str) -> str:
         A success message or an error message.
     """
     try:
-        if not confirm_tool_execution("write_file", f"Path: {path}\nContent Preview:\n{content[:500]}"):
+        normalized_path = resolve_workspace_path(path)
+        if not confirm_tool_execution("write_file", f"Path: {normalized_path}\nContent Preview:\n{content[:500]}"):
             return "Error: Tool execution denied by user."
             
-        normalized_path = resolve_workspace_path(path)
         parent_dir = os.path.dirname(normalized_path)
         if parent_dir and not os.path.exists(parent_dir):
             os.makedirs(parent_dir, exist_ok=True)
             
         with open(normalized_path, "w", encoding="utf-8") as f:
             f.write(content)
-        return f"Successfully wrote to file '{path}'."
+        return f"Successfully wrote to file '{normalized_path}'."
     except Exception as e:
         return f"Error writing to file '{path}': {e}"
 
@@ -869,30 +956,36 @@ def replace_in_file(path: str, old_text: str, new_text: str) -> str:
         A success message or an error message.
     """
     try:
-        if not confirm_tool_execution("replace_in_file", f"Path: {path}\n\nReplacing:\n{old_text[:300]}\n\nWith:\n{new_text[:300]}"):
+        normalized_path = resolve_workspace_path(path)
+        if not confirm_tool_execution("replace_in_file", f"Path: {normalized_path}\n\nReplacing:\n{old_text[:300]}\n\nWith:\n{new_text[:300]}"):
             return "Error: Tool execution denied by user."
             
-        normalized_path = resolve_workspace_path(path)
         if not os.path.exists(normalized_path):
-            return f"Error: File '{path}' does not exist."
+            return f"Error: File '{path}' does not exist at '{normalized_path}'."
             
         with open(normalized_path, "r", encoding="utf-8") as f:
             content = f.read()
             
         if old_text not in content:
-            return f"Error: Could not find exact text match for replacement in '{path}'."
+            normalized_content = content.replace("\r\n", "\n")
+            normalized_old = old_text.replace("\r\n", "\n")
+            normalized_new = new_text.replace("\r\n", "\n")
+            if normalized_old not in normalized_content:
+                return f"Error: Could not find exact text match for replacement in '{normalized_path}'. Read the file first with read_file to inspect exact lines."
+            updated_content = normalized_content.replace(normalized_old, normalized_new, 1)
+        else:
+            updated_content = content.replace(old_text, new_text, 1)
             
-        updated_content = content.replace(old_text, new_text)
         with open(normalized_path, "w", encoding="utf-8") as f:
             f.write(updated_content)
-        return f"Successfully replaced content in '{path}'."
+        return f"Successfully replaced content in '{normalized_path}'."
     except Exception as e:
         return f"Error modifying file '{path}': {e}"
 
 
 @track_tool_activity
-def run_shell_command(command: str) -> str:
-    """Runs a shell command in the local workspace directory and returns its output.
+def run_shell_command(command: str, cwd: str = "") -> str:
+    """Runs a shell command in the workspace directory and returns its output.
 
     Ensure commands complete within 30 seconds. Use targeted listing and search commands
     instead of recursive directory operations (like 'dir /s', 'find .', or 'grep -r')
@@ -900,24 +993,27 @@ def run_shell_command(command: str) -> str:
 
     Args:
         command: The shell command to run.
+        cwd: Optional working directory (defaults to the active project workspace folder).
 
     Returns:
         The standard output and standard error from running the command.
     """
     try:
-        if not confirm_tool_execution("run_shell_command", f"Command:\n{command}"):
+        target_cwd = resolve_workspace_cwd(cwd)
+        if not confirm_tool_execution("run_shell_command", f"CWD: {target_cwd}\nCommand:\n{command}"):
             return "Error: Tool execution denied by user."
             
         result = subprocess.run(
             command,
             shell=True,
+            cwd=target_cwd,
             capture_output=True,
             text=True,
             encoding="utf-8",
             errors="replace",
             timeout=30
         )
-        output = f"Exit Code: {result.returncode}\n"
+        output = f"Working Directory: {target_cwd}\nExit Code: {result.returncode}\n"
         if result.stdout:
             output += f"--- Standard Output ---\n{result.stdout}\n"
         if result.stderr:
@@ -930,17 +1026,28 @@ def run_shell_command(command: str) -> str:
 
 
 @track_tool_activity
-def get_workspace_structure() -> str:
-    """Recursively lists all files and directories in all configured project folders,
+def get_workspace_structure(path: str = "") -> str:
+    """Recursively lists files and directories in the specified path or all configured project folders,
     excluding virtual environments (.venv), caches (__pycache__), and git directories.
     Safeguarded with maximum depth and line limits for large workspace directories.
+
+    Args:
+        path: Optional subdirectory or workspace folder path to inspect.
 
     Returns:
         A text representation of the workspace directory tree structure.
     """
     exclude_dirs = {".venv", "__pycache__", ".git", "node_modules", "dist", ".idea", ".vscode"}
     
-    folders = get_project_folders()
+    if path and path.strip():
+        resolved = resolve_workspace_path(path.strip())
+        if not os.path.exists(resolved):
+            return f"Error: Directory '{path}' does not exist at '{resolved}'."
+        if os.path.isfile(resolved):
+            return f"'{resolved}' is a file. Use read_file(path=\"{path}\") to view its contents."
+        folders = [resolved]
+    else:
+        folders = _get_prioritized_folders()
         
     lines = []
     max_lines = 300
@@ -960,23 +1067,21 @@ def get_workspace_structure() -> str:
         except Exception:
             return
             
-        for i, item in enumerate(items):
+        visible_items = [item for item in items if item not in exclude_dirs]
+        for i, item in enumerate(visible_items):
             if len(lines) >= max_lines:
                 truncated = True
                 break
                 
-            if item in exclude_dirs:
-                continue
-                
-            path = os.path.join(directory, item)
-            is_last = (i == len(items) - 1)
+            item_path = os.path.join(directory, item)
+            is_last = (i == len(visible_items) - 1)
             connector = "└── " if is_last else "├── "
             
             lines.append(f"{prefix}{connector}{item}")
             
-            if os.path.isdir(path):
+            if os.path.isdir(item_path):
                 new_prefix = prefix + ("    " if is_last else "│   ")
-                _build_tree(path, new_prefix, depth + 1)
+                _build_tree(item_path, new_prefix, depth + 1)
                 
     for folder in folders:
         if not os.path.exists(folder):
@@ -989,19 +1094,85 @@ def get_workspace_structure() -> str:
         lines.append("")
         
     if truncated:
-        lines.append("... [Tree truncated: maximum list limit of 300 lines or depth level of 3 reached. Use search_codebase to locate specific files.]")
+        lines.append("... [Tree truncated: maximum list limit of 300 lines or depth level of 3 reached. Pass path=\"...\" to get_workspace_structure or use find_files / search_codebase.]")
         
     return "\n".join(lines).strip()
 
 
 @track_tool_activity
-def search_codebase(keyword: str) -> str:
-    """Performs a case-insensitive search for a keyword or pattern inside all text files
-    in all configured workspace folders, returning the matching files, line numbers, and snippets.
+def find_files(pattern: str = "", path: str = "") -> str:
+    """Finds files across the workspace whose filenames or relative paths match a substring or glob pattern.
+
+    Args:
+        pattern: Substring or glob pattern to match against file names (e.g. '*.py', 'router', 'package.json'). Leave empty to list files.
+        path: Optional directory path to restrict the search.
+
+    Returns:
+        A list of matching file paths, or a 'no files found' message.
+    """
+    exclude_dirs = {".venv", "__pycache__", ".git", "node_modules", "dist", ".idea", ".vscode"}
+    if path and path.strip():
+        resolved = resolve_workspace_path(path.strip())
+        if not os.path.exists(resolved):
+            return f"Error: Path '{path}' does not exist at '{resolved}'."
+        folders = [resolved]
+    else:
+        folders = _get_prioritized_folders()
+
+    pat = (pattern or "").strip().lower()
+    is_glob = any(ch in pat for ch in ("*", "?", "["))
+    matches = []
+    max_matches = 100
+    truncated = False
+
+    for folder in folders:
+        if not os.path.exists(folder):
+            continue
+        if os.path.isfile(folder):
+            matches.append(folder)
+            continue
+        for root, dirs, files in os.walk(folder):
+            dirs[:] = [d for d in dirs if d not in exclude_dirs]
+            for file in sorted(files):
+                full_path = os.path.join(root, file)
+                rel_path = os.path.relpath(full_path, folder)
+                file_lower = file.lower()
+                rel_lower = rel_path.lower().replace("\\", "/")
+                if not pat:
+                    matched = True
+                elif is_glob:
+                    matched = fnmatch.fnmatch(file_lower, pat) or fnmatch.fnmatch(rel_lower, pat)
+                else:
+                    matched = (pat in file_lower) or (pat in rel_lower)
+                if matched:
+                    display_path = os.path.join(os.path.basename(folder), rel_path) if len(folders) > 1 else rel_path
+                    matches.append(f"{display_path}  ({full_path})")
+                    if len(matches) >= max_matches:
+                        truncated = True
+                        break
+            if truncated:
+                break
+        if truncated:
+            break
+
+    if not matches:
+        return f"No files found matching pattern '{pattern}'."
+
+    output = f"Found {len(matches)}{'+' if truncated else ''} matching file(s):\n" + "\n".join(matches)
+    if truncated:
+        output += f"\n\n... [Results truncated at {max_matches} files. Refine `pattern` or specify `path`.]"
+    return output
+
+
+@track_tool_activity
+def search_codebase(keyword: str, path: str = "") -> str:
+    """Performs a case-insensitive search for a keyword or pattern inside text files
+    in the workspace, returning matching file paths, line numbers, and snippets.
     Safeguarded with a maximum match limit for large workspaces.
 
     Args:
         keyword: The text pattern or keyword to search for.
+        path: Optional directory or file path to restrict the search.
 
     Returns:
         A list of matching snippets grouped by file, or a 'no matches found' message.
@@ -1012,13 +1183,34 @@ def search_codebase(keyword: str) -> str:
     max_files = 25
     truncated = False
     
-    folders = get_project_folders()
+    if path and path.strip():
+        resolved = resolve_workspace_path(path.strip())
+        if not os.path.exists(resolved):
+            return f"Error: Search path '{path}' does not exist at '{resolved}'."
+        folders = [resolved]
+    else:
+        folders = _get_prioritized_folders()
         
     keyword_lower = keyword.lower()
     
     for folder in folders:
         if not os.path.exists(folder):
             continue
+        if os.path.isfile(folder):
+            try:
+                with open(folder, "r", encoding="utf-8", errors="ignore") as f:
+                    lines = f.readlines()
+                file_matches = [
+                    f"  Line {line_idx + 1}: {line.strip()}"
+                    for line_idx, line in enumerate(lines)
+                    if keyword_lower in line.lower()
+                ]
+                if file_matches:
+                    results.append(f"File: {folder}\n" + "\n".join(file_matches[:15]))
+            except Exception:
+                pass
+            continue
+
         if len(results) >= max_files:
             truncated = True
             break
@@ -1040,6 +1232,7 @@ def search_codebase(keyword: str) -> str:
                     
                 file_path = os.path.join(root, file)
                 rel_path = os.path.relpath(file_path, folder)
+                display_path = os.path.join(os.path.basename(folder), rel_path) if len(folders) > 1 else rel_path
                 
                 try:
                     with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
@@ -1051,7 +1244,7 @@ def search_codebase(keyword: str) -> str:
                             file_matches.append(f"  Line {line_idx + 1}: {line.strip()}")
                             
                     if file_matches:
-                        results.append(f"File: [{os.path.basename(folder)}] {rel_path}\n" + "\n".join(file_matches[:10]))
+                        results.append(f"File: {display_path} ({file_path})\n" + "\n".join(file_matches[:10]))
                 except Exception:
                     continue
                     
@@ -1060,7 +1253,7 @@ def search_codebase(keyword: str) -> str:
         
     output = "\n\n".join(results)
     if truncated:
-        output += "\n\n... [Search results truncated: maximum limit of 25 matched files reached. Please refine your search keyword.]"
+        output += "\n\n... [Search results truncated: maximum limit of 25 matched files reached. Refine your keyword or pass path=\"...\".]"
     return output
 
 # ==============================================================================
@@ -1682,17 +1875,20 @@ def _run_stream_reader(stream, log_list):
             pass
 
 @track_tool_activity
-def run_command_async(command: str) -> str:
-    """Spawns a shell command in the background, executing non-blockingly.
+def run_command_async(command: str, cwd: str = "", wait_seconds: float = 6.0) -> str:
+    """Spawns a shell command in the background, waits briefly for startup logs, and returns its task ID and initial output.
 
     Args:
         command: The shell command to run.
+        cwd: Optional working directory (defaults to the active project workspace folder).
+        wait_seconds: Seconds to wait for initial startup output before returning (default 6.0).
 
     Returns:
-        A success message with the task ID, or an error.
+        A status message with the task ID and initial output, or an error.
     """
     try:
-        if not confirm_tool_execution("run_command_async", f"Command:\n{command}"):
+        target_cwd = resolve_workspace_cwd(cwd)
+        if not confirm_tool_execution("run_command_async", f"CWD: {target_cwd}\nCommand:\n{command}"):
             return "Error: Tool execution denied by user."
 
         task_id = f"task_{int(time.time())}_{uuid.uuid4().hex[:4]}"
@@ -1700,6 +1896,7 @@ def run_command_async(command: str) -> str:
         process = lifecycle.track(subprocess.Popen(
             command,
             shell=True,
+            cwd=target_cwd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             stdin=subprocess.PIPE,
@@ -1722,6 +1919,7 @@ def run_command_async(command: str) -> str:
         task_info = {
             'task_id': task_id,
             'command': command,
+            'cwd': target_cwd,
             'process': process,
             'stdout': stdout_log,
             'stderr': stderr_log,
@@ -1731,8 +1929,30 @@ def run_command_async(command: str) -> str:
         
         with tasks_lock:
             background_tasks[task_id] = task_info
-            
-        return f"Successfully started task '{task_id}' in the background for command: `{command}`"
+
+        wait_limit = max(0.0, min(float(wait_seconds or 0.0), 15.0))
+        start_wait = time.time()
+        while time.time() - start_wait < wait_limit:
+            if process.poll() is not None:
+                break
+            time.sleep(0.25)
+
+        poll = process.poll()
+        status = "running" if poll is None else f"exited ({poll})"
+        stdout_txt = "".join(stdout_log).strip()
+        stderr_txt = "".join(stderr_log).strip()
+
+        output = (
+            f"Task ID: {task_id}\n"
+            f"Status: {status}\n"
+            f"Working Directory: {target_cwd}\n"
+            f"Command: `{command}`"
+        )
+        if stdout_txt:
+            output += f"\n--- Initial Standard Output ---\n{stdout_txt[-1500:]}"
+        if stderr_txt:
+            output += f"\n--- Initial Standard Error ---\n{stderr_txt[-1500:]}"
+        return output
     except Exception as e:
         return f"Error starting background command: {e}"
 
@@ -1863,16 +2083,18 @@ def replace_file_content(path: str, start_line: int, end_line: int, target_conte
         A success message or an error message.
     """
     try:
-        if not confirm_tool_execution("replace_file_content", f"Path: {path}\nLines: {start_line}-{end_line}\nTarget Preview:\n{target_content[:200]}\nReplacement Preview:\n{replacement_content[:200]}"):
+        normalized_path = resolve_workspace_path(path)
+        if not confirm_tool_execution("replace_file_content", f"Path: {normalized_path}\nLines: {start_line}-{end_line}\nTarget Preview:\n{target_content[:200]}\nReplacement Preview:\n{replacement_content[:200]}"):
             return "Error: Tool execution denied by user."
             
-        normalized_path = resolve_workspace_path(path)
         if not os.path.exists(normalized_path):
-            return f"Error: File '{path}' does not exist."
+            return f"Error: File '{path}' does not exist at '{normalized_path}'."
             
         with open(normalized_path, "r", encoding="utf-8") as f:
             lines = f.readlines()
             
+        start_line = int(start_line)
+        end_line = int(end_line)
         if start_line < 1 or end_line > len(lines) or start_line > end_line:
             return f"Error: Invalid line range {start_line}-{end_line}. File has {len(lines)} lines."
             
@@ -1884,12 +2106,14 @@ def replace_file_content(path: str, start_line: int, end_line: int, target_conte
         if normalize(actual_subset) != normalize(target_content):
             return f"Error: Content within lines {start_line}-{end_line} does not match target_content.\nActual:\n{actual_subset}\nTarget:\n{target_content}"
             
+        if replacement_content and not replacement_content.endswith("\n") and end_line < len(lines):
+            replacement_content += "\n"
         new_lines = lines[:start_line-1] + [replacement_content] + lines[end_line:]
         
         with open(normalized_path, "w", encoding="utf-8") as f:
             f.writelines(new_lines)
             
-        return f"Successfully modified lines {start_line}-{end_line} in '{path}'."
+        return f"Successfully modified lines {start_line}-{end_line} in '{normalized_path}'."
     except Exception as e:
         return f"Error modifying file '{path}': {e}"
 
@@ -1909,16 +2133,16 @@ def multi_replace_file_content(path: str, replacement_chunks: list[dict]) -> str
         A success message or an error message.
     """
     try:
+        normalized_path = resolve_workspace_path(path)
         preview_lines = []
         for i, chunk in enumerate(replacement_chunks):
             preview_lines.append(f"Chunk {i+1} (Lines {chunk.get('start_line')}-{chunk.get('end_line')}):\nTarget: {chunk.get('target_content')[:100]}\nReplacement: {chunk.get('replacement_content')[:100]}")
         preview_text = "\n\n".join(preview_lines)
-        if not confirm_tool_execution("multi_replace_file_content", f"Path: {path}\n\n{preview_text}"):
+        if not confirm_tool_execution("multi_replace_file_content", f"Path: {normalized_path}\n\n{preview_text}"):
             return "Error: Tool execution denied by user."
             
-        normalized_path = resolve_workspace_path(path)
         if not os.path.exists(normalized_path):
-            return f"Error: File '{path}' does not exist."
+            return f"Error: File '{path}' does not exist at '{normalized_path}'."
             
         with open(normalized_path, "r", encoding="utf-8") as f:
             lines = f.readlines()
@@ -1948,12 +2172,14 @@ def multi_replace_file_content(path: str, replacement_chunks: list[dict]) -> str
             actual_subset = "".join(lines[start_line-1:end_line])
             if normalize(actual_subset) != normalize(target):
                 return f"Error: Content within lines {start_line}-{end_line} does not match target content.\nActual:\n{actual_subset}\nTarget:\n{target}"
+            if replacement and not replacement.endswith("\n") and end_line < len(lines):
+                replacement += "\n"
             lines = lines[:start_line-1] + [replacement] + lines[end_line:]
             
         with open(normalized_path, "w", encoding="utf-8") as f:
             f.writelines(lines)
             
-        return f"Successfully applied {len(replacement_chunks)} replacements to '{path}'."
+        return f"Successfully applied {len(replacement_chunks)} replacements to '{normalized_path}'."
     except Exception as e:
         return f"Error modifying file '{path}': {e}"
 

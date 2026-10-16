@@ -32,6 +32,12 @@ TOOL_ALIASES = {
     "dalle:text2im": "generate_local_image",
     "text2im": "generate_local_image",
     "generate_general_image": "generate_imagen",
+    "view_file": "read_file",
+    "write_to_file": "write_file",
+    "run_command": "run_shell_command",
+    "find_by_name": "find_files",
+    "grep_search": "search_codebase",
+    "list_dir": "get_workspace_structure",
 }
 
 _MAIN_DIRECTIVE_PROMPT = (
@@ -39,7 +45,7 @@ _MAIN_DIRECTIVE_PROMPT = (
     'Tools are emulated by exact `[tool_name(key="value")]` tags. Use a tool only when it materially advances the current task; otherwise answer directly.\n'
     "The TOOLBELT above is the capability index. When a capability is relevant, use the matching retrieved skill instructions as the detailed procedure.\n"
     "Available tools: google_search, web_search, read_webpage, read_file, write_file, replace_in_file, replace_file_content, multi_replace_file_content, "
-    "run_shell_command, run_command_async, manage_task, wait_task, get_workspace_structure, search_codebase, generate_local_image, generate_imagen, "
+    "run_shell_command, run_command_async, manage_task, wait_task, get_workspace_structure, find_files, search_codebase, generate_local_image, generate_imagen, "
     "apply_comfy_workflow, add_quest, add_journal_entry, search_music.\n"
     "Use argument names shown by a retrieved skill or the tool's established signature. Do not invent tool results. After a tool result, continue the task concisely; do not repeat the tag.\n"
     "When URLs or web links are provided in the message, call `[read_webpage(url=\"...\")]` to fetch and read the page content. Ground all claims in real retrieved text rather than assuming or fabricating what a link contains.\n"
@@ -68,7 +74,140 @@ STANDALONE_ASTERISK_RE = re.compile(r'(?<!\*)\*(?!\*)')
 MULTI_NEWLINE_RE = re.compile(r'\n\s*\n+')
 MULTI_SPACE_RE = re.compile(r' +')
 JSON_BLOCK_RE = re.compile(r'```(?:json)?\s*(\{[\s\S]*?\})\s*```|(\{[\s\S]*?\})', re.IGNORECASE)
-TOOL_ARG_RE = re.compile(r'(\w+)\s*=\s*(?:("""|\'\'\'|["\']))([\s\S]*?)\2', re.DOTALL)
+TOOL_ARG_RE = re.compile(r'(\w+)\s*=\s*(?:("""|\'\'\'|["\'])((?:\\.|(?!\2)[\s\S])*?)\2|([^,\s\)]+))', re.DOTALL)
+_TOOL_OPEN_RE = re.compile(r"\[([a-zA-Z_][\w\.:]*)\(")
+
+
+class _ToolTagMatch:
+    """Match container compatible with regex match .group(0|1|2) interface."""
+    def __init__(self, full_tag: str, name: str, args_str: str):
+        self._groups = (full_tag, name, args_str)
+
+    def group(self, idx: int = 0) -> str:
+        return self._groups[idx]
+
+
+def _extract_tool_calls(text: str) -> list[_ToolTagMatch]:
+    """Extracts [tool_name(args)] tags using a quote- and parenthesis-aware scanner
+    so code strings containing ')]' inside arguments never truncate the tool call.
+    """
+    if not text or "[" not in text:
+        return []
+
+    matches = []
+    n = len(text)
+    cursor = 0
+
+    while cursor < n:
+        m = _TOOL_OPEN_RE.search(text, cursor)
+        if not m:
+            break
+
+        name = m.group(1)
+        i = m.end()
+        paren_depth = 1
+        found_end = -1
+        args_end = -1
+
+        while i < n:
+            ch = text[i]
+            if ch in ('"', "'"):
+                if text[i : i + 3] == ch * 3:
+                    quote = ch * 3
+                    i += 3
+                    while i < n and text[i : i + 3] != quote:
+                        i += 2 if text[i] == "\\" else 1
+                    i += 3
+                    continue
+                else:
+                    quote = ch
+                    i += 1
+                    while i < n and text[i] != quote:
+                        i += 2 if text[i] == "\\" else 1
+                    i += 1
+                    continue
+
+            if ch == "(":
+                paren_depth += 1
+            elif ch == ")":
+                paren_depth -= 1
+                if paren_depth == 0:
+                    args_end = i
+                    j = i + 1
+                    while j < n and text[j] in " \t\r\n":
+                        j += 1
+                    if j < n and text[j] == "]":
+                        found_end = j + 1
+                    break
+            i += 1
+
+        if found_end != -1:
+            matches.append(_ToolTagMatch(text[m.start() : found_end], name, text[m.end() : args_end]))
+            cursor = found_end
+        else:
+            cursor = m.end()
+
+    return matches
+
+
+def _strip_tool_calls(text: str, matches: list[_ToolTagMatch] | None = None) -> str:
+    """Removes extracted tool call tags from assistant response text."""
+    if not text:
+        return ""
+    if matches is None:
+        matches = _extract_tool_calls(text)
+    for m in matches:
+        text = text.replace(m.group(0), "")
+    return text.strip()
+
+
+def _escape_newlines_in_single_quotes(s: str) -> str:
+    """Escapes raw newline characters inside single- or double-quoted literals so ast.parse succeeds."""
+    out = []
+    i = 0
+    n = len(s)
+    while i < n:
+        ch = s[i]
+        if ch in ('"', "'"):
+            if s[i : i + 3] == ch * 3:
+                quote = ch * 3
+                out.append(quote)
+                i += 3
+                while i < n and s[i : i + 3] != quote:
+                    if s[i] == "\\" and i + 1 < n:
+                        out.append(s[i : i + 2])
+                        i += 2
+                    else:
+                        out.append(s[i])
+                        i += 1
+                if i < n:
+                    out.append(quote)
+                    i += 3
+                continue
+            else:
+                quote = ch
+                out.append(quote)
+                i += 1
+                while i < n and s[i] != quote:
+                    if s[i] == "\\" and i + 1 < n:
+                        out.append(s[i : i + 2])
+                        i += 2
+                    elif s[i] == "\n":
+                        out.append("\\n")
+                        i += 1
+                    elif s[i] == "\r":
+                        out.append("\\r")
+                        i += 1
+                    else:
+                        out.append(s[i])
+                        i += 1
+                if i < n:
+                    out.append(quote)
+                    i += 1
+                continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
 
 
 def _run_async_in_background_thread(coro):
@@ -173,28 +312,63 @@ def _parse_emulated_tool_call(tool_name: str, args_str: str) -> dict:
     args = []
 
     try:
-        # Try standard AST parse first
-        parsed = ast.parse(f"dummy({args_str})")
+        sanitized = _escape_newlines_in_single_quotes(args_str)
+        parsed = ast.parse(f"dummy({sanitized})")
         call_node = parsed.body[0].value
         kwargs = {kw.arg: ast.literal_eval(kw.value) for kw in call_node.keywords}
         args = [ast.literal_eval(arg) for arg in call_node.args]
     except Exception:
-        # Backup for multi-line / complex arguments (like code blocks)
         matches = TOOL_ARG_RE.findall(args_str)
-        
         if matches:
-            for key, quote, val in matches:
-                kwargs[key] = val
+            for key, quote, str_val, raw_val in matches:
+                if quote:
+                    val = (
+                        str_val.replace('\\"', '"')
+                        .replace("\\'", "'")
+                        .replace("\\n", "\n")
+                        .replace("\\t", "\t")
+                        .replace("\\\\", "\\")
+                    )
+                    kwargs[key] = val
+                else:
+                    try:
+                        kwargs[key] = ast.literal_eval(raw_val)
+                    except Exception:
+                        kwargs[key] = raw_val
         else:
-            # Backup for single raw string argument
             val = args_str.strip().strip("'\"")
             if val:
                 args = [val]
 
     # --- Parameter Alias Normalization ---
+    file_tools = {"read_file", "write_file", "replace_in_file", "replace_file_content", "multi_replace_file_content", "get_workspace_structure", "find_files"}
+    if tool_name in file_tools:
+        for alias in ("filename", "file_path", "filepath", "target_file", "AbsolutePath", "TargetFile"):
+            if alias in kwargs and "path" not in kwargs:
+                kwargs["path"] = kwargs.pop(alias)
     if tool_name == "write_file":
-        if "filename" in kwargs and "path" not in kwargs:
-            kwargs["path"] = kwargs.pop("filename")
+        if "CodeContent" in kwargs and "content" not in kwargs:
+            kwargs["content"] = kwargs.pop("CodeContent")
+    elif tool_name == "replace_in_file":
+        if "target_content" in kwargs and "old_text" not in kwargs:
+            kwargs["old_text"] = kwargs.pop("target_content")
+        if "replacement_content" in kwargs and "new_text" not in kwargs:
+            kwargs["new_text"] = kwargs.pop("replacement_content")
+    elif tool_name in ("run_shell_command", "run_command_async"):
+        for alias in ("cmd", "command_line", "CommandLine"):
+            if alias in kwargs and "command" not in kwargs:
+                kwargs["command"] = kwargs.pop(alias)
+        for alias in ("working_dir", "directory", "Cwd"):
+            if alias in kwargs and "cwd" not in kwargs:
+                kwargs["cwd"] = kwargs.pop(alias)
+    elif tool_name == "search_codebase":
+        for alias in ("query", "pattern", "Query"):
+            if alias in kwargs and "keyword" not in kwargs:
+                kwargs["keyword"] = kwargs.pop(alias)
+    elif tool_name == "find_files":
+        for alias in ("query", "name", "glob", "Pattern"):
+            if alias in kwargs and "pattern" not in kwargs:
+                kwargs["pattern"] = kwargs.pop(alias)
 
     return {"args": args, "kwargs": kwargs}
 

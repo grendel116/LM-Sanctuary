@@ -29,11 +29,13 @@ from utils.utils import (
     _build_vector_query,
     _convert_json_tool_calls_to_tags,
     _execute_emulated_tool,
+    _extract_tool_calls,
     _get_databank_contexts,
     _get_safe_local_path,
     _normalize_tool_name,
     _parse_emulated_tool_call,
     _run_async_in_background_thread,
+    _strip_tool_calls,
     is_real_user_msg,
     strip_story,
 )
@@ -568,7 +570,7 @@ class BaseProgramRunner:
         invocation_id: str,
         speaker_id: str = None,
     ) -> tuple[str, list]:
-        max_iterations = 5
+        max_iterations = 8
         iteration = 0
         all_tool_calls = []
         final_response_text = ""
@@ -585,14 +587,11 @@ class BaseProgramRunner:
             messages = _trim_context_messages(messages, max_chars=26000)
 
             # --- STAGE 2: LOCAL PROCESSING PASS ---
-            from core.program_config import is_story_mode
-
             temperature = self._load_temperature_setting()
             url = LOCAL_SERVER_URL
             headers = get_local_server_headers()
 
-            story_active = is_story_mode()
-            max_tokens_limit = 1024 if story_active else 512
+            max_tokens_limit = 2048
 
             from variables.settings import is_thinking_enabled, DISABLED_THINKING
             from core.banned_words import get_logit_bias_dict
@@ -640,7 +639,7 @@ class BaseProgramRunner:
             # --- STAGE 3: POST-PROCESSING (TOOLS & CLEANUP) ---
             bot_response_text = self._sanitize_thinking_tags(bot_response_text)
 
-            matches = list(TOOL_TAG_RE.finditer(bot_response_text))
+            matches = _extract_tool_calls(bot_response_text)
             matches, bot_response_text = self._filter_story_mode_matches(matches, bot_response_text, session_id)
 
             if matches:
@@ -675,7 +674,7 @@ class BaseProgramRunner:
                     tool_calls.extend(_build_tool_calls_pair(t_name, t_args, t_output, len(all_tool_calls) + idx))
                 all_tool_calls.extend(tool_calls)
 
-                clean_text = TOOL_TAG_STRIP_RE.sub("", bot_response_text).strip()
+                clean_text = _strip_tool_calls(bot_response_text, matches)
 
                 # Terminal / side-effect tools that do not require continued LLM turn
                 terminal_tools = {

@@ -12,6 +12,7 @@ import tools.tools as tools
 from utils.utils import (
     _MAIN_DIRECTIVE_PROMPT,
     _STORY_MODE_DIRECTIVE_PROMPT,
+    _build_vector_query,
     _merge_consecutive_messages,
 )
 
@@ -371,12 +372,13 @@ class OsHistoryAdapter(LocalHistoryAdapter):
         if memory_context:
             post_blocks.append(f"<archived_memory>\n{memory_context}\n</archived_memory>")
 
-        if last_user_msg:
+        skill_query = _build_vector_query(filtered_history) or last_user_msg
+        if skill_query:
             try:
                 from core.skill_retriever import retrieve_skill_instructions
                 skills = retrieve_skill_instructions(
-                    query=last_user_msg,
-                    story_active=is_story_mode(),
+                    query=skill_query,
+                    story_active=story_active,
                     threshold=0.35,
                     top_k=2,
                     query_vector=self.query_vector,

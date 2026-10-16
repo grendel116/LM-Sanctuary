@@ -87,7 +87,7 @@ def main():
         sys.exit(1)
 
     # Launch native desktop window
-    webview.create_window(
+    window = webview.create_window(
         title="LM-Sanctuary",
         url=server_url,
         width=1320,
@@ -96,6 +96,20 @@ def main():
         background_color="#121214",
         text_select=True
     )
+
+    def on_shown():
+        if sys.platform == "win32" and getattr(window, "native", None) and getattr(window.native, "webview", None):
+            def on_key_down(sender, args):
+                if args.Control and args.Shift and not args.Alt and int(args.KeyCode) == 82:  # Keys.R
+                    args.Handled = True
+                    if sender.CoreWebView2:
+                        sender.CoreWebView2.CallDevToolsProtocolMethodAsync("Page.reload", '{"ignoreCache": true}')
+                    else:
+                        sender.Reload()
+
+            window.native.webview.KeyDown += on_key_down
+
+    window.events.shown += on_shown
 
     # Blocks until the window closes. Shutdown runs after the window is gone, so the UI never hangs on exit.
     if sys.platform == "win32":

@@ -43,6 +43,7 @@ from variables.settings import LOCAL_SERVER_URL, get_local_server_headers, VARIA
 os.environ["ACTIVE_PROGRAM"] = get_active_program()
 
 app = Flask(__name__)
+app.config['TEMPLATES_AUTO_RELOAD'] = True
 
 # Pre-compiled regular expressions
 PROGRAM_ID_RE = re.compile(r'^[a-zA-Z0-9_\-]+$')
@@ -3263,7 +3264,9 @@ def rename_program():
             if was_active:
                 os.environ["ACTIVE_PROGRAM"] = new_id
                 settings["active_program"] = new_id
-                settings["folders"] = [new_path]
+                current_folders = settings.get("folders", [])
+                extra_folders = [f for f in current_folders[1:] if os.path.normpath(f) != os.path.normpath(new_path)]
+                settings["folders"] = [new_path] + extra_folders
                 
             if "program_voices" in settings:
                 if program_id in settings["program_voices"]:

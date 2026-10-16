@@ -18,12 +18,14 @@ import numpy as np
 
 # Module level cache for parsed and embedded skill records
 _skill_cache = None
+_skill_mtime: float = 0.0
 
 
 def invalidate_skill_cache():
     """Resets the cached skill registry, forcing a fresh parse and embed on next access."""
-    global _skill_cache
+    global _skill_cache, _skill_mtime
     _skill_cache = None
+    _skill_mtime = 0.0
 
 
 def _parse_skill_frontmatter(skill_text: str) -> tuple:
@@ -59,10 +61,7 @@ def _get_skill_registry() -> list:
     Returns a list of skill records, each containing:
         name, description, summary, retrieval, triggers, instruction_body, vector
     """
-    global _skill_cache
-    if _skill_cache is not None:
-        return _skill_cache
-
+    global _skill_cache, _skill_mtime
     base_dir = os.path.dirname(os.path.abspath(__file__))
     skills_dir = os.path.join(base_dir, "skills")
 
@@ -70,44 +69,58 @@ def _get_skill_registry() -> list:
         _skill_cache = []
         return _skill_cache
 
+    skill_files = []
+    latest_mtime = 0.0
+    for root, dirs, files in os.walk(skills_dir):
+        for file in files:
+            if file.lower() == "skill.md":
+                sp = os.path.join(root, file)
+                skill_files.append((root, sp))
+                try:
+                    mtime = os.path.getmtime(sp)
+                    if mtime > latest_mtime:
+                        latest_mtime = mtime
+                except OSError:
+                    pass
+
+    if _skill_cache is not None and latest_mtime == _skill_mtime:
+        return _skill_cache
+
     records = []
     descriptions_to_embed = []
     embed_indices = []
 
-    for root, dirs, files in os.walk(skills_dir):
-        for file in files:
-            if file.lower() == "skill.md":
-                skill_path = os.path.join(root, file)
-                try:
-                    with open(skill_path, "r", encoding="utf-8") as sf:
-                        skill_text = sf.read()
-                except Exception as e:
-                    print(f"[skill_retriever] Error reading {skill_path}: {e}")
-                    continue
+    for root, skill_path in skill_files:
+        try:
+            with open(skill_path, "r", encoding="utf-8") as sf:
+                skill_text = sf.read()
+        except Exception as e:
+            print(f"[skill_retriever] Error reading {skill_path}: {e}")
+            continue
 
-                metadata, body = _parse_skill_frontmatter(skill_text)
+        metadata, body = _parse_skill_frontmatter(skill_text)
 
-                # Parse triggers as comma separated lowercase list
-                triggers_raw = metadata.get("triggers", "")
-                triggers = [t.strip().lower() for t in triggers_raw.split(",") if t.strip()]
+        # Parse triggers as comma separated lowercase list
+        triggers_raw = metadata.get("triggers", "")
+        triggers = [t.strip().lower() for t in triggers_raw.split(",") if t.strip()]
 
-                record = {
-                    "name": metadata.get("name", os.path.basename(root)),
-                    "description": metadata.get("description", ""),
-                    "summary": metadata.get("summary", ""),
-                    "retrieval": metadata.get("retrieval", "always"),
-                    "triggers": triggers,
-                    "instruction_body": body,
-                    "vector": None,
-                }
+        record = {
+            "name": metadata.get("name", os.path.basename(root)),
+            "description": metadata.get("description", ""),
+            "summary": metadata.get("summary", ""),
+            "retrieval": metadata.get("retrieval", "always"),
+            "triggers": triggers,
+            "instruction_body": body,
+            "vector": None,
+        }
 
-                idx = len(records)
-                records.append(record)
+        idx = len(records)
+        records.append(record)
 
-                # Queue vector retrieval skills for embedding
-                if record["retrieval"] == "vector" and record["description"]:
-                    descriptions_to_embed.append(record["description"])
-                    embed_indices.append(idx)
+        # Queue vector retrieval skills for embedding
+        if record["retrieval"] == "vector" and record["description"]:
+            descriptions_to_embed.append(record["description"])
+            embed_indices.append(idx)
 
     # Batch embed all vector retrieval skill descriptions
     if descriptions_to_embed:
@@ -122,6 +135,7 @@ def _get_skill_registry() -> list:
             print(f"[skill_retriever] Embedding unavailable (relying on keyword triggers): {e}")
 
     _skill_cache = records
+    _skill_mtime = latest_mtime
     return _skill_cache
 
 
@@ -142,14 +156,15 @@ def get_toolbelt_block(story_active: bool = False) -> str:
             continue
         summary = record.get("summary", "")
         if summary:
-            lines.append(f"- {record['name']}: {summary}")
+            label = record["name"].replace("_", " ").title()
+            lines.append(f"- {label}: {summary}")
 
     if not lines:
         return ""
 
     header = (
         "# TOOLBELT\n"
-        "Available capabilities and their tool call syntax:\n"
+        "Available capabilities and the exact `[tool_name(arg=\"...\")]` tags to invoke:\n"
     )
     return header + "\n".join(lines)
 
