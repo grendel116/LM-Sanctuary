@@ -12,7 +12,6 @@ from pathlib import Path
 # --- DEFINE GLOBALS FIRST BEFORE LOCAL IMPORTS ---
 cancelled_sessions = set()
 voice_call_sessions = set()
-active_stream_state: dict[str, str] = {}
 
 import httpx
 from dotenv import load_dotenv
@@ -175,15 +174,6 @@ def clean_group_speaker_response(text: str, speaker_id: str = None, group_meta: 
 
     return text
 
-def _format_streaming_preview(raw_text: str) -> str:
-    """Extracts user-visible text from an in-progress stream by hiding protocol tags (<think>, [mood], [tool()])."""
-    cleaned = THINK_TAG_RE.sub("", raw_text)
-    cleaned = CHANNEL_TAG_RE.sub("", cleaned)
-    cleaned = re.sub(r"\[mood:\s*[a-zA-Z_]+\s*\]", "", cleaned, flags=re.IGNORECASE)
-    cleaned = TOOL_TAG_STRIP_RE.sub("", cleaned)
-    cleaned = re.sub(r"\[\w+\([^\]]*$", "", cleaned)
-    return cleaned.strip()
-
 
 def _trim_context_messages(messages: list[dict], max_chars: int | None = None) -> list[dict]:
     """Fast context trimming calculation to remain within token/char budget."""
@@ -268,68 +258,17 @@ class BaseProgramRunner:
             try:
                 client = get_http_client()
                 if session_id:
-                    req_payload = {**payload, "stream": True}
-                    req_headers = {**headers, "Accept-Encoding": "identity"}
-
-                    async with client.stream("POST", url, json=req_payload, headers=req_headers, timeout=timeout) as r:
-                        if r.status_code == 503:
-                            await r.aread()
-                            if time.time() - start_time < max_retry_time:
-                                print(f"[Local LLM] Server is loading model (503). Retrying in {retry_interval}s...", flush=True)
-                                await asyncio.sleep(retry_interval)
-                                continue
-
-                        if r.status_code != 200:
-                            await r.aread()
-                            if r.status_code == 500 and b"image input is not supported" in r.content:
-                                print("[Local LLM] Vision not supported by server. Converting payload to Image Scan tags and retrying...", flush=True)
-                                from utils.utils import scan_and_tag_image
-                                new_msgs = []
-                                for m in payload.get("messages", []):
-                                    c = m.get("content")
-                                    if isinstance(c, list):
-                                        t_parts = []
-                                        for item in c:
-                                            if item.get("type") == "text":
-                                                t_parts.append(item.get("text", ""))
-                                            elif item.get("type") == "image_url":
-                                                t_parts.append(scan_and_tag_image(item.get("image_url", {}).get("url")))
-                                        m_copy = dict(m)
-                                        m_copy["content"] = "\n\n".join(t_parts).strip()
-                                        new_msgs.append(m_copy)
-                                    else:
-                                        new_msgs.append(m)
-                                payload["messages"] = new_msgs
-                                continue
-                            return httpx.Response(status_code=r.status_code, headers=r.headers, content=r.content, request=r.request)
-
-                        content_parts = []
-                        async for line in r.aiter_lines():
+                    post_task = asyncio.create_task(client.post(url, json=payload, headers=headers, timeout=timeout))
+                    try:
+                        while not post_task.done():
                             _check_cancellation()
-
-                            line = line.strip()
-                            if not line or not line.startswith("data:"):
-                                continue
-
-                            data_str = line[5:].strip()
-                            if data_str == "[DONE]":
-                                break
-
-                            try:
-                                delta = json.loads(data_str).get("choices", [{}])[0].get("delta", {})
-                                if content := delta.get("content"):
-                                    content_parts.append(content)
-                                    active_stream_state[session_id] = _format_streaming_preview("".join(content_parts))
-                            except Exception:
-                                pass
-
-                        mock_data = {
-                            "choices": [{"message": {"role": "assistant", "content": "".join(content_parts)}}],
-                            "model": payload.get("model", ""),
-                        }
-                        return httpx.Response(status_code=200, headers=r.headers, content=json.dumps(mock_data).encode("utf-8"), request=r.request)
-
-                response = await client.post(url, json=payload, headers=headers, timeout=timeout)
+                            await asyncio.wait({post_task}, timeout=0.25)
+                        response = post_task.result()
+                    except asyncio.CancelledError:
+                        post_task.cancel()
+                        raise
+                else:
+                    response = await client.post(url, json=payload, headers=headers, timeout=timeout)
                 if response.status_code == 503:
                     if time.time() - start_time < max_retry_time:
                         print(f"[Local LLM] Server is loading model (503). Retrying in {retry_interval}s...", flush=True)
@@ -596,191 +535,187 @@ class BaseProgramRunner:
         completed_final_turn = False
         target_model = model if (model and model != "local-llm") else os.getenv("LOCAL_MODEL_NAME")
 
-        active_stream_state[session_id] = ""
-        try:
-            while iteration < max_iterations:
-                iteration += 1
+        while iteration < max_iterations:
+            iteration += 1
 
-                # --- STAGE 1: LOCAL PREPROCESSING ---
-                sys_instructions = self._get_system_instructions(
-                    session_id, inversion_directive, user_message=new_message_text, speaker_id=speaker_id
-                )
-                messages = adapter.get_openai_messages(sys_instructions, rag_context)
-                messages = _trim_context_messages(messages)
+            # --- STAGE 1: LOCAL PREPROCESSING ---
+            sys_instructions = self._get_system_instructions(
+                session_id, inversion_directive, user_message=new_message_text, speaker_id=speaker_id
+            )
+            messages = adapter.get_openai_messages(sys_instructions, rag_context)
+            messages = _trim_context_messages(messages)
 
-                # --- STAGE 2: LOCAL PROCESSING PASS ---
-                temperature = self._load_temperature_setting()
-                url = LOCAL_SERVER_URL
-                headers = get_local_server_headers()
+            # --- STAGE 2: LOCAL PROCESSING PASS ---
+            temperature = self._load_temperature_setting()
+            url = LOCAL_SERVER_URL
+            headers = get_local_server_headers()
 
-                max_tokens_limit = 2048
+            max_tokens_limit = 2048
 
-                from variables.settings import is_thinking_enabled, DISABLED_THINKING
-                from core.banned_words import get_logit_bias_dict
-                from runners import engine_llm
+            from variables.settings import is_thinking_enabled, DISABLED_THINKING
+            from core.banned_words import get_logit_bias_dict
+            from runners import engine_llm
 
-                payload = {
-                    "messages": messages,
-                    "temperature": temperature,
-                    "max_tokens": max_tokens_limit,
-                    "cache_prompt": True,
-                }
-                if not is_thinking_enabled() and isinstance(DISABLED_THINKING, dict):
-                    payload.update(DISABLED_THINKING)
-                if target_model:
-                    payload["model"] = target_model
+            payload = {
+                "messages": messages,
+                "temperature": temperature,
+                "max_tokens": max_tokens_limit,
+                "cache_prompt": True,
+            }
+            if not is_thinking_enabled() and isinstance(DISABLED_THINKING, dict):
+                payload.update(DISABLED_THINKING)
+            if target_model:
+                payload["model"] = target_model
 
-                logit_bias = get_logit_bias_dict(url)
-                if logit_bias:
-                    payload["logit_bias"] = logit_bias
+            logit_bias = get_logit_bias_dict(url)
+            if logit_bias:
+                payload["logit_bias"] = logit_bias
 
-                bot_response_text = ""
+            bot_response_text = ""
+            try:
+                response = await self._post_llm_request(url, payload, headers, timeout=120.0, session_id=session_id)
+                if response.status_code == 200:
+                    bot_response_text = response.json()["choices"][0]["message"]["content"]
+                else:
+                    bot_response_text = f"Error: {response.text}"
+                print(f"[DEBUG STATUS] {response.status_code}", flush=True)
+            except Exception as e:
+                # Query in-process engine if external server is offline
                 try:
-                    response = await self._post_llm_request(url, payload, headers, timeout=120.0, session_id=session_id)
-                    if response.status_code == 200:
-                        bot_response_text = response.json()["choices"][0]["message"]["content"]
-                    else:
-                        bot_response_text = f"Error: {response.text}"
-                    print(f"[DEBUG STATUS] {response.status_code}", flush=True)
-                except Exception as e:
-                    # Query in-process engine if external server is offline
-                    try:
-                        from runners import engine_llm
-                        if engine_llm.is_loaded():
-                            bot_response_text = await asyncio.to_thread(
-                                engine_llm.generate_text,
-                                messages,
-                                temperature,
-                                max_tokens_limit
-                            )
-                    except Exception:
-                        pass
-
-                    if not bot_response_text:
-                        bot_response_text = f"Error: Could not connect to LLM ({e}). Ensure local llama-server is running."
-
-                # --- STAGE 3: POST-PROCESSING (TOOLS & CLEANUP) ---
-                bot_response_text = self._sanitize_thinking_tags(bot_response_text)
-
-                matches = _extract_tool_calls(bot_response_text)
-                matches, bot_response_text = self._filter_story_mode_matches(matches, bot_response_text, session_id)
-
-                if matches:
-                    if session_id in cancelled_sessions:
-                        raise asyncio.CancelledError("Session cancelled by user request.")
-
-                    clean_text = _strip_tool_calls(bot_response_text, matches)
-                    if clean_text:
-                        active_stream_state[session_id] = _format_streaming_preview(clean_text)
-
-                    loop = asyncio.get_running_loop()
-                    tasks = [
-                        loop.run_in_executor(
-                            None,
-                            contextvars.copy_context().run,
-                            _execute_emulated_tool,
-                            m.group(1),
-                            m.group(2),
+                    from runners import engine_llm
+                    if engine_llm.is_loaded():
+                        bot_response_text = await asyncio.to_thread(
+                            engine_llm.generate_text,
+                            messages,
+                            temperature,
+                            max_tokens_limit
                         )
-                        for m in matches
-                    ]
-                    raw_results = await asyncio.gather(*tasks)
+                except Exception:
+                    pass
 
-                    results = [
-                        (_normalize_tool_name(m.group(1)), parsed_args["kwargs"], output)
-                        for m, (parsed_args, output) in zip(matches, raw_results)
-                    ]
+                if not bot_response_text:
+                    bot_response_text = f"Error: Could not connect to LLM ({e}). Ensure local llama-server is running."
 
-                    # Check guest tool restrictions for group sessions
-                    group_meta = self.sessions_group_meta.get(session_id)
-                    if group_meta and speaker_id and speaker_id != group_meta.get("host_id"):
-                        # Guest program speaking: block add_journal_entry to avoid contaminating host memory
-                        filtered_results = []
-                        for t_name, t_args, t_output in results:
-                            if t_name == "add_journal_entry":
-                                t_output = "Error: Journal logging is reserved for the Host program during Group Sessions."
-                            filtered_results.append((t_name, t_args, t_output))
-                        results = filtered_results
+            # --- STAGE 3: POST-PROCESSING (TOOLS & CLEANUP) ---
+            bot_response_text = self._sanitize_thinking_tags(bot_response_text)
 
-                    tool_calls = []
-                    for idx, (t_name, t_args, t_output) in enumerate(results):
-                        tool_calls.extend(_build_tool_calls_pair(t_name, t_args, t_output, len(all_tool_calls) + idx))
-                    all_tool_calls.extend(tool_calls)
+            matches = _extract_tool_calls(bot_response_text)
+            matches, bot_response_text = self._filter_story_mode_matches(matches, bot_response_text, session_id)
 
-                    # Terminal / side-effect tools that do not require continued LLM turn
-                    terminal_tools = {
-                        "add_journal_entry",
-                        "add_quest",
+            if matches:
+                if session_id in cancelled_sessions:
+                    raise asyncio.CancelledError("Session cancelled by user request.")
+
+                clean_text = _strip_tool_calls(bot_response_text, matches)
+
+                loop = asyncio.get_running_loop()
+                tasks = [
+                    loop.run_in_executor(
+                        None,
+                        contextvars.copy_context().run,
+                        _execute_emulated_tool,
+                        m.group(1),
+                        m.group(2),
+                    )
+                    for m in matches
+                ]
+                raw_results = await asyncio.gather(*tasks)
+
+                results = [
+                    (_normalize_tool_name(m.group(1)), parsed_args["kwargs"], output)
+                    for m, (parsed_args, output) in zip(matches, raw_results)
+                ]
+
+                # Check guest tool restrictions for group sessions
+                group_meta = self.sessions_group_meta.get(session_id)
+                if group_meta and speaker_id and speaker_id != group_meta.get("host_id"):
+                    # Guest program speaking: block add_journal_entry to avoid contaminating host memory
+                    filtered_results = []
+                    for t_name, t_args, t_output in results:
+                        if t_name == "add_journal_entry":
+                            t_output = "Error: Journal logging is reserved for the Host program during Group Sessions."
+                        filtered_results.append((t_name, t_args, t_output))
+                    results = filtered_results
+
+                tool_calls = []
+                for idx, (t_name, t_args, t_output) in enumerate(results):
+                    tool_calls.extend(_build_tool_calls_pair(t_name, t_args, t_output, len(all_tool_calls) + idx))
+                all_tool_calls.extend(tool_calls)
+
+                # Terminal / side-effect tools that do not require continued LLM turn
+                terminal_tools = {
+                    "add_journal_entry",
+                    "add_quest",
+                    "generate_local_image",
+                    "generate_program_portrait",
+                    "generate_general_image",
+                    "generate_imagen",
+                    "apply_comfy_workflow",
+                    "generate_video_from_image",
+                }
+                if all(t_name in terminal_tools for t_name, _, _ in results):
+                    final_response_text = clean_text
+                    image_tools = {
                         "generate_local_image",
                         "generate_program_portrait",
                         "generate_general_image",
                         "generate_imagen",
                         "apply_comfy_workflow",
-                        "generate_video_from_image",
                     }
-                    if all(t_name in terminal_tools for t_name, _, _ in results):
-                        final_response_text = clean_text
-                        image_tools = {
-                            "generate_local_image",
-                            "generate_program_portrait",
-                            "generate_general_image",
-                            "generate_imagen",
-                            "apply_comfy_workflow",
-                        }
-                        if any(t_name in image_tools for t_name, _, _ in results):
-                            msg_lower = new_message_text.lower()
-                            is_portrait_turn = any(k in msg_lower for k in ("portrait", "draw", "picture", "image", "photo", "selfie", "generate_program_portrait", "generate_local_image"))
-                            if is_portrait_turn:
-                                final_response_text = ""
-                        bot_msg = adapter.append_assistant_message(final_response_text, all_tool_calls, invocation_id, speaker_id=speaker_id)
-                        if bot_msg and isinstance(bot_msg, dict) and "text" in bot_msg:
-                            final_response_text = bot_msg["text"]
-                        completed_final_turn = True
-                        break
-
-                    group_meta = getattr(self, "sessions_group_meta", {}).get(session_id)
-                    clean_text = clean_group_speaker_response(clean_text, speaker_id, group_meta)
-                    adapter.append_assistant_message(clean_text, tool_calls, invocation_id, intermediate=True, speaker_id=speaker_id)
-                    adapter.append_tool_events(results, invocation_id)
-
-                    if clean_text:
-                        final_response_text = clean_text
-
-                    continue
-                else:
-                    group_meta = getattr(self, "sessions_group_meta", {}).get(session_id)
-                    bot_response_text = clean_group_speaker_response(bot_response_text, speaker_id, group_meta)
-
-                    clean_text = bot_response_text.strip()
-                    final_response_text = clean_text if clean_text else final_response_text
-
+                    if any(t_name in image_tools for t_name, _, _ in results):
+                        msg_lower = new_message_text.lower()
+                        is_portrait_turn = any(k in msg_lower for k in ("portrait", "draw", "picture", "image", "photo", "selfie", "generate_program_portrait", "generate_local_image"))
+                        if is_portrait_turn:
+                            final_response_text = ""
                     bot_msg = adapter.append_assistant_message(final_response_text, all_tool_calls, invocation_id, speaker_id=speaker_id)
                     if bot_msg and isinstance(bot_msg, dict) and "text" in bot_msg:
                         final_response_text = bot_msg["text"]
                     completed_final_turn = True
                     break
 
-            if not completed_final_turn:
-                bot_msg = adapter.append_assistant_message(
-                    final_response_text or "(Completed tool execution steps.)",
-                    all_tool_calls,
-                    invocation_id,
-                    speaker_id=speaker_id,
-                )
+                group_meta = getattr(self, "sessions_group_meta", {}).get(session_id)
+                clean_text = clean_group_speaker_response(clean_text, speaker_id, group_meta)
+                bot_msg = adapter.append_assistant_message(clean_text, tool_calls, invocation_id, intermediate=True, speaker_id=speaker_id)
+                adapter.append_tool_events(results, invocation_id)
+
+                if bot_msg and isinstance(bot_msg, dict) and bot_msg.get("text"):
+                    final_response_text = bot_msg["text"]
+                elif clean_text:
+                    final_response_text = clean_text
+
+                continue
+            else:
+                group_meta = getattr(self, "sessions_group_meta", {}).get(session_id)
+                bot_response_text = clean_group_speaker_response(bot_response_text, speaker_id, group_meta)
+
+                clean_text = bot_response_text.strip()
+                final_response_text = clean_text if clean_text else final_response_text
+
+                bot_msg = adapter.append_assistant_message(final_response_text, all_tool_calls, invocation_id, speaker_id=speaker_id)
                 if bot_msg and isinstance(bot_msg, dict) and "text" in bot_msg:
                     final_response_text = bot_msg["text"]
+                completed_final_turn = True
+                break
 
-            adapter.post_process_thoughts(invocation_id)
-            final_response_text = self._ensure_images_are_embedded(final_response_text)
-            if isinstance(session_id, str) and session_id.endswith("_voice"):
-                final_response_text = strip_story(final_response_text)
+        if not completed_final_turn:
+            bot_msg = adapter.append_assistant_message(
+                final_response_text or "(Completed tool execution steps.)",
+                all_tool_calls,
+                invocation_id,
+                speaker_id=speaker_id,
+            )
+            if bot_msg and isinstance(bot_msg, dict) and "text" in bot_msg:
+                final_response_text = bot_msg["text"]
 
-            prog = getattr(self, "sessions_program", {}).get(session_id) or getattr(self, "program_id", None) or get_active_program()
-            self.trigger_memory_pipeline(session_id=session_id, active_model=target_model or "", program_id=prog)
+        adapter.post_process_thoughts(invocation_id)
+        final_response_text = self._ensure_images_are_embedded(final_response_text)
+        if isinstance(session_id, str) and session_id.endswith("_voice"):
+            final_response_text = strip_story(final_response_text)
 
-            return final_response_text, all_tool_calls
-        finally:
-            active_stream_state.pop(session_id, None)
+        prog = getattr(self, "sessions_program", {}).get(session_id) or getattr(self, "program_id", None) or get_active_program()
+        self.trigger_memory_pipeline(session_id=session_id, active_model=target_model or "", program_id=prog)
+
+        return final_response_text, all_tool_calls
 
     @property
     def sessions_dir(self) -> str:

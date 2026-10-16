@@ -297,7 +297,9 @@ def parse_mood_tag(text: str) -> tuple[str, str, float]:
     else:
         intensity = 0.0 if mood_name in ("baseline", "serene", "calm") else 0.75
 
-    clean_text = text.replace(tag_str, "").strip()
+    clean_text = re.sub(r'`?\s*<mood\b[^>]*?(?:/>|>.*?</mood>|>|$)\s*`?', '', text, flags=re.IGNORECASE | re.DOTALL)
+    clean_text = re.sub(r'`?\s*</mood>\s*`?', '', clean_text, flags=re.IGNORECASE)
+    clean_text = re.sub(r'`?\s*\[mood[:\s][^\]]*\]\s*`?', '', clean_text, flags=re.IGNORECASE).strip()
     return clean_text, mood_name, max(0.0, min(1.0, round(intensity, 2)))
 
 

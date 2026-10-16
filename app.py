@@ -1788,7 +1788,6 @@ def list_images():
 @requires_auth
 def get_pending_tool_call():
     import tools.tools as tools
-    from runners.runner import active_stream_state
 
     session_id = request.args.get('session_id', 'default')
     pending = None
@@ -1803,14 +1802,12 @@ def get_pending_tool_call():
     active_list = list(tools.active_running_tools.keys())
     with tools.session_tool_calls_lock:
         session_calls = list(tools.session_tool_calls.get(session_id, []))
-    partial_text = active_stream_state.get(session_id, "")
     return jsonify({
         'call_id': pending['call_id'] if pending else None,
         'tool_name': pending['tool_name'] if pending else None,
         'details': pending['details'] if pending else None,
         'active_tools': active_list,
         'tool_calls': session_calls,
-        'partial_text': partial_text,
     })
 
 @app.route('/api/cancel_chat', methods=['POST'])
