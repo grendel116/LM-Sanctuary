@@ -252,20 +252,31 @@ def ensure_ssl_certificates() -> None:
 
 
 def ensure_llama_server_binary() -> None:
-    """Ensures the prebuilt llama-server binary matching the host GPU is downloaded."""
-    exe_name = "llama-server.exe" if os.name == "nt" else "llama-server"
-    expected_bin = BASE_DIR / "utils" / "llama-bin" / exe_name
-    if expected_bin.exists():
-        return
-
+    """Ensures the prebuilt llama-server binary matching the host GPU is downloaded and detects a GPU."""
     try:
         from runners import local_server
-        if not os.path.exists(local_server.SERVER_EXE):
-            print("[Setup] Downloading prebuilt llama-server binary for your GPU...")
-            local_server.download_llama_server()
-            gpu_type_file = os.path.join(local_server.LLAMA_BIN_DIR, "installed_gpu_type.txt")
+        gpu_type = local_server.detect_gpu_type()
+        gpu_type_file = os.path.join(local_server.LLAMA_BIN_DIR, "installed_gpu_type.txt")
+        installed_type = ""
+        if os.path.exists(gpu_type_file):
+            try:
+                with open(gpu_type_file, "r", encoding="utf-8") as f:
+                    installed_type = f.read().strip()
+            except Exception:
+                pass
+
+        if (
+            os.path.exists(local_server.SERVER_EXE)
+            and installed_type == gpu_type
+            and local_server.has_gpu_devices()
+        ):
+            return
+
+        print(f"[Setup] Downloading prebuilt llama-server binary for your GPU ({gpu_type})...")
+        local_server.stop_local_server()
+        if local_server.download_llama_server():
             with open(gpu_type_file, "w", encoding="utf-8") as f:
-                f.write(local_server.detect_gpu_type())
+                f.write(gpu_type)
     except Exception as e:
         print(f"[Setup] Note: llama-server will be downloaded on first model load ({e})")
 

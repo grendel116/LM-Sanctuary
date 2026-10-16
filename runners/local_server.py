@@ -23,16 +23,49 @@ def _get_http_session() -> requests.Session:
         _http_session = requests.Session()
     return _http_session
 
+def _has_windows_rocm_sdk() -> bool:
+    """Checks whether the full AMD ROCm/HIP BLAS runtime (hipblas.dll) is loadable on Windows.
+    Standard AMD Adrenalin display drivers install amdhip64_*.dll into System32,
+    but llama.cpp's win-rocm backend (ggml-hip.dll) also requires hipblas.dll and rocblas.dll
+    from the external AMD ROCm SDK. Without hipblas.dll, ggml-hip.dll fails LoadLibrary and
+    llama-server runs on CPU with 0 GPU devices.
+    """
+    if os.name != "nt":
+        return False
+    try:
+        import ctypes
+        ctypes.WinDLL("hipblas.dll")
+        return True
+    except Exception:
+        return False
+
+
+def has_gpu_devices() -> bool:
+    """Verifies that the installed llama-server binary enumerates at least one hardware GPU device."""
+    if not os.path.exists(SERVER_EXE):
+        return False
+    try:
+        flags = subprocess.CREATE_NO_WINDOW if (os.name == "nt" and hasattr(subprocess, "CREATE_NO_WINDOW")) else 0
+        out = subprocess.check_output(
+            [SERVER_EXE, "--list-devices"],
+            text=True,
+            stderr=subprocess.STDOUT,
+            timeout=5.0,
+            creationflags=flags,
+        )
+        return "(none)" not in out.lower() and ":" in out
+    except Exception:
+        return False
+
+
 def detect_gpu_type() -> str:
     """Detects the optimal GPU backend ('amd', 'nvidia', 'vulkan', or 'metal') for llama-server."""
     global _cached_gpu_type
     forced_gpu = (os.getenv("LOCAL_GPU_TYPE") or "").strip().lower()
     if forced_gpu in ("amd", "nvidia", "vulkan", "metal"):
-        if os.name == "nt" and forced_gpu == "amd":
-            import glob
-            if not glob.glob(r"C:\Windows\System32\amdhip64*.dll"):
-                print("[llama-runner] AMD HIP runtime DLL (amdhip64*.dll) not found in System32; using Vulkan backend for broad AMD compatibility.", flush=True)
-                return "vulkan"
+        if os.name == "nt" and forced_gpu == "amd" and not _has_windows_rocm_sdk():
+            print("[llama-runner] AMD ROCm BLAS runtime (hipblas.dll) not found; using Vulkan backend for AMD GPU acceleration.", flush=True)
+            return "vulkan"
         return forced_gpu
 
     if _cached_gpu_type:
@@ -64,8 +97,7 @@ def detect_gpu_type() -> str:
         if "nvidia" in output_lower:
             _cached_gpu_type = "nvidia"
         elif "amd" in output_lower or "radeon" in output_lower:
-            import glob
-            if glob.glob(r"C:\Windows\System32\amdhip64*.dll"):
+            if _has_windows_rocm_sdk():
                 _cached_gpu_type = "amd"
             else:
                 _cached_gpu_type = "vulkan"
@@ -78,9 +110,27 @@ def detect_gpu_type() -> str:
     _cached_gpu_type = "vulkan"
     return _cached_gpu_type
 
-def download_llama_server():
-    import sys
+
+def _download_and_extract_archive(asset: dict) -> None:
     import tarfile
+    temp_archive = os.path.join(LLAMA_BIN_DIR, asset["name"])
+    with requests.get(asset["browser_download_url"], stream=True, timeout=60.0) as r:
+        r.raise_for_status()
+        with open(temp_archive, "wb") as f:
+            for chunk in r.iter_content(65536):
+                if chunk:
+                    f.write(chunk)
+    if temp_archive.endswith(".zip"):
+        with zipfile.ZipFile(temp_archive, "r") as zip_ref:
+            zip_ref.extractall(LLAMA_BIN_DIR)
+    elif temp_archive.endswith(".tar.gz"):
+        with tarfile.open(temp_archive, "r:gz") as tar_ref:
+            tar_ref.extractall(LLAMA_BIN_DIR)
+    os.remove(temp_archive)
+
+
+def download_llama_server(override_gpu_type: str | None = None):
+    import sys
     import platform
     os.makedirs(LLAMA_BIN_DIR, exist_ok=True)
     api_url = "https://api.github.com/repos/ggml-org/llama.cpp/releases"
@@ -89,7 +139,7 @@ def download_llama_server():
         release = next(r for r in resp if len(r.get("assets", [])) > 5)
         assets = release.get("assets", [])
 
-        gpu_type = detect_gpu_type()
+        gpu_type = override_gpu_type or detect_gpu_type()
         print(f"[llama-runner] Detected GPU type: {gpu_type}", flush=True)
 
         if os.name == "nt":
@@ -106,47 +156,48 @@ def download_llama_server():
             target_keywords = ["ubuntu-vulkan-x64", "ubuntu-x64"]
 
         asset = None
+        matched_kw = None
         for kw in target_keywords:
             for a in assets:
                 name = a.get("name", "").lower()
-                if kw in name and (name.endswith(".zip") or name.endswith(".tar.gz")):
+                if name.startswith("llama-") and kw in name and (name.endswith(".zip") or name.endswith(".tar.gz")):
                     asset = a
+                    matched_kw = kw
                     break
             if asset:
                 break
 
         if not asset and os.name == "nt":
             print("[llama-runner] Target asset not found, using Vulkan build", flush=True)
-            asset = next(a for a in assets if "win-vulkan-x64" in a.get("name", "").lower() and a.get("name", "").endswith(".zip"))
+            asset = next(
+                (a for a in assets if a.get("name", "").lower().startswith("llama-") and "win-vulkan-x64" in a.get("name", "").lower() and a.get("name", "").endswith(".zip")),
+                None,
+            )
 
         if not asset:
             raise RuntimeError(f"No compatible llama-server release binary found for platform {sys.platform} ({gpu_type})")
 
-        print(f"[llama-runner] Downloading {asset['name']}...", flush=True)
-        temp_archive = os.path.join(LLAMA_BIN_DIR, asset["name"])
-        with requests.get(asset["browser_download_url"], stream=True, timeout=60.0) as r:
-            r.raise_for_status()
-            with open(temp_archive, 'wb') as f:
-                for chunk in r.iter_content(65536):
-                    if chunk:
-                        f.write(chunk)
-
         # Clean existing bin directory before extracting to prevent DLL conflicts
         for f_name in os.listdir(LLAMA_BIN_DIR):
             f_path = os.path.join(LLAMA_BIN_DIR, f_name)
-            if os.path.isfile(f_path) and f_name != asset["name"]:
+            if os.path.isfile(f_path):
                 try:
                     os.remove(f_path)
                 except Exception:
                     pass
 
-        if temp_archive.endswith(".zip"):
-            with zipfile.ZipFile(temp_archive, 'r') as zip_ref:
-                zip_ref.extractall(LLAMA_BIN_DIR)
-        elif temp_archive.endswith(".tar.gz"):
-            with tarfile.open(temp_archive, 'r:gz') as tar_ref:
-                tar_ref.extractall(LLAMA_BIN_DIR)
-        os.remove(temp_archive)
+        print(f"[llama-runner] Downloading {asset['name']}...", flush=True)
+        _download_and_extract_archive(asset)
+
+        # On Windows NVIDIA CUDA builds, also extract the companion cudart archive so cublas/cudart DLLs are present
+        if os.name == "nt" and gpu_type == "nvidia" and matched_kw and "win-cuda" in matched_kw:
+            cudart_asset = next(
+                (a for a in assets if a.get("name", "").lower().startswith("cudart-") and matched_kw in a.get("name", "").lower() and a.get("name", "").endswith(".zip")),
+                None,
+            )
+            if cudart_asset:
+                print(f"[llama-runner] Downloading CUDA runtime companion {cudart_asset['name']}...", flush=True)
+                _download_and_extract_archive(cudart_asset)
 
         # If archive extracted into a nested subfolder (e.g. build/bin/llama-server), hoist binaries to LLAMA_BIN_DIR
         if not os.path.exists(SERVER_EXE):
@@ -218,8 +269,18 @@ def start_local_server(model_key=None):
         if not model_path:
             return False, f"Model not found: {model_key}"
         
-    # Check if server is running and has this model loaded
-    if is_online is True:
+    gpu_type = detect_gpu_type()
+    gpu_type_file = os.path.join(LLAMA_BIN_DIR, "installed_gpu_type.txt")
+    installed_type = "unknown"
+    if os.path.exists(gpu_type_file):
+        try:
+            with open(gpu_type_file, "r") as f:
+                installed_type = f.read().strip()
+        except Exception:
+            pass
+
+    # Check if server is running with the expected GPU backend and has this model loaded
+    if is_online is True and installed_type == gpu_type:
         from models.models import fetch_local_models
         loaded = fetch_local_models()
         if loaded:
@@ -232,31 +293,24 @@ def start_local_server(model_key=None):
                         _current_model = model_key
                         return True, "Online (already running)"
                         
-    # If online but with another model, or booting up, stop first to be clean
+    # If online with another model, mismatched GPU backend, or booting up, stop first to be clean
     if is_online:
         stop_local_server()
         
     if not os.getenv("LOCAL_MODEL_NAME") and model_key:
         os.environ["LOCAL_MODEL_NAME"] = model_key
         
-    gpu_type = detect_gpu_type()
-    gpu_type_file = os.path.join(LLAMA_BIN_DIR, "installed_gpu_type.txt")
-    
     reinstall = False
     if not os.path.exists(SERVER_EXE):
         reinstall = True
-    else:
-        installed_type = "unknown"
-        if os.path.exists(gpu_type_file):
-            try:
-                with open(gpu_type_file, "r") as f:
-                    installed_type = f.read().strip()
-            except Exception:
-                pass
-        if installed_type != gpu_type:
-            print(f"[llama-runner] Reinstalling llama-server: installed type '{installed_type}' differs from detected GPU type '{gpu_type}'", flush=True)
-            reinstall = True
-            stop_local_server()
+    elif installed_type != gpu_type:
+        print(f"[llama-runner] Reinstalling llama-server: installed type '{installed_type}' differs from detected GPU type '{gpu_type}'", flush=True)
+        reinstall = True
+        stop_local_server()
+    elif not has_gpu_devices():
+        print(f"[llama-runner] Installed llama-server ({installed_type}) detected 0 GPU devices; reinstalling...", flush=True)
+        reinstall = True
+        stop_local_server()
             
     if reinstall:
         if not download_llama_server():
