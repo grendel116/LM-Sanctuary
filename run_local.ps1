@@ -1,27 +1,46 @@
-# LM Sanctuary: Local Windows Startup Script (PowerShell)
+# LM Sanctuary: Local Windows Startup & Bootstrap Script (PowerShell)
 
-# 1. Check for Python
-if (!(Get-Command python -ErrorAction SilentlyContinue)) {
-    Write-Host "Error: Python is not installed. Please install it from python.org" -ForegroundColor Red
-    exit
+$ErrorActionPreference = "Stop"
+
+# 1. Locate Python Interpreter (prefer 3.12 or 3.11 for full DirectML/CUDA wheel support)
+$pyCmd = $null
+if (Get-Command py -ErrorAction SilentlyContinue) {
+    foreach ($ver in @("-3.12", "-3.11", "-3")) {
+        try {
+            & py $ver --version *> $null
+            if ($LASTEXITCODE -eq 0) {
+                $pyCmd = @("py", $ver)
+                break
+            }
+        } catch {}
+    }
+}
+if (-not $pyCmd -and (Get-Command python -ErrorAction SilentlyContinue)) {
+    $pyCmd = @("python")
 }
 
-# 2. Create Virtual Environment
-if (!(Test-Path .venv)) {
-    Write-Host "--- Creating Virtual Environment ---"
-    py -3.12 -m venv .venv
+if (-not $pyCmd) {
+    Write-Host "Error: Python 3 is not installed or not on PATH. Please install Python 3.12 from https://www.python.org/" -ForegroundColor Red
+    exit 1
 }
 
-# 3. Install Dependencies
-Write-Host "--- Installing Dependencies ---"
-.\.venv\Scripts\python.exe -m pip install -q -r requirements.txt
-
-# 4. Environment Variables
-if (!(Test-Path .env)) {
-    Write-Host "--- Creating .env from .env.example ---"
-    Copy-Item .env.example .env
+# 2. Create Virtual Environment if missing
+if (!(Test-Path ".\.venv\Scripts\python.exe")) {
+    Write-Host "--- Creating Virtual Environment ($($pyCmd -join ' ')) ---" -ForegroundColor Cyan
+    if ($pyCmd.Count -gt 1) {
+        & $pyCmd[0] $pyCmd[1] -m venv .venv
+    } else {
+        & $pyCmd[0] -m venv .venv
+    }
 }
 
-# 5. Start LM Sanctuary Desktop
-Write-Host "--- Starting LM Sanctuary Desktop ---"
+# 3. Run Hardware-Aware Environment Setup (instant on subsequent runs)
+& ".\.venv\Scripts\python.exe" setup_env.py @args
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "Error: Environment setup failed." -ForegroundColor Red
+    exit 1
+}
+
+# 4. Start LM Sanctuary Desktop
+Write-Host "--- Starting LM Sanctuary Desktop ---" -ForegroundColor Green
 Start-Process -FilePath ".\.venv\Scripts\pythonw.exe" -ArgumentList "desktop.py" -WindowStyle Hidden

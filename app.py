@@ -1495,17 +1495,24 @@ def regenerate_image():
     finally:
         _image_mutex.release()
 
+_cached_portrait_tags: dict[tuple[str, str], str] = {}
+
+
 def extract_portrait_tags_from_context(session_id: str, custom_prompt: str = "") -> str:
-    """Extracts comma-separated visual tags from the latest conversation and character context
-    by querying the LLM (which automatically triggers start_llm()).
+    """Extracts comma-separated visual tags from the latest conversation and character context.
+    When the GPU is already in IMG mode (e.g., generating consecutive portraits without new chat turns),
+    reuses the cached scene tags to avoid unloading SDXL and booting llama-server back and forth.
     """
     if custom_prompt and custom_prompt.strip():
         return custom_prompt.strip()
 
+    from adapters.vram_orchestrator import get_current_mode, start_llm
     from core.program_config import _load_card_data, replace_placeholders
     from runners.program import get_active_program, get_active_user
 
     active_prog = get_active_program()
+    cache_key = (active_prog, session_id)
+
     card = _load_card_data(active_prog)
     char_name = card.get("name") or active_prog.title()
     description = replace_placeholders(card.get("description", "")).strip()
@@ -1518,13 +1525,32 @@ def extract_portrait_tags_from_context(session_id: str, custom_prompt: str = "")
     except Exception:
         pass
 
-    recent_history = chat_history[-4:] if len(chat_history) > 4 else chat_history
+    recent_history = [
+        msg for msg in chat_history
+        if msg.get("text") and not msg.get("text", "").startswith("![Portrait")
+    ][-4:]
+
+    # If the GPU is already holding the SDXL diffusion pipeline in VRAM, avoid a costly
+    # IMG -> LLM -> IMG double-swap by reusing cached tags or deriving scene tags directly.
+    if get_current_mode() == "IMG":
+        if cached := _cached_portrait_tags.get(cache_key):
+            print(f"[Portrait] Reusing cached scene tags in IMG mode (zero VRAM swap): {cached}", flush=True)
+            return cached
+        fallback_parts = ["1girl, solo"]
+        if scenario:
+            fallback_parts.append(scenario[:160])
+        elif recent_history:
+            fallback_parts.append(recent_history[-1].get("text", "")[:160])
+        synthesized = ", ".join(p.strip() for p in fallback_parts if p.strip())
+        _cached_portrait_tags[cache_key] = synthesized
+        print(f"[Portrait] Synthesized scene tags in IMG mode (zero VRAM swap): {synthesized}", flush=True)
+        return synthesized
+
     history_text = ""
     for msg in recent_history:
         role = user_name if msg.get('role') == 'user' else char_name
         text_val = msg.get('text', '')
-        if text_val and not text_val.startswith("![Portrait"):
-            history_text += f"{role}: {text_val}\n"
+        history_text += f"{role}: {text_val}\n"
 
     system_instruction = (
         "You are an expert Stable Diffusion prompt tagger. "
@@ -1549,7 +1575,6 @@ def extract_portrait_tags_from_context(session_id: str, custom_prompt: str = "")
     prompt = "\n\n".join(prompt_parts)
 
     try:
-        from adapters.vram_orchestrator import start_llm
         start_llm()
         tags = asyncio.run(runner.generate_impersonation(prompt, system_instruction, temperature=0.3))
         if tags:
@@ -1557,6 +1582,7 @@ def extract_portrait_tags_from_context(session_id: str, custom_prompt: str = "")
             tags = re.sub(r'<think>.*?</think>', '', tags, flags=re.DOTALL).strip()
             tags = tags.strip('`"\'').strip()
             if tags:
+                _cached_portrait_tags[cache_key] = tags
                 print(f"[Portrait] LLM extracted tags: {tags}", flush=True)
                 return tags
     except Exception as e:
@@ -1762,6 +1788,9 @@ def list_images():
 @requires_auth
 def get_pending_tool_call():
     import tools.tools as tools
+    from runners.runner import active_stream_state
+
+    session_id = request.args.get('session_id', 'default')
     pending = None
     for call_id, info in list(tools.pending_tool_calls.items()):
         if info['status'] == 'pending':
@@ -1772,11 +1801,16 @@ def get_pending_tool_call():
             }
             break
     active_list = list(tools.active_running_tools.keys())
+    with tools.session_tool_calls_lock:
+        session_calls = list(tools.session_tool_calls.get(session_id, []))
+    partial_text = active_stream_state.get(session_id, "")
     return jsonify({
         'call_id': pending['call_id'] if pending else None,
         'tool_name': pending['tool_name'] if pending else None,
         'details': pending['details'] if pending else None,
-        'active_tools': active_list
+        'active_tools': active_list,
+        'tool_calls': session_calls,
+        'partial_text': partial_text,
     })
 
 @app.route('/api/cancel_chat', methods=['POST'])

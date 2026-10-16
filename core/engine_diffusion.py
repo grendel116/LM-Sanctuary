@@ -459,7 +459,10 @@ def execute_workflow_graph(
             src_id, src_out_idx = val[0], val[1]
             if src_id not in executed_outputs:
                 execute_node(src_id)
-            return executed_outputs[src_id][src_out_idx]
+            src_out = executed_outputs.get(src_id)
+            if isinstance(src_out, (list, tuple)) and len(src_out) > src_out_idx:
+                return src_out[src_out_idx]
+            return None
         return val
 
     def execute_node(node_id: str) -> Any:
@@ -470,7 +473,16 @@ def execute_workflow_graph(
         class_type = node_data.get("class_type")
         if not class_type or class_type not in nodes.NODE_CLASS_MAPPINGS:
             print(f"[engine_diffusion] Skipping unmapped node [{node_id}] {class_type}")
-            return None
+            raw_inputs = node_data.get("inputs", {})
+            if "image" in raw_inputs:
+                passthrough_img = get_input_val(raw_inputs["image"])
+                executed_outputs[node_id] = (passthrough_img,)
+                return executed_outputs[node_id]
+            if "model" in raw_inputs and "clip" in raw_inputs:
+                executed_outputs[node_id] = (get_input_val(raw_inputs["model"]), get_input_val(raw_inputs["clip"]))
+                return executed_outputs[node_id]
+            executed_outputs[node_id] = (None,)
+            return executed_outputs[node_id]
 
         cls = nodes.NODE_CLASS_MAPPINGS[class_type]
         instance = cls()
@@ -512,6 +524,11 @@ def execute_workflow_graph(
             sc = resolved_inputs.get("strength_clip")
             m_in = resolved_inputs.get("model")
             c_in = resolved_inputs.get("clip")
+            if not lora_name or (not resolve_lora_path(lora_name) and not folder_paths.get_full_path("loras", lora_name)):
+                print(f"[engine_diffusion] Optional LoRA '{lora_name}' not found in models/loras; bypassing LoraLoader node.")
+                outs = (m_in, c_in)
+                executed_outputs[node_id] = outs
+                return outs
             cache_key = ("LoraLoader", lora_name, sm, sc, id(m_in), id(c_in))
             if cache_key in _COMFY_NODE_CACHE:
                 print(f"[engine_diffusion] Reusing cached LoRA weights: {lora_name}")
@@ -525,6 +542,11 @@ def execute_workflow_graph(
 
         if class_type == "UltralyticsDetectorProvider":
             m_name = resolved_inputs.get("model_name")
+            det_path = os.path.join(root_dir, "models", "ultralytics", m_name) if m_name else ""
+            if not m_name or (not os.path.exists(det_path) and not folder_paths.get_full_path("ultralytics", m_name)):
+                print(f"[engine_diffusion] Optional detector '{m_name}' not found in models/ultralytics; bypassing detector.")
+                executed_outputs[node_id] = (None,)
+                return executed_outputs[node_id]
             cache_key = ("UltralyticsDetectorProvider", m_name)
             if cache_key in _COMFY_NODE_CACHE:
                 print(f"[engine_diffusion] Reusing cached detector: {m_name}")
@@ -533,6 +555,12 @@ def execute_workflow_graph(
 
             outs = func(**resolved_inputs)
             _COMFY_NODE_CACHE[cache_key] = outs
+            executed_outputs[node_id] = outs
+            return outs
+
+        if class_type == "FaceDetailer" and resolved_inputs.get("bbox_detector") is None:
+            print("[engine_diffusion] Detector unavailable for FaceDetailer; passing decoded image through.")
+            outs = (resolved_inputs.get("image"),)
             executed_outputs[node_id] = outs
             return outs
 

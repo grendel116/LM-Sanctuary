@@ -1,25 +1,18 @@
-# Use a slim Python image
-FROM python:3.11-slim
+FROM python:3.12-slim
 
-# Set working directory
 WORKDIR /app
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y \
+# Install system dependencies (git and libsndfile1 for local audio/TTS)
+RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
+    libsndfile1 \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements (we will generate this)
-COPY requirements.txt .
+COPY requirements.txt setup_env.py ./
+RUN python setup_env.py
 
-# Install Python dependencies
-RUN pip install --no-cache-dir -r requirements.txt
-
-# Copy the source code
 COPY . .
 
-# Expose the Flask port
 EXPOSE 5000
 
-# Start the application
 CMD ["python", "app.py"]

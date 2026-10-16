@@ -7963,10 +7963,13 @@ async function animateImage(buttonElement, oldImageUrl, motionPrompt) {
 function startToolPolling() {
     if (toolPollInterval) clearInterval(toolPollInterval);
     let lastActiveToolsStr = "";
+    let isPolling = false;
     
     const pollFunc = async () => {
+        if (isPolling) return;
+        isPolling = true;
         try {
-            const response = await fetch('/pending_tool_call');
+            const response = await fetch(`/pending_tool_call?session_id=${encodeURIComponent(sessionId)}`);
             const data = await response.json();
             
             // Update activity exclamation badge on the avatar if typing indicator exists
@@ -8010,14 +8013,37 @@ function startToolPolling() {
                 
                 const bubble = typingIndicator.closest('.message.program');
                 if (bubble) {
-                    try {
-                        const logRes = await fetch(`/api/session_tool_calls?session_id=${sessionId}`);
-                        const logData = await logRes.json();
-                        if (logData.tool_calls && logData.tool_calls.length > 0) {
-                            updateLiveLogs(bubble, logData.tool_calls);
+                    if (data.tool_calls && data.tool_calls.length > 0) {
+                        updateLiveLogs(bubble, data.tool_calls);
+                    }
+
+                    let streamDiv = bubble.querySelector('.live-stream-text');
+                    if (data.partial_text && data.partial_text.trim()) {
+                        if (!streamDiv) {
+                            streamDiv = document.createElement('div');
+                            streamDiv.className = 'message-text live-stream-text';
+                            bubble.insertBefore(streamDiv, typingIndicator);
                         }
-                    } catch (e) {
-                        console.error("Error polling session tool calls:", e);
+                        if (streamDiv.dataset.rawText !== data.partial_text) {
+                            streamDiv.dataset.rawText = data.partial_text;
+                            let parsedHtml = data.partial_text;
+                            if (typeof marked !== 'undefined' && marked.parse) {
+                                try {
+                                    parsedHtml = marked.parse(data.partial_text);
+                                } catch (me) {
+                                    console.error("Marked parsing error:", me);
+                                }
+                            }
+                            streamDiv.innerHTML = parsedHtml;
+                            postProcessMessageHTML(streamDiv);
+                            if (chatContainer && (chatContainer.scrollHeight - chatContainer.scrollTop - chatContainer.clientHeight < 180)) {
+                                chatContainer.scrollTop = chatContainer.scrollHeight;
+                            }
+                        }
+                        const hasRunningTool = data.active_tools && data.active_tools.length > 0;
+                        typingIndicator.style.display = hasRunningTool ? '' : 'none';
+                    } else if (streamDiv) {
+                        typingIndicator.style.display = '';
                     }
                 }
             }
@@ -8029,11 +8055,13 @@ function startToolPolling() {
             }
         } catch (e) {
             console.error("Error polling for tool calls:", e);
+        } finally {
+            isPolling = false;
         }
     };
     
     pollFunc(); // Poll immediately
-    toolPollInterval = setInterval(pollFunc, 4000);
+    toolPollInterval = setInterval(pollFunc, 400);
 }
 
 function updateLiveLogs(bubble, toolCalls) {

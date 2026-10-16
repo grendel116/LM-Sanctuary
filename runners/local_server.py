@@ -24,34 +24,51 @@ def _get_http_session() -> requests.Session:
     return _http_session
 
 def detect_gpu_type() -> str:
-    """Detects if the system has an AMD, Nvidia, or Vulkan compatible GPU on Windows.
-    Returns 'amd', 'nvidia', or 'vulkan'.
-    """
+    """Detects the optimal GPU backend ('amd', 'nvidia', 'vulkan', or 'metal') for llama-server."""
     global _cached_gpu_type
-    forced_gpu = os.getenv("LOCAL_GPU_TYPE")
-    if forced_gpu in ("amd", "nvidia", "vulkan"):
+    forced_gpu = (os.getenv("LOCAL_GPU_TYPE") or "").strip().lower()
+    if forced_gpu in ("amd", "nvidia", "vulkan", "metal"):
+        if os.name == "nt" and forced_gpu == "amd":
+            import glob
+            if not glob.glob(r"C:\Windows\System32\amdhip64*.dll"):
+                print("[llama-runner] AMD HIP runtime DLL (amdhip64*.dll) not found in System32; using Vulkan backend for broad AMD compatibility.", flush=True)
+                return "vulkan"
         return forced_gpu
-        
+
     if _cached_gpu_type:
         return _cached_gpu_type
 
-    if os.name != 'nt':
-        _cached_gpu_type = 'vulkan'
+    import sys
+    if sys.platform == "darwin":
+        _cached_gpu_type = "metal"
         return _cached_gpu_type
 
+    if os.name != "nt":
+        try:
+            subprocess.check_output(["nvidia-smi"], stderr=subprocess.DEVNULL)
+            _cached_gpu_type = "nvidia"
+            return _cached_gpu_type
+        except Exception:
+            _cached_gpu_type = "vulkan"
+            return _cached_gpu_type
+
     try:
-        # Run PowerShell to get video controller names
         output = subprocess.check_output(
-            'powershell -Command "Get-CimInstance Win32_VideoController | Select-Object -ExpandProperty Name"',
+            'powershell -NoProfile -Command "Get-CimInstance Win32_VideoController | Select-Object -ExpandProperty Name"',
             shell=True,
             text=True,
-            stderr=subprocess.DEVNULL
+            stderr=subprocess.DEVNULL,
+            timeout=5.0,
         )
         output_lower = output.lower()
         if "nvidia" in output_lower:
             _cached_gpu_type = "nvidia"
         elif "amd" in output_lower or "radeon" in output_lower:
-            _cached_gpu_type = "amd"
+            import glob
+            if glob.glob(r"C:\Windows\System32\amdhip64*.dll"):
+                _cached_gpu_type = "amd"
+            else:
+                _cached_gpu_type = "vulkan"
         else:
             _cached_gpu_type = "vulkan"
         return _cached_gpu_type
@@ -62,45 +79,58 @@ def detect_gpu_type() -> str:
     return _cached_gpu_type
 
 def download_llama_server():
+    import sys
+    import tarfile
+    import platform
     os.makedirs(LLAMA_BIN_DIR, exist_ok=True)
     api_url = "https://api.github.com/repos/ggml-org/llama.cpp/releases"
     try:
         resp = requests.get(api_url, headers={"User-Agent": "LM-Sanctuary-Client/1.0"}, timeout=10.0).json()
         release = next(r for r in resp if len(r.get("assets", [])) > 5)
         assets = release.get("assets", [])
-        
+
         gpu_type = detect_gpu_type()
         print(f"[llama-runner] Detected GPU type: {gpu_type}", flush=True)
-        
-        if gpu_type == "amd":
-            target_keywords = ["win-rocm", "win-hip", "win-vulkan-x64"]
-        elif gpu_type == "nvidia":
-            target_keywords = ["win-cuda-12.4-x64", "win-cuda", "win-vulkan-x64"]
+
+        if os.name == "nt":
+            if gpu_type == "amd":
+                target_keywords = ["win-rocm", "win-hip", "win-vulkan-x64"]
+            elif gpu_type == "nvidia":
+                target_keywords = ["win-cuda-12.4-x64", "win-cuda", "win-vulkan-x64"]
+            else:
+                target_keywords = ["win-vulkan-x64"]
+        elif sys.platform == "darwin":
+            arch = "arm64" if platform.machine().lower() in ("arm64", "aarch64") else "x64"
+            target_keywords = [f"macos-{arch}"]
         else:
-            target_keywords = ["win-vulkan-x64"]
-            
-        # Try to find the best target asset
+            target_keywords = ["ubuntu-vulkan-x64", "ubuntu-x64"]
+
         asset = None
         for kw in target_keywords:
             for a in assets:
                 name = a.get("name", "").lower()
-                if kw in name and name.endswith(".zip"):
+                if kw in name and (name.endswith(".zip") or name.endswith(".tar.gz")):
                     asset = a
                     break
             if asset:
                 break
-                
-        if not asset:
-            print("[llama-runner] Target asset not found, falling back to Vulkan", flush=True)
+
+        if not asset and os.name == "nt":
+            print("[llama-runner] Target asset not found, using Vulkan build", flush=True)
             asset = next(a for a in assets if "win-vulkan-x64" in a.get("name", "").lower() and a.get("name", "").endswith(".zip"))
-            
+
+        if not asset:
+            raise RuntimeError(f"No compatible llama-server release binary found for platform {sys.platform} ({gpu_type})")
+
         print(f"[llama-runner] Downloading {asset['name']}...", flush=True)
-        temp_zip = os.path.join(LLAMA_BIN_DIR, asset["name"])
-        with requests.get(asset["browser_download_url"], stream=True) as r:
-            with open(temp_zip, 'wb') as f:
-                for chunk in r.iter_content(8192):
-                    f.write(chunk)
-                    
+        temp_archive = os.path.join(LLAMA_BIN_DIR, asset["name"])
+        with requests.get(asset["browser_download_url"], stream=True, timeout=60.0) as r:
+            r.raise_for_status()
+            with open(temp_archive, 'wb') as f:
+                for chunk in r.iter_content(65536):
+                    if chunk:
+                        f.write(chunk)
+
         # Clean existing bin directory before extracting to prevent DLL conflicts
         for f_name in os.listdir(LLAMA_BIN_DIR):
             f_path = os.path.join(LLAMA_BIN_DIR, f_name)
@@ -109,10 +139,34 @@ def download_llama_server():
                     os.remove(f_path)
                 except Exception:
                     pass
-                    
-        with zipfile.ZipFile(temp_zip, 'r') as zip_ref:
-            zip_ref.extractall(LLAMA_BIN_DIR)
-        os.remove(temp_zip)
+
+        if temp_archive.endswith(".zip"):
+            with zipfile.ZipFile(temp_archive, 'r') as zip_ref:
+                zip_ref.extractall(LLAMA_BIN_DIR)
+        elif temp_archive.endswith(".tar.gz"):
+            with tarfile.open(temp_archive, 'r:gz') as tar_ref:
+                tar_ref.extractall(LLAMA_BIN_DIR)
+        os.remove(temp_archive)
+
+        # If archive extracted into a nested subfolder (e.g. build/bin/llama-server), hoist binaries to LLAMA_BIN_DIR
+        if not os.path.exists(SERVER_EXE):
+            target_name = os.path.basename(SERVER_EXE)
+            for root, _, files in os.walk(LLAMA_BIN_DIR):
+                if target_name in files and os.path.abspath(root) != os.path.abspath(LLAMA_BIN_DIR):
+                    import shutil
+                    for item in os.listdir(root):
+                        src = os.path.join(root, item)
+                        dst = os.path.join(LLAMA_BIN_DIR, item)
+                        if os.path.isfile(src):
+                            shutil.move(src, dst)
+                    break
+
+        if os.name != "nt" and os.path.exists(SERVER_EXE):
+            try:
+                os.chmod(SERVER_EXE, 0o755)
+            except Exception:
+                pass
+
         print(f"[llama-runner] Successfully installed llama-server ({asset['name']})", flush=True)
         return True
     except Exception as e:
@@ -232,11 +286,15 @@ def start_local_server(model_key=None):
         "--host", "127.0.0.1",
         "-ngl", gpu_layers,
         "-np", "1",
+        "--cache-reuse", "64",
         "-fa", "on",
         "-ctk", ctk,
         "-ctv", ctv,
         "--no-warmup"
     ]
+
+    if no_mmap:
+        cmd.append("--no-mmap")
 
     from variables.settings import is_thinking_enabled
     if not is_thinking_enabled():

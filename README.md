@@ -51,18 +51,18 @@ These are the things your program can do on your computer. By default, before th
 * **Read URL** (`read_webpage`): Fetch and extract text content from any webpage.
 
 ### Generative Media Engines (Local)
-* **Native LLM Engine**: Direct GGUF loading and token inference via `llama-cpp-python` with zero external server processes or port conflicts.
-* **Native In-Process Diffusion Engine** (`generate_local_image`): Real-time GPU-accelerated diffusion directly in-process using embedded engine nodes with SDXL SafeTensors checkpoints and LoRAs. No background services or external servers required.
+* **Hardware-Aware Local LLM Engine (`llama-server`)**: Automatic GPU detection (NVIDIA CUDA, AMD ROCm/HIP, Vulkan, or Apple Metal) with automatic binary provisioning, KV prefix cache reuse (`--cache-reuse`), and real-time token streaming. Also discovers existing `.gguf` models in `~/.lmstudio/models/` automatically.
+* **Native In-Process Diffusion Engine** (`generate_local_image`): Real-time GPU-accelerated SDXL diffusion (CUDA or DirectML) using SafeTensors checkpoints and optional LoRAs, coordinated by an automatic VRAM orchestrator so LLM and Diffusion never compete for GPU memory.
 
 ---
 
 ## 📁 MODELS DIRECTORY & RECOMMENDED DOWNLOADS
 
-Place your local model weights into the `models/` directory for automatic discovery:
+You can search and download both **GGUF LLMs** and **SDXL Checkpoints** directly inside the app via the **Connection Settings (⚙️)** modal, or place your local model weights into the `models/` directory for automatic discovery:
 
-* **`models/llm/`**: Place GGUF chat models.
-* **`models/checkpoints/`**: Place Stable Diffusion / SDXL SafeTensors checkpoints (e.g. `WAI_illustrious-SDXL_16.safetensors`).
-* **`models/loras/`**: Place character or style LoRAs (`.safetensors`).
+* **`models/llm/`**: Place GGUF chat models (models inside `~/.lmstudio/models/` are also auto-detected).
+* **`models/checkpoints/`**: Place Stable Diffusion / SDXL SafeTensors checkpoints (e.g. `WAI_Illustrious-SDXL_v11.safetensors` or `sd_xl_base_1.0.safetensors`).
+* **`models/loras/`**: Place optional character or style LoRAs (`.safetensors`). Missing optional LoRAs in a workflow are bypassed automatically.
 * **`models/vae/`**: Place custom VAE weights (`.safetensors` / `.pt`).
 
 ### 🧠 Suggested GGUF LLM Models
@@ -77,9 +77,9 @@ Place your local model weights into the `models/` directory for automatic discov
 
 ## 🎭 CHAT FEATURES
 
-* **Interactive Voice Calls / Chat**: Speak with programs in real-time. Powering Kokoro ONNX voice generation, program-specific voices, and call transcript saving.
-* **Procedural Journals**: programs build dynamic journal logs (`journals.json`), preserving context and relationships across sessions.
-* **Quest Log & Calendar Export**: Integrated quest system to track and display user objectives in the UI. programs can assign quests (chores, habits, tasks) using the local `add_quest` tool. Each quest card provides a quick-action to export the task:
+* **Interactive Voice Calls / Chat**: Speak with programs in real-time. Powering Kokoro ONNX voice generation (auto-downloaded on first use), local `faster-whisper` speech recognition, program-specific voices, and call transcript saving.
+* **Procedural Journals**: Programs build dynamic journal logs (`journals.json`), preserving context and relationships across sessions.
+* **Quest Log & Calendar Export**: Integrated quest system to track and display user objectives in the UI. Programs can assign quests (chores, habits, tasks) using the local `add_quest` tool. Each quest card provides a quick-action to export the task:
   * **Download ICS**: Download a standard `.ics` file containing a `VALARM` notification alert for native desktop/mobile task/calendar clients.
 * **Program Editing, Imports & Exports**: Edit program profiles, import SillyTavern character cards (PNG & `chara_card_v3` `.json`), import World Info lorebooks (`.json`), and export cards and lorebooks back to SillyTavern format.
 * **Character Accent Palette**: Dynamic accent colors resolved from your program's profile card that automatically generate and update themed CSS variables (buttons, borders, highlights, and active states).
@@ -91,14 +91,35 @@ Place your local model weights into the `models/` directory for automatic discov
 
 ## 🚀 HOW TO RUN
 
-### Easy Way (Windows Desktop App):
-Double-click **`run_local.bat`** (or run `./run_local.ps1` in PowerShell).
-This automatically launches LM-Sanctuary in a standalone native desktop window.
+### Prerequisites
+* **Python 3.11 or 3.12** (recommended for full CUDA / DirectML GPU wheel support).
+* No C++ compiler or Visual Studio Build Tools required — prebuilt GPU binaries and wheels are installed automatically.
+
+### Easy Way (One-Click Desktop Launcher):
+* **Windows**: Double-click **`run_local.bat`** (or run `./run_local.ps1` in PowerShell).
+* **Linux / macOS**: Run `./run_local.sh`.
+
+On first launch, `setup_env.py` automatically:
+1. Creates `.venv` and `.env` (from `.env.example`) with hardware-agnostic defaults.
+2. Detects your GPU (**NVIDIA CUDA**, **AMD/Intel DirectML**, or **Linux/macOS**) and installs the matching PyTorch & runtime packages.
+3. Downloads the prebuilt `llama-server` binary matching your GPU and generates local SSL certificates if needed.
+4. On subsequent launches, `setup_env.py` verifies the install stamp in `<50ms` and opens the app immediately.
 
 ### Manual Way / Browser Mode:
-1. Open terminal in this folder.
-2. Run `python -m venv .venv` to make python environment.
-3. Run `.venv\Scripts\activate` (or `source .venv/bin/activate` on Mac/Linux).
-4. Run `pip install -r requirements.txt` to install tools.
-5. Run `python desktop.py` (for desktop window) or `python app.py` (for browser server).
-6. Browser UI is available at **`http://localhost:5000`** (or **`http://<YOUR_PC_IP>:5000`** on mobile/LAN).
+1. Open a terminal in this folder.
+2. Create and activate a virtual environment:
+   ```bash
+   python -m venv .venv
+   # Windows:
+   .venv\Scripts\activate
+   # Linux / macOS:
+   source .venv/bin/activate
+   ```
+3. Run the hardware-aware installer:
+   ```bash
+   python setup_env.py
+   ```
+   *(Pass `python setup_env.py --update` at any time to force a dependency re-check).*
+4. Launch the app:
+   * Native desktop window: `python desktop.py`
+   * Browser server: `python app.py` (available at **`http://localhost:5000`** or **`http://<YOUR_PC_IP>:5000`** on mobile/LAN).

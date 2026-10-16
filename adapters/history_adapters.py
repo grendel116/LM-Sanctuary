@@ -49,10 +49,6 @@ class LocalHistoryAdapter(ABC):
     def save(self):
         pass
 
-    async def compact_history(self, active_model: str, force: bool = False):
-        """Optional hook for history compaction."""
-        pass
-
 
 class OsHistoryAdapter(LocalHistoryAdapter):
     def __init__(self, runner_obj, session_id: str, file_path_resolved, image_data, image_mime, query_vector=None):
@@ -62,117 +58,28 @@ class OsHistoryAdapter(LocalHistoryAdapter):
         self.image_mime = image_mime
         self.query_vector = query_vector
         self.initial_history_len = len(runner_obj.sessions_history.get(session_id, []))
-        self._calculate_context_threshold()
+        self._cached_dyn_ctx = None
 
-    def _calculate_context_threshold(self):
-        """Derives local character threshold limit from environment configuration."""
-        local_context = os.getenv("LOCAL_CONTEXT")
+    def _get_max_input_tokens(self) -> int:
+        local_context = os.getenv("LOCAL_CONTEXT", "8192")
         if local_context and local_context.isdigit():
-            self.max_context_chars = int(int(local_context) * 0.30 * 4)
-        else:
-            self.max_context_chars = int(os.getenv("LOCAL_CONTEXT_THRESHOLD_CHARS", "6000"))
-
-    async def compact_history(self, active_model: str, force: bool = False):
-        """Compacts older history turns into vectorized memory chunks."""
-        history = self.runner_obj.sessions_history.get(self.session_id, [])
-        uncompacted_length = sum(len(msg.get("text") or "") for msg in history if not msg.get("compacted"))
-
-        if not force and uncompacted_length <= self.max_context_chars:
-            return
-
-        user_msg_indices = [idx for idx, msg in enumerate(history) if msg.get("role") == "user" and not msg.get("compacted")]
-        keep_turns = 2 if force else 4
-
-        if len(user_msg_indices) <= keep_turns:
-            return
-
-        cutoff_idx = user_msg_indices[-keep_turns]
-        historical_turns = history[:cutoff_idx]
-        uncompacted_turns = [msg for msg in historical_turns if not msg.get("compacted")]
-
-        summary_lines = [
-            f"{'User' if msg.get('role') == 'user' else 'Program'}: {msg.get('text', '').strip()}"
-            for msg in uncompacted_turns
-            if msg.get("role") in ("user", "program") and msg.get("text", "").strip()
-        ]
-
-        text_to_summarize = "\n".join(summary_lines)
-        if not text_to_summarize:
-            return
-
-        from core.skills.vectorized_databank.databank import DataBankManager
-        prior_texts = []
-        try:
-            db = DataBankManager()
-            priors = db.get_prior_chat_histories(self.session_id, limit=2)
-            prior_texts = [f"--- PRIOR MEMORY ARCHIVE ({p['name']}) ---\n{p['text']}" for p in priors]
-        except Exception as e:
-            print(f"[COMPACTION OS] Error fetching prior chat histories: {e}", flush=True)
-
-        summary = await self.runner_obj._generate_local_summary(text_to_summarize, active_model, prior_memories=prior_texts)
-        if summary.startswith("Memory compaction summary generation failed"):
-            summary = (
-                "Older conversation turns were pruned to free up local memory. "
-                "The full transcript of these turns has been archived in the vector database."
-            )
-
-        try:
-            db = DataBankManager()
-            db.ingest_text(
-                text=summary,
-                name=f"chat_history_archive_{self.session_id}_{int(time.time())}",
-                source_type="chat_history",
-            )
-            db.prune_chat_histories(self.session_id, keep_limit=3)
-
-            priors = db.get_prior_chat_histories(self.session_id, limit=3)
-            if len(priors) == 3 and len(priors[-1].get("text", "")) > 1200:
-                asyncio.create_task(self._background_distill(priors[-1], active_model, db))
-        except Exception as e:
-            print(f"[COMPACTION OS ERROR] Failed to ingest: {e}", flush=True)
-
-        summary_msg = {
-            "id": f"sys_{uuid.uuid4().hex}",
-            "role": "system-memory",
-            "text": f"[System Memory of older conversation turns]:\n{summary}",
-            "timestamp": time.time(),
-        }
-
-        with self.runner_obj._lock:
-            live_history = self.runner_obj.sessions_history.get(self.session_id, [])
-            last_id = historical_turns[-1].get("id") if historical_turns else None
-
-            if last_id:
-                idx = next((i for i, msg in enumerate(live_history) if msg.get("id") == last_id), -1)
-                if idx != -1:
-                    for msg in live_history[: idx + 1]:
-                        msg["compacted"] = True
-                    live_history.insert(idx + 1, summary_msg)
-
-            self.runner_obj._save_session_to_disk(self.session_id)
-
-    async def _background_distill(self, oldest_doc: dict, active_model: str, db):
-        try:
-            chronicle = await self.runner_obj._distill_epic_chronicle(oldest_doc["text"], active_model)
-            if chronicle and not chronicle.startswith("Distillation failed"):
-                db.update_memory_document(oldest_doc["name"], chronicle)
-        except Exception as e:
-            print(f"[COMPACTION OS ERROR] Background distillation failed: {e}", flush=True)
+            return max(4096, int(local_context) - 2048)
+        return 6500
 
     def _build_tiered_messages(
         self,
         system_content: str,
         raw_messages: list[dict],
         post_injection: str,
-        max_input_tokens: int = 6500
+        max_input_tokens: int | None = None
     ) -> list[dict]:
         """
-        Assembles OpenAI payload using a 4-tier context prioritization system:
-          - Tier 1 (Crucial): System Instructions, Core Directives, Latest User Query, & Post-Injection State.
-          - Tier 2 (High): Chat history turns (newest to oldest).
-          - Tier 3 (Medium): World Info / Lorebook & RAG / Knowledge Base excerpts.
-          - Tier 4 (Low): System Memory of older conversation turns.
+        Assembles OpenAI payload using a prioritized context budget:
+          - Tier 1 (Crucial): Static System Instructions & Core Directives + Latest User Query & Dynamic Post-Injection State.
+          - Tier 2 (High): Chat history turns (newest to oldest, fitting 100% of remaining budget).
         """
+        if max_input_tokens is None:
+            max_input_tokens = self._get_max_input_tokens()
         CHAR_BUDGET = max_input_tokens * 4
 
         # 1. Isolate non-system chat turns
@@ -181,9 +88,14 @@ class OsHistoryAdapter(LocalHistoryAdapter):
         # 2. Locate the actual latest user message to attach post_injection
         latest_user_idx = None
         for i in range(len(chat_turns) - 1, -1, -1):
-            if chat_turns[i].get("role") == "user":
+            if chat_turns[i].get("role") == "user" and not str(chat_turns[i].get("content", "")).startswith("[Tool Response from"):
                 latest_user_idx = i
                 break
+        if latest_user_idx is None:
+            for i in range(len(chat_turns) - 1, -1, -1):
+                if chat_turns[i].get("role") == "user":
+                    latest_user_idx = i
+                    break
 
         # Attach post-injection payload strictly to the latest user message
         # If no user message exists in history, append it to system content
@@ -197,7 +109,7 @@ class OsHistoryAdapter(LocalHistoryAdapter):
             else:
                 system_content = f"{system_content.strip()}\n\n{post_injection}"
 
-        # 3. Calculate Tier 1 core footprint
+        # 3. Calculate Tier 1 core footprint (includes post_injection on latest_user_idx)
         latest_user_len = 0
         if latest_user_idx is not None:
             user_content = chat_turns[latest_user_idx].get("content")
@@ -210,7 +122,7 @@ class OsHistoryAdapter(LocalHistoryAdapter):
                 latest_user_len = len(user_content)
 
         tier1_base_len = len(system_content) + latest_user_len
-        remaining_budget = CHAR_BUDGET - tier1_base_len
+        remaining_budget = max(0, CHAR_BUDGET - tier1_base_len)
 
         # 4. Truncate chat history from newest to oldest to fit remaining budget
         trimmed_chat_turns = []
@@ -227,7 +139,7 @@ class OsHistoryAdapter(LocalHistoryAdapter):
             )
             turn_len = len(turn_text)
 
-            if accumulated_chat_chars + turn_len <= (remaining_budget * 0.70):
+            if accumulated_chat_chars + turn_len <= remaining_budget:
                 trimmed_chat_turns.insert(0, turn)
                 accumulated_chat_chars += turn_len
             else:
@@ -271,6 +183,7 @@ class OsHistoryAdapter(LocalHistoryAdapter):
         raw_messages = []
         for idx, msg in enumerate(filtered_history):
             role = "assistant" if msg["role"] == "program" else "user"
+            msg_id = msg.get("id", "")
             content_text = replace_placeholders(msg.get("text") or "")
 
             if is_group and role == "assistant" and msg.get("sender_name"):
@@ -278,7 +191,9 @@ class OsHistoryAdapter(LocalHistoryAdapter):
                 if not content_text.startswith(f"[{s_name}]") and not content_text.startswith(f"{s_name}:"):
                     content_text = f"[{s_name}]: {content_text}"
 
-            if msg.get("tool_calls"):
+            # Only re-serialize tool call tags on intermediate (itm_) turns that directly preceded a tool response.
+            # Never append tool tags onto completed prgm_ turns, as that teaches models to emit tags after final replies.
+            if msg.get("tool_calls") and msg_id.startswith("itm_"):
                 for tc in msg["tool_calls"]:
                     if tc.get("type") == "call":
                         args_list = [
@@ -286,6 +201,18 @@ class OsHistoryAdapter(LocalHistoryAdapter):
                             for k, v in tc.get("args", {}).items()
                         ]
                         content_text += f"\n[{tc.get('name')}({', '.join(args_list)})]"
+
+            # Compact large tool outputs from completed prior turns so they do not crowd out dialogue history
+            if (
+                idx < latest_user_idx
+                and (msg_id.startswith("tool_") or content_text.startswith("[Tool Response from"))
+                and len(content_text) > 800
+            ):
+                content_text = (
+                    f"{content_text[:450]}\n"
+                    f"... [Earlier tool output compacted ({len(content_text)} chars)] ...\n"
+                    f"{content_text[-200:]}"
+                )
 
             if idx == latest_user_idx:
                 img_src = (
@@ -323,22 +250,24 @@ class OsHistoryAdapter(LocalHistoryAdapter):
 
         system_content = f"{sys_inst}{directive}"
 
-        # Tier 3: World Info / Lore
+        # Dynamic Post-Injections attached to latest user turn (Preserves System Prompt Prefix Caching)
+        post_blocks = []
+
+        # World Info / Lore (placed in post_blocks so dynamic keyword triggers do not invalidate system prompt KV cache)
         try:
             lore_before, lore_after = get_active_lore(active_prog, filtered_history)
             all_lore = (lore_before or []) + (lore_after or [])
             if all_lore:
-                system_content += f"\n\n[WORLD INFO]\n{'\n\n'.join(all_lore)}\n[END WORLD INFO]"
+                post_blocks.append(f"[WORLD INFO]\n{'\n\n'.join(all_lore)}\n[END WORLD INFO]")
         except Exception as le:
             print(f"[lorebook] Injection error: {le}")
 
-        # Tier 4: Dynamic Post-Injections attached to latest user turn (Preserves System Prompt Prefix Caching)
-        post_blocks = []
         try:
-            from core.program_config import load_dynamic_runtime_context
-            dyn_ctx = load_dynamic_runtime_context()
-            if dyn_ctx:
-                post_blocks.append(dyn_ctx.strip())
+            if self._cached_dyn_ctx is None:
+                from core.program_config import load_dynamic_runtime_context
+                self._cached_dyn_ctx = load_dynamic_runtime_context().strip()
+            if self._cached_dyn_ctx:
+                post_blocks.append(self._cached_dyn_ctx)
         except Exception:
             pass
 
@@ -388,6 +317,13 @@ class OsHistoryAdapter(LocalHistoryAdapter):
             except Exception as se:
                 print(f"[skills] Retrieval error: {se}")
 
+        if last_user_msg and ("http://" in last_user_msg or "https://" in last_user_msg):
+            post_blocks.append(
+                "# PASTED LINK DIRECTIVE\n"
+                "When a URL is present in the message, execute `[read_webpage(url=\"...\")]` to fetch the webpage. "
+                "After the webpage content is retrieved, analyze its core concepts and discuss the article's ideas directly in character."
+            )
+
         try:
             json_path = Path(PROGRAMS_DIR) / active_prog / f"{active_prog}.json"
             if json_path.is_file():
@@ -404,7 +340,6 @@ class OsHistoryAdapter(LocalHistoryAdapter):
             system_content=system_content,
             raw_messages=raw_messages,
             post_injection=full_post_injection,
-            max_input_tokens=6500
         )
 
     def append_assistant_message(self, text: str, tool_calls_data: list, invocation_id: str, intermediate: bool = False, speaker_id: str = None):
