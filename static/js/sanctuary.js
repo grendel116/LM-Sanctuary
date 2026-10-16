@@ -7614,34 +7614,26 @@ async function regenerateImage(buttonElement, oldImageUrl, prompt) {
             await loadServerImages();
 
             // Re-render Activity Log in completed ("Ran...") state
-            try {
-                const bubble = buttonElement.closest('.message.program');
-                if (bubble) {
-                    const logRes = await fetch(`/api/session_tool_calls?session_id=${sessionId}`);
-                    const logData = await logRes.json();
-                    if (logData.tool_calls && logData.tool_calls.length > 0) {
-                        // Convert Python session tool calls to formatted logs
-                        const formattedToolCalls = [];
-                        logData.tool_calls.forEach(tc => {
-                            formattedToolCalls.push({
-                                type: 'call',
-                                name: tc.name,
-                                args: tc.args ? { prompt: tc.args } : {},
-                                id: tc.id
-                            });
-                            formattedToolCalls.push({
-                                type: 'response',
-                                name: tc.name,
-                                response: tc.response || '',
-                                id: tc.id
-                            });
-                        });
-                        const totalDur = logData.tool_calls.reduce((sum, tc) => sum + (tc.duration || 0), 0);
-                        renderCompletedLogs(bubble, formattedToolCalls, totalDur ? Math.round(totalDur * 10) / 10 : null);
-                    }
-                }
-            } catch (err) {
-                console.error("Error finalizing activity logs after reroll:", err);
+            const bubble = buttonElement.closest('.message.program');
+            const rerollCalls = data.tool_calls || [];
+            if (bubble && rerollCalls.length > 0) {
+                const formattedToolCalls = [];
+                rerollCalls.forEach(tc => {
+                    formattedToolCalls.push({
+                        type: 'call',
+                        name: tc.name,
+                        args: tc.args ? { prompt: tc.args } : {},
+                        id: tc.id
+                    });
+                    formattedToolCalls.push({
+                        type: 'response',
+                        name: tc.name,
+                        response: tc.response || '',
+                        id: tc.id
+                    });
+                });
+                const totalDur = rerollCalls.reduce((sum, tc) => sum + (tc.duration || 0), 0);
+                renderCompletedLogs(bubble, formattedToolCalls, totalDur ? Math.round(totalDur * 10) / 10 : null);
             }
         } else {
             let errorMsg = data.error || 'Unknown error';

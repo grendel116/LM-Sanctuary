@@ -62,6 +62,12 @@ RAW_IMAGE_PATH_RE = re.compile(
 )
 PASTED_LINK_RE = re.compile(r"https?://[^\s>)]+")
 
+
+def _media_url_pattern(path: str) -> str:
+    """Regex for a stored media path together with any query string that trails it."""
+    return re.escape(path.split("?", 1)[0]) + r"(?:\?[^)\s]*)?"
+
+
 # --- PERSISTENT HTTP CLIENT POOL ---
 _http_client: httpx.AsyncClient | None = None
 _http_client_loop: asyncio.AbstractEventLoop | None = None
@@ -1943,7 +1949,7 @@ class OpenSourceRunner(BaseProgramRunner):
 
                 modified = False
                 indices_to_delete = set()
-                pattern = r"!\[[^\]]*\]\(" + re.escape(image_url) + r"\)"
+                pattern = r"!\[[^\]]*\]\(" + _media_url_pattern(image_url) + r"\)"
 
                 for i, msg in enumerate(history):
                     has_image = False
@@ -2019,21 +2025,24 @@ class OpenSourceRunner(BaseProgramRunner):
                 if history is None:
                     return False
 
+                old_url_re = re.compile(_media_url_pattern(old_image_url))
+                old_path = old_image_url.split("?", 1)[0]
+
                 modified = False
                 for msg in history:
-                    if msg.get("text") and old_image_url in msg["text"]:
-                        msg["text"] = msg["text"].replace(old_image_url, new_image_url)
+                    if msg.get("text") and old_path in msg["text"]:
+                        msg["text"] = old_url_re.sub(new_image_url, msg["text"])
                         modified = True
 
-                    if msg.get("image_url") == old_image_url:
+                    if msg.get("image_url") and msg["image_url"].split("?", 1)[0] == old_path:
                         msg["image_url"] = new_image_url
                         modified = True
 
                     if tool_calls := msg.get("tool_calls"):
                         call_ids_to_update = set()
                         for tc in tool_calls:
-                            if tc.get("type") == "response" and tc.get("response") and old_image_url in tc["response"]:
-                                tc["response"] = tc["response"].replace(old_image_url, new_image_url)
+                            if tc.get("type") == "response" and tc.get("response") and old_path in tc["response"]:
+                                tc["response"] = old_url_re.sub(new_image_url, tc["response"])
                                 modified = True
                                 if tc.get("id"):
                                     call_ids_to_update.add(tc["id"])

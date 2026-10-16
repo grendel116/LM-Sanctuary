@@ -1582,7 +1582,7 @@ def generate_local_image(prompt: str) -> str:
                 json.dump({"prompt": prompt, "full_prompt": final_prompt, "engine": "in_process_gpu"}, jf, indent=4)
         except Exception:
             pass
-        return f"![Portrait](/images/portraits/{local_filename}?v={timestamp})"
+        return f"![Portrait](/images/portraits/{local_filename})"
     except Exception as e:
         print(f"[engine_diffusion] Error generating portrait: {e}")
         return f"Error generating portrait: {e}"

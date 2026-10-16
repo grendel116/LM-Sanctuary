@@ -291,6 +291,17 @@ def prepare_generation_request(session_id, use_imagen=False, is_voice_call=False
     if is_voice_call:
         voice_call_sessions.add(session_id)
 
+
+def finish_generation_request(session_id) -> list:
+    """Close out the live tool activity for a finished request and return what ran.
+
+    The live activity list holds only the request in flight, so the next turn's
+    first poll starts from an empty list.
+    """
+    import tools.tools as tools
+    with tools.session_tool_calls_lock:
+        return tools.session_tool_calls.pop(session_id, [])
+
 def sanitize_response(response_text: str, session_id: str, program_msg_id: str) -> str:
     """Cleans or processes the generated response text before sending it to the client."""
     if not response_text:
@@ -1046,6 +1057,7 @@ def chat():
         print(f"Error occurred in chat: {e}")
         return jsonify({'error': str(e)}), 500
     finally:
+        finish_generation_request(session_id)
         from runners.runner import cancelled_sessions, voice_call_sessions
         cancelled_sessions.discard(session_id)
         voice_call_sessions.discard(session_id)
@@ -1097,6 +1109,7 @@ def edit():
         print(f"Error occurred during edit: {e}")
         return jsonify({'error': str(e)}), 500
     finally:
+        finish_generation_request(session_id)
         from runners.runner import cancelled_sessions
         cancelled_sessions.discard(session_id)
 
@@ -1211,15 +1224,8 @@ def delete_message():
 def continue_generation():
     session_id = request.json.get('session_id', 'default')
     model = request.json.get('model')
-    
-    import tools.tools as tools
-    tools.current_session_id.set(session_id)
-    tools.current_use_imagen.set(request.json.get('use_imagen', False))
-    with tools.session_tool_calls_lock:
-        tools.session_tool_calls[session_id] = []
 
-    from runners.runner import cancelled_sessions
-    cancelled_sessions.discard(session_id)
+    prepare_generation_request(session_id, use_imagen=request.json.get('use_imagen', False))
     start_time = time.time()
     
     try:
@@ -1345,6 +1351,7 @@ def continue_generation():
         print(f"Error in continue_generation: {e}")
         return jsonify({'error': str(e)}), 500
     finally:
+        finish_generation_request(session_id)
         from runners.runner import cancelled_sessions
         cancelled_sessions.discard(session_id)
 
@@ -1485,7 +1492,8 @@ def regenerate_image():
         if success:
             return jsonify({
                 'status': 'success',
-                'new_image_url': new_image_url
+                'new_image_url': new_image_url,
+                'tool_calls': finish_generation_request(session_id),
             })
         else:
             return jsonify({'error': 'Original image not found in session'}), 404
@@ -1493,6 +1501,7 @@ def regenerate_image():
         print(f"Error regenerating image in session {session_id}: {e}")
         return jsonify({'error': str(e)}), 500
     finally:
+        finish_generation_request(session_id)
         _image_mutex.release()
 
 _cached_portrait_tags: dict[tuple[str, str], str] = {}
@@ -1649,6 +1658,7 @@ def api_generate_portrait():
         print(f"Error generating direct portrait: {e}")
         return jsonify({'error': str(e)}), 500
     finally:
+        finish_generation_request(session_id)
         _image_mutex.release()
 
 
@@ -1827,15 +1837,6 @@ def cancel_chat():
         pass
         
     return jsonify({'status': 'success'})
-
-@app.route('/api/session_tool_calls', methods=['GET'])
-@requires_auth
-def get_session_tool_calls():
-    session_id = request.args.get('session_id', 'default')
-    import tools.tools as tools
-    with tools.session_tool_calls_lock:
-        calls = tools.session_tool_calls.get(session_id, [])
-        return jsonify({'tool_calls': list(calls)})
 
 @app.route('/approve_tool', methods=['POST'])
 @requires_auth
