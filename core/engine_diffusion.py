@@ -472,17 +472,10 @@ def execute_workflow_graph(
         node_data = graph[node_id]
         class_type = node_data.get("class_type")
         if not class_type or class_type not in nodes.NODE_CLASS_MAPPINGS:
-            print(f"[engine_diffusion] Skipping unmapped node [{node_id}] {class_type}")
-            raw_inputs = node_data.get("inputs", {})
-            if "image" in raw_inputs:
-                passthrough_img = get_input_val(raw_inputs["image"])
-                executed_outputs[node_id] = (passthrough_img,)
-                return executed_outputs[node_id]
-            if "model" in raw_inputs and "clip" in raw_inputs:
-                executed_outputs[node_id] = (get_input_val(raw_inputs["model"]), get_input_val(raw_inputs["clip"]))
-                return executed_outputs[node_id]
-            executed_outputs[node_id] = (None,)
-            return executed_outputs[node_id]
+            raise RuntimeError(
+                f"Workflow node [{node_id}] '{class_type}' is not registered. "
+                f"Install the custom node pack that provides it into core/comfy_engine/custom_nodes."
+            )
 
         cls = nodes.NODE_CLASS_MAPPINGS[class_type]
         instance = cls()
@@ -542,11 +535,11 @@ def execute_workflow_graph(
 
         if class_type == "UltralyticsDetectorProvider":
             m_name = resolved_inputs.get("model_name")
-            det_path = os.path.join(root_dir, "models", "ultralytics", m_name) if m_name else ""
-            if not m_name or (not os.path.exists(det_path) and not folder_paths.get_full_path("ultralytics", m_name)):
-                print(f"[engine_diffusion] Optional detector '{m_name}' not found in models/ultralytics; bypassing detector.")
-                executed_outputs[node_id] = (None,)
-                return executed_outputs[node_id]
+            if not m_name or not folder_paths.get_full_path("ultralytics", m_name):
+                raise FileNotFoundError(
+                    f"Detector model '{m_name}' not found. Expected at "
+                    f"{os.path.join(root_dir, 'models', 'ultralytics', m_name or '')}"
+                )
             cache_key = ("UltralyticsDetectorProvider", m_name)
             if cache_key in _COMFY_NODE_CACHE:
                 print(f"[engine_diffusion] Reusing cached detector: {m_name}")
@@ -555,12 +548,6 @@ def execute_workflow_graph(
 
             outs = func(**resolved_inputs)
             _COMFY_NODE_CACHE[cache_key] = outs
-            executed_outputs[node_id] = outs
-            return outs
-
-        if class_type == "FaceDetailer" and resolved_inputs.get("bbox_detector") is None:
-            print("[engine_diffusion] Detector unavailable for FaceDetailer; passing decoded image through.")
-            outs = (resolved_inputs.get("image"),)
             executed_outputs[node_id] = outs
             return outs
 

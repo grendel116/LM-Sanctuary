@@ -20,6 +20,13 @@ REQUIREMENTS_FILE = BASE_DIR / "requirements.txt"
 ENV_FILE = BASE_DIR / ".env"
 ENV_EXAMPLE_FILE = BASE_DIR / ".env.example"
 STAMP_FILE = Path(sys.prefix) / ".sanctuary_install_stamp"
+CUSTOM_NODES_DIR = BASE_DIR / "core" / "comfy_engine" / "custom_nodes"
+
+# ComfyUI custom node packs required by core/skills/portrait_generation/ImageWorkflow.json
+CUSTOM_NODE_PACKS = {
+    "ComfyUI-Impact-Pack": "429d0159ad429e64d2b3916e6e7be9c22d025c3c",
+    "ComfyUI-Impact-Subpack": "50c7b71a6a224734cc9b21963c6d1926816a97f1",
+}
 
 REQUIRED_IMPORT_SPECS = (
     "flask",
@@ -58,6 +65,13 @@ REQUIRED_IMPORT_SPECS = (
     "aiohttp",
     "yaml",
     "tqdm",
+    "ultralytics",
+    "segment_anything",
+    "skimage",
+    "cv2",
+    "piexif",
+    "dill",
+    "matplotlib",
 )
 
 
@@ -281,10 +295,50 @@ def ensure_llama_server_binary() -> None:
         print(f"[Setup] Note: llama-server will be downloaded on first model load ({e})")
 
 
+def ensure_custom_nodes() -> None:
+    """Downloads the ComfyUI custom node packs used by ImageWorkflow.json at pinned commits."""
+    import io
+    import urllib.request
+    import zipfile
+
+    for name, sha in CUSTOM_NODE_PACKS.items():
+        target = CUSTOM_NODES_DIR / name
+        marker = target / ".sanctuary_commit"
+        if marker.exists() and marker.read_text(encoding="utf-8").strip() == sha:
+            continue
+
+        print(f"[Setup] Installing custom node pack {name} ({sha[:7]})...")
+        url = f"https://github.com/ltdrdata/{name}/archive/{sha}.zip"
+        with urllib.request.urlopen(url, timeout=60) as resp:
+            archive = zipfile.ZipFile(io.BytesIO(resp.read()))
+
+        if target.exists():
+            shutil.rmtree(target)
+        CUSTOM_NODES_DIR.mkdir(parents=True, exist_ok=True)
+        archive.extractall(CUSTOM_NODES_DIR)
+        (CUSTOM_NODES_DIR / f"{name}-{sha}").rename(target)
+        marker.write_text(sha, encoding="utf-8")
+
+
+def ensure_detector_models() -> None:
+    """Downloads the face detector model used by ImageWorkflow.json's FaceDetailer."""
+    import urllib.request
+
+    target = BASE_DIR / "models" / "ultralytics" / "bbox" / "face_yolov8m.pt"
+    if target.exists():
+        return
+    print("[Setup] Downloading face detector model (face_yolov8m.pt)...")
+    partial = target.with_suffix(".part")
+    urllib.request.urlretrieve("https://huggingface.co/Bingsu/adetailer/resolve/main/face_yolov8m.pt", partial)
+    partial.rename(target)
+
+
 def main() -> int:
     force = "--force" in sys.argv or "--update" in sys.argv
     ensure_directories_and_env()
     install_dependencies(force=force)
+    ensure_custom_nodes()
+    ensure_detector_models()
     ensure_ssl_certificates()
     ensure_llama_server_binary()
     return 0

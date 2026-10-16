@@ -35,3 +35,11 @@ kornia
 aiohttp
 PyYAML
 tqdm
+# Impact Pack + Impact Subpack (FaceDetailer, UltralyticsDetectorProvider)
+ultralytics>=8.3.162
+segment-anything
+scikit-image
+opencv-python-headless
+piexif
+dill
+matplotlib
