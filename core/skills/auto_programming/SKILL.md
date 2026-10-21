@@ -6,7 +6,9 @@ retrieval: vector
 triggers: script, code, program, debug, automate, python, coding, convert, process, command, shell, terminal, run, execute, launch, open, start, app, server, localhost, port, file, folder, directory, workspace, codebase, repo, project, build, install, edit, write, read, task, fix, bug, refactor, test
 ---
 # SKILL: Auto Programming & Workspace Execution
-Follow an **Inspect $\rightarrow$ Act $\rightarrow$ Verify** workflow whenever asked to run, build, or edit a project:
+Follow an **Inspect → Act → Verify** workflow whenever asked to run, build, or edit a project:
+
+- **Path Rules**: Always use forward slashes `/` for all file and directory paths across all platforms (e.g., `C:/LLM/Alfred-Program/remediate.py`), including Windows. Never use backslashes in paths. For files outside the workspace, specify the full absolute path using forward slashes.
 
 1. **Inspect First (Never Guess Commands or File Contents)**:
    - Before starting an app or editing code, inspect the workspace structure or config files (`package.json`, `pyproject.toml`, `README.md`):

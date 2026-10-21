@@ -304,6 +304,43 @@ def _normalize_tool_name(tool_name: str) -> str:
     return TOOL_ALIASES.get(tool_name, tool_name)
 
 
+def _normalize_tool_call_paths(tool_name: str, args_str: str) -> str:
+    r"""Normalizes Windows backslashes in file/directory path arguments to forward slashes
+    so Python AST parsing never corrupts path characters into escape sequences (e.g. \r, \a, \u).
+    """
+    file_tools = {
+        "read_file", "write_file", "replace_in_file", "replace_file_content",
+        "multi_replace_file_content", "get_workspace_structure", "find_files"
+    }
+
+    # 1. Quoted Windows drive paths: e.g. "C:\foo\bar" -> "C:/foo/bar"
+    def fix_drive_path(m):
+        return m.group(1) + m.group(2).replace("\\", "/")
+
+    normalized = re.sub(r'(["\'])([a-zA-Z]:[\\/][^"\']*)', fix_drive_path, args_str)
+
+    # 2. Named path parameters: path="...", cwd="...", etc.
+    path_param_re = re.compile(
+        r'(\b(?:path|filename|file_path|filepath|target_file|cwd|directory|working_dir)\s*=\s*)(["\'])(.*?)\2',
+        re.DOTALL
+    )
+    def fix_param_path(m):
+        return m.group(1) + m.group(2) + m.group(3).replace("\\", "/") + m.group(2)
+
+    normalized = path_param_re.sub(fix_param_path, normalized)
+
+    # 3. Positional path arguments for file tools
+    if tool_name in file_tools:
+        pos_match = re.match(r'^\s*(["\'])(.*?)\1', normalized)
+        if pos_match:
+            quote = pos_match.group(1)
+            val = pos_match.group(2)
+            if "\\" in val:
+                normalized = f"{quote}{val.replace('\\', '/')}{quote}" + normalized[pos_match.end():]
+
+    return normalized
+
+
 def _parse_emulated_tool_call(tool_name: str, args_str: str) -> dict:
     """Parses tool call argument strings safely into dictionary structures, 
     handling multi-line code blocks and parameter aliases.
@@ -312,7 +349,8 @@ def _parse_emulated_tool_call(tool_name: str, args_str: str) -> dict:
     args = []
 
     try:
-        sanitized = _escape_newlines_in_single_quotes(args_str)
+        sanitized = _normalize_tool_call_paths(tool_name, args_str)
+        sanitized = _escape_newlines_in_single_quotes(sanitized)
         parsed = ast.parse(f"dummy({sanitized})")
         call_node = parsed.body[0].value
         kwargs = {kw.arg: ast.literal_eval(kw.value) for kw in call_node.keywords}
