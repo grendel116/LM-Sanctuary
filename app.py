@@ -747,20 +747,22 @@ def proactive_action():
         personality = ""
         scenario = ""
         
-        # Read active program JSON config
-        for filename in [f"{active_program}.json", "character_profile.json"]:
-            json_path = os.path.join(program_path, filename)
-            if os.path.exists(json_path):
+        # Read active program card (chara_card_v3 `data` block, with legacy `operation` fallback)
+        from core.program_config import _load_card_data
+        card = _load_card_data(active_program)
+        if not card:
+            legacy_path = os.path.join(program_path, "character_profile.json")
+            if os.path.exists(legacy_path):
                 try:
-                    with open(json_path, 'r', encoding='utf-8') as f:
-                        data = json.load(f)
-                        name = data.get('name', name)
-                        op = data.get('operation', {})
-                        description = op.get('description', '')
-                        personality = op.get('personality', '')
-                        scenario = op.get('scenario', '')
+                    with open(legacy_path, 'r', encoding='utf-8') as f:
+                        card = json.load(f)
                 except Exception as ex:
                     print(f"Error reading program config for proactive action: {ex}")
+        op = card.get('operation', card)
+        name = card.get('name', name)
+        description = op.get('description', '')
+        personality = op.get('personality', '')
+        scenario = op.get('scenario', '')
                     
         # Get active user profile
         from runners.program import get_active_user

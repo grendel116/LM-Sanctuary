@@ -111,7 +111,10 @@ def load_program_inversion(program_id: str | None = None) -> dict:
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
-            return data if isinstance(data, dict) else {}
+            if not isinstance(data, dict):
+                return {}
+            # Parsed mood tags are lowercased, so keys must be too
+            return {str(k).strip().lower(): v for k, v in data.items()}
     except (OSError, json.JSONDecodeError):
         return {}
 
