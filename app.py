@@ -1287,6 +1287,8 @@ def continue_generation():
             # Delete the temporary turn
             if user_msg_id:
                 asyncio.run(runner.delete_message_at(session_id, user_msg_id))
+            if program_msg_id:
+                asyncio.run(runner.delete_message_at(session_id, program_msg_id))
             
             # Merge continuation text dynamically
             if last_program_text.endswith('\n') or response_text.startswith('\n'):
