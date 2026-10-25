@@ -112,11 +112,84 @@ if args.deterministic:
     torch.use_deterministic_algorithms(True, warn_only=True)
 
 directml_enabled = False
+_directml_vram_bytes: int | None = None
+
+
+def _detect_directml_vram_bytes(device_index: int = 0) -> int:
+    global _directml_vram_bytes
+    if _directml_vram_bytes is not None:
+        return _directml_vram_bytes
+
+    dml_name = ""
+    try:
+        import torch_directml
+        idx = 0 if device_index is None or device_index < 0 else int(device_index)
+        dml_name = torch_directml.device_name(idx).replace("\x00", "").strip().lower()
+    except Exception:
+        pass
+
+    matched_vram = 0
+    max_vram = 0
+    if os.name == "nt":
+        try:
+            import winreg
+            display_key_path = r"SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}"
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, display_key_path) as base_key:
+                subkey_count = winreg.QueryInfoKey(base_key)[0]
+                for i in range(subkey_count):
+                    subkey_name = winreg.EnumKey(base_key, i)
+                    if not subkey_name.isdigit():
+                        continue
+                    try:
+                        with winreg.OpenKey(base_key, subkey_name) as subkey:
+                            desc = ""
+                            try:
+                                desc_val, _ = winreg.QueryValueEx(subkey, "DriverDesc")
+                                desc = str(desc_val).replace("\x00", "").strip().lower()
+                            except OSError:
+                                pass
+
+                            vram_bytes = 0
+                            for val_name in ("HardwareInformation.qwMemorySize", "HardwareInformation.MemorySize"):
+                                try:
+                                    raw_val, _ = winreg.QueryValueEx(subkey, val_name)
+                                    if isinstance(raw_val, int):
+                                        vram_bytes = raw_val
+                                    elif isinstance(raw_val, (bytes, bytearray)) and len(raw_val) in (4, 8):
+                                        vram_bytes = int.from_bytes(raw_val, byteorder="little", signed=False)
+                                    if vram_bytes > 0:
+                                        break
+                                except OSError:
+                                    continue
+
+                            if vram_bytes > max_vram:
+                                max_vram = vram_bytes
+                            if dml_name and desc and (desc in dml_name or dml_name in desc):
+                                if vram_bytes > matched_vram:
+                                    matched_vram = vram_bytes
+                    except OSError:
+                        continue
+        except Exception:
+            pass
+
+    detected = matched_vram or max_vram or (8 * 1024 * 1024 * 1024)
+    _directml_vram_bytes = int(detected)
+    return _directml_vram_bytes
+
+
 try:
     import torch_directml
     if not torch.cuda.is_available():
         directml_enabled = True
         directml_device = torch_directml.device()
+        lowvram_available = _detect_directml_vram_bytes(0) < (10 * 1024 * 1024 * 1024)
+        logging.info(
+            "Using directml with device: {} ({:0.0f} MB VRAM, lowvram_available={})".format(
+                torch_directml.device_name(0).replace("\x00", "").strip(),
+                _detect_directml_vram_bytes(0) / (1024 * 1024),
+                lowvram_available,
+            )
+        )
 except Exception:
     pass
 
@@ -128,9 +201,8 @@ if args.directml is not None:
         directml_device = torch_directml.device()
     else:
         directml_device = torch_directml.device(device_index)
+    lowvram_available = _detect_directml_vram_bytes(device_index) < (10 * 1024 * 1024 * 1024)
     logging.info("Using directml with device: {}".format(torch_directml.device_name(device_index)))
-    # torch_directml.disable_tiled_resources(True)
-    lowvram_available = False #TODO: need to find a way to get free memory in directml before this can be enabled by default.
 
 
 try:
@@ -333,7 +405,7 @@ def get_total_memory(dev=None, torch_total_too=False):
         mem_total_torch = mem_total
     else:
         if directml_enabled:
-            mem_total = 24 * 1024 * 1024 * 1024
+            mem_total = _detect_directml_vram_bytes(getattr(dev, "index", 0) or 0)
             mem_total_torch = mem_total
         elif is_intel_xpu():
             stats = torch.xpu.memory_stats(dev)
@@ -479,7 +551,7 @@ try:
         if torch_version_numeric[0] >= 2:
             if ENABLE_PYTORCH_ATTENTION == False and args.use_split_cross_attention == False and args.use_quad_cross_attention == False:
                 ENABLE_PYTORCH_ATTENTION = True
-    if is_intel_xpu() or is_ascend_npu() or is_mlu() or is_ixuca():
+    if is_intel_xpu() or is_ascend_npu() or is_mlu() or is_ixuca() or directml_enabled:
         if args.use_split_cross_attention == False and args.use_quad_cross_attention == False:
             ENABLE_PYTORCH_ATTENTION = True
 except:
@@ -1774,8 +1846,15 @@ def get_free_memory(dev=None, torch_free_too=False):
         mem_free_torch = mem_free_total
     else:
         if directml_enabled:
-            mem_free_total = 6 * 1024 * 1024 * 1024
-            mem_free_torch = mem_free_total
+            total_mem = get_total_memory(dev)
+            loaded_bytes = sum(
+                m.model_loaded_memory()
+                for m in current_loaded_models
+                if m.model is not None and m.device == dev
+            )
+            reserve_bytes = int(3 * 1024**3) if total_mem >= (12 * 1024**3) else int(1.5 * 1024**3)
+            mem_free_total = max(int(1.5 * 1024**3), total_mem - loaded_bytes - reserve_bytes)
+            mem_free_torch = 0
         elif is_intel_xpu():
             stats = torch.xpu.memory_stats(dev)
             mem_active = stats['active_bytes.all.current']

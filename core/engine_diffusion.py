@@ -402,7 +402,8 @@ def execute_workflow_graph(
     replacements: Optional[Dict[str, Any]] = None,
     save_path: Optional[str] = None,
     save_paths: Optional[List[str]] = None,
-    batch_size: int = 1
+    batch_size: int = 1,
+    empty_cache_after: bool = True
 ) -> Tuple[Optional[Any], Any]:
     """Dynamically executes any ComfyUI node graph JSON in-process with AMD DirectML GPU acceleration."""
     comfy_dir = os.path.normpath(os.path.join(root_dir, "core", "comfy_engine"))
@@ -623,18 +624,19 @@ def execute_workflow_graph(
     # Explicitly release intermediate tensor references
     executed_outputs.clear()
     del final_images
-    gc.collect()
-    try:
-        import comfy.model_management as mm
-        mm.soft_empty_cache()
-    except Exception:
-        pass
-    try:
-        import torch_directml
-        if hasattr(torch_directml, "empty_cache"):
-            torch_directml.empty_cache()
-    except Exception:
-        pass
+    if empty_cache_after:
+        gc.collect()
+        try:
+            import comfy.model_management as mm
+            mm.soft_empty_cache()
+        except Exception:
+            pass
+        try:
+            import torch_directml
+            if hasattr(torch_directml, "empty_cache"):
+                torch_directml.empty_cache()
+        except Exception:
+            pass
 
     if save_paths is not None:
         return result_image, saved_paths
@@ -687,7 +689,12 @@ def _generate_portrait_image_inprocess(
                     "%model%": selected_checkpoint,
                     "%vae%": ""
                 }
-                _, out_p = execute_workflow_graph(wf_template, replacements=replacements, save_path=target_p)
+                _, out_p = execute_workflow_graph(
+                    wf_template,
+                    replacements=replacements,
+                    save_path=target_p,
+                    empty_cache_after=(idx == len(save_paths) - 1),
+                )
                 if out_p and os.path.exists(out_p):
                     saved_out.append(out_p)
             return saved_out

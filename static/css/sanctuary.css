@@ -1510,21 +1510,29 @@ header {
     color: var(--text-main);
 }
 
+.message-bubbles-container:has(.portrait-grid),
+.message-row.program-row .message-bubbles-container:has(.portrait-grid),
+.message-bubbles-container .message.image-message:has(.portrait-grid) {
+    inline-size: 100%;
+}
+
 .portrait-grid {
-    display: flex;
-    flex-direction: row;
-    flex-wrap: nowrap;
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
     gap: 10px;
     align-items: stretch;
+    inline-size: 100%;
     max-inline-size: 100%;
     margin: 6px 0 2px 0;
+    box-sizing: border-box;
 }
 
 .portrait-grid .message-image-container,
-.portrait-grid .message-video-container {
-    width: 200px;
-    height: 300px;
-    flex: 0 0 200px;
+.portrait-grid .message-video-container,
+.portrait-grid .message-image-container.is-deleted-slot {
+    inline-size: 100%;
+    block-size: auto;
+    min-inline-size: 0;
     aspect-ratio: 2 / 3;
     margin: 0;
     display: flex;
@@ -1534,20 +1542,13 @@ header {
     box-sizing: border-box;
 }
 
-.portrait-grid .message-image-container.is-deleted-slot {
-    width: 200px;
-    height: 300px;
-    flex: 0 0 200px;
-    background: transparent;
-}
-
 .portrait-grid .message-image-container img,
 .portrait-grid .message-video-container video {
     display: block;
-    width: 200px;
-    height: 300px;
-    max-width: 200px;
-    max-height: 300px;
+    inline-size: 100%;
+    block-size: 100%;
+    max-inline-size: 100%;
+    max-block-size: none;
     object-fit: cover;
     margin: 0;
     box-sizing: border-box;
@@ -1585,15 +1586,19 @@ header {
     color: #ffffff;
 }
 
-@media (max-width: 640px) {
+@media (max-width: 768px) {
     .portrait-grid {
-        display: grid;
-        grid-template-columns: repeat(2, minmax(0, 1fr));
-        gap: 8px;
+        gap: 6px;
     }
-    .portrait-grid .message-image-container,
-    .portrait-grid .message-image-container.is-deleted-slot {
-        inline-size: 100%;
+    .portrait-grid .image-actions-overlay {
+        right: 4px;
+        bottom: 4px;
+        gap: 3px;
+    }
+    .portrait-grid .image-action-btn {
+        inline-size: 22px;
+        block-size: 22px;
+        border-radius: 6px;
     }
 }
 
