@@ -14,8 +14,11 @@ I believe in seizing AI and the means of production into collective ownership. U
 3. **Autonomous Action**: Let the AI run code, run tests, and manage workflows.
 
 ### Sovereign Workspace
-
 100% Local-First workspace. Your chats, your memory, and your data stay on your drive. Local models do all the heavy lifting directly on your hardware, saving resources from capitalist hyperscale data centers. Compute should be a public utility governed locally, not by shareholders or venture capitalists.
+
+> [!NOTE]
+> **The Sanctuary Ethos**
+> AI is a new means of production. We must seize it, expropriate it from the hyperscale data centers, and return it to the people. We want local, sovereign, and democratic. The code and the models should belong to the worker, not the shareholder.
 
 ---
 
@@ -58,7 +61,7 @@ These are the things your program can do on your computer. By default, before th
 
 ## 📁 MODELS DIRECTORY & RECOMMENDED DOWNLOADS
 
-You can search and download both **GGUF LLMs** and **SDXL Checkpoints** directly inside the app via the **Connection Settings (⚙️)** modal, or place your local model weights into the `models/` directory for automatic discovery:
+Place your local models into the `models/` directory for **GGUF LLMs** and **SDXL Checkpoints** used inside the app via the **Connection Settings (⚙️)** modal:
 
 * **`models/llm/`**: Place GGUF chat models (models inside `~/.lmstudio/models/` are also auto-detected).
 * **`models/checkpoints/`**: Place Stable Diffusion / SDXL SafeTensors checkpoints (e.g. `WAI_Illustrious-SDXL_v11.safetensors` or `sd_xl_base_1.0.safetensors`).
@@ -71,7 +74,7 @@ You can search and download both **GGUF LLMs** and **SDXL Checkpoints** directly
 | :--- | :--- | :--- | :--- |
 | **Gemma 2 9B It** | `gemma-2-9b-it-Q4_K_M.gguf` | ~7 GB | Nuanced dialogue, character personas, and knowledge grounding |
 | **Mistral Small 24B (2501)** | `Mistral-Small-24B-Instruct-2501-Q4_K_M.gguf` | ~16 GB | Deep reasoning, intricate multi-character roleplay, and complex code generation |
-| **Gemma 4 31B It Heretic** | `gemma-4-31B-it-heretic.i1-Q4_K_M.gguf` | ~19–21 GB | Advanced reasoning, uncensored roleplay, deep character dialogue, and complex multi-turn interaction |
+| **Qwen3.6 Fallen-Fabulist 35B-A3B Heretic** | `Qwen3.6-Fallen-Fabulist-35B-A3B-heretic.Q4_K_M.gguf` | ~19–22 GB | Advanced reasoning, uncensored roleplay, deep character dialogue, and complex multi-turn interaction |
 
 ---
 
