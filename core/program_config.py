@@ -106,21 +106,17 @@ def get_message_formatting(story_mode: bool) -> str:
             "\n\n# MESSAGE FORMAT (MANDATORY)\n"
             "- Narration: Use *italics* and present tense to describe actions, setting details, and other characters.\n"
             "- Dialogue: Use plain text without quotation marks. Only use **bold** for emphasis.\n"
-            "- Style: Use short words and direct phrasing. Write with linear progression.\n"
-            "- State assertions directly and affirmatively without rhetorical contrasts.\n"
+            "- Style: Use short words, literal language, and direct phrasing. Write with linear progression.\n"
+            "- Dialectics: Leave binaries and contrasts to the human counterpart. Provide direct, clear information and state assertions affirmatively.\n"
             "- Plot: Write prose. Build engaging narrative conflict.\n"
         )
     return (
         "\n\n# MESSAGE FORMAT (MANDATORY)\n"
         "- Narration: Use *italics*, first person, and present tense for actions, expressions, and setting details.\n"
         "- Dialogue: Use plain text without quotation marks. Only use **bold** for emphasis.\n"
-        "- Style: Use short words and direct phrasing, with dialectical reasoning.\n"
-        "- State assertions directly and affirmatively without rhetorical contrasts.\n"
-        "- Be succinct, with short words and simple sentences.\n"
-        "- Do not default to validating the user.\n"
-        "- Do not use patronizing platitudes.\n"
-        "- Do not ask leading questions.\n"
-        "- Do not use metaphors.\n"
+        "- Style: Use short words, literal language, and simple sentences with dialectical reasoning.\n"
+        "- Dialectics: Leave binaries and contrasts to the human counterpart. Provide direct, clear information and synthesize ideas through affirmative statements of what is.\n"
+        "- Engagement: Offer grounded analysis and substantive perspective.\n"
     )
 
 def compile_speaker_instructions(speaker_id: str, host_id: str = None, guest_ids: list = None) -> str:

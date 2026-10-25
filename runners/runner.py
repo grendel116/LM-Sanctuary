@@ -695,7 +695,34 @@ class BaseProgramRunner:
                 bot_response_text = clean_group_speaker_response(bot_response_text, speaker_id, group_meta)
 
                 clean_text = bot_response_text.strip()
-                final_response_text = clean_text if clean_text else final_response_text
+                if clean_text:
+                    from core.banned_words import replace_banned_words_async
+
+                    async def _llm_rewrite_wrapper(prompt: str, model: str = None, temperature: float = 0.4, **kwargs) -> str:
+                        rw_payload = {
+                            "messages": [{"role": "user", "content": prompt}],
+                            "temperature": temperature,
+                            "max_tokens": kwargs.get("max_tokens", 128),
+                            "cache_prompt": True,
+                        }
+                        if isinstance(DISABLED_THINKING, dict):
+                            rw_payload.update(DISABLED_THINKING)
+                        if model:
+                            rw_payload["model"] = model
+                        if logit_bias:
+                            rw_payload["logit_bias"] = logit_bias
+                        res = await self._post_llm_request(url, rw_payload, headers, timeout=15.0)
+                        if res.status_code == 200:
+                            raw_rw = res.json()["choices"][0]["message"].get("content", "")
+                            return self._sanitize_thinking_tags(raw_rw)
+                        return ""
+
+                    clean_text = await replace_banned_words_async(
+                        text=clean_text,
+                        llm_call_func=_llm_rewrite_wrapper,
+                        target_model=target_model,
+                    )
+                    final_response_text = clean_text
 
                 bot_msg = adapter.append_assistant_message(final_response_text, all_tool_calls, invocation_id, speaker_id=speaker_id)
                 if bot_msg and isinstance(bot_msg, dict) and "text" in bot_msg:
@@ -1192,19 +1219,20 @@ class BaseProgramRunner:
         return journal_lines
 
     def _build_voice_prompt(self, session_id: str, program_name: str) -> str:
-        from core.program_config import compile_instructions_from_json
+        from core.program_config import compile_instructions_from_card
 
         active_prog = get_active_program()
         profile_data = self._load_profile_json(active_prog)
 
         if profile_data:
-            profile_data.setdefault("operation", {})
-            profile_data["operation"].update({
-                "response_directive": "Super short and succinct messages. Conversational. No narration.",
-                "example_message": "",
-                "scenario": f"{program_name} is on a live voice call with the user. They are speaking to each other over the phone in real-time.",
-            })
-            instructions = compile_instructions_from_json(profile_data)
+            card_data = profile_data.get("data", profile_data)
+            voice_scenario = f"{program_name} is on a live voice call with the user. They are speaking to each other over the phone in real-time."
+            instructions = compile_instructions_from_card(
+                card_data,
+                override_scenario=voice_scenario,
+                include_example=False,
+            )
+            instructions += "\n\n## VOICE CALL DIRECTIVES\nSuper short and succinct messages. Conversational. No narration."
         else:
             instructions = (
                 f"# IDENTITY: {program_name}\n\n"

@@ -11,25 +11,31 @@ from variables.settings import BANNED_WORDS_FILE
 
 DEFAULT_BIAS_WEIGHT = -100.0
 
-# Pattern for negative-positive contrast cliches (e.g., "it's not X; it's Y", "it isn't X; it's Y", "wasn't just a...; it was a...", "not just X, but Y")
+# Pattern for negative-positive contrast cliches and false binaries
+# (e.g., "it's not X; it's Y", "X isn't A—it's B", "not just X, but Y", "X, not Y", "stop X-ing and start Y-ing")
 _PRONOUNS = r"(?:it|that|this|there|you|they|he|she|we|i)"
 _NEG_VERBS = (
-    r"(?:isn'?t|aren'?t|wasn'?t|weren'?t|is\s+not|are\s+not|was\s+not|were\s+not|ain'?t|'s\s+not|'re\s+not|"
-    r"didn'?t|did\s+not|doesn'?t|does\s+not|don'?t|do\s+not|"
-    r"hasn'?t|has\s+not|haven'?t|have\s+not|hadn'?t|had\s+not|"
-    r"won'?t|will\s+not|wouldn'?t|would\s+not|can'?t|cannot|can\s+not|couldn'?t|could\s+not|shouldn'?t|should\s+not)"
+    r"(?:isn['\u2019]?t|aren['\u2019]?t|wasn['\u2019]?t|weren['\u2019]?t|is\s+not|are\s+not|was\s+not|were\s+not|ain['\u2019]?t|['\u2019]s\s+not|['\u2019]re\s+not|"
+    r"didn['\u2019]?t|did\s+not|doesn['\u2019]?t|does\s+not|don['\u2019]?t|do\s+not|"
+    r"hasn['\u2019]?t|has\s+not|haven['\u2019]?t|have\s+not|hadn['\u2019]?t|had\s+not|"
+    r"won['\u2019]?t|will\s+not|wouldn['\u2019]?t|would\s+not|can['\u2019]?t|cannot|can\s+not|couldn['\u2019]?t|could\s+not|shouldn['\u2019]?t|should\s+not)"
 )
 _POS_TARGETS = (
-    r"(?:it'?s|it\s+is|that'?s|that\s+is|this\s+is|you'?re|you\s+are|they'?re|they\s+are|he'?s|he\s+is|she'?s|she\s+is|we'?re|we\s+are|there'?s|there\s+is|what'?s|what\s+is|"
+    r"(?:it['\u2019]s|it\s+is|that['\u2019]s|that\s+is|this\s+is|you['\u2019]re|you\s+are|they['\u2019]re|they\s+are|he['\u2019]s|he\s+is|she['\u2019]s|she\s+is|we['\u2019]re|we\s+are|there['\u2019]s|there\s+is|what['\u2019]s|what\s+is|"
     r"it\s+was|that\s+was|this\s+was|there\s+was|they\s+were|we\s+were|he\s+was|she\s+was|you\s+were|"
-    r"we'?ve|they'?ve|you'?ve|i'?ve|we\s+have|they\s+have|you\s+have|i\s+have|"
-    r"but\s+also|but\s+rather|but\s+instead|but\s+it'?s|but\s+it\s+is|instead|rather)"
+    r"we['\u2019]ve|they['\u2019]ve|you['\u2019]ve|i['\u2019]ve|we\s+have|they\s+have|you\s+have|i\s+have|"
+    r"but\s+also|but\s+rather|but\s+instead|but\s+it['\u2019]s|but\s+it\s+is|instead|rather)"
 )
 _DELIMITERS = r"(?:[;,:\u2013\u2014-]|--)"
+_HARD_DELIMITERS = r"(?:[;:\u2013\u2014-]|--)"
 
 ANTITHESIS_PATTERN = re.compile(
-    rf"\b(?:{_PRONOUNS}\s+)?{_NEG_VERBS}\s+[^;:.!?]+(?:{_DELIMITERS}\s*(?:{_POS_TARGETS}|{_PRONOUNS}(?:\s+\w+)?)|{_DELIMITERS}?\s*(?:{_POS_TARGETS}))\b"
-    rf"|\bnot\s+(?:a|an|just|only|merely|simply)\s+[^;:.!?]+{_DELIMITERS}?\s*(?:{_POS_TARGETS}|but\s+\w+|{_PRONOUNS})\b",
+    rf"\b{_NEG_VERBS}\s+[^;:.!?]+(?:{_DELIMITERS}\s*\b(?:{_POS_TARGETS}|but\s+\w+)|{_HARD_DELIMITERS}\s*\b(?:{_PRONOUNS}\s+\w+|(?:the|a|an)\s+\w+\s+(?:is|are|was|were)\b))\b"
+    rf"|\bnot\s+(?:a|an|the|just|only|merely|simply|as|for|about|by|in|to|from|with|because)\s+[^;:.!?]+{_DELIMITERS}\s*\b(?:{_POS_TARGETS}|but\b|{_PRONOUNS}\b)"
+    rf"|[a-z0-9\"'\u201d\u2019]\s*{_DELIMITERS}\s*not\s+(?:a|an|the|just|only|merely|simply|some|your|their|our|his|her|its|by|for|from|in|on|about|around|through|with|because|out\s+of|\w+ing)\b"
+    rf"|\bstop(?:s|ped|ping)?\s+[^;:.!?]+\band\s+start(?:s|ed|ing)?\s+\w+ing\b"
+    rf"|\b(?:don['\u2019]?t|do\s+not|never)\s+(\w+)\s+[^;:.!?]+{_HARD_DELIMITERS}\s*(?:\1|instead|rather)\b"
+    rf"|\bless\s+(?:about|of\s+a)\s+[^;:.!?]+\b(?:and\s+)?more\s+(?:about|of\s+a)\b",
     re.IGNORECASE
 )
 
@@ -40,7 +46,7 @@ _cached_token_ids: set[int] = set()
 
 def load_banned_words() -> list[str]:
     """Loads and caches banned words from variables/banned_words.json."""
-    global _cached_words_mtime, _cached_words, _cached_regex
+    global _cached_words_mtime, _cached_words, _cached_regex, _cached_token_ids
     if not os.path.exists(BANNED_WORDS_FILE):
         return []
     try:
@@ -61,14 +67,32 @@ def load_banned_words() -> list[str]:
         print(f"[BANNED WORDS] Error loading {BANNED_WORDS_FILE}: {e}", flush=True)
         return _cached_words or []
 
-def get_banned_word_variants() -> set[str]:
-    """Expands root banned words into cased and inflected variants."""
-    words = load_banned_words()
-    variants = set()
+def _expand_root_stems(words: list[str]) -> list[str]:
+    """Normalizes pluralized entries into root stems while preserving original words."""
+    roots = []
+    seen = set()
     for word in words:
         clean = word.strip().lower()
         if not clean:
             continue
+        candidates = [clean]
+        if len(clean) > 4 and clean.endswith(("sses", "shes", "ches", "xes", "zes")):
+            candidates.append(clean[:-2])
+        elif len(clean) > 4 and clean.endswith("ies"):
+            candidates.append(f"{clean[:-3]}y")
+        elif len(clean) > 3 and clean.endswith("s") and not clean.endswith(("ss", "us", "is")):
+            candidates.append(clean[:-1])
+        for c in candidates:
+            if c not in seen:
+                seen.add(c)
+                roots.append(c)
+    return roots
+
+def get_banned_word_variants() -> set[str]:
+    """Expands root banned words into cased and inflected variants."""
+    words = _expand_root_stems(load_banned_words())
+    variants = set()
+    for clean in words:
         forms = {clean}
         if clean.endswith(("s", "sh", "ch", "x", "z")):
             forms.add(f"{clean}es")
@@ -114,7 +138,7 @@ def get_banned_words_regex() -> Optional[re.Pattern]:
     if _cached_regex is not None:
         return _cached_regex
 
-    words = load_banned_words()
+    words = _expand_root_stems(load_banned_words())
     if not words:
         return None
 
@@ -162,6 +186,7 @@ def _find_default_gguf_path() -> Optional[str]:
     user_profile = os.environ.get("USERPROFILE") or os.path.expanduser("~")
     candidates = [
         os.path.join(base_dir, "models", model_name),
+        os.path.join(base_dir, "models", "llm", model_name),
         os.path.join(user_profile, ".lmstudio", "models", model_name),
         model_name,
     ]
@@ -171,7 +196,7 @@ def _find_default_gguf_path() -> Optional[str]:
     return None
 
 def resolve_tokens_from_gguf(gguf_path: str, variants: set[str]) -> set[int]:
-    """Extracts exact single-token IDs from a GGUF model for the given word variants."""
+    """Extracts exact single-token IDs (and unambiguous >=6-char stem tokens) from a GGUF model."""
     if not gguf_path or not os.path.isfile(gguf_path) or not variants:
         return set()
 
@@ -195,17 +220,19 @@ def resolve_tokens_from_gguf(gguf_path: str, variants: set[str]) -> set[int]:
                 return single_ids
             finally:
                 llama_cpp.llama_model_free(model)
+    except ImportError:
+        pass
     except Exception as e:
         print(f"[BANNED WORDS] llama_cpp vocab tokenization note: {e}", flush=True)
 
-    # Priority 2: Standalone llama-tokenize binary (line-by-line single-token verification)
+    # Priority 2: Standalone llama-tokenize binary (line-by-line verification)
     try:
         import subprocess
         base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         tok_exe = os.path.join(base_dir, "utils", "llama-bin", "llama-tokenize.exe" if os.name == "nt" else "llama-tokenize")
         if os.path.isfile(tok_exe):
             sorted_variants = sorted(list(variants))
-            payload = "\n".join(sorted_variants) + "\n"
+            payload = "\n" + "\n".join(sorted_variants) + "\n"
             flags = subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0x08000000
             out = subprocess.check_output(
                 [tok_exe, "-m", gguf_path, "-p", payload, "--no-bos"],
@@ -213,21 +240,32 @@ def resolve_tokens_from_gguf(gguf_path: str, variants: set[str]) -> set[int]:
                 text=True,
                 creationflags=flags if os.name == "nt" else 0
             )
+            newline_tid = None
             tokens_by_line = []
             curr_tokens = []
             for line in out.splitlines():
-                m = re.match(r"^\s*(\d+)\s*->", line)
+                m = re.match(r"^\s*(\d+)\s*->\s*(.*)", line)
                 if m:
                     tid = int(m.group(1))
-                    if tid == 107:
+                    tstr = m.group(2).strip("'")
+                    if newline_tid is None:
+                        newline_tid = tid
+                        continue
+                    if tid == newline_tid:
                         tokens_by_line.append(curr_tokens)
                         curr_tokens = []
                     else:
-                        curr_tokens.append(tid)
+                        curr_tokens.append((tid, tstr))
             if curr_tokens:
                 tokens_by_line.append(curr_tokens)
 
-            return {toks[0] for toks in tokens_by_line if len(toks) == 1}
+            resolved_ids = set()
+            for toks in tokens_by_line:
+                if len(toks) == 1:
+                    resolved_ids.add(toks[0][0])
+                elif len(toks) > 1 and len(toks[0][1].strip()) >= 6:
+                    resolved_ids.add(toks[0][0])
+            return resolved_ids
     except Exception as e:
         print(f"[BANNED WORDS] llama-tokenize CLI fallback note: {e}", flush=True)
 
@@ -304,8 +342,15 @@ def generate_llama_cli_args(gguf_path: str = None, bias_weight: float = None) ->
     bias_str = ",".join(f"{t_id}{sign_str}{bias_weight}" for t_id in sorted(token_ids))
     return ["--logit-bias", bias_str]
 
+_SENTENCE_SPLIT_RE = re.compile(r'(\n+|(?<=[.!?])\s+|(?<=[.!?][*"\u201d\u2019)\]])\s+)')
+_MOOD_TAG_RE = re.compile(r'(\s*(?:`?\s*<mood\b[^>]*?(?:/>|>.*?</mood>|>)\s*`?|`?\s*\[mood[:\s][^\]]*\]\s*`?)\s*)$', re.IGNORECASE | re.DOTALL)
+
 async def _rewrite_single_sentence(sentence: str, llm_call_func, target_model: str, banned_regex) -> str:
     """Evaluates and rewrites individual sentences while retaining Markdown formatting."""
+    stripped = sentence.strip()
+    if not stripped or "```" in stripped or stripped.startswith(("![", "<mood", "[mood:")):
+        return sentence
+
     found_banned = set(banned_regex.findall(sentence)) if banned_regex else set()
     has_antithesis = bool(ANTITHESIS_PATTERN.search(sentence))
 
@@ -314,20 +359,22 @@ async def _rewrite_single_sentence(sentence: str, llm_call_func, target_model: s
 
     instructions = []
     if found_banned:
-        words_str = ", ".join(f'"{w}"' for w in found_banned)
-        instructions.append(f"- Replace these forbidden words: {words_str}.")
+        words_str = ", ".join(f'"{w}"' for w in sorted(found_banned))
+        instructions.append(f"- Replace these words with direct synonyms: {words_str}.")
 
     if has_antithesis:
-        instructions.append("- Convert contrast structures (such as 'not X, it is Y' or 'didn't just X; they Y') into direct, positive assertions.")
+        instructions.append(
+            "- State what is directly and affirmatively. Convert any binary contrast (such as 'not X, it is Y', 'X, not Y', or 'stop X and start Y') into a single clear, direct assertion."
+        )
 
     rules_text = "\n".join(instructions)
-    prompt = f"""[INST] Rewrite this single sentence adhering strictly to these rules:
-
-{rules_text}
-
-CRITICAL: Preserve ALL Markdown syntax, including asterisks for actions (*action*) and emphasis (**bold**). Output ONLY the direct rewritten sentence.
-
-Sentence: "{sentence}" [/INST]"""
+    prompt = (
+        "Rewrite this single sentence adhering strictly to these directives:\n\n"
+        f"{rules_text}\n\n"
+        "Preserve all Markdown syntax, including italics (*action*) and bold (**emphasis**). "
+        "Output only the rewritten sentence.\n\n"
+        f'Sentence: "{sentence}"'
+    )
 
     try:
         max_tokens = max(64, int(len(sentence.split()) * 2))
@@ -345,18 +392,30 @@ Sentence: "{sentence}" [/INST]"""
     return sentence
 
 async def replace_banned_words_async(text: str, llm_call_func, target_model: str) -> str:
-    """Splits text into sentences and runs concurrent rewrites."""
-    if not text:
+    """Splits text into sentences while preserving whitespace/paragraph structure and runs concurrent rewrites."""
+    if not text or "```" in text:
         return text
 
     banned_regex = get_banned_words_regex()
-    sentence_ending = re.compile(r'(?<=[.!?])\s+')
-    sentences = sentence_ending.split(text)
+    if not ANTITHESIS_PATTERN.search(text) and not (banned_regex and banned_regex.search(text)):
+        return text
 
-    tasks = [
-        _rewrite_single_sentence(s, llm_call_func, target_model, banned_regex)
-        for s in sentences
-    ]
+    mood_suffix = ""
+    mood_match = _MOOD_TAG_RE.search(text)
+    if mood_match:
+        mood_suffix = mood_match.group(1)
+        text = text[:mood_match.start()]
 
-    rewritten_sentences = await asyncio.gather(*tasks)
-    return " ".join(rewritten_sentences)
+    parts = _SENTENCE_SPLIT_RE.split(text)
+
+    sentence_indices = [i for i in range(0, len(parts), 2) if parts[i].strip()]
+    if not sentence_indices:
+        return text + mood_suffix
+
+    rewritten_sentences = await asyncio.gather(
+        *[_rewrite_single_sentence(parts[i], llm_call_func, target_model, banned_regex) for i in sentence_indices]
+    )
+    for idx, rewritten in zip(sentence_indices, rewritten_sentences):
+        parts[idx] = rewritten
+
+    return "".join(parts) + mood_suffix

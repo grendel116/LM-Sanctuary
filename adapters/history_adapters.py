@@ -330,7 +330,7 @@ class OsHistoryAdapter(LocalHistoryAdapter):
                 raw = json.loads(json_path.read_text(encoding="utf-8"))
                 post_inst = raw.get("data", raw).get("post_history_instructions", "").strip()
                 if post_inst:
-                    post_blocks.append(post_inst)
+                    post_blocks.append(replace_placeholders(post_inst))
         except Exception as e:
             print(f"Error loading post-history instructions: {e}", flush=True)
 
