@@ -74,7 +74,7 @@ Place your local models into the `models/` directory for **GGUF LLMs** and **SDX
 | :--- | :--- | :--- | :--- |
 | **Gemma 2 9B It** | `gemma-2-9b-it-Q4_K_M.gguf` | ~7 GB | Nuanced dialogue, character personas, and knowledge grounding |
 | **Mistral Small 24B (2501)** | `Mistral-Small-24B-Instruct-2501-Q4_K_M.gguf` | ~16 GB | Deep reasoning, intricate multi-character roleplay, and complex code generation |
-| **Gemma 3 27B IT Abliterated** | `gemma-3-27b-it-abliterated.Q4_K_M.gguf` | ~17–18 GB | Uncensored roleplay, rich prose and emotional subtext, strong character consistency, and multi-turn reasoning |
+| **Gemma 4 31B IT Abliterated** | `Gemma-4-31B-Abliterated-Uncensored.i1-Q4_K_M.gguf` | ~19–20 GB | Uncensored roleplay, rich prose and emotional subtext, strong character consistency, and multi-turn reasoning |
 
 ---
 
