@@ -14,10 +14,10 @@ I believe in seizing AI and the means of production into collective ownership. U
 3. **Autonomous Action**: Let the AI run code, run tests, and manage workflows.
 
 ### Sovereign Workspace
-100% Local-First workspace. Your chats, your memory, and your data stay on your drive. Local models do all the heavy lifting directly on your hardware, saving resources from capitalist hyperscale data centers. Compute should be a public utility governed locally, not by shareholders or venture capitalists.
+100% Local-First workspace. Your chats, your memory, and your data stay on your drive. Local models do all the heavy lifting directly on your hardware.
 
 > [!NOTE]
-> **The Sanctuary Ethos**
+> **The Sanctuary Ethos**:
 > AI is a new means of production. We must seize it, expropriate it from the hyperscale data centers, and return it to the people. We want local, sovereign, and democratic. The code and the models should belong to the worker, not the shareholder.
 
 ---
