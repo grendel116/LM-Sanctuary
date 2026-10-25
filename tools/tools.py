@@ -1475,14 +1475,15 @@ def apply_comfy_workflow(workflow_path: str, parameters: dict, save_path: str, s
         return f"Error executing ComfyUI workflow: {e}"
 
 @track_tool_activity
-def generate_local_image(prompt: str) -> str:
-    """Generates a local image using ComfyUI with program-specific workflow configurations.
+def generate_local_image(prompt: str, count: int = 3) -> str:
+    """Generates local portrait image(s) using ComfyUI with program-specific workflow configurations.
     
     Args:
         prompt: A prompt describing what you are doing or the scene/expression.
+        count: Number of images to generate (defaults to 3 for initial portrait generation, 1 for single slot reroll).
         
     Returns:
-        A markdown link to the generated portrait image, or an error message.
+        Markdown link(s) to the generated portrait image(s), or an error message.
     """
     import os
     import random
@@ -1553,36 +1554,80 @@ def generate_local_image(prompt: str) -> str:
     from core.program_config import replace_placeholders
     final_prompt = replace_placeholders(prompt)
     if img_details_val:
-        if final_prompt and not final_prompt.endswith(","):
-            final_prompt += ", "
-        final_prompt += img_details_val
-        
-    final_negative = neg_details_val if neg_details_val else "worst quality, low quality, deformed, mutated, extra limbs, watermark, text"
+        img_details_clean = replace_placeholders(img_details_val).strip()
+        if img_details_clean:
+            if final_prompt and not final_prompt.endswith(","):
+                final_prompt += ", "
+            final_prompt += img_details_clean
 
-    timestamp = int(time.time())
-    local_filename = f"portrait_{timestamp}.png"
+    base_negative = "worst quality, low quality, deformed, mutated, extra limbs, watermark, text"
+    if neg_details_val and neg_details_val.strip():
+        neg_clean = replace_placeholders(neg_details_val).strip().rstrip(",")
+        final_negative = f"{neg_clean}, {base_negative}"
+    else:
+        final_negative = base_negative
+
+    base_timestamp = int(time.time() * 1000)
     portraits_dir = os.path.normpath(os.path.join(root_dir, "core", "programs", active_program, "portraits"))
-    local_path = os.path.join(portraits_dir, local_filename)
     os.makedirs(portraits_dir, exist_ok=True)
+    num_images = max(1, int(count or 3))
 
     # Execute pure in-process DirectML GPU diffusion engine
     try:
         from adapters.vram_orchestrator import start_img
-        start_img()
-
         from core.engine_diffusion import generate_portrait_image
-        generate_portrait_image(
-            prompt=final_prompt,
-            negative_prompt=final_negative,
-            save_path=local_path
-        )
-        json_path = os.path.join(portraits_dir, f"portrait_{timestamp}.json")
-        try:
-            with open(json_path, "w", encoding="utf-8") as jf:
-                json.dump({"prompt": prompt, "full_prompt": final_prompt, "engine": "in_process_gpu"}, jf, indent=4)
-        except Exception:
-            pass
-        return f"![Portrait](/images/portraits/{local_filename})"
+        from runners.runner import cancelled_sessions
+
+        start_img()
+        sess_id = current_session_id.get()
+        if sess_id in cancelled_sessions:
+            return "Error: Portrait generation cancelled by user."
+
+        stems = []
+        local_filenames = []
+        local_paths = []
+        for idx in range(num_images):
+            suffix = f"_{idx + 1}" if num_images > 1 else ""
+            stem = f"portrait_{base_timestamp}{suffix}"
+            local_filename = f"{stem}.png"
+            stems.append(stem)
+            local_filenames.append(local_filename)
+            local_paths.append(os.path.join(portraits_dir, local_filename))
+
+        if num_images == 1:
+            generate_portrait_image(
+                prompt=final_prompt,
+                negative_prompt=final_negative,
+                save_path=local_paths[0]
+            )
+        else:
+            generate_portrait_image(
+                prompt=final_prompt,
+                negative_prompt=final_negative,
+                save_paths=local_paths,
+                batch_size=num_images
+            )
+
+        markdown_links = []
+        for stem, local_filename in zip(stems, local_filenames):
+            json_path = os.path.join(portraits_dir, f"{stem}.json")
+            try:
+                with open(json_path, "w", encoding="utf-8") as jf:
+                    json.dump(
+                        {
+                            "prompt": prompt,
+                            "full_prompt": final_prompt,
+                            "negative_prompt": final_negative,
+                            "engine": "in_process_gpu",
+                        },
+                        jf,
+                        indent=4,
+                    )
+            except Exception:
+                pass
+            markdown_links.append(f"![Portrait](/images/portraits/{local_filename})")
+
+        return "\n".join(markdown_links)
     except Exception as e:
         print(f"[engine_diffusion] Error generating portrait: {e}")
         return f"Error generating portrait: {e}"

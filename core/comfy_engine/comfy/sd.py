@@ -1229,7 +1229,7 @@ class VAE:
                 memory_used = self.memory_used_decode(samples_in.shape, self.vae_dtype)
                 model_management.load_models_gpu([self.patcher], memory_required=memory_used, force_full_load=self.disable_offload)
                 free_memory = self.patcher.get_free_memory(self.device)
-                batch_number = int(free_memory / memory_used)
+                batch_number = 1 if model_management.directml_enabled else int(free_memory / memory_used)
                 batch_number = max(1, batch_number)
 
                 # Pre-allocate output for VAEs that support direct buffer writes

@@ -1372,6 +1372,11 @@ def reset():
         print(f"Error resetting session {session_id}: {e}")
         return jsonify({'error': str(e)}), 500
 
+_image_mutex = threading.Lock()
+_active_regen_lock = threading.Lock()
+_active_image_regenerations: dict[str, int] = {}
+
+
 @app.route('/delete_image', methods=['POST'])
 @requires_auth
 def delete_image():
@@ -1379,10 +1384,14 @@ def delete_image():
     image_url = request.json.get('image_url')
     if not image_url:
         return jsonify({'error': 'Missing image_url'}), 400
+
+    with _active_regen_lock:
+        regen_in_progress = _active_image_regenerations.get(session_id, 0) > 0
+    keep_message = bool(request.json.get('keep_message')) or regen_in_progress
         
     try:
         # Detach from session log - delete the image and remove it from history
-        success = asyncio.run(runner.delete_image_from_session(session_id, image_url))
+        success = asyncio.run(runner.delete_image_from_session(session_id, image_url, keep_message=keep_message))
         if success:
             return jsonify({'status': 'success'})
         else:
@@ -1392,8 +1401,6 @@ def delete_image():
         return jsonify({'error': str(e)}), 500
 
 
-_image_mutex = threading.Lock()
-
 @app.route('/regenerate_image', methods=['POST'])
 @requires_auth
 def regenerate_image():
@@ -1401,68 +1408,98 @@ def regenerate_image():
     from runners.runner import cancelled_sessions
     cancelled_sessions.discard(session_id)
     
-    old_image_url = request.json.get('old_image_url')
+    old_image_url = request.json.get('old_image_url') or ''
     prompt = request.json.get('prompt')
+    msg_id = request.json.get('msg_id')
+    slot_index = request.json.get('slot_index')
+    if slot_index is not None:
+        try:
+            slot_index = int(slot_index)
+        except Exception:
+            slot_index = None
     
-    if not old_image_url:
-        return jsonify({'error': 'Missing old_image_url'}), 400
+    if not old_image_url and not msg_id:
+        return jsonify({'error': 'Missing old_image_url or msg_id'}), 400
         
     # Normalize old_image_url to pathname
-    if "://" in old_image_url:
+    if old_image_url and "://" in old_image_url:
         from urllib.parse import urlparse
         old_image_url = urlparse(old_image_url).path
 
+    with _active_regen_lock:
+        _active_image_regenerations[session_id] = _active_image_regenerations.get(session_id, 0) + 1
+
     if not _image_mutex.acquire(blocking=True, timeout=300.0):
+        with _active_regen_lock:
+            _active_image_regenerations[session_id] = max(0, _active_image_regenerations.get(session_id, 1) - 1)
         return jsonify({'error': 'Image generation engine is currently busy. Please retry in a moment.'}), 429
 
     try:
         if not prompt:
             import os
-            filename = os.path.basename(old_image_url)
+            filename = os.path.basename(old_image_url) if old_image_url else ''
             # 1. Try to find the prompt in the program sidecar JSON file (most reliable and clean)
-            try:
-                from runners.program import get_active_program
-                active_program = get_active_program()
-                filename_only = os.path.basename(old_image_url)
-                json_path = find_image_sidecar_json(filename_only, active_program)
+            if filename:
+                try:
+                    from runners.program import get_active_program
+                    active_program = get_active_program()
+                    json_path = find_image_sidecar_json(filename, active_program)
 
-                if json_path and os.path.exists(json_path):
-                    with open(json_path, 'r', encoding='utf-8') as f:
-                        meta = json.load(f)
-                        prompt = meta.get('prompt')
-                        if prompt:
-                            print(f"[DEBUG REROLL] Found prompt in sidecar JSON: {prompt}")
-            except Exception as je:
-                print(f"Error reading sidecar JSON: {je}")
+                    if json_path and os.path.exists(json_path):
+                        with open(json_path, 'r', encoding='utf-8') as f:
+                            meta = json.load(f)
+                            prompt = meta.get('prompt')
+                            if prompt:
+                                print(f"[DEBUG REROLL] Found prompt in sidecar JSON: {prompt}")
+                except Exception as je:
+                    print(f"Error reading sidecar JSON: {je}")
 
-            # 2. Check session history for prompt
+            # 2. Check session history for prompt (by msg_id, media items, or tool_calls)
             if not prompt:
                 try:
                     chat_history = asyncio.run(runner.get_history(session_id))
-                    for msg in chat_history:
-                        tool_calls = msg.get('tool_calls', [])
-                        if not tool_calls:
-                            continue
-                        calls = {}
-                        for tc in tool_calls:
-                            if tc.get('type') == 'call' and tc.get('name') == 'generate_program_portrait':
-                                call_id = tc.get('id')
-                                args = tc.get('args', {})
-                                p = args.get('prompt')
-                                if call_id and p:
-                                    calls[call_id] = p
-                        for tc in tool_calls:
-                            if tc.get('type') == 'response' and tc.get('name') == 'generate_program_portrait':
-                                call_id = tc.get('id')
-                                response_val = tc.get('response', '')
-                                if call_id in calls and filename in response_val:
-                                    prompt = calls[call_id]
-                                    print(f"[DEBUG REROLL] Found prompt in history matching filename '{filename}': {prompt}")
+                    if msg_id:
+                        for msg in chat_history:
+                            if msg.get('id') == msg_id:
+                                for m in msg.get('media', []):
+                                    if m.get('prompt'):
+                                        prompt = m['prompt']
+                                        break
+                                if prompt:
                                     break
-                        if prompt:
-                            break
+                    if not prompt:
+                        for msg in chat_history:
+                            if msg_id and msg.get('id') != msg_id and filename:
+                                pass
+                            tool_calls = msg.get('tool_calls', [])
+                            if not tool_calls:
+                                continue
+                            calls = {}
+                            for tc in tool_calls:
+                                if tc.get('type') == 'call' and tc.get('name') in ('generate_program_portrait', 'generate_local_image'):
+                                    call_id = tc.get('id')
+                                    args = tc.get('args', {})
+                                    p = args.get('prompt') if isinstance(args, dict) else None
+                                    if call_id and p:
+                                        calls[call_id] = p
+                            if msg_id and msg.get('id') == msg_id and calls:
+                                prompt = next(iter(calls.values()))
+                                break
+                            for tc in tool_calls:
+                                if tc.get('type') == 'response' and tc.get('name') in ('generate_program_portrait', 'generate_local_image'):
+                                    call_id = tc.get('id')
+                                    response_val = tc.get('response', '')
+                                    if call_id in calls and filename and filename in response_val:
+                                        prompt = calls[call_id]
+                                        print(f"[DEBUG REROLL] Found prompt in history matching filename '{filename}': {prompt}")
+                                        break
+                            if prompt:
+                                break
                 except Exception as he:
                     print(f"Error scanning session history for prompt: {he}")
+
+            if not prompt:
+                prompt = extract_portrait_tags_from_context(session_id, "")
 
             if not prompt:
                 return jsonify({'error': 'Original prompt not found. Unable to regenerate image.'}), 400
@@ -1475,28 +1512,38 @@ def regenerate_image():
         with tools.session_tool_calls_lock:
             tools.session_tool_calls[session_id] = []
         use_imagen = request.json.get('use_imagen', False)
-        # Generate new portrait
+        # Generate 1 replacement portrait for the target slot
         if use_imagen:
             new_markdown = tools.generate_imagen(prompt)
         else:
-            new_markdown = tools.generate_local_image(prompt)
+            new_markdown = tools.generate_local_image(prompt, count=1)
         if new_markdown.startswith("Error"):
             return jsonify({'error': new_markdown}), 500
             
         # Parse the new image URL from Markdown link: ![...](/images/...)
-        new_image_url = None
-        if new_markdown.startswith("![") and new_markdown.endswith(")"):
-            new_image_url = new_markdown.split("(", 1)[1][:-1]
+        import re
+        extracted_urls = re.findall(r'!\[[^\]]*\]\(([^)]+)\)', new_markdown)
+        new_image_url = extracted_urls[0] if extracted_urls else None
             
         if not new_image_url:
             return jsonify({'error': f'Failed to parse generated image markdown: {new_markdown}'}), 500
             
-        # Replace in session history
-        success = asyncio.run(runner.replace_image_in_session(session_id, old_image_url, new_image_url, new_prompt=prompt))
+        # Replace or insert at slot in session history
+        success = asyncio.run(
+            runner.replace_image_in_session(
+                session_id,
+                old_image_url,
+                new_image_url,
+                new_prompt=prompt,
+                msg_id=msg_id,
+                slot_index=slot_index,
+            )
+        )
         if success:
             return jsonify({
                 'status': 'success',
                 'new_image_url': new_image_url,
+                'prompt': prompt,
                 'tool_calls': finish_generation_request(session_id),
             })
         else:
@@ -1505,6 +1552,8 @@ def regenerate_image():
         print(f"Error regenerating image in session {session_id}: {e}")
         return jsonify({'error': str(e)}), 500
     finally:
+        with _active_regen_lock:
+            _active_image_regenerations[session_id] = max(0, _active_image_regenerations.get(session_id, 1) - 1)
         finish_generation_request(session_id)
         _image_mutex.release()
 
@@ -1570,7 +1619,7 @@ def extract_portrait_tags_from_context(session_id: str, custom_prompt: str = "")
         f"Your task is to generate precise visual image tags depicting the character '{char_name}' in the current scene.\n"
         "Rules for tag generation:\n"
         f"1. Main Subject: Focus on '{char_name}' (e.g. '1girl, solo'). Do NOT include additional characters.\n"
-        "2. Character & Outfit: Include the character's clothing/outfit, features, and accessories.\n"
+        "2. Character & Outfit: Include the character's clothing/outfit and physical features.\n"
         "3. Setting & Environment: Include environment details combined with the active scene context.\n"
         "4. Pose & Expression: Capture the character's posture, action, and expression.\n"
         "5. Format: Output ONLY comma-separated tags. "
@@ -1631,7 +1680,8 @@ def api_generate_portrait():
             return jsonify({'error': 'Portrait generation cancelled by user.'}), 400
 
         # 2. Local GPU image generation (unloads LLM before running diffusion engine)
-        new_markdown = tools.generate_local_image(extracted_tags)
+        count = int(request.json.get('count', 3))
+        new_markdown = tools.generate_local_image(extracted_tags, count=count)
 
         if session_id in cancelled_sessions:
             return jsonify({'error': 'Portrait generation cancelled by user.'}), 400
@@ -1639,10 +1689,10 @@ def api_generate_portrait():
         if new_markdown.startswith("Error"):
             return jsonify({'error': new_markdown}), 500
 
-        # Extract image URL
-        new_image_url = None
-        if new_markdown.startswith("![") and new_markdown.endswith(")"):
-            new_image_url = new_markdown.split("(", 1)[1][:-1]
+        # Extract image URLs
+        import re
+        image_urls = re.findall(r'!\[[^\]]*\]\(([^)]+)\)', new_markdown)
+        new_image_url = image_urls[0] if image_urls else None
 
         from runners.program import get_active_program
         from core.program_config import _load_card_data
@@ -1650,13 +1700,24 @@ def api_generate_portrait():
         card = _load_card_data(active_prog)
         prog_name = card.get("name") or active_prog.title()
 
-        # Append directly to session history as an image message preserving character identity
-        asyncio.run(runner.append_message_to_session(session_id, "program", new_markdown, sender_id=active_prog, sender_name=prog_name))
+        # Append directly to session history as an image message preserving character identity and prompt
+        asyncio.run(
+            runner.append_message_to_session(
+                session_id,
+                "program",
+                new_markdown,
+                sender_id=active_prog,
+                sender_name=prog_name,
+                prompt=extracted_tags,
+            )
+        )
 
         return jsonify({
             'status': 'success',
             'markdown': new_markdown,
-            'image_url': new_image_url
+            'image_url': new_image_url,
+            'image_urls': image_urls,
+            'prompt': extracted_tags,
         })
     except Exception as e:
         print(f"Error generating direct portrait: {e}")

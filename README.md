@@ -74,7 +74,7 @@ Place your local models into the `models/` directory for **GGUF LLMs** and **SDX
 | :--- | :--- | :--- | :--- |
 | **Gemma 2 9B It** | `gemma-2-9b-it-Q4_K_M.gguf` | ~7 GB | Nuanced dialogue, character personas, and knowledge grounding |
 | **Mistral Small 24B (2501)** | `Mistral-Small-24B-Instruct-2501-Q4_K_M.gguf` | ~16 GB | Deep reasoning, intricate multi-character roleplay, and complex code generation |
-| **Qwen3.6 Fallen-Fabulist 35B-A3B Heretic** | `Qwen3.6-Fallen-Fabulist-35B-A3B-heretic.Q4_K_M.gguf` | ~19–22 GB | Advanced reasoning, uncensored roleplay, deep character dialogue, and complex multi-turn interaction |
+| **Gemma 3 27B IT Abliterated** | `gemma-3-27b-it-abliterated.Q4_K_M.gguf` | ~17–18 GB | Uncensored roleplay, rich prose and emotional subtext, strong character consistency, and multi-turn reasoning |
 
 ---
 
@@ -126,3 +126,16 @@ On first launch, `setup_env.py` automatically:
 4. Launch the app:
    * Native desktop window: `python desktop.py`
    * Browser server: `python app.py` (available at **`http://localhost:5000`** or **`http://<YOUR_PC_IP>:5000`** on mobile/LAN).
+
+
+---
+
+## 📜 LICENSE
+
+Copyright (C) 2026 Davy & Sebile
+
+This program is free software: you can redistribute it and/or modify it under the terms of the **GNU Affero General Public License** as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
+
+This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the [GNU Affero General Public License](./LICENSE) for more details.
+
+You should have received a copy of the GNU Affero General Public License along with this program. If not, see <https://www.gnu.org/licenses/>.

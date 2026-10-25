@@ -5477,15 +5477,14 @@ function renderMessage(msg, isLive = false) {
     if (!isTextEmpty || !msg.media || msg.media.length === 0) {
         bubblesToCreate.push({ type: 'text', content: text });
     }
-    if (msg.media) {
-        msg.media.forEach(m => {
-            bubblesToCreate.push({ type: 'media', content: m });
-        });
+    if (msg.media && msg.media.length > 0) {
+        bubblesToCreate.push({ type: 'media', content: msg.media });
     }
 
     bubblesToCreate.forEach((item, idx) => {
         const isMediaItem = item.type === 'media';
-        const isVideo = isMediaItem && item.content && item.content.type === 'video';
+        const mediaList = isMediaItem ? (Array.isArray(item.content) ? item.content : [item.content]) : [];
+        const isVideo = isMediaItem && mediaList.length === 1 && mediaList[0] && mediaList[0].type === 'video';
         const bubble = document.createElement('div');
         bubble.className = `message ${role}` + (isMediaItem ? ' image-message' : '');
         bubble.dataset.rawText = text;
@@ -5708,139 +5707,46 @@ function renderMessage(msg, isLive = false) {
             }
 
         } else if (item.type === 'media') {
-            const mediaItem = item.content;
-            const imgUrl = mediaItem.url;
-            const isVideo = mediaItem.type === 'video';
-
-            if (isVideo) {
-                const videoContainer = document.createElement('div');
-                videoContainer.className = 'message-video-container';
-                videoContainer.style.marginTop = '8px';
-                
-                const video = document.createElement('video');
-                video.src = imgUrl;
-                video.controls = true;
-                video.style.maxWidth = '100%';
-                video.style.maxHeight = '300px';
-                video.style.borderRadius = '12px';
-                
-                videoContainer.appendChild(video);
-                bubble.appendChild(videoContainer);
-            } else {
-                const imgContainer = document.createElement('div');
-                imgContainer.className = 'message-image-container';
-                
-                const img = document.createElement('img');
-                img.src = imgUrl;
-                img.style.cursor = 'pointer';
-                img.title = 'Click to expand';
-                img.onclick = () => expandImage(imgUrl);
-                
-                const overlay = document.createElement('div');
-                overlay.className = 'image-actions-overlay';
-
-                if (imgUrl.includes('/images/') && role === 'program') {
-                    const editPromptBtn = document.createElement('button');
-                    editPromptBtn.className = 'image-action-btn';
-                    editPromptBtn.title = 'Edit prompt and regenerate';
-                    editPromptBtn.innerHTML = `
-                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                            <path d="M12 20h9"></path>
-                            <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"></path>
-                        </svg>
-                    `;
-                    editPromptBtn.onclick = async (e) => {
-                        e.stopPropagation();
-                        let activePrompt = mediaItem.prompt || portraitPrompt;
-                        try {
-                            const response = await fetch(`/api/get_image_prompt?image_url=${encodeURIComponent(img.src)}`);
-                            const data = await response.json();
-                            if (data.status === 'success' && data.prompt) {
-                                activePrompt = data.prompt;
-                            }
-                        } catch (err) {
-                            console.error("Failed to fetch prompt from server:", err);
-                        }
-                        showCustomTextareaPrompt(
-                            "Edit Image Prompt",
-                            "Modify the prompt to regenerate this image (Ctrl+Enter to save):",
-                            activePrompt || "",
-                            (newPrompt) => {
-                                if (newPrompt !== null) {
-                                    mediaItem.prompt = newPrompt;
-                                    regenerateImage(editPromptBtn, img.src, newPrompt);
-                                }
-                            }
-                        );
-                    };
-                    overlay.appendChild(editPromptBtn);
-
-                    const recycleBtn = document.createElement('button');
-                    recycleBtn.className = 'image-action-btn';
-                    recycleBtn.title = 'Reroll image with the same prompt';
-                    recycleBtn.innerHTML = `
-                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-                            <polyline points="23 4 23 10 17 10"></polyline>
-                            <polyline points="1 20 1 14 7 14"></polyline>
-                            <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>
-                        </svg>
-                    `;
-                    recycleBtn.onclick = (e) => {
-                        e.stopPropagation();
-                        try {
-                            regenerateImage(recycleBtn, img.src, mediaItem.prompt || portraitPrompt);
-                        } catch (err) {
-                            showCustomAlert("Error", "Click handler error: " + err.message);
-                        }
-                    };
-                    overlay.appendChild(recycleBtn);
-
-                    const animateBtn = document.createElement('button');
-                    animateBtn.className = 'image-action-btn';
-                    animateBtn.title = 'Animate image (video generation)';
-                    animateBtn.innerHTML = `
-                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-                            <polygon points="23 7 16 12 23 17 23 7"></polygon>
-                            <rect x="1" y="5" width="15" height="14" rx="2" ry="2"></rect>
-                        </svg>
-                    `;
-                    animateBtn.onclick = (e) => {
-                        e.stopPropagation();
-                        showCustomTextareaPrompt(
-                            "Animate Image",
-                            "Describe the motion or animation for this image (e.g. blinking, smiling, wind in hair, looking at camera):",
-                            "",
-                            (motionPrompt) => {
-                                if (motionPrompt !== null) {
-                                    animateImage(animateBtn, img.src, motionPrompt);
-                                }
-                            }
-                        );
-                    };
-                    overlay.appendChild(animateBtn);
-                }
-
-                const deleteBtn = document.createElement('button');
-                deleteBtn.className = 'image-action-btn';
-                deleteBtn.title = 'Delete message from history';
-                deleteBtn.innerHTML = `
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                        <polyline points="3 6 5 6 21 6"></polyline>
-                        <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
-                        <line x1="10" y1="11" x2="10" y2="17"></line>
-                        <line x1="14" y1="11" x2="14" y2="17"></line>
-                    </svg>
-                `;
-                deleteBtn.onclick = (e) => {
-                    e.stopPropagation();
-                    deleteTurnFromMessage(deleteBtn);
-                };
-                overlay.appendChild(deleteBtn);
-
-                imgContainer.appendChild(overlay);
-                imgContainer.appendChild(img);
-                bubble.appendChild(imgContainer);
+            const mediaList = Array.isArray(item.content) ? item.content : [item.content];
+            const portraitGrid = document.createElement('div');
+            portraitGrid.className = 'portrait-grid';
+            portraitGrid.dataset.msgId = msgId;
+            const sharedPrompt = (mediaList.find(m => m && m.prompt)?.prompt) || portraitPrompt || '';
+            if (sharedPrompt) {
+                portraitGrid.dataset.prompt = sharedPrompt;
             }
+
+            const isProgramPortraitRow = role === 'program' && mediaList.some(m => (m.url || '').includes('/images/portraits/'));
+            if (isProgramPortraitRow && mediaList.length > 0 && mediaList.length < 3) {
+                portraitGrid.dataset.deletedCount = String(3 - mediaList.length);
+            }
+
+            mediaList.forEach((mediaItem) => {
+                const imgUrl = mediaItem.url;
+                const isVideoItem = mediaItem.type === 'video';
+
+                if (isVideoItem) {
+                    const videoContainer = document.createElement('div');
+                    videoContainer.className = 'message-video-container';
+                    
+                    const video = document.createElement('video');
+                    video.src = imgUrl;
+                    video.controls = true;
+                    video.style.maxWidth = '100%';
+                    video.style.maxHeight = '300px';
+                    video.style.borderRadius = '12px';
+                    
+                    videoContainer.appendChild(video);
+                    portraitGrid.appendChild(videoContainer);
+                } else {
+                    const itemPrompt = mediaItem.prompt || sharedPrompt;
+                    const imgContainer = createPortraitCardElement(imgUrl, itemPrompt, msgId, role);
+                    portraitGrid.appendChild(imgContainer);
+                }
+            });
+
+            bubble.appendChild(portraitGrid);
+            updatePortraitGridToolbar(portraitGrid);
 
             if (isTextEmpty && idx === bubblesToCreate.length - 1 && msg.tool_calls && msg.tool_calls.length > 0) {
                 renderCompletedLogs(bubble, msg.tool_calls, msg.duration);
@@ -7149,6 +7055,317 @@ function nextGalleryImage(event) {
     updateModalImage();
 }
 
+// --- createPortraitCardElement ---
+function createPortraitCardElement(imgUrl, prompt, msgId, role = 'program') {
+    const imgContainer = document.createElement('div');
+    imgContainer.className = 'message-image-container';
+    if (imgUrl) {
+        imgContainer.dataset.imageUrl = imgUrl;
+    }
+    imgContainer.dataset.prompt = prompt || '';
+    if (msgId) {
+        imgContainer.dataset.msgId = msgId;
+    }
+
+    const overlay = document.createElement('div');
+    overlay.className = 'image-actions-overlay';
+
+    if (role === 'program' && (!imgUrl || imgUrl.includes('/images/'))) {
+        const editPromptBtn = document.createElement('button');
+        editPromptBtn.className = 'image-action-btn edit-prompt-action-btn';
+        editPromptBtn.title = 'Edit shared prompt';
+        editPromptBtn.innerHTML = `
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M12 20h9"></path>
+                <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"></path>
+            </svg>
+        `;
+        editPromptBtn.onclick = async (e) => {
+            e.stopPropagation();
+            const grid = imgContainer.closest('.portrait-grid');
+            const curImg = imgContainer.querySelector('img');
+            const curUrl = curImg ? curImg.src : (imgContainer.dataset.imageUrl || '');
+            let activePrompt = (grid && grid.dataset.prompt) || imgContainer.dataset.prompt || '';
+            if (!activePrompt && curUrl) {
+                try {
+                    const response = await fetch(`/api/get_image_prompt?image_url=${encodeURIComponent(curUrl)}`);
+                    const data = await response.json();
+                    if (data.status === 'success' && data.prompt) {
+                        activePrompt = data.prompt;
+                    }
+                } catch (err) {
+                    console.error("Failed to fetch prompt from server:", err);
+                }
+            }
+            showCustomTextareaPrompt(
+                "Edit Image Prompt",
+                "Modify the shared prompt for this portrait set (Ctrl+Enter to save):",
+                activePrompt || "",
+                (newPrompt) => {
+                    if (newPrompt !== null) {
+                        if (grid) {
+                            grid.dataset.prompt = newPrompt;
+                            grid.querySelectorAll('.message-image-container').forEach(c => {
+                                c.dataset.prompt = newPrompt;
+                            });
+                            if (getDeletedSlotCount(grid) > 0) {
+                                rerollDeletedSlotsInGrid(grid, newPrompt);
+                                return;
+                            }
+                        } else {
+                            imgContainer.dataset.prompt = newPrompt;
+                        }
+                        regenerateImage(imgContainer, curUrl, newPrompt);
+                    }
+                }
+            );
+        };
+        overlay.appendChild(editPromptBtn);
+
+        const recycleBtn = document.createElement('button');
+        recycleBtn.className = 'image-action-btn';
+        recycleBtn.title = 'Reroll image with the same prompt';
+        recycleBtn.innerHTML = `
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="23 4 23 10 17 10"></polyline>
+                <polyline points="1 20 1 14 7 14"></polyline>
+                <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>
+            </svg>
+        `;
+        recycleBtn.onclick = (e) => {
+            e.stopPropagation();
+            const grid = imgContainer.closest('.portrait-grid');
+            const curImg = imgContainer.querySelector('img');
+            const curUrl = curImg ? curImg.src : (imgContainer.dataset.deletedImageUrl || imgContainer.dataset.imageUrl || '');
+            const sharedPrompt = (grid && grid.dataset.prompt) || imgContainer.dataset.prompt || '';
+            regenerateImage(imgContainer, curUrl, sharedPrompt);
+        };
+        overlay.appendChild(recycleBtn);
+
+        const animateBtn = document.createElement('button');
+        animateBtn.className = 'image-action-btn animate-action-btn';
+        animateBtn.title = 'Animate image (video generation)';
+        animateBtn.innerHTML = `
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                <polygon points="23 7 16 12 23 17 23 7"></polygon>
+                <rect x="1" y="5" width="15" height="14" rx="2" ry="2"></rect>
+            </svg>
+        `;
+        animateBtn.onclick = (e) => {
+            e.stopPropagation();
+            const curImg = imgContainer.querySelector('img');
+            if (!curImg) return;
+            showCustomTextareaPrompt(
+                "Animate Image",
+                "Describe the motion or animation for this image (e.g. blinking, smiling, wind in hair, looking at camera):",
+                "",
+                (motionPrompt) => {
+                    if (motionPrompt !== null) {
+                        animateImage(animateBtn, curImg.src, motionPrompt);
+                    }
+                }
+            );
+        };
+        overlay.appendChild(animateBtn);
+    }
+
+    const deleteBtn = document.createElement('button');
+    deleteBtn.className = 'image-action-btn delete-image-btn';
+    deleteBtn.title = 'Delete this portrait';
+    deleteBtn.innerHTML = `
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="3 6 5 6 21 6"></polyline>
+            <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+            <line x1="10" y1="11" x2="10" y2="17"></line>
+            <line x1="14" y1="11" x2="14" y2="17"></line>
+        </svg>
+    `;
+    deleteBtn.onclick = (e) => {
+        e.stopPropagation();
+        deleteSinglePortraitSlot(imgContainer);
+    };
+    overlay.appendChild(deleteBtn);
+
+    imgContainer.appendChild(overlay);
+
+    if (imgUrl) {
+        const img = document.createElement('img');
+        img.src = imgUrl;
+        img.style.cursor = 'pointer';
+        img.title = 'Click to expand';
+        img.onclick = () => expandImage(imgContainer.dataset.imageUrl || img.src);
+        imgContainer.appendChild(img);
+    }
+
+    return imgContainer;
+}
+
+// --- getDeletedSlotCount ---
+function getDeletedSlotCount(grid) {
+    if (!grid) return 0;
+    return Math.max(0, parseInt(grid.dataset.deletedCount || '0', 10) || 0);
+}
+
+// --- removeMediaBubbleOrRowIfEmpty ---
+function removeMediaBubbleOrRowIfEmpty(element) {
+    if (!element) return false;
+    const grid = element.classList && element.classList.contains('portrait-grid')
+        ? element
+        : element.closest('.portrait-grid');
+    const bubble = element.closest('.message');
+    const row = element.closest('.message-row');
+    const bubblesContainer = element.closest('.message-bubbles-container');
+
+    const scope = grid || bubble;
+    if (!scope) return false;
+
+    const remainingActiveMedia = scope.querySelectorAll(
+        '.message-image-container:not(.is-deleted-slot) img, .message-image-container .image-loading-overlay, .message-video-container video'
+    ).length;
+
+    if (remainingActiveMedia > 0) return false;
+
+    if (bubble && bubblesContainer && bubblesContainer.querySelectorAll('.message').length > 1) {
+        bubble.remove();
+    } else if (row) {
+        row.remove();
+    } else if (bubble) {
+        bubble.remove();
+    }
+    return true;
+}
+
+// --- markSlotAsDeleted ---
+function markSlotAsDeleted(container) {
+    if (!container) return;
+    const grid = container.closest('.portrait-grid');
+    const bubble = container.closest('.message');
+    if (grid) {
+        if (!grid.dataset.prompt && container.dataset.prompt) {
+            grid.dataset.prompt = container.dataset.prompt;
+        }
+        grid.dataset.deletedCount = String(getDeletedSlotCount(grid) + 1);
+    }
+
+    container.remove();
+
+    if (removeMediaBubbleOrRowIfEmpty(grid || bubble)) {
+        return;
+    }
+
+    if (grid) {
+        updatePortraitGridToolbar(grid);
+    }
+}
+
+// --- updatePortraitGridToolbar ---
+function updatePortraitGridToolbar(grid) {
+    if (!grid) return;
+    const bubble = grid.closest('.message');
+    if (!bubble) return;
+
+    const count = getDeletedSlotCount(grid);
+    let toolbar = bubble.querySelector('.portrait-grid-toolbar');
+
+    if (count === 0) {
+        if (toolbar) toolbar.remove();
+        return;
+    }
+
+    if (!toolbar) {
+        toolbar = document.createElement('div');
+        toolbar.className = 'portrait-grid-toolbar';
+        grid.insertAdjacentElement('afterend', toolbar);
+    }
+
+    toolbar.innerHTML = `
+        <button type="button" class="portrait-batch-reroll-btn">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="23 4 23 10 17 10"></polyline>
+                <polyline points="1 20 1 14 7 14"></polyline>
+                <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>
+            </svg>
+            <span>Regenerate</span>
+        </button>
+    `;
+    const batchBtn = toolbar.querySelector('.portrait-batch-reroll-btn');
+    if (batchBtn) {
+        batchBtn.onclick = (e) => {
+            e.stopPropagation();
+            rerollDeletedSlotsInGrid(grid);
+        };
+    }
+}
+
+// --- rerollDeletedSlotsInGrid ---
+async function rerollDeletedSlotsInGrid(grid, overridePrompt) {
+    if (!grid || isGenerating) return;
+    const count = getDeletedSlotCount(grid);
+    if (count <= 0) return;
+
+    const activePrompt = overridePrompt || grid.dataset.prompt || (grid.querySelector('.message-image-container')?.dataset.prompt) || '';
+    const msgId = grid.dataset.msgId || '';
+
+    for (let i = 0; i < count; i++) {
+        if (!document.body.contains(grid)) break;
+        const slot = createPortraitCardElement('', activePrompt, msgId, 'program');
+        slot.classList.add('is-deleted-slot');
+        grid.appendChild(slot);
+
+        const ok = await regenerateImage(slot, '', activePrompt);
+        if (!ok || (chatAbortController && chatAbortController.signal.aborted)) {
+            if (slot.classList.contains('is-deleted-slot') && !slot.querySelector('img')) {
+                slot.remove();
+            }
+            break;
+        }
+    }
+
+    updatePortraitGridToolbar(grid);
+}
+
+// --- deleteSinglePortraitSlot ---
+async function deleteSinglePortraitSlot(container) {
+    if (!container) return;
+    const img = container.querySelector('img');
+    const rawUrl = (img && img.src) ? img.src : (container.dataset.imageUrl || '');
+    const currentSrc = getRelativePath(rawUrl);
+    if (!currentSrc) return;
+
+    const scope = container.closest('.portrait-grid') || container.closest('.message');
+    const keepMessage = scope ? Array.from(
+        scope.querySelectorAll('.message-image-container:not(.is-deleted-slot) img, .message-image-container .image-loading-overlay, .message-video-container video')
+    ).some(el => !container.contains(el)) : false;
+
+    try {
+        const response = await fetch('/delete_image', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                session_id: sessionId,
+                image_url: currentSrc,
+                keep_message: keepMessage
+            })
+        });
+
+        if (response.ok) {
+            markSlotAsDeleted(container);
+            serverImages = serverImages.filter(u => getRelativePath(u) !== currentSrc);
+            galleryImages = galleryImages.filter(u => getRelativePath(u) !== currentSrc);
+        } else {
+            let errMsg = "Unknown error";
+            try {
+                const data = await response.json();
+                errMsg = data.error || errMsg;
+            } catch (e) {}
+            showCustomAlert("Error Deleting Image", "Error deleting image: " + errMsg);
+        }
+    } catch (err) {
+        console.error("Failed to delete portrait slot:", err);
+        showCustomAlert("Error Deleting Image", "Failed to delete image due to network error.");
+    }
+}
+
 // --- deleteCurrentImage ---
 async function deleteCurrentImage(event) {
     if (event) event.stopPropagation();
@@ -7157,12 +7374,27 @@ async function deleteCurrentImage(event) {
     
     showCustomConfirm("Delete Image", "Are you sure you want to permanently delete this image from this conversation and the server?", async () => {
         try {
+            let keepMessage = false;
+            document.querySelectorAll('.message-image-container img').forEach(img => {
+                if (getRelativePath(img.src) === currentSrc) {
+                    const container = img.closest('.message-image-container');
+                    const scope = container && (container.closest('.portrait-grid') || container.closest('.message'));
+                    if (scope) {
+                        const hasOther = Array.from(
+                            scope.querySelectorAll('.message-image-container:not(.is-deleted-slot) img, .message-image-container .image-loading-overlay, .message-video-container video')
+                        ).some(el => !container.contains(el));
+                        if (hasOther) keepMessage = true;
+                    }
+                }
+            });
+
             const response = await fetch('/delete_image', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     session_id: sessionId,
-                    image_url: currentSrc
+                    image_url: currentSrc,
+                    keep_message: keepMessage
                 })
             });
             
@@ -7173,17 +7405,12 @@ async function deleteCurrentImage(event) {
                     if (img.id === 'modal-img') return; // Skip modal preview image to prevent UI crash
                     if (getRelativePath(img.src) === currentSrc) {
                         const parent = img.parentElement;
-                        if (parent) {
+                        if (parent && parent.classList.contains('message-image-container')) {
+                            markSlotAsDeleted(parent);
+                        } else if (parent) {
                             const placeholder = document.createElement('div');
                             placeholder.className = 'deleted-image-placeholder';
-                            placeholder.innerHTML = `
-                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 6px; display: inline-block; vertical-align: middle;">
-                                    <line x1="1" y1="1" x2="23" y2="23"></line>
-                                    <path d="M21 21H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h3m3-3h6l2 3h4a2 2 0 0 1 2 2v9.34"></path>
-                                    <circle cx="12" cy="13" r="4"></circle>
-                                </svg>
-                                <span>[Portrait Deleted]</span>
-                            `;
+                            placeholder.innerHTML = `<span>[Portrait Deleted]</span>`;
                             parent.replaceChild(placeholder, img);
                         }
                     }
@@ -7195,17 +7422,20 @@ async function deleteCurrentImage(event) {
                         const container = vid.closest('.message-video-container') || vid;
                         const parent = container.parentElement;
                         if (parent) {
-                            const placeholder = document.createElement('div');
-                            placeholder.className = 'deleted-image-placeholder';
-                            placeholder.innerHTML = `
-                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 6px; display: inline-block; vertical-align: middle;">
-                                    <line x1="1" y1="1" x2="23" y2="23"></line>
-                                    <path d="M21 21H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h3m3-3h6l2 3h4a2 2 0 0 1 2 2v9.34"></path>
-                                    <circle cx="12" cy="13" r="4"></circle>
-                                </svg>
-                                <span>[Portrait Deleted]</span>
-                            `;
-                            parent.replaceChild(placeholder, container);
+                            container.remove();
+                            if (!removeMediaBubbleOrRowIfEmpty(parent)) {
+                                const placeholder = document.createElement('div');
+                                placeholder.className = 'deleted-image-placeholder';
+                                placeholder.innerHTML = `
+                                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 6px; display: inline-block; vertical-align: middle;">
+                                        <line x1="1" y1="1" x2="23" y2="23"></line>
+                                        <path d="M21 21H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h3m3-3h6l2 3h4a2 2 0 0 1 2 2v9.34"></path>
+                                        <circle cx="12" cy="13" r="4"></circle>
+                                    </svg>
+                                    <span>[Portrait Deleted]</span>
+                                `;
+                                parent.appendChild(placeholder);
+                            }
                         }
                     }
                 });
@@ -7557,25 +7787,39 @@ async function autoGenerateUserMessage() {
 
 // --- regenerateImage ---
 async function regenerateImage(buttonElement, oldImageUrl, prompt) {
-    if (isGenerating) return;
+    if (isGenerating) return false;
     setGenerating(true);
     if (chatAbortController) {
         chatAbortController.abort();
     }
     chatAbortController = new AbortController();
 
+    const container = (buttonElement && buttonElement.classList && buttonElement.classList.contains('message-image-container'))
+        ? buttonElement
+        : (buttonElement ? buttonElement.closest('.message-image-container') : null);
+
+    if (!container) {
+        setGenerating(false);
+        showCustomAlert("Reroll Failed", "Reroll failed: message-image-container parent not found!");
+        return false;
+    }
+
+    let succeeded = false;
     try {
-        const container = buttonElement.closest('.message-image-container');
-        if (!container) {
-            showCustomAlert("Reroll Failed", "Reroll failed: message-image-container parent not found!");
-            return;
+        const bubble = container.closest('.message.program') || container.closest('.message');
+        const msgId = container.dataset.msgId || (bubble ? bubble.dataset.msgId : null);
+        const grid = container.closest('.portrait-grid');
+        let slotIndex = 0;
+        if (grid) {
+            const siblings = Array.from(grid.querySelectorAll('.message-image-container'));
+            for (const sib of siblings) {
+                if (sib === container) break;
+                if (!sib.classList.contains('is-deleted-slot') && sib.querySelector('img')) {
+                    slotIndex += 1;
+                }
+            }
         }
-        const img = container.querySelector('img');
-        if (!img) {
-            showCustomAlert("Reroll Failed", "Reroll failed: img tag inside container not found!");
-            return;
-        }
-        
+
         // Create loading overlay
         let overlay = container.querySelector('.image-loading-overlay');
         if (!overlay) {
@@ -7590,8 +7834,10 @@ async function regenerateImage(buttonElement, oldImageUrl, prompt) {
             `;
             container.appendChild(overlay);
         }
-        buttonElement.style.pointerEvents = 'none';
-        buttonElement.style.opacity = '0.5';
+        if (buttonElement && buttonElement !== container) {
+            buttonElement.style.pointerEvents = 'none';
+            buttonElement.style.opacity = '0.5';
+        }
 
         startToolPolling();
         
@@ -7600,8 +7846,10 @@ async function regenerateImage(buttonElement, oldImageUrl, prompt) {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 session_id: sessionId,
-                old_image_url: getRelativePath(oldImageUrl),
-                prompt: prompt,
+                old_image_url: oldImageUrl ? getRelativePath(oldImageUrl) : '',
+                prompt: prompt || container.dataset.prompt || '',
+                msg_id: msgId,
+                slot_index: slotIndex,
                 use_imagen: useImagenMode
             }),
             signal: chatAbortController.signal
@@ -7609,12 +7857,51 @@ async function regenerateImage(buttonElement, oldImageUrl, prompt) {
         
         const data = await response.json();
         if (data.status === 'success') {
+            succeeded = true;
+            const wasDeletedSlot = container.classList.contains('is-deleted-slot');
+            container.dataset.imageUrl = data.new_image_url;
+            delete container.dataset.deletedImageUrl;
+            if (data.prompt) {
+                container.dataset.prompt = data.prompt;
+                if (grid) {
+                    grid.dataset.prompt = data.prompt;
+                }
+            }
+            container.classList.remove('is-deleted-slot');
+
+            if (grid && wasDeletedSlot) {
+                grid.dataset.deletedCount = String(Math.max(0, getDeletedSlotCount(grid) - 1));
+            }
+
+            const animateBtn = container.querySelector('.animate-action-btn');
+            if (animateBtn) animateBtn.style.display = '';
+            const deleteBtn = container.querySelector('.delete-image-btn');
+            if (deleteBtn) deleteBtn.style.display = '';
+
+            let img = container.querySelector('img');
+            const placeholder = container.querySelector('.deleted-image-placeholder');
+            if (!img) {
+                img = document.createElement('img');
+                img.style.cursor = 'pointer';
+                img.title = 'Click to expand';
+                if (placeholder) {
+                    container.replaceChild(img, placeholder);
+                } else {
+                    container.appendChild(img);
+                }
+            } else if (placeholder) {
+                placeholder.remove();
+            }
             img.src = data.new_image_url;
-            img.onclick = () => expandImage(data.new_image_url);
+            img.onclick = () => expandImage(container.dataset.imageUrl || img.src);
+
+            if (grid) {
+                updatePortraitGridToolbar(grid);
+            }
+
             await loadServerImages();
 
             // Re-render Activity Log in completed ("Ran...") state
-            const bubble = buttonElement.closest('.message.program');
             const rerollCalls = data.tool_calls || [];
             if (bubble && rerollCalls.length > 0) {
                 const formattedToolCalls = [];
@@ -7652,17 +7939,19 @@ async function regenerateImage(buttonElement, oldImageUrl, prompt) {
             showCustomAlert("Connection Error", "Failed to connect to the server for image regeneration: " + error.message);
         }
     } finally {
-        const container = buttonElement.closest('.message-image-container');
         if (container) {
             const overlay = container.querySelector('.image-loading-overlay');
             if (overlay) overlay.remove();
         }
-        buttonElement.style.pointerEvents = 'auto';
-        buttonElement.style.opacity = '';
+        if (buttonElement && buttonElement !== container) {
+            buttonElement.style.pointerEvents = 'auto';
+            buttonElement.style.opacity = '';
+        }
         setGenerating(false);
         stopToolPolling();
         await initializeModelSelect();
     }
+    return succeeded;
 }
 
 
@@ -7754,11 +8043,8 @@ function showImageErrorOverlay(container, error) {
 function swapImageWithVideo(container, videoUrl) {
     const bubble = container.closest('.message.program');
     if (bubble) {
-        container.remove();
-        
         const videoContainer = document.createElement('div');
         videoContainer.className = 'message-video-container';
-        videoContainer.style.marginTop = '8px';
         
         const video = document.createElement('video');
         video.src = videoUrl;
@@ -7772,11 +8058,16 @@ function swapImageWithVideo(container, videoUrl) {
         
         videoContainer.appendChild(video);
         
-        const textDiv = bubble.querySelector('.message-text');
-        if (textDiv) {
-            bubble.insertBefore(videoContainer, textDiv);
+        if (container.parentElement && container.parentElement.classList.contains('portrait-grid')) {
+            container.replaceWith(videoContainer);
         } else {
-            bubble.appendChild(videoContainer);
+            container.remove();
+            const textDiv = bubble.querySelector('.message-text');
+            if (textDiv) {
+                bubble.insertBefore(videoContainer, textDiv);
+            } else {
+                bubble.appendChild(videoContainer);
+            }
         }
     }
 }
@@ -10640,22 +10931,12 @@ function drawVisualizer() {
 
 // Global error handler to replace missing/deleted portraits with a clean placeholder
 document.addEventListener('error', function (event) {
-    if (event.target.tagName.toLowerCase() === 'img') {
+    if (event.target.tagName && event.target.tagName.toLowerCase() === 'img') {
         const src = event.target.src;
         if (src && src.includes('/images/portraits/')) {
             const parent = event.target.parentElement;
             if (parent && parent.classList.contains('message-image-container')) {
-                const placeholder = document.createElement('div');
-                placeholder.className = 'deleted-image-placeholder';
-                placeholder.innerHTML = `
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 6px; display: inline-block; vertical-align: middle;">
-                        <line x1="1" y1="1" x2="23" y2="23"></line>
-                        <path d="M21 21H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h3m3-3h6l2 3h4a2 2 0 0 1 2 2v9.34"></path>
-                        <circle cx="12" cy="13" r="4"></circle>
-                    </svg>
-                    <span>[Portrait Deleted]</span>
-                `;
-                parent.replaceChild(placeholder, event.target);
+                markSlotAsDeleted(parent);
             }
         }
     }

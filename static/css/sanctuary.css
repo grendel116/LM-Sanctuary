@@ -1448,16 +1448,153 @@ header {
     box-shadow: 0 0 15px rgba(56, 189, 248, 0.3);
 }
 .deleted-image-placeholder {
-    padding: 12px;
+    padding: 16px 12px;
     background: rgba(255, 255, 255, 0.03);
-    border: 1px dashed rgba(255, 255, 255, 0.1);
-    border-radius: 8px;
+    border: 1px dashed rgba(255, 255, 255, 0.14);
+    border-radius: 12px;
     color: var(--text-muted);
     font-size: 0.8rem;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    width: 100%;
+    height: 100%;
+    min-height: 180px;
+    box-sizing: border-box;
+    text-align: center;
+}
+
+.deleted-slot-label {
+    font-style: italic;
+    opacity: 0.75;
+}
+
+.deleted-slot-reroll-btn {
     display: inline-flex;
     align-items: center;
-    margin: 8px 0;
-    font-style: italic;
+    gap: 6px;
+    padding: 6px 12px;
+    border-radius: 8px;
+    border: 1px solid rgba(56, 189, 248, 0.35);
+    background: rgba(56, 189, 248, 0.12);
+    color: #38bdf8;
+    font-size: 0.78rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.deleted-slot-reroll-btn:hover {
+    background: rgba(56, 189, 248, 0.22);
+    border-color: #38bdf8;
+    color: #ffffff;
+    transform: translateY(-1px);
+}
+
+.deleted-slot-dismiss-btn {
+    background: transparent;
+    border: none;
+    color: var(--text-muted);
+    font-size: 0.72rem;
+    opacity: 0.6;
+    cursor: pointer;
+    padding: 2px 6px;
+    text-decoration: underline;
+    transition: opacity 0.15s ease;
+}
+
+.deleted-slot-dismiss-btn:hover {
+    opacity: 1;
+    color: var(--text-main);
+}
+
+.portrait-grid {
+    display: flex;
+    flex-direction: row;
+    flex-wrap: nowrap;
+    gap: 10px;
+    align-items: stretch;
+    max-inline-size: 100%;
+    margin: 6px 0 2px 0;
+}
+
+.portrait-grid .message-image-container,
+.portrait-grid .message-video-container {
+    width: 200px;
+    height: 300px;
+    flex: 0 0 200px;
+    aspect-ratio: 2 / 3;
+    margin: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(0, 0, 0, 0.18);
+    box-sizing: border-box;
+}
+
+.portrait-grid .message-image-container.is-deleted-slot {
+    width: 200px;
+    height: 300px;
+    flex: 0 0 200px;
+    background: transparent;
+}
+
+.portrait-grid .message-image-container img,
+.portrait-grid .message-video-container video {
+    display: block;
+    width: 200px;
+    height: 300px;
+    max-width: 200px;
+    max-height: 300px;
+    object-fit: cover;
+    margin: 0;
+    box-sizing: border-box;
+}
+
+.portrait-grid > .message-image-container:not(:first-of-type) .edit-prompt-action-btn {
+    display: none;
+}
+
+.portrait-grid-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: flex-start;
+    margin-top: 8px;
+}
+
+.portrait-batch-reroll-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 14px;
+    border-radius: 8px;
+    border: 1px solid rgba(56, 189, 248, 0.4);
+    background: rgba(56, 189, 248, 0.14);
+    color: #38bdf8;
+    font-size: 0.8rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.portrait-batch-reroll-btn:hover {
+    background: rgba(56, 189, 248, 0.25);
+    border-color: #38bdf8;
+    color: #ffffff;
+}
+
+@media (max-width: 640px) {
+    .portrait-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 8px;
+    }
+    .portrait-grid .message-image-container,
+    .portrait-grid .message-image-container.is-deleted-slot {
+        inline-size: 100%;
+    }
 }
 
 .message-image-container {
@@ -1482,8 +1619,12 @@ header {
     opacity: 0;
     transition: opacity 0.2s ease;
 }
-.message-image-container:hover .image-actions-overlay,
-.message.image-message:hover .image-actions-overlay {
+.message-image-container.is-deleted-slot .image-actions-overlay,
+.message-image-container:not(:has(img)) .image-actions-overlay,
+.message-image-container:has(.image-loading-overlay) .image-actions-overlay {
+    display: none;
+}
+.message-image-container:has(img):not(.is-deleted-slot):hover .image-actions-overlay {
     opacity: 1;
 }
 .image-action-btn {

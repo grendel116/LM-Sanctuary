@@ -900,7 +900,7 @@ class BaseProgramRunner:
         """Deletes a specific turn/message from history by its ID."""
         return await self.delete_message_at(session_id, msg_id)
 
-    async def delete_image_from_session(self, session_id: str, image_url: str) -> bool:
+    async def delete_image_from_session(self, session_id: str, image_url: str, keep_message: bool = False) -> bool:
         """Deletes an image reference from session history and cleans up disk files."""
         if session_id not in self.sessions_history:
             return False
@@ -945,7 +945,7 @@ class BaseProgramRunner:
             self._save_session_to_disk(session_id)
             return True
 
-    async def append_message_to_session(self, session_id: str, role: str, text: str, msg_id: str = None, sender_id: str = None, sender_name: str = None) -> bool:
+    async def append_message_to_session(self, session_id: str, role: str, text: str, msg_id: str = None, sender_id: str = None, sender_name: str = None, prompt: str = None) -> bool:
         """Appends a new raw message to the session history."""
         with self._lock:
             if session_id not in self.sessions_history:
@@ -987,6 +987,8 @@ class BaseProgramRunner:
                 "text": text,
                 "timestamp": time.time(),
             }
+            if prompt:
+                msg["prompt"] = prompt
             if role == "program":
                 msg["sender_id"] = sender_id or active_prog
                 msg["sender_name"] = sender_name or prog_name
@@ -1548,14 +1550,26 @@ class OpenSourceRunner(BaseProgramRunner):
                 "generate_program_portrait",
                 "generate_general_image",
             }
-            image_prompt = next(
+            image_prompt = msg.get("prompt") or next(
                 (ts.get("args", {}).get("prompt") for ts in tool_summary if ts.get("name") in image_tools),
                 None,
             )
 
-            if image_prompt:
-                for m in media:
+            for m in media:
+                if image_prompt:
                     m.setdefault("prompt", image_prompt)
+                if not m.get("prompt") and m.get("url"):
+                    local_img = _get_safe_local_path(m["url"])
+                    if local_img:
+                        sidecar_path = os.path.splitext(local_img)[0] + ".json"
+                        if os.path.exists(sidecar_path):
+                            try:
+                                with open(sidecar_path, "r", encoding="utf-8") as sf:
+                                    s_data = json.load(sf)
+                                    if s_prompt := s_data.get("prompt"):
+                                        m["prompt"] = s_prompt
+                            except Exception:
+                                pass
 
             role = msg.get("role", "user")
             sender_id = msg.get("sender_id")
@@ -1966,7 +1980,7 @@ class OpenSourceRunner(BaseProgramRunner):
                         return True
                 return False
 
-        async def delete_image_from_session(self, session_id: str, image_url: str) -> bool:
+        async def delete_image_from_session(self, session_id: str, image_url: str, keep_message: bool = False) -> bool:
             with self._lock:
                 if session_id not in self.sessions_history:
                     self._load_session_from_disk(session_id)
@@ -1984,8 +1998,8 @@ class OpenSourceRunner(BaseProgramRunner):
 
                     if msg.get("text") and image_url in msg["text"]:
                         has_image = True
-                        remaining_text = re.sub(pattern, "", msg["text"]).strip()
-                        if not re.sub(r"^[:\s\-\*]+|[:\s\-\*]+$", "", remaining_text):
+                        remaining_text = re.sub(r"\n{2,}", "\n", re.sub(pattern, "", msg["text"])).strip()
+                        if not keep_message and not re.sub(r"^[:\s\-\*]+|[:\s\-\*]+$", "", remaining_text):
                             indices_to_delete.add(i)
                         else:
                             msg["text"] = remaining_text
@@ -1994,7 +2008,7 @@ class OpenSourceRunner(BaseProgramRunner):
                     if msg.get("image_url") == image_url:
                         has_image = True
                         msg["image_url"] = None
-                        if not (msg.get("text") or "").strip():
+                        if not keep_message and not (msg.get("text") or "").strip():
                             indices_to_delete.add(i)
                         modified = True
 
@@ -2003,8 +2017,8 @@ class OpenSourceRunner(BaseProgramRunner):
                         for tc in tool_calls:
                             if tc.get("type") == "response" and tc.get("response") and image_url in tc["response"]:
                                 has_image = True
-                                tc["response"] = re.sub(pattern, "", tc["response"]).strip()
-                                if not tc["response"]:
+                                tc["response"] = re.sub(r"\n{2,}", "\n", re.sub(pattern, "", tc["response"])).strip()
+                                if not keep_message and not tc["response"]:
                                     cleared_call_ids.add(tc.get("id"))
                                 modified = True
 
@@ -2018,13 +2032,13 @@ class OpenSourceRunner(BaseProgramRunner):
                                 )
                             ]
 
-                        if not any(
+                        if not keep_message and not any(
                             tc.get("response", "").strip() for tc in msg["tool_calls"] if tc.get("type") == "response"
                         ):
                             if not (msg.get("text") or "").strip():
                                 indices_to_delete.add(i)
 
-                    if has_image and i > 0:
+                    if i in indices_to_delete and i > 0:
                         prev_msg = history[i - 1]
                         if prev_msg.get("role") == "user" and "Generate a portrait of yourself" in (
                             prev_msg.get("text") or ""
@@ -2043,8 +2057,25 @@ class OpenSourceRunner(BaseProgramRunner):
                 return modified or file_deleted
 
         async def replace_image_in_session(
-            self, session_id: str, old_image_url: str, new_image_url: str, new_prompt: str = None
+            self,
+            session_id: str,
+            old_image_url: str,
+            new_image_url: str,
+            new_prompt: str = None,
+            msg_id: str = None,
+            slot_index: int = None,
         ) -> bool:
+            def _insert_at_slot(text_str: str, new_md: str, idx: int = None) -> str:
+                img_matches = list(re.finditer(r"!\[[^\]]*\]\([^)]+\)", text_str or ""))
+                if not img_matches:
+                    return f"{text_str.strip()}\n{new_md}".strip() if (text_str or "").strip() else new_md
+                pos_idx = idx if (idx is not None and 0 <= idx <= len(img_matches)) else len(img_matches)
+                if pos_idx == len(img_matches):
+                    insert_pos = img_matches[-1].end()
+                    return text_str[:insert_pos] + "\n" + new_md + text_str[insert_pos:]
+                insert_pos = img_matches[pos_idx].start()
+                return text_str[:insert_pos] + new_md + "\n" + text_str[insert_pos:]
+
             with self._lock:
                 if session_id not in self.sessions_history:
                     self._load_session_from_disk(session_id)
@@ -2053,37 +2084,92 @@ class OpenSourceRunner(BaseProgramRunner):
                 if history is None:
                     return False
 
-                old_url_re = re.compile(_media_url_pattern(old_image_url))
-                old_path = old_image_url.split("?", 1)[0]
+                old_path = (old_image_url or "").split("?", 1)[0]
+                old_url_re = re.compile(_media_url_pattern(old_image_url)) if old_path else None
 
                 modified = False
-                for msg in history:
-                    if msg.get("text") and old_path in msg["text"]:
-                        msg["text"] = old_url_re.sub(new_image_url, msg["text"])
-                        modified = True
+                if old_path:
+                    for msg in history:
+                        if msg.get("text") and old_path in msg["text"]:
+                            msg["text"] = old_url_re.sub(new_image_url, msg["text"])
+                            if new_prompt:
+                                msg["prompt"] = new_prompt
+                            modified = True
 
-                    if msg.get("image_url") and msg["image_url"].split("?", 1)[0] == old_path:
-                        msg["image_url"] = new_image_url
-                        modified = True
+                        if msg.get("image_url") and msg["image_url"].split("?", 1)[0] == old_path:
+                            msg["image_url"] = new_image_url
+                            if new_prompt:
+                                msg["prompt"] = new_prompt
+                            modified = True
 
-                    if tool_calls := msg.get("tool_calls"):
-                        call_ids_to_update = set()
-                        for tc in tool_calls:
-                            if tc.get("type") == "response" and tc.get("response") and old_path in tc["response"]:
-                                tc["response"] = old_url_re.sub(new_image_url, tc["response"])
-                                modified = True
-                                if tc.get("id"):
-                                    call_ids_to_update.add(tc["id"])
-
-                        if new_prompt and call_ids_to_update:
+                        if tool_calls := msg.get("tool_calls"):
+                            call_ids_to_update = set()
                             for tc in tool_calls:
-                                if (
-                                    tc.get("type") == "call"
-                                    and tc.get("id") in call_ids_to_update
-                                    and isinstance(tc.get("args"), dict)
-                                ):
-                                    tc["args"]["prompt"] = new_prompt
+                                if tc.get("type") == "response" and tc.get("response") and old_path in tc["response"]:
+                                    tc["response"] = old_url_re.sub(new_image_url, tc["response"])
                                     modified = True
+                                    if tc.get("id"):
+                                        call_ids_to_update.add(tc["id"])
+
+                            if new_prompt and call_ids_to_update:
+                                for tc in tool_calls:
+                                    if (
+                                        tc.get("type") == "call"
+                                        and tc.get("id") in call_ids_to_update
+                                        and isinstance(tc.get("args"), dict)
+                                    ):
+                                        tc["args"]["prompt"] = new_prompt
+                                        modified = True
+
+                if modified and old_path and old_path != new_image_url.split("?", 1)[0]:
+                    self._delete_local_image(old_path)
+
+                # If old_image_url was already deleted via /delete_image, insert the new image into the slot
+                if not modified:
+                    new_md = f"![Portrait]({new_image_url})"
+                    target_msg = None
+                    if msg_id:
+                        target_msg = next((m for m in history if m.get("id") == msg_id), None)
+
+                    if target_msg is not None:
+                        inserted_in_tc = False
+                        if tool_calls := target_msg.get("tool_calls"):
+                            for tc in tool_calls:
+                                if tc.get("type") == "response" and tc.get("name") in (
+                                    "generate_local_image",
+                                    "generate_program_portrait",
+                                    "generate_imagen",
+                                ):
+                                    tc["response"] = _insert_at_slot(tc.get("response", ""), new_md, slot_index)
+                                    inserted_in_tc = True
+                                    break
+                            if new_prompt:
+                                for tc in tool_calls:
+                                    if tc.get("type") == "call" and isinstance(tc.get("args"), dict) and "prompt" in tc["args"]:
+                                        tc["args"]["prompt"] = new_prompt
+                        if not inserted_in_tc or target_msg.get("text"):
+                            target_msg["text"] = _insert_at_slot(target_msg.get("text", ""), new_md, slot_index)
+                        if new_prompt:
+                            target_msg["prompt"] = new_prompt
+                        modified = True
+                    elif msg_id:
+                        from runners.program import get_active_program
+                        from core.program_config import _load_card_data
+                        active_prog = get_active_program() or "sebile"
+                        card = _load_card_data(active_prog)
+                        prog_name = card.get("name") or active_prog.title()
+                        recreated_msg = {
+                            "id": msg_id,
+                            "role": "program",
+                            "text": new_md,
+                            "timestamp": time.time(),
+                            "sender_id": active_prog,
+                            "sender_name": prog_name,
+                        }
+                        if new_prompt:
+                            recreated_msg["prompt"] = new_prompt
+                        history.append(recreated_msg)
+                        modified = True
 
                 if modified:
                     self._save_session_to_disk(session_id)

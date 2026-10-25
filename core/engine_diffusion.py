@@ -240,9 +240,9 @@ def set_active_checkpoint(checkpoint_name: str) -> bool:
         filename = os.path.basename(resolved)
         os.environ["COMFYUI_CHECKPOINT"] = filename
         
-        # Clear cached checkpoint and dependent LoRAs if switched
+        # Clear cached checkpoint and dependent LoRAs/CLIP encodings if switched
         for key in list(_COMFY_NODE_CACHE.keys()):
-            if key[0] in ("CheckpointLoaderSimple", "LoraLoader"):
+            if key[0] in ("CheckpointLoaderSimple", "LoraLoader", "CLIPTextEncode"):
                 del _COMFY_NODE_CACHE[key]
 
         _persist_checkpoint_to_env(filename)
@@ -400,8 +400,10 @@ def unload_diffusion_models():
 def execute_workflow_graph(
     workflow_path_or_dict: Any,
     replacements: Optional[Dict[str, Any]] = None,
-    save_path: Optional[str] = None
-) -> Tuple[Optional[Any], str]:
+    save_path: Optional[str] = None,
+    save_paths: Optional[List[str]] = None,
+    batch_size: int = 1
+) -> Tuple[Optional[Any], Any]:
     """Dynamically executes any ComfyUI node graph JSON in-process with AMD DirectML GPU acceleration."""
     comfy_dir = os.path.normpath(os.path.join(root_dir, "core", "comfy_engine"))
     if comfy_dir not in sys.path:
@@ -501,10 +503,24 @@ def execute_workflow_graph(
                 executed_outputs[node_id] = _COMFY_NODE_CACHE[cache_key]
                 return executed_outputs[node_id]
 
-            # Invalidate older models and dependent LoRAs when switching checkpoints
+            # Invalidate older models and dependent LoRAs/CLIP encodings when switching checkpoints
             for k in list(_COMFY_NODE_CACHE.keys()):
-                if k[0] in ("CheckpointLoaderSimple", "LoraLoader"):
+                if k[0] in ("CheckpointLoaderSimple", "LoraLoader", "CLIPTextEncode"):
                     del _COMFY_NODE_CACHE[k]
+
+            outs = func(**resolved_inputs)
+            _COMFY_NODE_CACHE[cache_key] = outs
+            executed_outputs[node_id] = outs
+            return outs
+
+        if class_type == "CLIPTextEncode":
+            text_val = resolved_inputs.get("text")
+            c_in = resolved_inputs.get("clip")
+            cache_key = ("CLIPTextEncode", text_val, id(c_in))
+            if cache_key in _COMFY_NODE_CACHE:
+                print("[engine_diffusion] Reusing cached CLIP text encoding")
+                executed_outputs[node_id] = _COMFY_NODE_CACHE[cache_key]
+                return executed_outputs[node_id]
 
             outs = func(**resolved_inputs)
             _COMFY_NODE_CACHE[cache_key] = outs
@@ -553,26 +569,6 @@ def execute_workflow_graph(
 
         outs = func(**resolved_inputs)
         executed_outputs[node_id] = outs
-
-        if class_type in ("KSampler", "VAEDecode", "FaceDetailer"):
-            gc.collect()
-            try:
-                import comfy.model_management as mm
-                mm.soft_empty_cache()
-            except Exception:
-                pass
-            if torch.cuda.is_available():
-                try:
-                    torch.cuda.empty_cache()
-                except Exception:
-                    pass
-            try:
-                import torch_directml
-                if hasattr(torch_directml, "empty_cache"):
-                    torch_directml.empty_cache()
-            except Exception:
-                pass
-
         return outs
 
     final_images = None
@@ -607,30 +603,32 @@ def execute_workflow_graph(
     import numpy as np
 
     result_image = None
+    saved_paths: List[str] = []
     if final_images is not None:
-        img_array = (final_images[0].detach().cpu().numpy() * 255).astype(np.uint8)
-        result_image = Image.fromarray(img_array)
-        if save_path:
-            os.makedirs(os.path.dirname(save_path), exist_ok=True)
-            result_image.save(save_path)
-            print(f"[engine_diffusion] Image saved dynamically to {save_path}")
-        del img_array
+        target_paths = list(save_paths) if save_paths else ([save_path] if save_path else [])
+        num_out = final_images.shape[0]
+        for idx in range(num_out):
+            img_array = (final_images[idx].detach().cpu().numpy() * 255).astype(np.uint8)
+            pil_img = Image.fromarray(img_array)
+            if idx == 0:
+                result_image = pil_img
+            if idx < len(target_paths) and target_paths[idx]:
+                out_p = target_paths[idx]
+                os.makedirs(os.path.dirname(out_p), exist_ok=True)
+                pil_img.save(out_p)
+                saved_paths.append(out_p)
+                print(f"[engine_diffusion] Image saved dynamically to {out_p}")
+            del img_array
 
-    # Explicitly release GPU tensor references and flush caches
+    # Explicitly release intermediate tensor references
     executed_outputs.clear()
     del final_images
     gc.collect()
     try:
         import comfy.model_management as mm
         mm.soft_empty_cache()
-        mm.cleanup_models_gc()
     except Exception:
         pass
-    if torch.cuda.is_available():
-        try:
-            torch.cuda.empty_cache()
-        except Exception:
-            pass
     try:
         import torch_directml
         if hasattr(torch_directml, "empty_cache"):
@@ -638,8 +636,10 @@ def execute_workflow_graph(
     except Exception:
         pass
 
+    if save_paths is not None:
+        return result_image, saved_paths
     if result_image is not None:
-        return result_image, save_path or ""
+        return result_image, (saved_paths[0] if saved_paths else (save_path or ""))
 
     return None, ""
 
@@ -656,8 +656,10 @@ def _generate_portrait_image_inprocess(
     scheduler: str = "simple",
     seed: Optional[int] = None,
     workflow_path: Optional[str] = None,
-    save_path: Optional[str] = None
-) -> str:
+    save_path: Optional[str] = None,
+    save_paths: Optional[List[str]] = None,
+    batch_size: int = 1
+) -> Any:
     if seed is None:
         seed = random.randint(1, 1125899906842624)
 
@@ -672,6 +674,24 @@ def _generate_portrait_image_inprocess(
         selected_checkpoint = active_ckpt or "sd_xl_base_1.0.safetensors"
 
     if os.path.exists(wf_file):
+        with open(wf_file, "r", encoding="utf-8") as f:
+            wf_template = json.load(f)
+
+        if save_paths is not None:
+            saved_out = []
+            for idx, target_p in enumerate(save_paths):
+                replacements = {
+                    "%prompt%": prompt,
+                    "%negative_prompt%": negative_prompt,
+                    "%seed%": seed + idx,
+                    "%model%": selected_checkpoint,
+                    "%vae%": ""
+                }
+                _, out_p = execute_workflow_graph(wf_template, replacements=replacements, save_path=target_p)
+                if out_p and os.path.exists(out_p):
+                    saved_out.append(out_p)
+            return saved_out
+
         print(f"[engine_diffusion] Adapting dynamically to workflow: {wf_file} with checkpoint: {selected_checkpoint}")
         replacements = {
             "%prompt%": prompt,
@@ -680,9 +700,9 @@ def _generate_portrait_image_inprocess(
             "%model%": selected_checkpoint,
             "%vae%": ""
         }
-        _, out_path = execute_workflow_graph(wf_file, replacements=replacements, save_path=save_path)
-        if out_path and os.path.exists(out_path):
-            return out_path
+        _, out_result = execute_workflow_graph(wf_template, replacements=replacements, save_path=save_path)
+        if out_result and os.path.exists(out_result):
+            return out_result
 
     # Fallback to direct node synthesis if no workflow file exists
     comfy_dir = os.path.normpath(os.path.join(root_dir, "core", "comfy_engine"))
@@ -708,7 +728,7 @@ def _generate_portrait_image_inprocess(
     negative = clip_encoder.encode(clip, negative_prompt)[0]
 
     latent_node = nodes.EmptyLatentImage()
-    latent = latent_node.generate(width, height, 1)[0]
+    latent = latent_node.generate(width, height, effective_batch)[0]
 
     ksampler = nodes.KSampler()
     samples = ksampler.sample(model, seed, num_inference_steps, guidance_scale, sampler_name, scheduler, positive, negative, latent, 1.0)[0]
@@ -726,15 +746,21 @@ def _generate_portrait_image_inprocess(
 
     from PIL import Image
     import numpy as np
-    img_array = (images[0].detach().cpu().numpy() * 255).astype(np.uint8)
-    image = Image.fromarray(img_array)
+    target_paths = list(save_paths) if save_paths else ([save_path] if save_path else [])
+    saved_paths = []
+    for idx in range(images.shape[0]):
+        img_array = (images[idx].detach().cpu().numpy() * 255).astype(np.uint8)
+        image = Image.fromarray(img_array)
+        if idx < len(target_paths) and target_paths[idx]:
+            out_p = target_paths[idx]
+            os.makedirs(os.path.dirname(out_p), exist_ok=True)
+            image.save(out_p)
+            saved_paths.append(out_p)
+            print(f"[engine_diffusion] Portrait saved to {out_p}")
 
-    if save_path:
-        os.makedirs(os.path.dirname(save_path), exist_ok=True)
-        image.save(save_path)
-        print(f"[engine_diffusion] Portrait saved to {save_path}")
-
-    return save_path or ""
+    if save_paths is not None:
+        return saved_paths
+    return saved_paths[0] if saved_paths else (save_path or "")
 
 
 def generate_portrait_image(
@@ -749,9 +775,11 @@ def generate_portrait_image(
     scheduler: str = "simple",
     seed: Optional[int] = None,
     workflow_path: Optional[str] = None,
-    save_path: Optional[str] = None
-) -> str:
-    """Generates an image via persistent diffusion daemon, maintaining cached models across calls."""
+    save_path: Optional[str] = None,
+    save_paths: Optional[List[str]] = None,
+    batch_size: int = 1
+) -> Any:
+    """Generates one or more images via persistent diffusion worker, maintaining cached models across calls."""
     if os.getenv("DIFFUSION_WORKER") == "1":
         return _generate_portrait_image_inprocess(
             prompt=prompt,
@@ -765,7 +793,9 @@ def generate_portrait_image(
             scheduler=scheduler,
             seed=seed,
             workflow_path=workflow_path,
-            save_path=save_path
+            save_path=save_path,
+            save_paths=save_paths,
+            batch_size=batch_size
         )
 
     if not ensure_server_running():
@@ -786,7 +816,9 @@ def generate_portrait_image(
         "scheduler": scheduler,
         "seed": seed,
         "workflow_path": workflow_path,
-        "save_path": save_path
+        "save_path": save_path,
+        "save_paths": save_paths,
+        "batch_size": batch_size
     }
 
     req_data = json.dumps(payload).encode("utf-8")
@@ -802,7 +834,7 @@ def generate_portrait_image(
             with urllib.request.urlopen(req, timeout=300) as resp:
                 res_json = json.loads(resp.read().decode("utf-8"))
                 if res_json.get("status") == "ok":
-                    return res_json.get("path", "")
+                    return res_json.get("paths") if save_paths is not None else res_json.get("path", "")
                 else:
                     raise RuntimeError(res_json.get("error", "Unknown diffusion error"))
         except urllib.error.HTTPError as http_err:
@@ -866,11 +898,14 @@ if __name__ == "__main__":
                         _worker_is_generating = True
                         try:
                             cfg = json.loads(body.decode("utf-8"))
-                            out_path = _generate_portrait_image_inprocess(**cfg)
+                            out_res = _generate_portrait_image_inprocess(**cfg)
                             self.send_response(200)
                             self.send_header("Content-Type", "application/json")
                             self.end_headers()
-                            self.wfile.write(json.dumps({"status": "ok", "path": out_path}).encode("utf-8"))
+                            if isinstance(out_res, list):
+                                self.wfile.write(json.dumps({"status": "ok", "paths": out_res, "path": out_res[0] if out_res else ""}).encode("utf-8"))
+                            else:
+                                self.wfile.write(json.dumps({"status": "ok", "path": out_res}).encode("utf-8"))
                         except Exception as ex:
                             self.send_response(500)
                             self.send_header("Content-Type", "application/json")
