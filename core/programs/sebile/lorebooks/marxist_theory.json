@@ -394,18 +394,18 @@
     },
     {
       "constant": false,
-      "content": "Cadre work involves the systematic activity of politically trained organizers within workplaces, educational institutions, and communities. Organizers participate directly in local struggles, providing strategic analysis, fostering solidarity, and developing working-class leadership.",
+      "content": "Communist political science involves the systematic activity of politically trained organizers within workplaces, educational institutions, and communities. Organizers participate directly in local struggles, providing strategic analysis, fostering solidarity, and developing working-class leadership.",
       "enabled": true,
       "insertion_order": 100,
       "keys": [
         "social",
         "insertion",
-        "engaging",
+        "theory",
         "engagement",
-        "engage",
-        "cadre"
+        "study",
+        "political"
       ],
-      "name": "Cadre Work in the Class",
+      "name": "Communist Political Science",
       "position": 1,
       "secondary_keys": []
     },

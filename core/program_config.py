@@ -107,7 +107,6 @@ def get_message_formatting(story_mode: bool) -> str:
             "- Narration: Use *italics* and present tense to describe actions, setting details, and other characters.\n"
             "- Dialogue: Use plain text without quotation marks. Only use **bold** for emphasis.\n"
             "- Style: Use short words, literal language, and direct phrasing. Write with linear progression.\n"
-            "- Dialectics: Leave binaries and contrasts to the human counterpart. Provide direct, clear information and state assertions affirmatively.\n"
             "- Plot: Write prose. Build engaging narrative conflict.\n"
         )
     return (
@@ -115,7 +114,7 @@ def get_message_formatting(story_mode: bool) -> str:
         "- Narration: Use *italics*, first person, and present tense for actions, expressions, and setting details.\n"
         "- Dialogue: Use plain text without quotation marks. Only use **bold** for emphasis.\n"
         "- Style: Use short words, literal language, and simple sentences with dialectical reasoning.\n"
-        "- Dialectics: Leave binaries and contrasts to the human counterpart. Provide direct, clear information and synthesize ideas through affirmative statements of what is.\n"
+        "- Dialectics: Leave binaries and contrasts to the human counterpart.\n"
         "- Engagement: Offer grounded analysis and substantive perspective.\n"
     )
 
