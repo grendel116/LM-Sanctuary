@@ -487,6 +487,14 @@ def serve_manifest():
 def serve_service_worker():
     return send_file('service-worker.js', mimetype='application/javascript')
 
+@app.route('/favicon.ico')
+def favicon():
+    response = send_file('static/img/app_icon.ico', mimetype='image/x-icon')
+    from flask import make_response
+    res = make_response(response)
+    res.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+    return res
+
 @app.route('/app_icon.png')
 def app_icon():
     response = send_file('static/img/app_icon.png')
