@@ -223,15 +223,55 @@ def load_static_instructions() -> str:
     return instruction_content
 
 
-def load_dynamic_runtime_context() -> str:
-    """Compiles all dynamic, time-sensitive system data points for runtime grounding."""
-    now = datetime.datetime.now()
-    
+def _format_span(seconds: float) -> str:
+    """Renders a duration as a compact human span, e.g. '2 days 3 hours' or '45 minutes'."""
+    minutes = int(abs(seconds) // 60)
+    days, rem = divmod(minutes, 1440)
+    hours, mins = divmod(rem, 60)
+    parts = [(days, "day"), (hours, "hour")] if days else [(hours, "hour"), (mins, "minute")]
+    text = " ".join(f"{n} {unit}{'s' if n != 1 else ''}" for n, unit in parts if n)
+    return text or "less than a minute"
+
+
+def _quest_schedule_block(now: datetime.datetime) -> str:
+    from core import quest_manager
+    try:
+        quests = quest_manager.load_quests()
+    except Exception as e:
+        print(f"[program_config] Error reading quest log: {e}")
+        return ""
+    if not quests:
+        return ""
+    lines = []
+    for q in sorted(quests, key=lambda q: quest_manager.parse_due(q["due"])):
+        due = quest_manager.parse_due(q["due"])
+        delta = (due - now).total_seconds()
+        status = f"due in {_format_span(delta)}" if delta >= 0 else f"overdue by {_format_span(delta)}"
+        lines.append(f"- {q['title']}: {due.strftime('%A, %B %d at %I:%M %p')} ({status})")
+    return "### OPEN QUESTS\n" + "\n".join(lines) + "\n"
+
+
+def load_dynamic_runtime_context(previous_message_ts: float | None = None) -> str:
+    """Compiles all dynamic, time-sensitive system data points for runtime grounding.
+
+    previous_message_ts is the epoch timestamp of the message that preceded the user's current one.
+    """
+    now = datetime.datetime.now().astimezone()
+
+    elapsed_line = ""
+    if previous_message_ts:
+        elapsed = now.timestamp() - previous_message_ts
+        elapsed_line = f"- Time Since Previous Message: {_format_span(elapsed)}\n"
+
     temporal_block = (
         "### SYSTEM TEMPORAL CONTEXT\n"
-        f"- Current Local Time: {now.strftime('%Y-%m-%d %I:%M %p')}\n"
-        f"- Current Day: {now.strftime('%A, %B %d, %Y')}\n"
+        f"- Current Local Time: {now.strftime('%Y-%m-%dT%H:%M')} (UTC{now.strftime('%z')[:3]}:{now.strftime('%z')[3:]})\n"
+        f"- Current Day: {now.strftime('%A, %B %d, %Y, %I:%M %p')}\n"
+        f"{elapsed_line}"
+        "- Write quest due times as local ISO 8601 (YYYY-MM-DDTHH:MM), resolved from the current local time.\n"
     )
+
+    quest_block = _quest_schedule_block(now)
     
     try:
         from tools.tools import get_project_folders
@@ -248,11 +288,11 @@ def load_dynamic_runtime_context() -> str:
         f"{folders_line}"
     )
     
+    blocks = [b for b in (temporal_block, quest_block, env_block) if b]
     return (
         "\n\n# DYNAMIC RUNTIME CONTEXT\n"
         "Use the following parameters to ground time-sensitive requests or environmental checks:\n\n"
-        f"{temporal_block}\n"
-        f"{env_block}"
+        + "\n".join(blocks)
     )
 
 def load_user_instructions() -> str:

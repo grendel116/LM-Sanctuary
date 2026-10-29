@@ -265,11 +265,15 @@ class OsHistoryAdapter(LocalHistoryAdapter):
         try:
             if self._cached_dyn_ctx is None:
                 from core.program_config import load_dynamic_runtime_context
-                self._cached_dyn_ctx = load_dynamic_runtime_context().strip()
+                previous_ts = next(
+                    (m["timestamp"] for m in reversed(filtered_history[:latest_user_idx]) if m.get("timestamp")),
+                    None,
+                ) if latest_user_idx > 0 else None
+                self._cached_dyn_ctx = load_dynamic_runtime_context(previous_ts).strip()
             if self._cached_dyn_ctx:
                 post_blocks.append(self._cached_dyn_ctx)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[runtime context] Injection error: {e}")
 
         for msg in history:
             if msg.get("role") == "system-memory" and msg.get("text", "").strip():

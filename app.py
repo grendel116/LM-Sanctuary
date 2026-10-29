@@ -2638,18 +2638,8 @@ def delete_memory():
 @requires_auth
 def list_quests():
     try:
-        from runners.program import get_active_program
-        active_program = get_active_program()
-        quests_path = os.path.join('core', 'programs', active_program, 'quest_log.json')
-        
-        quests = []
-        if os.path.exists(quests_path):
-            with open(quests_path, 'r', encoding='utf-8') as f:
-                quests = json.load(f)
-                
-        return jsonify({
-            "quests": quests
-        })
+        from core import quest_manager
+        return jsonify({"quests": quest_manager.load_quests()})
     except Exception as e:
         print(f"Error loading quests: {e}")
         return jsonify({"error": str(e)}), 500
@@ -2658,19 +2648,8 @@ def list_quests():
 @requires_auth
 def delete_quest(quest_id):
     try:
-        from runners.program import get_active_program
-        active_program = get_active_program()
-        quests_path = os.path.join('core', 'programs', active_program, 'quest_log.json')
-        
-        if os.path.exists(quests_path):
-            with open(quests_path, 'r', encoding='utf-8') as f:
-                quests = json.load(f)
-            quests = [q for q in quests if q['id'] != quest_id]
-            temp_path = quests_path + ".tmp"
-            with open(temp_path, 'w', encoding='utf-8') as f:
-                json.dump(quests, f, indent=2, ensure_ascii=False)
-            os.replace(temp_path, quests_path)
-                
+        from core import quest_manager
+        quest_manager.remove_quest(quest_id)
         return jsonify({"status": "success"})
     except Exception as e:
         print(f"Error deleting quest {quest_id}: {e}")
@@ -2680,21 +2659,8 @@ def delete_quest(quest_id):
 @requires_auth
 def complete_quest(quest_id):
     try:
-        from runners.program import get_active_program
-        active_program = get_active_program()
-        quests_path = os.path.join('core', 'programs', active_program, 'quest_log.json')
-        quest_data = None
-        
-        if os.path.exists(quests_path):
-            with open(quests_path, 'r', encoding='utf-8') as f:
-                quests = json.load(f)
-            quest_data = next((q for q in quests if q['id'] == quest_id), None)
-            if quest_data:
-                quests = [q for q in quests if q['id'] != quest_id]
-                temp_path = quests_path + ".tmp"
-                with open(temp_path, 'w', encoding='utf-8') as f:
-                    json.dump(quests, f, indent=2, ensure_ascii=False)
-                os.replace(temp_path, quests_path)
+        from core import quest_manager
+        quest_data = quest_manager.remove_quest(quest_id)
         
         if not quest_data:
             return jsonify({"error": "Quest not found"}), 404
@@ -2723,14 +2689,9 @@ def complete_quest(quest_id):
 @requires_auth
 def download_quest(quest_id):
     try:
-        from runners.program import get_active_program
-        active_program = get_active_program()
-        quests_path = os.path.join('core', 'programs', active_program, 'quest_log.json')
-        if not os.path.exists(quests_path):
-            return jsonify({"error": "No quests found"}), 404
-        with open(quests_path, 'r', encoding='utf-8') as f:
-            quests = json.load(f)
-        quest = next((q for q in quests if q['id'] == quest_id), None)
+        from core import quest_manager
+        from datetime import datetime, timedelta, timezone
+        quest = next((q for q in quest_manager.load_quests() if q['id'] == quest_id), None)
         if not quest:
             return jsonify({"error": "Quest not found"}), 404
 
@@ -2738,15 +2699,8 @@ def download_quest(quest_id):
         location = quest.get('location', '')
         objectives = quest.get('objectives', [])
         notes = "\n".join(objectives)
-        due_str = quest.get('due', '')
 
-        # Parse start time
-        try:
-            from datetime import datetime, timedelta, timezone
-            dt_start = datetime.fromisoformat(due_str.replace("Z", "+00:00"))
-        except Exception:
-            dt_start = datetime.now(timezone.utc)
-            
+        dt_start = quest_manager.parse_due(quest['due']).astimezone(timezone.utc)
         dt_end = dt_start + timedelta(hours=1)
         
         stamp_str = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")

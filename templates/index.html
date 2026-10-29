@@ -635,7 +635,7 @@
             </h3>
 
             <div style="display: flex; gap: 6px; margin-bottom: 15px; align-items: stretch;">
-                <button onclick="switchConnectionTab('engine')" id="conn-tab-btn-engine" class="modal-tab-btn active">Model &amp; Engine</button>
+                <button onclick="switchConnectionTab('engine')" id="conn-tab-btn-engine" class="modal-tab-btn active">Models</button>
                 <button onclick="switchConnectionTab('project')" id="conn-tab-btn-project" class="modal-tab-btn">Project Settings</button>
             </div>
 
@@ -663,7 +663,7 @@
                         <!-- Native LLM Panel -->
                         <div class="onboarding-option-box local-box" id="modal-local-box-container" style="width: 100%; box-sizing: border-box;">
                             <div class="option-header">
-                                <h4 style="margin: 0; font-size: 1.05rem; font-weight: 600;">LLM Engine</h4>
+                                <h4 style="margin: 0; font-size: 1.05rem; font-weight: 600;">LLM Model</h4>
                                 <span id="modal-local-status" class="status-badge status-online">Online</span>
                             </div>
                             <p id="modal-local-desc" class="option-desc" style="font-size: 0.8rem; margin: 8px 0 12px 0;">Executes GGUF chat models in-process directly from <code>models/llm/</code>.</p>
@@ -681,7 +681,7 @@
                         <!-- Native Diffusion Panel -->
                         <div class="onboarding-option-box comfy-box" id="modal-comfy-box-container" style="width: 100%; box-sizing: border-box;">
                             <div class="option-header">
-                                <h4 style="margin: 0; font-size: 1.05rem; font-weight: 600;">Image Generation Engine</h4>
+                                <h4 style="margin: 0; font-size: 1.05rem; font-weight: 600;">Image Checkpoint</h4>
                                 <span id="modal-diffusion-status" class="status-badge status-online">Online</span>
                             </div>
                             <p class="option-desc" style="font-size: 0.8rem; margin: 8px 0 12px 0;">Renders character portraits in-process from <code>models/checkpoints/</code> and <code>models/loras/</code>.</p>

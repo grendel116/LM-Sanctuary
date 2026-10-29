@@ -2235,99 +2235,33 @@ def add_quest(title: str, notes: str, due: str = None, location: str = "", remin
     Args:
         title: Title/name of the quest.
         notes: Objectives of the quest, separated by newlines or commas.
-        due: Optional target due date/time (ISO 8601 string or description).
+        due: Target local date/time as ISO 8601 (e.g. "2026-10-29T09:00"). Defaults to now.
         location: Optional location coordinates or address.
         reminder_minutes: Optional alert/alarm trigger in minutes before due.
     """
+    from datetime import datetime
+    from core import quest_manager
+
     try:
-        import json
-        import re
-        from datetime import datetime, timezone, timedelta
-        
-        # Resolve quest log path under the active program directory
-        root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        from runners.program import get_active_program
-        active_program = get_active_program()
-        program_dir = os.path.normpath(os.path.join(root_dir, "core", "programs", active_program))
-        QUEST_LOG_PATH = os.path.join(program_dir, "quest_log.json")
-        
-        # Load existing quests
-        quests = []
-        if os.path.exists(QUEST_LOG_PATH):
-            try:
-                with open(QUEST_LOG_PATH, 'r', encoding='utf-8') as f:
-                    quests = json.load(f)
-            except Exception:
-                quests = []
+        due_dt = quest_manager.parse_due(due) if due else datetime.now().astimezone()
+    except ValueError:
+        return f"Error adding quest: due '{due}' is not ISO 8601. Use the local format YYYY-MM-DDTHH:MM."
 
-        # Parse notes into objectives
-        raw_notes = notes.replace('\\n', '\n')
-        objectives = [line.strip() for line in raw_notes.split('\n') if line.strip()]
-        if not objectives:
-            objectives = [notes.strip()]
+    try:
+        reminder_min_val = int(reminder_minutes)
+    except (ValueError, TypeError):
+        reminder_min_val = 15
 
-        # Generate new quest object
-        timestamp = int(time.time())
-        
-        # Handle due time parsing or format
-        due_val = due
-        if not due_val:
-            due_val = datetime.now(timezone.utc).isoformat()
-        else:
-            due_lower = due_val.lower()
-            if "tomorrow" in due_lower:
-                due_val = (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()
-            elif "today" in due_lower:
-                due_val = datetime.now(timezone.utc).isoformat()
-            else:
-                # check if there's hours/days, e.g. "in 2 hours", "in 3 days"
-                match_hours = re.search(r'in\s+(\d+)\s+hour', due_lower)
-                match_days = re.search(r'in\s+(\d+)\s+day', due_lower)
-                if match_hours:
-                    hours = int(match_hours.group(1))
-                    due_val = (datetime.now(timezone.utc) + timedelta(hours=hours)).isoformat()
-                elif match_days:
-                    days = int(match_days.group(1))
-                    due_val = (datetime.now(timezone.utc) + timedelta(days=days)).isoformat()
-                else:
-                    try:
-                        # check if it is parseable
-                        datetime.fromisoformat(due_val.replace("Z", "+00:00"))
-                    except Exception:
-                        # default to tomorrow if we cannot parse it, to prevent "Invalid Date" in UI
-                        due_val = (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()
+    raw_notes = notes.replace('\\n', '\n')
+    objectives = [line.strip() for line in raw_notes.split('\n') if line.strip()] or [notes.strip()]
 
-        try:
-            reminder_min_val = int(reminder_minutes)
-        except (ValueError, TypeError):
-            reminder_min_val = 15
-
-        unique_suffix = uuid.uuid4().hex[:6]
-        quest = {
-            "id": f"quest_{timestamp}_{unique_suffix}",
-            "title": title.strip(),
-            "objectives": objectives,
-            "location": location.strip(),
-            "due": due_val,
-            "reminder_minutes": reminder_min_val,
-            "created_at": datetime.now(timezone.utc).isoformat()
-        }
-
-        # Avoid duplicate quest titles in the same turn
-        if any(q.get("title") == quest["title"] for q in quests[-3:]):
-            return f"Quest '{quest['title']}' is already in the log."
-
-        quests.append(quest)
-
-        os.makedirs(program_dir, exist_ok=True)
-        temp_path = QUEST_LOG_PATH + ".tmp"
-        with open(temp_path, 'w', encoding='utf-8') as f:
-            json.dump(quests, f, indent=2, ensure_ascii=False)
-        os.replace(temp_path, QUEST_LOG_PATH)
-
-        return f"Successfully added quest: '{title}' to the quest log with {len(objectives)} objectives."
+    try:
+        quest = quest_manager.add_quest(title.strip(), objectives, due_dt, location.strip(), reminder_min_val)
     except Exception as e:
         return f"Error adding quest: {e}"
+    if quest is None:
+        return f"Quest '{title.strip()}' is already in the log."
+    return f"Successfully added quest: '{quest['title']}' due {due_dt.strftime('%A, %B %d at %I:%M %p')} with {len(objectives)} objectives."
 
 @track_tool_activity
 def add_journal_entry(keyphrases: str, content: str) -> str:
