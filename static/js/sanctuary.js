@@ -301,6 +301,11 @@ async function softReloadApp() {
             updateHeartState(data.state, data.inversion_active, data.inversion_state, null, false);
         }
         inversionActive = data.inversion_active || "";
+
+        // A reply started before this page loaded (e.g. the app was closed mid-generation)
+        if (data.generating && !isGenerating) {
+            watchServerGeneration();
+        }
         
         // Maintain scroll posture
         if (domUpdated) {
@@ -548,11 +553,6 @@ function toggleMoodModal() {
         openMoodModal();
     }
 }
-
-function showMoodStatusPopup() {
-    toggleMoodModal();
-}
-
 let heartClickTimer = null;
 
 function initHeartPulse() {
@@ -618,14 +618,6 @@ if ('serviceWorker' in navigator) {
         }
     });
 }
-
-// Update heart icon to reflect Program's current emotional state
-
-/* ==========================================================================
-   II. 1. UTILITY HELPERS & COMMON MIDDLEWARE
-   ========================================================================== */
-
-// --- getRelativePath ---
 
 /* ==========================================================================
    II. 1. UTILITY HELPERS & COMMON MIDDLEWARE
@@ -1189,19 +1181,6 @@ let useImagenMode = false;
 const savedImagenMode = safeLocalStorage.getItem('arena_use_imagen');
 if (savedImagenMode === 'true') {
     useImagenMode = true;
-}
-
-function toggleImagenMode() {
-    useImagenMode = !useImagenMode;
-    safeLocalStorage.setItem('arena_use_imagen', useImagenMode.toString());
-    updateImagenToggleUI();
-}
-
-function updateImagenToggleUI() {
-    const checkbox = document.getElementById('imagen-toggle-checkbox');
-    if (checkbox) {
-        checkbox.checked = useImagenMode;
-    }
 }
 
 // --- formatBytes helper ---
@@ -4335,41 +4314,6 @@ async function loadProgramJournals() {
         }
     }
 }
-
-async function addManualJournalEntry() {
-    const progId = (typeof activeProgramId !== 'undefined' && activeProgramId) || (typeof activeProgramName !== 'undefined' && activeProgramName ? activeProgramName.toLowerCase() : '') || 'sebile';
-    const kpInput = document.getElementById('journal-keyphrases-input');
-    const cInput = document.getElementById('journal-content-input');
-    if (!kpInput || !cInput) return;
-    
-    const keyphrases = kpInput.value.trim();
-    const content = cInput.value.trim();
-    if (!keyphrases || !content) {
-        showCustomAlert("Error", "Please provide trigger keywords and memory content.");
-        return;
-    }
-    
-    try {
-        const res = await fetch('/api/programs/journals/save', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                program_id: progId,
-                keyphrases: keyphrases,
-                content: content
-            })
-        });
-        const data = await res.json();
-        if (data.error) throw new Error(data.error);
-        
-        kpInput.value = '';
-        cInput.value = '';
-        await loadProgramJournals();
-    } catch (e) {
-        showCustomAlert("Error", "Could not add journal: " + e.message);
-    }
-}
-
 async function deleteProgramJournalEntry(entryId) {
     const progId = (typeof activeProgramId !== 'undefined' && activeProgramId) || (typeof activeProgramName !== 'undefined' && activeProgramName ? activeProgramName.toLowerCase() : '') || 'sebile';
     showCustomConfirm(
@@ -4394,31 +4338,6 @@ async function deleteProgramJournalEntry(entryId) {
         }
     );
 }
-
-async function deleteConsolidatedMemory(session_id, timestamp) {
-    showCustomConfirm(
-        "Delete Consolidated Memory",
-        "Are you sure you want to permanently delete this compacted chat history block? Your program will lose this memory immediately.",
-        async () => {
-            try {
-                const res = await fetch('/api/programs/memories/delete', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        session_id: session_id || sessionId,
-                        timestamp: timestamp
-                    })
-                });
-                const data = await res.json();
-                if (data.error) throw new Error(data.error);
-                await loadProgramJournals();
-            } catch (e) {
-                showCustomAlert("Error", "Could not delete memory: " + e.message);
-            }
-        }
-    );
-}
-
 /* ==========================================================================
    VIII. 7. CHAT SESSION & HISTORY CONTROLS
    ========================================================================== */
@@ -4622,6 +4541,11 @@ async function loadHistory() {
         }
         inversionActive = data.inversion_active || "";
 
+        // A reply started before this page loaded (e.g. the app was closed mid-generation)
+        if (data.generating && !isGenerating) {
+            watchServerGeneration();
+        }
+
         // Restore scroll position
         const savedScrollPos = safeSessionStorage.getItem('chat_scroll_pos');
         const wasAtBottom = safeSessionStorage.getItem('chat_was_at_bottom');
@@ -4658,6 +4582,76 @@ async function loadHistory() {
         if (typeof startSSE === 'function') {
             startSSE();
         }
+    }
+}
+
+let isWatchingServerGeneration = false;
+
+async function watchServerGeneration() {
+    if (isWatchingServerGeneration) return;
+    isWatchingServerGeneration = true;
+
+    setGenerating(true);
+    if (userInput) {
+        userInput.disabled = true;
+        userInput.placeholder = "";
+    }
+    updateInputGlow();
+
+    const targetSpeaker = (currentGroupMeta && currentGroupMeta.is_group) ? detectTargetGroupSpeaker(null) : null;
+    let typingIndicator = chatContainer.querySelector('.message-row .typing-indicator');
+    let typingRowElement = typingIndicator ? typingIndicator.closest('.message-row') : null;
+    if (!typingRowElement) {
+        typingRowElement = createTypingIndicatorRow(targetSpeaker);
+        const sentinel = document.getElementById('bottom-sentinel');
+        if (sentinel) {
+            chatContainer.insertBefore(typingRowElement, sentinel);
+        } else {
+            chatContainer.appendChild(typingRowElement);
+        }
+        chatContainer.scrollTop = chatContainer.scrollHeight;
+    }
+
+    startToolPolling();
+
+    const maxWaitMs = 180000;
+    const startTime = Date.now();
+    const pollInterval = 1000;
+
+    try {
+        while (isWatchingServerGeneration && isGenerating && (Date.now() - startTime < maxWaitMs)) {
+            await new Promise(resolve => setTimeout(resolve, pollInterval));
+            if (!isWatchingServerGeneration || !isGenerating) break;
+
+            try {
+                const res = await fetch(`/api/generation_status?session_id=${encodeURIComponent(sessionId)}&t=${Date.now()}`);
+                if (res.ok) {
+                    const status = await res.json();
+                    if (!status.generating) {
+                        break;
+                    }
+                }
+            } catch (err) {
+                console.warn("Generation status poll error:", err);
+            }
+        }
+    } finally {
+        if (typingRowElement && chatContainer.contains(typingRowElement)) {
+            chatContainer.removeChild(typingRowElement);
+        }
+        stopToolPolling();
+        isWatchingServerGeneration = false;
+        setGenerating(false);
+        if (userInput) {
+            userInput.disabled = false;
+            restoreInputPlaceholder();
+        }
+        updateInputGlow();
+        const heartEl = document.querySelector('.heart-pulse');
+        if (heartEl) {
+            heartEl.classList.remove('jiggling');
+        }
+        await softReloadApp();
     }
 }
 
@@ -6717,11 +6711,6 @@ async function rerollMessage(trigger) {
         await initializeModelSelect();
     }
 }
-
-// Aliases for consolidated reroll
-function resendUserMessage(bubble) { return rerollMessage(bubble); }
-function rerollFromMessage(button) { return rerollMessage(button); }
-function reusePromptFromMessage(button) { return rerollMessage(button); }
 
 // --- deleteTurnFromMessage ---
 async function deleteTurnFromMessage(button) {
@@ -9272,12 +9261,87 @@ async function uploadDataBankFile(event) {
     }
 }
 
+// --- openDataBankTextPrompt ---
+function openDataBankTextPrompt() {
+    showCustomTextareaPrompt(
+        "Ingest Text Document",
+        "Paste or type the text you want to vectorize and index into the Data Bank:",
+        "",
+        async (text) => {
+            if (!text || !text.trim()) return;
+            const loader = document.getElementById('databank-loader');
+            const loaderText = document.getElementById('databank-loader-text');
+            if (loaderText) loaderText.textContent = "Vectorizing and indexing text content...";
+            if (loader) loader.style.display = 'flex';
+            try {
+                const res = await fetch('/api/databank/text', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ text: text.trim() })
+                });
+                const data = await res.json();
+                if (data.error) {
+                    showCustomAlert("Ingest Failed", `Could not index text:<br><code style="color: #fca5a5; font-size: 0.75rem;">${data.error}</code>`);
+                }
+            } catch (e) {
+                console.error("Error ingesting text:", e);
+                showCustomAlert("Ingest Error", "Could not connect to server to index text document.");
+            } finally {
+                if (loader) loader.style.display = 'none';
+                loadDataBankFiles();
+            }
+        }
+    );
+}
+
 // --- scrapeDataBankUrl ---
 async function scrapeDataBankUrl() {
     const input = document.getElementById('databank-url-input');
-    const url = input.value.trim();
+    let url = input.value.trim();
     if (!url) return;
     
+    // Check if the user pasted raw multi-word text rather than a web URL
+    if (url.includes(' ') || url.includes('\n')) {
+        showCustomConfirm(
+            "Ingest as Text Document?",
+            "The entered content contains spaces or lines and appears to be text rather than a web URL. Would you like to index it directly as a text document?",
+            async () => {
+                input.value = '';
+                const loader = document.getElementById('databank-loader');
+                const loaderText = document.getElementById('databank-loader-text');
+                if (loaderText) loaderText.textContent = "Vectorizing and indexing text content...";
+                if (loader) loader.style.display = 'flex';
+                try {
+                    const res = await fetch('/api/databank/text', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ text: url })
+                    });
+                    const data = await res.json();
+                    if (data.error) {
+                        showCustomAlert("Ingest Failed", `Could not index text:<br><code style="color: #fca5a5; font-size: 0.75rem;">${data.error}</code>`);
+                    }
+                } catch (e) {
+                    console.error("Error ingesting text:", e);
+                    showCustomAlert("Ingest Error", "Could not connect to server to index text.");
+                } finally {
+                    if (loader) loader.style.display = 'none';
+                    loadDataBankFiles();
+                }
+            }
+        );
+        return;
+    }
+
+    if (!url.startsWith('http://') && !url.startsWith('https://')) {
+        if (/^[a-zA-Z0-9][-a-zA-Z0-9.]*\.[a-zA-Z]{2,}/.test(url)) {
+            url = 'https://' + url;
+        } else {
+            showCustomAlert("Invalid URL", "Please enter a valid web URL starting with https:// (e.g. https://example.com/article), or use '+ Paste Text'.");
+            return;
+        }
+    }
+
     const loader = document.getElementById('databank-loader');
     const loaderText = document.getElementById('databank-loader-text');
     
@@ -9344,232 +9408,6 @@ function purgeDataBank() {
 }
 
 /* ==========================================================================
-   XIII. PAGE EVENT HANDLERS & REGISTRATION LIFECYCLES
-   ========================================================================== */
-
-// --- generateMessageId ---
-
-// --- escapeHtml ---
-
-/* ==========================================================================
-   III. 2. ONBOARDING & GLOBAL CONFIG CONTROLLERS
-   ========================================================================== */
-
-// --- initializeModelSelect ---
-
-// --- showOnboardingCard ---
-
-// --- saveConfigData ---
-
-// --- saveOnboardingConfig ---
-
-// --- saveModalConfig ---
-
-// --- verifyConnections ---
-
-// --- checkOnboardingStatus ---
-
-// --- checkModalStatus ---
-
-/* ==========================================================================
-   IV. 3. SERVER CONTROL MIDDLEWARE
-   ========================================================================== */
-
-// --- installLocalLLM ---
-
-// --- pollInstallStatus ---
-
-// --- startLocalLLM ---
-
-// --- stopLocalLLM ---
-
-// --- stopComfyUI ---
-
-// --- searchHFModels ---
-
-// --- downloadHFModel ---
-
-// --- pollDownloadProgress ---
-
-// --- fetchAndRenderLocalModels ---
-
-// --- unloadLocalModel ---
-
-// --- loadLocalModelDirect ---
-
-// --- deleteLocalModel ---
-
-// --- downloadComfyCheckpoint ---
-
-// --- pollComfyCheckpointDownloads ---
-
-// --- installComfyUI ---
-
-// --- startComfyUI ---
-
-// --- resolveWorkflowDependencies ---
-
-/* ==========================================================================
-   V. 4. DYNAMIC UI ACCESSORIES & PROMPTS
-   ========================================================================== */
-
-// --- updateHeartState ---
-
-// --- triggerHeartBurst ---
-
-// --- updateInputGlow ---
-
-// --- getProfileUrl ---
-
-// --- updateProfileImages ---
-
-// --- applyTheme ---
-
-// --- updateConnectionStatus ---
-
-// --- updateConnectionModalStatus ---
-
-// --- updateComfyModalStatus ---
-
-// --- openConnectionModal ---
-
-// --- closeConnectionModal ---
-
-// --- openUserProfileModal ---
-
-// --- closeUserProfileModal ---
-
-// --- changeModel ---
-
-// --- showCustomAlert ---
-
-// --- showCustomConfirm ---
-
-// --- closeCustomDialog ---
-
-/* ==========================================================================
-   VI. 5. USER PROFILE MANAGEMENT
-   ========================================================================== */
-
-// --- loadUserProfiles ---
-
-// --- onUserProfileSelectChange ---
-
-// --- saveActiveUserProfile ---
-
-/* ==========================================================================
-   VII. 6. PROGRAM / PROGRAM SELECTION
-   ========================================================================== */
-
-// --- openAssistantModal ---
-
-// --- closeAssistantModal ---
-
-// --- openImportProgramModal ---
-
-// --- closeImportProgramModal ---
-
-// --- switchImportTab ---
-
-// --- triggerTavernCardFileSelect ---
-
-// --- handleTavernCardFileChange ---
-
-// --- submitTavernCardImport ---
-
-// --- submitDescriptionImport ---
-
-// --- renderProgramsList ---
-
-// --- selectAssistant ---
-
-// --- deleteAssistant ---
-
-/* ==========================================================================
-   VIII. 7. CHAT SESSION & HISTORY CONTROLS
-   ========================================================================== */
-
-// --- showWelcomeMessage ---
-
-// --- loadHistory ---
-
-// --- resetSession ---
-
-/* ==========================================================================
-   IX. 8. MESSAGE RENDERING & POST-PROCESSING
-   ========================================================================== */
-
-// --- toggleAutoSpeak ---
-
-// --- resetSpeakButtons ---
-
-// --- speakMessage ---
-
-// --- toggleThinkingBlock ---
-
-// --- appendMessage ---
-
-// --- postProcessMessageHTML ---
-
-/* ==========================================================================
-   X. 9. CHAT TURN PROCESSING
-   ========================================================================== */
-
-// --- triggerFileInput ---
-
-// --- handleFileSelect ---
-
-// --- clearAttachment ---
-
-// --- sendMessage ---
-
-// --- truncateChatAfter ---
-
-// --- startEditMessage ---
-
-// --- cancelMessageEdit ---
-
-// --- saveMessageEdit ---
-
-// --- resendUserMessage ---
-
-// --- rerollFromMessage ---
-
-// --- deleteTurnFromMessage ---
-
-// --- reusePromptFromMessage ---
-
-/* ==========================================================================
-   XI. 10. TOOL INVOCATION & PORTRAITS
-   ========================================================================== */
-
-/* ==========================================================================
-   XII. 11. DATABANK RAG SYSTEM
-   ========================================================================== */
-
-// --- openDataBank ---
-
-// --- closeDataBank ---
-
-// --- switchDataBankTab ---
-
-// --- loadDataBankFiles ---
-
-// --- uploadDataBankFile ---
-
-// --- scrapeDataBankUrl ---
-
-// --- deleteDataBankFile ---
-
-// --- purgeDataBank ---
-
-/* ==========================================================================
-   XIII. UNCATEGORIZED FUNCTIONS
-   ========================================================================== */
-
-// --- createNewUserProfilePrompt ---
-
-/* ==========================================================================
    XIV. PAGE EVENT HANDLERS & REGISTRATION LIFECYCLES
    ========================================================================== */
 
@@ -9600,6 +9438,7 @@ function setGenerating(val) {
 }
 
 async function cancelGeneration() {
+    isWatchingServerGeneration = false;
     if (chatAbortController) {
         chatAbortController.abort();
         chatAbortController = null;
@@ -9785,6 +9624,16 @@ function startSSE() {
         if (document.visibilityState === 'visible') {
             connect();
             refreshAllStatuses();
+            if (isWatchingServerGeneration || isGenerating) {
+                fetch(`/api/generation_status?session_id=${encodeURIComponent(sessionId)}&t=${Date.now()}`)
+                    .then(r => r.json())
+                    .then(s => {
+                        if (s && !s.generating) {
+                            isWatchingServerGeneration = false;
+                        }
+                    })
+                    .catch(() => {});
+            }
         }
     });
 

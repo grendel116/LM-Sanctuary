@@ -23,18 +23,15 @@ PROGRAMS_DIR = project_root / "core" / "programs"
 from variables.settings import get_local_server_headers
 from adapters.history_adapters import OsHistoryAdapter
 from core.mood_inversion import get_directive, is_enabled, new_state, update_state
-from models.models import is_local_model
 from runners.program import get_active_program
 from utils.utils import (
     _build_tool_calls_pair,
     _build_vector_query,
-    _convert_json_tool_calls_to_tags,
     _execute_emulated_tool,
     _extract_tool_calls,
     _get_databank_contexts,
     _get_safe_local_path,
     _normalize_tool_name,
-    _parse_emulated_tool_call,
     _run_async_in_background_thread,
     _strip_tool_calls,
     is_real_user_msg,
@@ -52,15 +49,11 @@ THINK_TAG_RE = re.compile(
     r"(?:</think>|\[/think\]|</thought>|\[/thought\]|<\|thought\|>|<\|channel\|>|<channel\|>|<\/\s*think>|\[\s*/\s*think\s*\]|$)",
     flags=re.IGNORECASE,
 )
-URL_PATTERN = re.compile(r"https?://[^\s>)\"']+")
 CHANNEL_TAG_RE = re.compile(r"<\|channel\|>|<channel\|>", flags=re.IGNORECASE)
-TOOL_TAG_RE = re.compile(r"\[(\w+)\(([\s\S]*?)\)\]")
-TOOL_TAG_STRIP_RE = re.compile(r"\[\w+\([\s\S]*?\n?\)\]", flags=re.DOTALL)
 IMAGE_EMBED_RE = re.compile(r"(?<!\!)(\[[^\]]*\]\(/images/(?:portraits|media)/[^)]+\))")
 RAW_IMAGE_PATH_RE = re.compile(
     r"(?<![\([/])(/images/(?:portraits|media)/[a-zA-Z0-9_\-\.]+\.(?:png|jpg|jpeg|webp|gif|mp4))"
 )
-PASTED_LINK_RE = re.compile(r"https?://[^\s>)]+")
 
 
 def _media_url_pattern(path: str) -> str:
@@ -181,35 +174,6 @@ def clean_group_speaker_response(text: str, speaker_id: str = None, group_meta: 
     return text
 
 
-def _trim_context_messages(messages: list[dict], max_chars: int | None = None) -> list[dict]:
-    """Fast context trimming calculation to remain within token/char budget."""
-    if max_chars is None:
-        local_ctx = int(os.environ.get("LOCAL_CONTEXT", 12288))
-        max_input_tokens = max(4096, local_ctx - 2048)
-        max_chars = int(max_input_tokens * 3.5)
-
-    total_chars = sum(len(m.get("content") or "") if isinstance(m.get("content"), str) else 500 for m in messages)
-    if total_chars <= max_chars:
-        return messages
-
-    print("[CONTEXT TRIM] Context payload exceeds local budget. Trimming older turns...", flush=True)
-    system_msgs = [m for m in messages if m.get("role") == "system"]
-    chat_msgs = [m for m in messages if m.get("role") != "system"]
-
-    sys_len = sum(len(m.get("content") or "") if isinstance(m.get("content"), str) else 500 for m in system_msgs)
-    budget = max_chars - sys_len
-
-    current_len = 0
-    trimmed_chat = []
-    for m in reversed(chat_msgs):
-        m_len = len(m.get("content") or "") if isinstance(m.get("content"), str) else 500
-        if current_len + m_len > budget:
-            break
-        trimmed_chat.append(m)
-        current_len += m_len
-
-    return system_msgs + list(reversed(trimmed_chat))
-
 class BaseProgramRunner:
     def __init__(self, app_name: str = "Sanctuary", program_id: str = None):
         self.app_name = app_name
@@ -219,6 +183,7 @@ class BaseProgramRunner:
         self.sessions_memory_state: dict = {}  # Tracks chapters and epic chronicles
         self.sessions_group_meta: dict = {}  # Tracks group session participants (host & guests)
         self.sessions_program: dict = {}  # Tracks program owner for each session
+        self.generating_sessions: set[str] = set()
 
     def _get_memory_meta(self, session_id: str) -> dict:
         """Helper to ensure session memory state exists."""
@@ -541,15 +506,19 @@ class BaseProgramRunner:
         completed_final_turn = False
         target_model = model if (model and model != "local-llm") else os.getenv("LOCAL_MODEL_NAME")
 
+        # Prompt layout, ordered for prefix caching: static system prompt -> memory chronicle -> chat history
+        # -> latest user turn carrying every per-turn block (inversion, time, lore, recall, skills).
+        sys_instructions = self._get_system_instructions(session_id, speaker_id=speaker_id)
+        memory_block = self._get_memory_block(session_id)
+        turn_directive = self._get_turn_inversion_directive(session_id, inversion_directive)
+
         while iteration < max_iterations:
             iteration += 1
 
             # --- STAGE 1: LOCAL PREPROCESSING ---
-            sys_instructions = self._get_system_instructions(
-                session_id, inversion_directive, user_message=new_message_text, speaker_id=speaker_id
+            messages = adapter.get_openai_messages(
+                sys_instructions, rag_context, memory_context=memory_block, turn_directive=turn_directive
             )
-            messages = adapter.get_openai_messages(sys_instructions, rag_context)
-            messages = _trim_context_messages(messages)
 
             # --- STAGE 2: LOCAL PROCESSING PASS ---
             temperature = self._load_temperature_setting()
@@ -740,7 +709,6 @@ class BaseProgramRunner:
             if bot_msg and isinstance(bot_msg, dict) and "text" in bot_msg:
                 final_response_text = bot_msg["text"]
 
-        adapter.post_process_thoughts(invocation_id)
         final_response_text = self._ensure_images_are_embedded(final_response_text)
         if isinstance(session_id, str) and session_id.endswith("_voice"):
             final_response_text = strip_story(final_response_text)
@@ -800,135 +768,6 @@ class BaseProgramRunner:
         target_dir = os.path.join(project_root, "core", "programs", prog, "sessions")
         os.makedirs(target_dir, exist_ok=True)
         return os.path.join(target_dir, f"{safe_id}.json")
-
-    async def get_history(self, session_id: str) -> list:
-        """Returns the message history for a given session."""
-        if session_id not in self.sessions_history:
-            self._load_session_from_disk(session_id)
-        return self.sessions_history.get(session_id, [])
-    
-    async def run_async(self, session_id: str, new_message_text: str, image_data: str = None, image_mime: str = None, model: str = None, media_path: str = None, msg_id: str = None, speaker_id: str = None) -> tuple:
-            """Main execution entry point for handling user input and running the LLM loop."""
-            # Ensure session history is loaded
-            if session_id not in self.sessions_history:
-                self._load_session_from_disk(session_id)
-
-            # Append user message to history
-            with self._lock:
-                user_msg = {
-                    "id": msg_id or f"usr_{uuid.uuid4().hex}",
-                    "role": "user",
-                    "text": new_message_text,
-                    "timestamp": time.time(),
-                }
-                if image_data:
-                    user_msg["image_data"] = image_data
-                    user_msg["image_mime"] = image_mime
-                if media_path:
-                    user_msg["media_path"] = media_path
-                self.sessions_history[session_id].append(user_msg)
-                self._save_session_to_disk(session_id)
-
-            # Get adapter and run the generation loop
-            adapter = self._get_session_adapter(session_id)
-            inversion_directive = await self._get_inversion_directive(session_id)
-            rag_context = "" # Fetch RAG context if applicable in your app
-            
-            try:
-                return await self._execute_local_llm_loop(
-                    session_id=session_id,
-                    adapter=adapter,
-                    model=model,
-                    inversion_directive=inversion_directive,
-                    rag_context=rag_context,
-                    new_message_text=new_message_text,
-                    invocation_id=user_msg["id"],
-                    speaker_id=speaker_id,
-                )
-            finally:
-                self._save_session_to_disk(session_id)
-
-    async def edit_turn(self, session_id: str, msg_id: str, new_text: str = None, model: str = None, speaker_id: str = None) -> tuple:
-        """Edits an existing turn, truncates subsequent history, and re-runs generation."""
-        if session_id not in self.sessions_history:
-            return "", []
-
-        history = self.sessions_history[session_id]
-        target_idx = -1
-        
-        # Find the index of the message being edited
-        for idx, msg in enumerate(history):
-            if msg.get("id") == msg_id:
-                target_idx = idx
-                break
-
-        if target_idx == -1:
-            return "", []
-
-        with self._lock:
-            # Update the message text if provided
-            if new_text is not None:
-                history[target_idx]["text"] = new_text
-            
-            # Truncate all history after this turn so the model can regenerate fresh responses
-            self.sessions_history[session_id] = history[:target_idx + 1]
-            self._save_session_to_disk(session_id)
-
-        # Re-run the LLM loop from this point
-        edited_msg = history[target_idx]["text"]
-        adapter = self._get_session_adapter(session_id)
-        inversion_directive = await self._get_inversion_directive(session_id)
-        
-        return await self._execute_local_llm_loop(
-            session_id=session_id,
-            adapter=adapter,
-            model=model,
-            inversion_directive=inversion_directive,
-            rag_context="",
-            new_message_text=edited_msg,
-            invocation_id=msg_id,
-            speaker_id=speaker_id
-        )
-
-    async def reset_session(self, session_id: str):
-        """Clears the history for a session."""
-        with self._lock:
-            self.sessions_history[session_id] = []
-            self._save_session_to_disk(session_id)
-
-    async def delete_turn(self, session_id: str, msg_id: str) -> bool:
-        """Deletes a specific turn/message from history by its ID."""
-        return await self.delete_message_at(session_id, msg_id)
-
-    async def delete_image_from_session(self, session_id: str, image_url: str, keep_message: bool = False) -> bool:
-        """Deletes an image reference from session history and cleans up disk files."""
-        if session_id not in self.sessions_history:
-            return False
-
-        deleted_file = self._delete_local_image(image_url)
-        with self._lock:
-            for msg in self.sessions_history[session_id]:
-                if msg.get("image_url") == image_url or image_url in msg.get("text", ""):
-                    msg.pop("image_url", None)
-                    # Clean markdown image references if present
-                    msg["text"] = msg["text"].replace(f"![]({image_url})", "").replace(image_url, "")
-            self._save_session_to_disk(session_id)
-            
-        return deleted_file
-
-    async def replace_image_in_session(self, session_id: str, old_image_url: str, new_image_url: str) -> bool:
-        """Replaces an image reference in history."""
-        if session_id not in self.sessions_history:
-            return False
-
-        with self._lock:
-            for msg in self.sessions_history[session_id]:
-                if msg.get("image_url") == old_image_url:
-                    msg["image_url"] = new_image_url
-                if old_image_url in msg.get("text", ""):
-                    msg["text"] = msg["text"].replace(old_image_url, new_image_url)
-            self._save_session_to_disk(session_id)
-            return True
 
     async def replace_image_with_video_in_session(self, session_id: str, old_image_url: str, new_video_url: str) -> bool:
         """Swaps an image reference with a video reference in history."""
@@ -1029,27 +868,6 @@ class BaseProgramRunner:
             self._save_session_to_disk(dest_id)
             return True
 
-    async def delete_system_memory(self, session_id: str, timestamp: float) -> bool:
-        """Deletes a system memory node from history matching a specific timestamp."""
-        if session_id not in self.sessions_history:
-            return False
-
-        history = self.sessions_history[session_id]
-        initial_len = len(history)
-
-        with self._lock:
-            # Filter out system memory entries matching the timestamp (within a small tolerance)
-            self.sessions_history[session_id] = [
-                msg for msg in history 
-                if not (msg.get("role") == "system-memory" and abs(msg.get("timestamp", 0) - timestamp) < 1.0)
-            ]
-
-            if len(self.sessions_history[session_id]) < initial_len:
-                self._save_session_to_disk(session_id)
-                return True
-
-        return False
-
     async def update_epic_chronicle(self, session_id: str, chronicle: str) -> bool:
         """Updates the full conversation epic chronicle for a session and saves to disk."""
         if session_id not in self.sessions_history:
@@ -1104,22 +922,6 @@ class BaseProgramRunner:
                 
         # Debugging helper: print available IDs if it fails to match
         print(f"[UPDATE MESSAGE] Failed to find message ID '{msg_id}'. Available IDs in session:", [m.get("id") for m in history], flush=True)
-        return False
-
-    async def delete_message_at(self, session_id: str, msg_id: str) -> bool:
-        """Deletes a specific message by its ID from session history."""
-        if session_id not in self.sessions_history:
-            return False
-
-        history = self.sessions_history[session_id]
-        with self._lock:
-            for i, msg in enumerate(history):
-                if msg.get("id") == msg_id:
-                    if img_url := msg.get("image_url"):
-                        self._delete_local_image(img_url)
-                    del history[i]
-                    self._save_session_to_disk(session_id)
-                    return True
         return False
 
     def _inversion_enabled(self) -> bool:
@@ -1250,22 +1052,37 @@ class BaseProgramRunner:
 
         return instructions
 
-    def _inject_system_memories(self, instructions: str, session_id: str) -> str:
+    def _get_memory_block(self, session_id: str) -> str:
+        """Returns the chronicle and recent chapter summaries. These change once every 12 turns,
+        so they sit after the static instructions at the tail of the system prompt."""
+        if isinstance(session_id, str) and session_id.endswith("_voice"):
+            return ""
+
         meta = self._get_memory_meta(session_id)
         epic = meta.get("epic_chronicle", "")
         chapters = meta.get("recent_chapters", [])
 
+        parts = []
         if epic:
-            instructions += f"\n\n# CORE CONVERSATION CHRONICLE\n{epic.strip()}\n"
-
+            parts.append(f"# CORE CONVERSATION CHRONICLE\n{epic.strip()}")
         if chapters:
             formatted_chapters = "\n".join(f"- {ch.strip()}" for ch in chapters)
-            instructions += f"\n\n# RECENT CONVERSATION CHAPTERS\n{formatted_chapters}\n"
+            parts.append(f"# RECENT CONVERSATION CHAPTERS\n{formatted_chapters}")
 
-        return instructions
+        return "\n\n".join(parts)
 
-    def _get_system_instructions(self, session_id: str, inversion_directive: str = None, user_message: str = None, speaker_id: str = None) -> str:
-        from core.program_config import get_compiled_instructions, get_program_name, is_story_mode, set_inversion_directive
+    def _get_turn_inversion_directive(self, session_id: str, inversion_directive: str) -> str:
+        """Inversion steering applies to the solo text chat only."""
+        is_voice = isinstance(session_id, str) and session_id.endswith("_voice")
+        group_meta = getattr(self, "sessions_group_meta", {}).get(session_id)
+        if is_voice or (group_meta and group_meta.get("is_group")) or not inversion_directive:
+            return ""
+        from core.program_config import replace_placeholders
+        return f"# PERSONALITY INVERSION DIRECTIVE\n{replace_placeholders(inversion_directive)}"
+
+    def _get_system_instructions(self, session_id: str, speaker_id: str = None) -> str:
+        """Builds the static system prompt. Its text is identical on every turn of a session."""
+        from core.program_config import get_compiled_instructions, get_program_name
 
         try:
             program_name = get_program_name()
@@ -1277,25 +1094,15 @@ class BaseProgramRunner:
 
         if is_voice:
             instructions = self._build_voice_prompt(session_id, program_name)
-        elif group_meta and group_meta.get("is_group"):
-            host_id = group_meta.get("host_id")
-            guest_ids = group_meta.get("guest_ids", [])
-            active_speaker = speaker_id or host_id
-            from core.program_config import compile_speaker_instructions
-            instructions = compile_speaker_instructions(active_speaker, host_id, guest_ids)
-            instructions = self._inject_system_memories(instructions, session_id)
-
-            if "CONCISENESS" not in instructions and "brief, succinct, and natural" not in instructions:
-                instructions += (
-                    "\n\n# STYLE\n"
-                    "Be brief and natural. No monologues, lectures, or forced questions. Ask questions only if contextually natural.\n"
-                )
         else:
-            if inversion_directive is not None:
-                set_inversion_directive(inversion_directive)
-
-            instructions = get_compiled_instructions()
-            instructions = self._inject_system_memories(instructions, session_id)
+            if group_meta and group_meta.get("is_group"):
+                from core.program_config import compile_speaker_instructions
+                host_id = group_meta.get("host_id")
+                instructions = compile_speaker_instructions(
+                    speaker_id or host_id, host_id, group_meta.get("guest_ids", [])
+                )
+            else:
+                instructions = get_compiled_instructions()
 
             if "CONCISENESS" not in instructions and "brief, succinct, and natural" not in instructions:
                 instructions += (
@@ -1325,6 +1132,13 @@ class OpenSourceRunner(BaseProgramRunner):
             self.sessions_memory_state = {}
             self.sessions_program = {}
             self._lock = threading.RLock()
+            # One generation at a time per session; history reads stay available meanwhile
+            self._session_locks: dict[str, threading.Lock] = {}
+            self.generating_sessions: set[str] = set()
+
+        def _session_lock(self, session_id: str) -> threading.Lock:
+            with self._lock:
+                return self._session_locks.setdefault(session_id, threading.Lock())
 
         async def generate_impersonation(
             self, prompt: str, system_instruction: str, model: str = None, temperature: float = 0.7
@@ -1594,10 +1408,10 @@ class OpenSourceRunner(BaseProgramRunner):
             }
 
         async def get_history(self, session_id: str):
-            from pathlib import Path
-            project_root = Path(__file__).resolve().parent.parent
             with self._lock:
-                self._load_session_from_disk(session_id)
+                # While a reply is generating, memory holds the newest turns; disk catches up when it finishes
+                if session_id not in self.generating_sessions:
+                    self._load_session_from_disk(session_id)
                 self._ensure_first_message(session_id)
 
                 raw_history = self.sessions_history.get(session_id, [])
@@ -1647,9 +1461,11 @@ class OpenSourceRunner(BaseProgramRunner):
             msg_id: str = None,
             speaker_id: str = None,
         ) -> tuple:
-            with self._lock:
-                self._load_session_from_disk(session_id)
-                self.sessions_history.setdefault(session_id, [])
+            with self._session_lock(session_id):
+                with self._lock:
+                    self._load_session_from_disk(session_id)
+                    self.sessions_history.setdefault(session_id, [])
+                self.generating_sessions.add(session_id)
 
                 try:
                     return await self._run_async_internal(
@@ -1663,6 +1479,7 @@ class OpenSourceRunner(BaseProgramRunner):
                         speaker_id=speaker_id,
                     )
                 finally:
+                    self.generating_sessions.discard(session_id)
                     self._save_session_to_disk(session_id)
 
         async def _run_async_internal(
@@ -1728,6 +1545,7 @@ class OpenSourceRunner(BaseProgramRunner):
                 "timestamp": time.time(),
             }
             self.sessions_history[session_id].append(user_msg)
+            self._save_session_to_disk(session_id)
 
             history = self.sessions_history.get(session_id, [])
             vector_query = _build_vector_query(history)
@@ -1921,50 +1739,6 @@ class OpenSourceRunner(BaseProgramRunner):
                 except Exception as e:
                     print(f"Error cleaning up databank history on session reset: {e}")
 
-                from core import program_config
-
-                program_config.set_inversion_directive("")
-
-        async def delete_system_memory(self, session_id: str, timestamp: float) -> bool:
-            with self._lock:
-                if session_id not in self.sessions_history:
-                    self._load_session_from_disk(session_id)
-
-                marked_compacted = False
-                for msg in self.sessions_history.get(session_id, []):
-                    if msg.get("role") == "system-memory" and abs(msg.get("timestamp", 0) - timestamp) < 1.0:
-                        msg["compacted"] = True
-                        marked_compacted = True
-                        print("[MEMORY DELETE] Marked OS message as compacted.", flush=True)
-
-                if marked_compacted:
-                    self._save_session_to_disk(session_id)
-
-                return marked_compacted
-
-        async def delete_turn(self, session_id: str, msg_id: str) -> bool:
-            with self._lock:
-                if session_id not in self.sessions_history:
-                    self._load_session_from_disk(session_id)
-
-                history = self.sessions_history.get(session_id)
-                if history is None:
-                    raise ValueError("Session not found")
-
-                user_idx = next((i for i, ev in enumerate(history) if ev.get("id") == msg_id), -1)
-                if user_idx == -1:
-                    raise ValueError("User message not found")
-
-                next_user_idx = next(
-                    (i for i in range(user_idx + 1, len(history)) if is_real_user_msg(history[i])), -1
-                )
-
-                self.sessions_history[session_id] = history[:user_idx] + (
-                    history[next_user_idx:] if next_user_idx != -1 else []
-                )
-                self._save_session_to_disk(session_id)
-                return True
-
         async def delete_message_at(self, session_id: str, msg_id: str) -> bool:
             with self._lock:
                 if session_id not in self.sessions_history:
@@ -1994,10 +1768,7 @@ class OpenSourceRunner(BaseProgramRunner):
                 pattern = r"!\[[^\]]*\]\(" + _media_url_pattern(image_url) + r"\)"
 
                 for i, msg in enumerate(history):
-                    has_image = False
-
                     if msg.get("text") and image_url in msg["text"]:
-                        has_image = True
                         remaining_text = re.sub(r"\n{2,}", "\n", re.sub(pattern, "", msg["text"])).strip()
                         if not keep_message and not re.sub(r"^[:\s\-\*]+|[:\s\-\*]+$", "", remaining_text):
                             indices_to_delete.add(i)
@@ -2006,7 +1777,6 @@ class OpenSourceRunner(BaseProgramRunner):
                         modified = True
 
                     if msg.get("image_url") == image_url:
-                        has_image = True
                         msg["image_url"] = None
                         if not keep_message and not (msg.get("text") or "").strip():
                             indices_to_delete.add(i)
@@ -2016,7 +1786,6 @@ class OpenSourceRunner(BaseProgramRunner):
                         cleared_call_ids = set()
                         for tc in tool_calls:
                             if tc.get("type") == "response" and tc.get("response") and image_url in tc["response"]:
-                                has_image = True
                                 tc["response"] = re.sub(r"\n{2,}", "\n", re.sub(pattern, "", tc["response"])).strip()
                                 if not keep_message and not tc["response"]:
                                     cleared_call_ids.add(tc.get("id"))

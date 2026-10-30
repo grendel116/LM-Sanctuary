@@ -118,18 +118,7 @@
             </div>
         </header>
         
-        <div id="chat-container">
-            <div class="message-row program-row" id="welcome-message" data-msg-id="first_mes_default">
-                <div class="avatar-container">
-                    <img class="avatar program-avatar" src="/profile.png" alt="Program" onclick="expandImage('/profile.png')">
-                </div>
-                <div class="message program">
-                    <div class="message-text">
-                        <p>{{ welcome_message }}</p>
-                    </div>
-                </div>
-            </div>
-        </div>
+        <div id="chat-container"></div>
 
         <!-- Live media upload preview area -->
         <div id="preview-area">
@@ -289,7 +278,10 @@
                 <!-- TAB 1: INGESTED DOCUMENTS -->
                 <div id="databank-tab-upload" class="databank-tab-content" style="display: flex; flex-direction: column; gap: 15px;">
                     <input type="file" id="databank-file-input" accept=".txt,.md,.html,.htm,.pdf" onchange="uploadDataBankFile(event)" style="display: none;">
-                    <button onclick="document.getElementById('databank-file-input').click()" class="dashed-action-btn">+ Select Document File</button>
+                    <div style="display: flex; gap: 8px;">
+                        <button onclick="document.getElementById('databank-file-input').click()" class="dashed-action-btn" style="flex: 1;">+ Select File (.txt, .pdf, .md)</button>
+                        <button onclick="openDataBankTextPrompt()" class="dashed-action-btn" style="flex: 1;">+ Paste Text</button>
+                    </div>
                     
                     <div class="or-divider">
                         <div class="or-divider-line"></div>

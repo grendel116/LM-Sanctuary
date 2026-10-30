@@ -66,7 +66,3 @@ def fetch_local_models(force_refresh=False) -> list:
         _local_models_cache = []
         _last_fetch_time = now
         return []
-
-def is_local_model(model: str) -> bool:
-    """Always treats model execution as local without external dependency checks."""
-    return True

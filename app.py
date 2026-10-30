@@ -3,12 +3,10 @@ import time
 import shutil
 import json
 import re
-import importlib
 import traceback
 import threading
 import uuid
 import colorsys
-import base64
 import socket
 import httpx
 import asyncio
@@ -16,7 +14,6 @@ from pathlib import Path
 from functools import wraps
 from flask import Flask, render_template, request, jsonify, send_file, send_from_directory, Response, make_response
 from dotenv import load_dotenv
-from PIL import Image
 
 # 1. Setup paths and load environment BEFORE importing application code
 base_dir = Path(__file__).resolve().parent
@@ -37,7 +34,7 @@ load_dotenv(dotenv_path=env_path, override=True)
 # 2. Application imports
 from adapters import comfy_manager
 from runners.runner import cancelled_sessions, voice_call_sessions, OpenSourceRunner
-from runners.program import get_active_program, set_active_program, get_active_user, set_active_user, get_active_session, set_active_session, _load_settings
+from runners.program import get_active_program, set_active_program, get_active_user, get_active_session, set_active_session
 from variables.settings import LOCAL_SERVER_URL, get_local_server_headers, VARIABLES_DIR, PROGRAMS_DIR
 
 os.environ["ACTIVE_PROGRAM"] = get_active_program()
@@ -97,18 +94,6 @@ def init_runner():
     active_prog = get_active_program()
     runner = OpenSourceRunner(app_name="Sanctuary", program_id=active_prog)
     print(">>> Starting Sanctuary using decoupled OPEN-SOURCE Runner backend!")
-
-_prewarm_started = False
-_prewarm_lock = threading.Lock()
-
-@app.before_request
-def start_prewarm_on_first_request():
-    global _prewarm_started
-    if not _prewarm_started:
-        with _prewarm_lock:
-            if not _prewarm_started:
-                _prewarm_started = True
-                threading.Thread(target=prewarm_caches, daemon=True).start()
 
 @app.before_request
 def check_program_change():
@@ -178,11 +163,8 @@ def prewarm_caches():
 
     print(">>> Backend caches pre-warmed successfully!")
 
-# Always start prewarming in a background thread immediately on import
-with _prewarm_lock:
-    if not _prewarm_started:
-        _prewarm_started = True
-        threading.Thread(target=prewarm_caches, daemon=True).start()
+# Start prewarming in a background thread immediately on import
+threading.Thread(target=prewarm_caches, daemon=True).start()
 
 # Initialize the dynamic runner based on configuration
 init_runner()
@@ -194,8 +176,6 @@ def health_check():
 
 def reload_program_state():
     """Reload program config, reinitialize the runner, and clear session caches."""
-    from core import program_config
-    importlib.reload(program_config)
     init_runner()
     runner.sessions_history.clear()
 
@@ -217,7 +197,6 @@ def load_theme(program_id):
 
 def load_temperature():
     """Read temperature from project settings, defaulting to 0.95."""
-    from variables.settings import VARIABLES_DIR
     settings_path = os.path.join(VARIABLES_DIR, "project_settings.json")
     if os.path.exists(settings_path):
         try:
@@ -286,7 +265,6 @@ def prepare_generation_request(session_id, use_imagen=False, is_voice_call=False
     with tools.session_tool_calls_lock:
         tools.session_tool_calls[session_id] = []
 
-    from runners.runner import cancelled_sessions, voice_call_sessions
     cancelled_sessions.discard(session_id)
     if is_voice_call:
         voice_call_sessions.add(session_id)
@@ -461,18 +439,17 @@ def index():
         # If Basic Auth is active, default active user to authenticated user
         active_user = request.authorization.username
 
-    from core.program_config import get_program_greeting
     from core.mood_inversion import get_program_mood_metadata
-    welcome_message = get_program_greeting()
     program_moods = get_program_mood_metadata(active_program)
-    response = make_response(render_template('index.html', local_ip=local_ip, tts_auto_speak=tts_auto_speak, tts_provider=tts_provider, active_program=active_program, active_session=active_session, theme=theme, active_user=active_user, welcome_message=welcome_message, program_moods=program_moods))
+    response = make_response(render_template('index.html', local_ip=local_ip, tts_auto_speak=tts_auto_speak, tts_provider=tts_provider, active_program=active_program, active_session=active_session, theme=theme, active_user=active_user, program_moods=program_moods))
     response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
     return response
 
 @app.route('/manifest.json')
 def serve_manifest():
-    from core.program_config import program_name
+    from core.program_config import get_program_name
     import json
+    program_name = get_program_name()
     try:
         with open('manifest.json', 'r', encoding='utf-8') as f:
             manifest_data = json.load(f)
@@ -482,10 +459,6 @@ def serve_manifest():
         return jsonify(manifest_data)
     except Exception:
         return send_file('manifest.json', mimetype='application/json')
-
-@app.route('/service-worker.js')
-def serve_service_worker():
-    return send_file('service-worker.js', mimetype='application/javascript')
 
 @app.route('/favicon.ico')
 def favicon():
@@ -532,41 +505,6 @@ def program_profile_png(program_id):
         return "Profile image not found", 404
 
 
-
-@app.route('/api/programs/profile_picture/save', methods=['POST'])
-@requires_auth
-def save_profile_picture():
-    try:
-        from variables.settings import PROGRAMS_DIR
-        from runners.program import get_active_program
-        import base64
-        import re
-        
-        data = request.get_json(silent=True) or {}
-        cropped_image_base64 = data.get('cropped_image')
-        if not cropped_image_base64:
-            return jsonify({'error': 'No cropped_image data provided'}), 400
-            
-        program_id = data.get('program_id') or get_active_program()
-        portraits_dir = os.path.join(PROGRAMS_DIR, program_id, 'portraits')
-        os.makedirs(portraits_dir, exist_ok=True)
-        dest_path = os.path.join(portraits_dir, 'profile.png')
-        
-        # Remove base64 header if present (e.g., data:image/png;base64,)
-        if ',' in cropped_image_base64:
-            base64_data = cropped_image_base64.split(',', 1)[1]
-        else:
-            base64_data = cropped_image_base64
-            
-        image_bytes = base64.b64decode(base64_data)
-        print(f"[PROFILE SAVE] program={program_id}, dataUrl length={len(cropped_image_base64)}, base64 length={len(base64_data)}, decoded bytes={len(image_bytes)}, dest={dest_path}")
-        with open(dest_path, 'wb') as f:
-            f.write(image_bytes)
-            
-        return jsonify({'status': 'success', 'message': 'Profile picture cropped and saved successfully.'})
-    except Exception as e:
-        print(f"Error saving profile picture: {e}")
-        return jsonify({'error': str(e)}), 500
 
 @app.route('/api/programs/profile_picture/crop', methods=['POST'])
 @requires_auth
@@ -737,7 +675,6 @@ def proactive_action():
     session_id = request.json.get('session_id', 'default')
     selected_model = request.json.get('model')
     
-    from runners.runner import cancelled_sessions
     if session_id in cancelled_sessions:
         return jsonify({'error': 'Session cancelled'}), 400
         
@@ -873,8 +810,7 @@ You must return a valid JSON object matching the following schema:
             if not raw_response:
                 return jsonify({'error': 'Failed to generate proactive response'}), 500
             
-        # Parse output
-        action_type = "thought"
+        # Parse output (proactive actions are always returned as thoughts)
         content = ""
         
         try:
@@ -888,15 +824,11 @@ You must return a valid JSON object matching the following schema:
                 cleaned = cleaned[:-3]
             cleaned = cleaned.strip()
             
-            parsed = json.loads(cleaned)
-            action_type = parsed.get("type", "thought").lower()
-            content = parsed.get("content", "").strip()
+            content = json.loads(cleaned).get("content", "").strip()
         except Exception as e:
             print(f"[PROACTIVE] JSON parsing failed: {e}. Raw: {raw_response}")
-            action_type = "thought"
             content = raw_response
             
-        # Force action to be a thought only
         return jsonify({
             'status': 'success',
             'type': 'thought',
@@ -951,7 +883,8 @@ def history():
             except Exception as e:
                 print(f"Error saving active session: {e}")
         
-        from core.program_config import program_name, get_program_greeting
+        from core.program_config import get_program_name, get_program_greeting
+        program_name = get_program_name()
         welcome_message = get_program_greeting()
         theme = load_theme(active_program)
         group_meta = enrich_group_meta(raw_group_meta)
@@ -965,11 +898,18 @@ def history():
             'active_program': active_program,
             'theme': theme,
             'welcome_message': welcome_message,
-            'group_meta': group_meta
+            'group_meta': group_meta,
+            'generating': session_id in runner.generating_sessions
         })
     except Exception as e:
         print(f"Error getting history: {e}")
         return jsonify({'error': str(e)}), 500
+
+@app.route('/api/generation_status', methods=['GET'])
+@requires_auth
+def generation_status():
+    session_id = request.args.get('session_id', 'default')
+    return jsonify({'generating': session_id in runner.generating_sessions})
 
 @app.route('/upload_media', methods=['POST'])
 @requires_auth
@@ -1413,7 +1353,6 @@ def delete_image():
 @requires_auth
 def regenerate_image():
     session_id = request.json.get('session_id', 'default')
-    from runners.runner import cancelled_sessions
     cancelled_sessions.discard(session_id)
     
     old_image_url = request.json.get('old_image_url') or ''
@@ -1666,7 +1605,6 @@ def extract_portrait_tags_from_context(session_id: str, custom_prompt: str = "")
 def api_generate_portrait():
     session_id = request.json.get('session_id', 'default')
     custom_prompt = request.json.get('prompt', '')
-    from runners.runner import cancelled_sessions
     cancelled_sessions.discard(session_id)
 
     if not _image_mutex.acquire(blocking=True, timeout=300.0):
@@ -1736,7 +1674,6 @@ def api_generate_portrait():
 
 
 import threading
-import uuid
 
 active_generations = {}
 active_generations_lock = threading.Lock()
@@ -1897,8 +1834,9 @@ def get_pending_tool_call():
 @requires_auth
 def cancel_chat():
     session_id = request.json.get('session_id', 'default')
-    from runners.runner import cancelled_sessions
     cancelled_sessions.add(session_id)
+    if hasattr(runner, 'generating_sessions'):
+        runner.generating_sessions.discard(session_id)
     print(f"[CANCEL] Session cancellation requested: {session_id}", flush=True)
     
     # Immediately interrupt active ComfyUI rendering job if running
@@ -1932,7 +1870,7 @@ from models.models import fetch_local_models
 @requires_auth
 def get_models():
     # Check if Remote API key and Cloud URL are validly configured
-    is_remote_configured, remote_key, remote_cloud_url = remote_configuration()
+    is_remote_configured, _, remote_cloud_url = remote_configuration()
     
     from adapters.local_llm_manager import check_status, check_installed
     is_local_online = check_status()
@@ -1963,7 +1901,6 @@ def get_models():
 @app.route('/api/project_settings', methods=['GET', 'POST'])
 @requires_auth
 def project_settings():
-    from variables.settings import VARIABLES_DIR
     import json
     settings_path = os.path.join(VARIABLES_DIR, "project_settings.json")
     
@@ -2385,13 +2322,41 @@ def databank_upload():
             except Exception as re:
                 print(f"Error cleaning up temporary file {temp_path}: {re}")
 
+@app.route('/api/databank/text', methods=['POST'])
+@requires_auth
+def databank_text():
+    data = request.get_json(silent=True) or {}
+    text = (data.get('text') or '').strip()
+    title = (data.get('title') or '').strip()
+    if not text:
+        return jsonify({"error": "Missing text content"}), 400
+    if not title:
+        first_line = text.splitlines()[0][:40].strip()
+        title = first_line if first_line else "Text Document"
+    try:
+        manager = DataBankManager()
+        doc_id = manager.ingest_text(text, title, "file")
+        return jsonify({"status": "success", "id": doc_id})
+    except Exception as e:
+        print(f"Error ingesting text into databank: {e}")
+        return jsonify({"error": str(e)}), 500
+
 @app.route('/api/databank/scrape', methods=['POST'])
 @requires_auth
 def databank_scrape():
-    url = request.json.get('url')
+    url = (request.json.get('url') or '').strip()
     if not url:
         return jsonify({"error": "Missing URL"}), 400
         
+    if ' ' in url or '\n' in url:
+        return jsonify({"error": "The input contains spaces or multiple lines. Please enter a valid web URL (e.g. https://example.com/article) or use '+ Paste Text'."}), 400
+
+    if not url.startswith('http://') and not url.startswith('https://'):
+        if re.match(r'^[a-zA-Z0-9][-a-zA-Z0-9.]*\.[a-zA-Z]{2,}', url):
+            url = 'https://' + url
+        else:
+            return jsonify({"error": "Please enter a valid web URL starting with https:// (e.g. https://example.com/article)."}), 400
+
     try:
         manager = DataBankManager()
         doc_id = manager.ingest_url(url)
@@ -2598,41 +2563,6 @@ def save_lorebook_entries(filename):
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
-
-@app.route('/api/programs/memories', methods=['GET'])
-@requires_auth
-def get_program_memories():
-    try:
-        from runners.program import get_active_program
-        program_id = request.args.get('program_id') or get_active_program()
-        
-        db_dir = os.path.join(base_dir, "core", "programs", program_id)
-        
-        manager = DataBankManager(db_dir=db_dir)
-        memories = manager.get_all_memories()
-        return jsonify({"memories": memories})
-    except Exception as e:
-        print(f"Error loading program memories: {e}")
-        return jsonify({"error": str(e)}), 500
-
-@app.route('/api/programs/memories/delete', methods=['POST'])
-@requires_auth
-def delete_memory():
-    data = request.json or {}
-    session_id = data.get("session_id", "default")
-    timestamp = data.get("timestamp")
-    if timestamp is None:
-        return jsonify({"error": "Missing timestamp"}), 400
-    try:
-        timestamp = float(timestamp)
-    except ValueError:
-        return jsonify({"error": "Invalid timestamp"}), 400
-    try:
-        success = asyncio.run(runner.delete_system_memory(session_id, timestamp))
-        return jsonify({"status": "success", "deleted": success})
-    except Exception as e:
-        print(f"Error deleting memory for session {session_id} at {timestamp}: {e}")
-        return jsonify({"error": str(e)}), 500
 
 @app.route('/api/quests', methods=['GET'])
 @requires_auth
@@ -2872,7 +2802,8 @@ def select_program():
         from core.mood_inversion import get_program_mood_metadata
         mood_meta = get_program_mood_metadata(program_id)
 
-        from core.program_config import program_name
+        from core.program_config import get_program_name
+        program_name = get_program_name()
         return jsonify({
             'status': 'success',
             'active': program_id,
@@ -2963,7 +2894,8 @@ def start_group_session():
         theme = load_theme(host_id)
         from core.mood_inversion import get_program_mood_metadata
         mood_meta = get_program_mood_metadata(host_id)
-        from core.program_config import program_name
+        from core.program_config import get_program_name
+        program_name = get_program_name()
 
         return jsonify({
             'status': 'success',
@@ -3405,8 +3337,7 @@ def get_program_profile():
 @requires_auth
 def save_program_profile():
     try:
-        from runners.program import get_active_program, set_tts_voice_for_program, _load_settings, _save_settings
-        from core.program_config import compile_instructions_from_card
+        from runners.program import set_tts_voice_for_program
         from variables.settings import PROGRAMS_DIR
         import json
 
@@ -3475,15 +3406,6 @@ def save_program_profile():
         with open(json_path, 'w', encoding='utf-8') as f:
             json.dump(card_to_write, f, indent=2, ensure_ascii=False)
 
-        # Hot-swap base instructions in-place if active program was edited
-        if program_id == get_active_program():
-            card_data = card_to_write.get('data', card_to_write)
-            new_instructions = compile_instructions_from_card(card_data)
-            
-            # Hot-swap without clearing runner.sessions_history
-            if hasattr(app, "runner") and app.runner:
-                app.runner.system_instructions = new_instructions
-
         return jsonify({'status': 'success'})
     except Exception as e:
         traceback.print_exc()
@@ -3542,40 +3464,6 @@ def get_program_journals():
             'recent_chapters': recent_chapters,
             'epic_chronicle': memory_meta.get('epic_chronicle', '')
         })
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-
-@app.route('/api/programs/journals/save', methods=['POST'])
-@requires_auth
-def save_program_journals():
-    try:
-        from runners.program import get_active_program
-        from tools.journals import get_journal_entries, save_journal_entries, add_journal_entry
-        
-        data = request.get_json(silent=True) or {}
-        entry_id = data.get('id')
-        keyphrases_str = data.get('keyphrases', '')
-        content = data.get('content', '')
-        program_id = data.get('program_id') or get_active_program()
-        
-        if entry_id:
-            entries = get_journal_entries(program_id)
-            found = False
-            for entry in entries:
-                if entry.get("id") == entry_id:
-                    entry["keyphrases"] = [k.strip().lower() for k in keyphrases_str.split(",") if k.strip()]
-                    entry["content"] = content.strip()[:300]
-                    found = True
-                    break
-            if found:
-                save_journal_entries(entries, program_id)
-                return jsonify({'status': 'success'})
-            else:
-                return jsonify({'error': 'Journal entry not found'}), 404
-        else:
-            add_journal_entry(keyphrases_str, content, program_id)
-            return jsonify({'status': 'success'})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -4357,7 +4245,7 @@ _last_broadcast_state = {}
 def _get_current_status():
     """Build the combined connection status payload."""
     from adapters import local_llm_manager
-    is_remote_configured, remote_key, remote_cloud_url = remote_configuration()
+    is_remote_configured, _, remote_cloud_url = remote_configuration()
     
     # Load temperature dynamically
     temperature = 0.95
@@ -4456,7 +4344,6 @@ def sse_status_stream():
 
 # --- Headless Local LLM & Hugging Face Integration API ---
 from adapters import local_llm_manager
-from adapters import comfy_manager
 
 # Wire SSE broadcast callbacks into both managers
 from runners import local_server
@@ -4560,19 +4447,6 @@ def local_llm_stop():
 
 # --- Headless ComfyUI & Dependency Resolver API ---
 
-@app.route('/api/comfy/status', methods=['GET'])
-@requires_auth
-def comfy_status():
-    installed = comfy_manager.check_comfy_installed()
-    running = comfy_manager.check_comfy_running()
-    if not running and getattr(comfy_manager, '_starting', False):
-        running = "starting"
-    return jsonify({
-        "installed": installed,
-        "running": running,
-        "resolution_status": comfy_manager.resolution_status
-    })
-
 @app.route('/api/comfy/install', methods=['POST'])
 @requires_auth
 def comfy_install():
@@ -4661,18 +4535,6 @@ def select_native_checkpoint():
         return jsonify({"success": False, "message": str(e)}), 500
 
 
-@app.route('/api/models/native/unload_llm', methods=['POST'])
-@requires_auth
-def unload_native_llm():
-    """Unloads the active in-process GGUF model."""
-    try:
-        from runners import engine_llm
-        success = engine_llm.unload_model()
-        return jsonify({"success": success, "message": "Model unloaded." if success else "No model was loaded."})
-    except Exception as e:
-        return jsonify({"success": False, "message": str(e)}), 500
-
-
 @app.route('/api/models/native/open_folder', methods=['POST'])
 @requires_auth
 def open_models_folder():
@@ -4712,55 +4574,27 @@ def comfy_resolve_workflow():
     workflow_json = request.json.get("workflow_json")
     if not workflow_json:
         try:
-            from variables.settings import PROGRAMS_DIR, COMFYUI_CHECKPOINT
-            from runners.program import get_active_program
-            active_program = get_active_program()
-            
+            from variables.settings import COMFYUI_CHECKPOINT, get_workflow_path
+
             combined_workflow = {}
-            
-            # Read ImageWorkflow.json
-            image_path = os.path.normpath(os.path.join(
-                PROGRAMS_DIR, active_program, "portraits", "ImageWorkflow.json"
-            ))
-            if not os.path.exists(image_path):
-                image_path = os.path.normpath(os.path.join(
-                    base_dir, "core", "skills", "portrait_generation", "ImageWorkflow.json"
-                ))
-                
-            if os.path.exists(image_path):
-                with open(image_path, "r", encoding="utf-8") as f:
-                    try:
-                        image_wf = json.load(f)
-                        resolved_checkpoint = os.getenv("COMFYUI_CHECKPOINT", COMFYUI_CHECKPOINT)
-                        image_str = json.dumps(image_wf).replace("%model%", resolved_checkpoint)
-                        image_wf = json.loads(image_str)
-                        for k, v in image_wf.items():
-                            combined_workflow[f"image_{k}"] = v
-                    except Exception as je1:
-                        print(f"Error parsing ImageWorkflow.json for resolution: {je1}")
-            
-            # Read VideoWorkflow.json
-            video_path = os.path.normpath(os.path.join(
-                PROGRAMS_DIR, active_program, "portraits", "VideoWorkflow.json"
-            ))
-            if not os.path.exists(video_path):
-                video_path = os.path.normpath(os.path.join(
-                    base_dir, "core", "skills", "portrait_generation", "VideoWorkflow.json"
-                ))
-                
-            if os.path.exists(video_path):
-                with open(video_path, "r", encoding="utf-8") as f:
-                    try:
-                        video_wf = json.load(f)
-                        for k, v in video_wf.items():
-                            combined_workflow[f"video_{k}"] = v
-                    except Exception as je2:
-                        print(f"Error parsing VideoWorkflow.json for resolution: {je2}")
-            
+            resolved_checkpoint = os.getenv("COMFYUI_CHECKPOINT", COMFYUI_CHECKPOINT)
+
+            for kind in ("Image", "Video"):
+                wf_path = get_workflow_path(kind)
+                if not os.path.exists(wf_path):
+                    continue
+                try:
+                    with open(wf_path, "r", encoding="utf-8") as f:
+                        wf_str = f.read().replace("%model%", resolved_checkpoint)
+                    for k, v in json.loads(wf_str).items():
+                        combined_workflow[f"{kind.lower()}_{k}"] = v
+                except Exception as je:
+                    print(f"Error parsing {wf_path} for resolution: {je}")
+
             if combined_workflow:
                 workflow_json = json.dumps(combined_workflow)
         except Exception as e:
-            return jsonify({"error": f"Failed to read program workflows: {e}"}), 500
+            return jsonify({"error": f"Failed to read workflows: {e}"}), 500
             
     if not workflow_json:
         return jsonify({"error": "No workflow configuration found to resolve."}), 400

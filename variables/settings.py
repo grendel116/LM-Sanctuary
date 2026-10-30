@@ -13,13 +13,8 @@ BANNED_WORDS_FILE = os.path.join(VARIABLES_DIR, "banned_words.json")
 USER_MD_FILE = os.path.join(VARIABLES_DIR, "user.md")
 USER_PROFILES_DIR = os.path.join(VARIABLES_DIR, "user_profiles")
 
-# Model and server configurations
-DEFAULT_REMOTE_MODEL = os.getenv("REMOTE_MODEL", "")
-DEFAULT_LOCAL_MODEL = "local-llm"
 DISABLED_THINKING = {"thinking": {"type": "disabled"}}
 REMOTE_SERVER_URL = os.getenv("REMOTE_SERVER_URL", "http://127.0.0.1:1234/v1/chat/completions")
-REMOTE_API_KEY = os.getenv("REMOTE_API_KEY")
-REMOTE_CLOUD_URL = os.getenv("REMOTE_CLOUD_URL")
 
 # Pull server endpoint configuration from environment with standard local defaults
 LOCAL_SERVER_URL = os.getenv("LOCAL_SERVER_URL", "http://localhost:8080")
@@ -29,12 +24,6 @@ def get_local_server_headers():
     api_key = os.getenv("LOCAL_SERVER_API_KEY")
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
-    return headers
-
-def get_remote_server_headers():
-    headers = {"Content-Type": "application/json"}
-    if REMOTE_API_KEY:
-        headers["Authorization"] = f"Bearer {REMOTE_API_KEY}"
     return headers
 
 def is_thinking_enabled() -> bool:
@@ -72,8 +61,21 @@ LLM_MODELS_DIR = os.path.join(MODELS_DIR, "llm")
 CHECKPOINTS_DIR = os.path.join(MODELS_DIR, "checkpoints")
 LORAS_DIR = os.path.join(MODELS_DIR, "loras")
 VAE_DIR = os.path.join(MODELS_DIR, "vae")
+WORKFLOWS_DIR = os.path.join(MODELS_DIR, "workflows")
 
-for _dir in (MODELS_DIR, LLM_MODELS_DIR, CHECKPOINTS_DIR, LORAS_DIR, VAE_DIR, PROGRAMS_DIR, LOGS_DIR):
+for _dir in (MODELS_DIR, LLM_MODELS_DIR, CHECKPOINTS_DIR, LORAS_DIR, VAE_DIR, WORKFLOWS_DIR, PROGRAMS_DIR, LOGS_DIR):
     os.makedirs(_dir, exist_ok=True)
+
+
+def get_workflow_path(kind: str) -> str:
+    """Returns the ComfyUI workflow for `kind` ("Image" or "Video").
+
+    A personal `models/workflows/<Kind>Workflow.json` takes precedence over the bundled
+    `<Kind>Workflow.default.json` starter that ships with the repository.
+    """
+    personal = os.path.join(WORKFLOWS_DIR, f"{kind}Workflow.json")
+    if os.path.exists(personal):
+        return personal
+    return os.path.join(WORKFLOWS_DIR, f"{kind}Workflow.default.json")
 
 

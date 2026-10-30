@@ -59,6 +59,9 @@ models/*
 !models/models.py
 !models/**/
 !models/**/.gitkeep
+# Personal workflows (models/workflows/ImageWorkflow.json) stay private; the starter templates ship
+models/workflows/*
+!models/workflows/*.default.json
 
 # TTS Speech Model weights and synthesized audio cache
 core/skills/speech_generation/speech_model/*.onnx
@@ -69,10 +72,6 @@ core/skills/speech_generation/speech_cache/
 logs/
 *.log
 comfy_server.log
-
-# Workflow Configs
-ImageWorkflow.json
-VideoWorkflow.json
 
 # Local Binaries
 utils/llama-bin/

@@ -10,7 +10,7 @@ import concurrent.futures
 
 import requests
 
-from variables.settings import COMFYUI_SERVER_URL, COMFYUI_CHECKPOINT, COMFYUI_VAE, VARIABLES_DIR
+from variables.settings import COMFYUI_SERVER_URL
 from utils import lifecycle
 
 _search_executor = concurrent.futures.ThreadPoolExecutor(max_workers=10)
@@ -277,7 +277,6 @@ def read_webpage(url: str) -> str:
 
 
 def query_searxng(query: str, base_url: str = None, engines: str = "baidu,yandex,bing") -> list:
-    import requests
     public_instances = [
         "https://searx.be",
         "https://searxng.site",
@@ -343,8 +342,6 @@ def web_search(query: str) -> str:
         A formatted string of matching pages with titles, URLs, and snippets.
     """
     import os
-    import json
-    import requests
     import concurrent.futures
     import time
 
@@ -1260,34 +1257,6 @@ def search_codebase(keyword: str, path: str = "") -> str:
 # COMFYUI TOOLS
 # ==============================================================================
 
-def get_comfy_checkpoints(comfy_url: str) -> list:
-    try:
-        response = requests.get(f"{comfy_url}/object_info", timeout=2.0)
-        if response.status_code == 200:
-            data = response.json()
-            ckpt_loader = data.get("CheckpointLoaderSimple", {})
-            ckpt_names = ckpt_loader.get("input", {}).get("required", {}).get("ckpt_name", [[]])[0]
-            if isinstance(ckpt_names, list):
-                return ckpt_names
-    except Exception as e:
-        print(f"[DEBUG] Failed to fetch checkpoints from ComfyUI: {e}", flush=True)
-    return []
-
-
-def get_comfy_vaes(comfy_url: str) -> list:
-    try:
-        response = requests.get(f"{comfy_url}/object_info", timeout=2.0)
-        if response.status_code == 200:
-            data = response.json()
-            vae_loader = data.get("VAELoader", {})
-            vae_names = vae_loader.get("input", {}).get("required", {}).get("vae_name", [[]])[0]
-            if isinstance(vae_names, list):
-                return vae_names
-    except Exception as e:
-        print(f"[DEBUG] Failed to fetch VAEs from ComfyUI: {e}", flush=True)
-    return []
-
-
 def format_comfy_validation_error(error_json: dict) -> str:
     try:
         details = error_json.get("error", {}).get("details", {})
@@ -1343,7 +1312,6 @@ def apply_comfy_workflow(workflow_path: str, parameters: dict, save_path: str, s
     """
     import os
     import json
-    import requests
     import time
 
     if not os.path.exists(workflow_path):
@@ -1486,48 +1454,9 @@ def generate_local_image(prompt: str, count: int = 3) -> str:
         Markdown link(s) to the generated portrait image(s), or an error message.
     """
     import os
-    import random
     import time
     import json
-    import requests
     
-    def get_install_instructions(reason: str) -> str:
-        from adapters.comfy_manager import check_comfy_running
-        status = check_comfy_running()
-        if status == "starting" or "ConnectionRefusedError" in reason or "10061" in reason:
-            return (
-                "### ⏳ ComfyUI is starting up...\n\n"
-                "The image generation engine was recently launched and is currently starting in the background.\n\n"
-                f"> *(Details: {reason})*\n\n"
-                "Please wait 10-15 seconds for the server to finish loading and bind to port 8188, then try again!"
-            )
-        if status is True:
-            return (
-                "### ⚠️ Image Generation Failed (ComfyUI Execution Error)\n\n"
-                "ComfyUI is online, but the image generation workflow encountered an error:\n"
-                f"> **{reason}**\n\n"
-                "Please verify that your models are compatible, check the ComfyUI server logs (`comfy_server.log`) for details, or try again."
-            )
-        if "Missing Checkpoint" in reason or "Missing LoRA" in reason or "Missing VAE" in reason:
-            return (
-                "### ⚠️ Image Generation Failed (Missing Assets)\n\n"
-                f"{reason}\n\n"
-                "To automatically download and configure the required assets, please use the **Connection Settings** modal:\n"
-                "- Click the settings gear icon in the top header.\n"
-                "- Click **Resolve Workflow Dependencies** under the Image Generation Environment section to download missing files.\n"
-                "- Once the files are successfully downloaded, request another portrait!"
-            )
-        return (
-            "**Image Generation Inactive (ComfyUI Offline/Not Installed)**\n\n"
-            f"*(Reason: {reason})*\n\n"
-            "To enable program portrait generation, you can install, run, and resolve ComfyUI dependencies directly from the **Connection Settings** panel:\n\n"
-            "- **Open Connection Settings**: Click the settings gear icon in the top header.\n"
-            "- **Install ComfyUI**: If not already installed, click **Install Headless ComfyUI** under the Image Generation Environment section.\n"
-            "- **Start the Server**: Click **Start ComfyUI Engine** to launch the server headlessly.\n"
-            "- **Resolve Dependencies**: Click **Resolve Workflow Dependencies** to automatically download the required checkpoints, VAEs, and custom nodes.\n"
-            "- **Request a Portrait**: Once the engine is online, ask the program to generate a portrait!"
-        )
-
     from runners.program import get_active_program
     active_program = get_active_program()
 
@@ -1605,7 +1534,6 @@ def generate_local_image(prompt: str, count: int = 3) -> str:
                 prompt=final_prompt,
                 negative_prompt=final_negative,
                 save_paths=local_paths,
-                batch_size=num_images
             )
 
         markdown_links = []
@@ -1647,20 +1575,15 @@ def generate_video_from_image(image_path: str, prompt: str) -> str:
     import time
     import json
     import random
-    import requests
     from PIL import Image
     
-    from variables.settings import COMFYUI_SERVER_URL
+    from variables.settings import COMFYUI_SERVER_URL, get_workflow_path
     from adapters.comfy_manager import COMFYUI_DIR, check_comfy_running, _resolver_worker, resolution_status
-    from runners.program import get_active_program
 
-    active_program = get_active_program()
-    
-    workflow_env_path = os.getenv("COMFYUI_VIDEO_WORKFLOW", "core/skills/portrait_generation/VideoWorkflow.json")
-    workflow_path = os.path.normpath(os.path.join(root_dir, workflow_env_path))
+    workflow_path = get_workflow_path("Video")
     
     if not os.path.exists(workflow_path):
-        raise Exception(f"Video workflow template not found at '{workflow_path}'")
+        raise Exception("No video workflow found. Save a ComfyUI API-format workflow as models/workflows/VideoWorkflow.json.")
         
     if not os.path.exists(image_path):
         raise Exception(f"Source image not found at '{image_path}'")
@@ -2292,9 +2215,7 @@ def search_music(query: str, mode: str = "deep_cuts") -> str:
     Returns:
         Curated list of matching artists, recordings, and liner notes.
     """
-    import os
     import re
-    import requests
     from concurrent.futures import ThreadPoolExecutor
 
     mode_lower = (mode or "deep_cuts").lower().strip()

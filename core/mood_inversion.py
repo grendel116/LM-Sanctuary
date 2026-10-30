@@ -1,6 +1,5 @@
 """Program mood-inversion policy, CMYK sequential palette generation, and emotional state tracking."""
 
-import copy
 import json
 import os
 import re
@@ -346,11 +345,6 @@ def analyze_emotional_state(text: str, program_id: str | None = None) -> dict:
     """Analyze emotional state directly from the text's self-declared mood tag."""
     _, details = extract_and_strip_mood(text, program_id=program_id)
     return details
-
-
-def analyze_sentiment_fast(text: str, program_id: str | None = None) -> dict:
-    """Fast emotional state resolution via direct tag declaration."""
-    return analyze_emotional_state(text, program_id=program_id)
 
 
 def get_mood_declaration_prompt(program_id: str | None = None) -> str:

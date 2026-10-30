@@ -5,14 +5,12 @@ import time
 import threading
 from runners import local_server
 
-import json
 
 download_status = {}
 _local_models_list_cached = None
 _local_models_list_cache_time = 0.0
 
 
-def get_server_path(): return "llama-server"
 def check_installed(): return os.path.exists(local_server.SERVER_EXE)
 def install_server():
     success = local_server.download_llama_server()

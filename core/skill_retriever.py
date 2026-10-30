@@ -21,13 +21,6 @@ _skill_cache = None
 _skill_mtime: float = 0.0
 
 
-def invalidate_skill_cache():
-    """Resets the cached skill registry, forcing a fresh parse and embed on next access."""
-    global _skill_cache, _skill_mtime
-    _skill_cache = None
-    _skill_mtime = 0.0
-
-
 def _parse_skill_frontmatter(skill_text: str) -> tuple:
     """Parses YAML frontmatter from a SKILL.md file.
 

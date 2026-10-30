@@ -345,37 +345,20 @@ def is_story_mode(program_name: str = None) -> bool:
     card = _load_card_data(program_name)
     return bool(card.get("story_mode", False))
 
-inversion_directive = ""
-
-def set_inversion_directive(directive: str):
-    global inversion_directive
-    inversion_directive = directive
-
 def get_compiled_instructions() -> str:
-    """Merges static identity profiles, dynamic temporal/runtime contexts, and user relationship settings."""
+    """Merges the static identity profile, toolbelt, user relationship settings, and formatting rules.
+
+    Everything returned here stays byte-identical between turns so the server reuses its cached prefix.
+    Per-turn state (inversion directive, time, lore, recalled memories) is attached to the latest user turn.
+    """
     from runners.program import get_active_program
-    global inversion_directive
     base = replace_placeholders(load_static_instructions() + load_user_instructions())
-    
+
     active_program = get_active_program()
     story_mode = is_story_mode(active_program)
     base += get_message_formatting(story_mode)
 
     from core.mood_inversion import get_mood_declaration_prompt
     base += get_mood_declaration_prompt(active_program)
-    
-    if inversion_directive:
-        base += f"\n\n# PERSONALITY INVERSION DIRECTIVE\n{replace_placeholders(inversion_directive)}\n"
-        
+
     return base
-
-# Determine program name dynamically from the active program configuration
-program_name = get_program_name()
-
-# LlmAgent requires the name to be a valid identifier. Sanitize it.
-sanitized_agent_name = re.sub(r'[^a-zA-Z0-9_]', '_', program_name)
-if not sanitized_agent_name or not (sanitized_agent_name[0].isalpha() or sanitized_agent_name[0] == '_'):
-    sanitized_agent_name = '_' + sanitized_agent_name
-
-# Dynamically initialize/reload the sovereign instruction
-instruction = get_compiled_instructions()

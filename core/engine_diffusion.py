@@ -2,7 +2,8 @@
 core/engine_diffusion.py — Internal GPU-accelerated diffusion engine.
 
 Executes SDXL image generation directly in-process with PyTorch/GPU acceleration,
-using the exact parameters from ImageWorkflow.json.
+running the node graph from models/workflows/ImageWorkflow.json (or the bundled
+ImageWorkflow.default.json starter).
 """
 
 import os
@@ -23,6 +24,7 @@ from utils import lifecycle
 _diffusion_lock = threading.Lock()
 _active_checkpoint: Optional[str] = None
 _COMFY_NODE_CACHE: Dict[Tuple[Any, ...], Any] = {}
+_custom_nodes_loaded = False
 root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
 
@@ -255,14 +257,9 @@ def set_active_checkpoint(checkpoint_name: str) -> bool:
 
 DIFFUSION_SERVER_PORT = 8189
 DIFFUSION_SERVER_URL = f"http://127.0.0.1:{DIFFUSION_SERVER_PORT}"
-# Retain aliases for backward compatibility
-DIFFUSION_DAEMON_PORT = DIFFUSION_SERVER_PORT
-DIFFUSION_DAEMON_URL = DIFFUSION_SERVER_URL
 
 _server_proc: Optional[subprocess.Popen] = None
-_daemon_proc = _server_proc
 _server_lock = threading.Lock()
-_daemon_lock = _server_lock
 
 
 def _cleanup_stale_port_process(port: int):
@@ -299,12 +296,11 @@ def check_server_status() -> bool:
         return False
 
 
-check_daemon_status = check_server_status
 
 
 def ensure_server_running(timeout: float = 60.0) -> bool:
     """Starts the diffusion server worker if not already running."""
-    global _server_proc, _daemon_proc
+    global _server_proc
     if _server_proc is not None and _server_proc.poll() is None:
         return True
 
@@ -324,7 +320,6 @@ def ensure_server_running(timeout: float = 60.0) -> bool:
         print("[engine_diffusion] Starting persistent diffusion server worker...", flush=True)
         py_exe = sys.executable
         env = os.environ.copy()
-        env["DIFFUSION_WORKER"] = "1"
         env["PYTHONPATH"] = root_dir + os.pathsep + env.get("PYTHONPATH", "")
 
         logs_dir = os.path.join(root_dir, "logs")
@@ -346,7 +341,6 @@ def ensure_server_running(timeout: float = 60.0) -> bool:
                 stderr=daemon_log,
                 **popen_kwargs
             ))
-            _daemon_proc = _server_proc
 
         start_t = time.time()
         while time.time() - start_t < timeout:
@@ -362,12 +356,11 @@ def ensure_server_running(timeout: float = 60.0) -> bool:
         return False
 
 
-ensure_daemon_running = ensure_server_running
 
 
 def unload_diffusion_models():
     """Unloads the diffusion server worker, releasing 100% of GPU VRAM back to the OS."""
-    global _server_proc, _daemon_proc, _COMFY_NODE_CACHE, _active_checkpoint
+    global _server_proc, _COMFY_NODE_CACHE, _active_checkpoint
     with _server_lock:
         try:
             import urllib.request
@@ -387,7 +380,6 @@ def unload_diffusion_models():
                 except Exception:
                     pass
             _server_proc = None
-            _daemon_proc = None
 
         _cleanup_stale_port_process(DIFFUSION_SERVER_PORT)
 
@@ -417,7 +409,8 @@ def execute_workflow_graph(
     folder_paths.folder_names_and_paths["ultralytics"] = ([os.path.join(root_dir, "models", "ultralytics")], folder_paths.supported_pt_extensions)
 
     import nodes
-    if "FaceDetailer" not in nodes.NODE_CLASS_MAPPINGS:
+    global _custom_nodes_loaded
+    if not _custom_nodes_loaded:
         try:
             import logging, asyncio
             prev_level = logging.getLogger().level
@@ -426,8 +419,8 @@ def execute_workflow_graph(
             logging.getLogger().setLevel(prev_level)
         except Exception as custom_node_err:
             print(f"[engine_diffusion] Warning initializing custom nodes: {custom_node_err}")
+        _custom_nodes_loaded = True
 
-    import comfy.model_management
 
     if isinstance(workflow_path_or_dict, str):
         with open(workflow_path_or_dict, "r", encoding="utf-8") as f:
@@ -650,22 +643,16 @@ def _generate_portrait_image_inprocess(
     prompt: str,
     negative_prompt: str = "worst quality, low quality, deformed, mutated, extra limbs, watermark, text",
     checkpoint: Optional[str] = None,
-    width: int = 832,
-    height: int = 1248,
-    num_inference_steps: int = 24,
-    guidance_scale: float = 6.0,
-    sampler_name: str = "euler",
-    scheduler: str = "simple",
     seed: Optional[int] = None,
     workflow_path: Optional[str] = None,
     save_path: Optional[str] = None,
     save_paths: Optional[List[str]] = None,
-    batch_size: int = 1
 ) -> Any:
     if seed is None:
         seed = random.randint(1, 1125899906842624)
 
-    wf_file = workflow_path or os.getenv("COMFYUI_IMAGE_WORKFLOW", "core/skills/portrait_generation/ImageWorkflow.json")
+    from variables.settings import get_workflow_path
+    wf_file = workflow_path or get_workflow_path("Image")
     if not os.path.isabs(wf_file):
         wf_file = os.path.normpath(os.path.join(root_dir, wf_file))
 
@@ -675,136 +662,52 @@ def _generate_portrait_image_inprocess(
     except Exception:
         selected_checkpoint = active_ckpt or "sd_xl_base_1.0.safetensors"
 
-    if os.path.exists(wf_file):
-        with open(wf_file, "r", encoding="utf-8") as f:
-            wf_template = json.load(f)
-
-        if save_paths is not None:
-            saved_out = []
-            for idx, target_p in enumerate(save_paths):
-                replacements = {
-                    "%prompt%": prompt,
-                    "%negative_prompt%": negative_prompt,
-                    "%seed%": seed + idx,
-                    "%model%": selected_checkpoint,
-                    "%vae%": ""
-                }
-                _, out_p = execute_workflow_graph(
-                    wf_template,
-                    replacements=replacements,
-                    save_path=target_p,
-                    empty_cache_after=(idx == len(save_paths) - 1),
-                )
-                if out_p and os.path.exists(out_p):
-                    saved_out.append(out_p)
-            return saved_out
-
-        print(f"[engine_diffusion] Adapting dynamically to workflow: {wf_file} with checkpoint: {selected_checkpoint}")
-        replacements = {
-            "%prompt%": prompt,
-            "%negative_prompt%": negative_prompt,
-            "%seed%": seed,
-            "%model%": selected_checkpoint,
-            "%vae%": ""
-        }
-        _, out_result = execute_workflow_graph(wf_template, replacements=replacements, save_path=save_path)
-        if out_result and os.path.exists(out_result):
-            return out_result
-
-    # Fallback to direct node synthesis if no workflow file exists
-    comfy_dir = os.path.normpath(os.path.join(root_dir, "core", "comfy_engine"))
-    if comfy_dir not in sys.path:
-        sys.path.insert(0, comfy_dir)
-
-    import folder_paths
-    folder_paths.folder_names_and_paths["checkpoints"] = ([os.path.join(root_dir, "models", "checkpoints")], folder_paths.supported_pt_extensions)
-    folder_paths.folder_names_and_paths["loras"] = ([os.path.join(root_dir, "models", "loras")], folder_paths.supported_pt_extensions)
-
-    import nodes
-    import comfy.model_management
-
-    ckpt_loader = nodes.CheckpointLoaderSimple()
-    model, clip, vae = ckpt_loader.load_checkpoint(selected_checkpoint)
-    try:
-        model.model.to(torch.float16)
-    except Exception:
-        pass
-
-    clip_encoder = nodes.CLIPTextEncode()
-    positive = clip_encoder.encode(clip, prompt)[0]
-    negative = clip_encoder.encode(clip, negative_prompt)[0]
-
-    latent_node = nodes.EmptyLatentImage()
-    latent = latent_node.generate(width, height, effective_batch)[0]
-
-    ksampler = nodes.KSampler()
-    samples = ksampler.sample(model, seed, num_inference_steps, guidance_scale, sampler_name, scheduler, positive, negative, latent, 1.0)[0]
-
-    try:
-        vae.first_stage_model.to("cpu")
-        vae.device = torch.device("cpu")
-        vae.output_device = torch.device("cpu")
-    except Exception:
-        pass
-
-    samples_cpu = {"samples": samples["samples"].to("cpu")}
-    vae_decoder = nodes.VAEDecode()
-    images = vae_decoder.decode(vae, samples_cpu)[0]
-
-    from PIL import Image
-    import numpy as np
-    target_paths = list(save_paths) if save_paths else ([save_path] if save_path else [])
-    saved_paths = []
-    for idx in range(images.shape[0]):
-        img_array = (images[idx].detach().cpu().numpy() * 255).astype(np.uint8)
-        image = Image.fromarray(img_array)
-        if idx < len(target_paths) and target_paths[idx]:
-            out_p = target_paths[idx]
-            os.makedirs(os.path.dirname(out_p), exist_ok=True)
-            image.save(out_p)
-            saved_paths.append(out_p)
-            print(f"[engine_diffusion] Portrait saved to {out_p}")
+    with open(wf_file, "r", encoding="utf-8") as f:
+        wf_template = json.load(f)
 
     if save_paths is not None:
-        return saved_paths
-    return saved_paths[0] if saved_paths else (save_path or "")
+        saved_out = []
+        for idx, target_p in enumerate(save_paths):
+            replacements = {
+                "%prompt%": prompt,
+                "%negative_prompt%": negative_prompt,
+                "%seed%": seed + idx,
+                "%model%": selected_checkpoint,
+                "%vae%": ""
+            }
+            _, out_p = execute_workflow_graph(
+                wf_template,
+                replacements=replacements,
+                save_path=target_p,
+                empty_cache_after=(idx == len(save_paths) - 1),
+            )
+            if out_p and os.path.exists(out_p):
+                saved_out.append(out_p)
+        return saved_out
+
+    print(f"[engine_diffusion] Running workflow: {wf_file} with checkpoint: {selected_checkpoint}")
+    replacements = {
+        "%prompt%": prompt,
+        "%negative_prompt%": negative_prompt,
+        "%seed%": seed,
+        "%model%": selected_checkpoint,
+        "%vae%": ""
+    }
+    _, out_result = execute_workflow_graph(wf_template, replacements=replacements, save_path=save_path)
+    return out_result
 
 
 def generate_portrait_image(
     prompt: str,
     negative_prompt: str = "worst quality, low quality, deformed, mutated, extra limbs, watermark, text",
     checkpoint: Optional[str] = None,
-    width: int = 832,
-    height: int = 1248,
-    num_inference_steps: int = 24,
-    guidance_scale: float = 6.0,
-    sampler_name: str = "euler",
-    scheduler: str = "simple",
     seed: Optional[int] = None,
     workflow_path: Optional[str] = None,
     save_path: Optional[str] = None,
     save_paths: Optional[List[str]] = None,
-    batch_size: int = 1
 ) -> Any:
-    """Generates one or more images via persistent diffusion worker, maintaining cached models across calls."""
-    if os.getenv("DIFFUSION_WORKER") == "1":
-        return _generate_portrait_image_inprocess(
-            prompt=prompt,
-            negative_prompt=negative_prompt,
-            checkpoint=checkpoint,
-            width=width,
-            height=height,
-            num_inference_steps=num_inference_steps,
-            guidance_scale=guidance_scale,
-            sampler_name=sampler_name,
-            scheduler=scheduler,
-            seed=seed,
-            workflow_path=workflow_path,
-            save_path=save_path,
-            save_paths=save_paths,
-            batch_size=batch_size
-        )
-
+    """Generates one or more images via the persistent diffusion worker, which keeps models cached across calls.
+    Image size, steps, and sampler settings come from the workflow file."""
     if not ensure_server_running():
         raise RuntimeError("Failed to start persistent diffusion server worker.")
 
@@ -815,17 +718,10 @@ def generate_portrait_image(
         "prompt": prompt,
         "negative_prompt": negative_prompt,
         "checkpoint": checkpoint,
-        "width": width,
-        "height": height,
-        "num_inference_steps": num_inference_steps,
-        "guidance_scale": guidance_scale,
-        "sampler_name": sampler_name,
-        "scheduler": scheduler,
         "seed": seed,
         "workflow_path": workflow_path,
         "save_path": save_path,
         "save_paths": save_paths,
-        "batch_size": batch_size
     }
 
     req_data = json.dumps(payload).encode("utf-8")

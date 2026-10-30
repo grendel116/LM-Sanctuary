@@ -1,11 +1,7 @@
-import asyncio
-import base64
 import json
-import mimetypes
 import os
 import time
 import uuid
-from abc import ABC, abstractmethod
 from pathlib import Path
 
 import tools.tools as tools
@@ -17,54 +13,32 @@ from utils.utils import (
 )
 
 
-
-
-
-class LocalHistoryAdapter(ABC):
-    def __init__(self, runner_obj, session_id: str):
+class OsHistoryAdapter:
+    def __init__(self, runner_obj, session_id: str, file_path_resolved, image_data, image_mime, query_vector=None):
         self.runner_obj = runner_obj
         self.session_id = session_id
-
-    @abstractmethod
-    def get_openai_messages(self, sys_inst: str, rag_context: str, memory_context: str | None = None) -> list[dict]:
-        pass
-
-    @abstractmethod
-    def append_assistant_message(self, text: str, tool_calls_data: list, invocation_id: str, intermediate: bool = False, speaker_id: str = None):
-        pass
-
-    @abstractmethod
-    def append_tool_events(self, results: list, invocation_id: str):
-        pass
-
-    @abstractmethod
-    def append_image_tool_events(self, tool_name: str, tool_args: dict, new_markdown: str, call_id: str, invocation_id: str):
-        pass
-
-    @abstractmethod
-    def post_process_thoughts(self, invocation_id: str):
-        pass
-
-    @abstractmethod
-    def save(self):
-        pass
-
-
-class OsHistoryAdapter(LocalHistoryAdapter):
-    def __init__(self, runner_obj, session_id: str, file_path_resolved, image_data, image_mime, query_vector=None):
-        super().__init__(runner_obj, session_id)
         self.file_path_resolved = file_path_resolved
         self.image_data = image_data
         self.image_mime = image_mime
         self.query_vector = query_vector
-        self.initial_history_len = len(runner_obj.sessions_history.get(session_id, []))
-        self._cached_dyn_ctx = None
+        self._cached_post_injection = None
 
     def _get_max_input_tokens(self) -> int:
         local_context = os.getenv("LOCAL_CONTEXT", "8192")
         if local_context and local_context.isdigit():
             return max(4096, int(local_context) - 2048)
         return 6500
+
+    # History is cut in whole blocks of this many messages so the first kept message stays
+    # the same across many turns, letting the server reuse the cached history prefix.
+    HISTORY_CUT_STEP = 8
+    CHARS_PER_TOKEN = 3.5
+
+    @staticmethod
+    def _content_len(content) -> int:
+        if isinstance(content, list):
+            return sum(len(item.get("text", "")) if isinstance(item, dict) else len(item) for item in content)
+        return len(content or "")
 
     def _build_tiered_messages(
         self,
@@ -74,18 +48,17 @@ class OsHistoryAdapter(LocalHistoryAdapter):
         max_input_tokens: int | None = None
     ) -> list[dict]:
         """
-        Assembles OpenAI payload using a prioritized context budget:
-          - Tier 1 (Crucial): Static System Instructions & Core Directives + Latest User Query & Dynamic Post-Injection State.
-          - Tier 2 (High): Chat history turns (newest to oldest, fitting 100% of remaining budget).
+        Assembles the OpenAI payload in prefix-cache order:
+          1. System prompt (static instructions, then the slow-changing memory chronicle).
+          2. Chat history, trimmed from the oldest end in fixed blocks.
+          3. Latest user turn with the per-turn post-injection appended.
         """
         if max_input_tokens is None:
             max_input_tokens = self._get_max_input_tokens()
-        CHAR_BUDGET = max_input_tokens * 4
+        char_budget = int(max_input_tokens * self.CHARS_PER_TOKEN)
 
-        # 1. Isolate non-system chat turns
         chat_turns = [m for m in raw_messages if m.get("role") != "system"]
 
-        # 2. Locate the actual latest user message to attach post_injection
         latest_user_idx = None
         for i in range(len(chat_turns) - 1, -1, -1):
             if chat_turns[i].get("role") == "user" and not str(chat_turns[i].get("content", "")).startswith("[Tool Response from"):
@@ -97,8 +70,6 @@ class OsHistoryAdapter(LocalHistoryAdapter):
                     latest_user_idx = i
                     break
 
-        # Attach post-injection payload strictly to the latest user message
-        # If no user message exists in history, append it to system content
         if post_injection:
             if latest_user_idx is not None:
                 user_turn = chat_turns[latest_user_idx]
@@ -107,55 +78,31 @@ class OsHistoryAdapter(LocalHistoryAdapter):
                 elif isinstance(user_turn.get("content"), list):
                     user_turn["content"].append({"type": "text", "text": f"\n\n{post_injection}"})
             else:
-                system_content = f"{system_content.strip()}\n\n{post_injection}"
+                chat_turns.append({"role": "user", "content": post_injection})
+                latest_user_idx = len(chat_turns) - 1
 
-        # 3. Calculate Tier 1 core footprint (includes post_injection on latest_user_idx)
-        latest_user_len = 0
-        if latest_user_idx is not None:
-            user_content = chat_turns[latest_user_idx].get("content")
-            if isinstance(user_content, list):
-                latest_user_len = sum(
-                    len(item.get("text", "")) if isinstance(item, dict) else len(item)
-                    for item in user_content
-                )
-            elif isinstance(user_content, str):
-                latest_user_len = len(user_content)
+        # Find the earliest block-aligned cut that fits the budget. The latest user turn and
+        # everything after it (tool loop steps of the current turn) are always kept.
+        lengths = [self._content_len(t.get("content")) for t in chat_turns]
+        available = char_budget - len(system_content)
+        protected_from = latest_user_idx if latest_user_idx is not None else len(chat_turns)
 
-        tier1_base_len = len(system_content) + latest_user_len
-        remaining_budget = max(0, CHAR_BUDGET - tier1_base_len)
+        cut = 0
+        while cut < protected_from and sum(lengths[cut:]) > available:
+            cut = min(cut + self.HISTORY_CUT_STEP, protected_from)
+        if cut:
+            print(f"[CONTEXT] Dropped {cut} oldest messages to fit the context budget.", flush=True)
 
-        # 4. Truncate chat history from newest to oldest to fit remaining budget
-        trimmed_chat_turns = []
-        accumulated_chat_chars = 0
-
-        for i in range(len(chat_turns) - 1, -1, -1):
-            turn = chat_turns[i]
-            if i == latest_user_idx:
-                trimmed_chat_turns.insert(0, turn)
-                continue
-
-            turn_text = turn["content"] if isinstance(turn.get("content"), str) else "".join(
-                item.get("text", "") for item in turn.get("content", []) if isinstance(item, dict)
-            )
-            turn_len = len(turn_text)
-
-            if accumulated_chat_chars + turn_len <= remaining_budget:
-                trimmed_chat_turns.insert(0, turn)
-                accumulated_chat_chars += turn_len
-            else:
-                break
-
-        # 5. Assemble final OpenAI message array
         final_messages = [{"role": "system", "content": system_content.strip()}]
-        final_messages.extend(trimmed_chat_turns)
+        final_messages.extend(chat_turns[cut:])
 
         return _merge_consecutive_messages(final_messages)
 
-    def get_openai_messages(self, sys_inst: str, rag_context: str, memory_context: str | None = None) -> list[dict]:
+    def get_openai_messages(
+        self, sys_inst: str, rag_context: str, memory_context: str = "", turn_directive: str = ""
+    ) -> list[dict]:
         from core.program_config import is_story_mode, replace_placeholders
-        from tools.lorebook import get_active_lore
         from runners.program import get_active_program
-        from variables.settings import PROGRAMS_DIR
 
         history = self.runner_obj.sessions_history.get(self.session_id, [])
         filtered_history = [
@@ -248,9 +195,31 @@ class OsHistoryAdapter(LocalHistoryAdapter):
         if not tools.current_use_imagen.get():
             directive = "\n".join(line for line in directive.split("\n") if "generate_imagen" not in line)
 
+        # Static instructions first, then the memory chronicle (refreshed once every 12 turns).
         system_content = f"{sys_inst}{directive}"
+        if memory_context:
+            system_content = f"{system_content.rstrip()}\n\n{memory_context}"
 
-        # Dynamic Post-Injections attached to latest user turn (Preserves System Prompt Prefix Caching)
+        # Per-turn blocks ride on the latest user turn so the system prompt and history stay cached.
+        # They are computed once per turn so every tool-loop pass shares the same prefix.
+        if self._cached_post_injection is None:
+            self._cached_post_injection = self._build_post_injection(
+                history, filtered_history, latest_user_idx, active_prog, story_active, rag_context, turn_directive
+            )
+
+        return self._build_tiered_messages(
+            system_content=system_content,
+            raw_messages=raw_messages,
+            post_injection=self._cached_post_injection,
+        )
+
+    def _build_post_injection(
+        self, history, filtered_history, latest_user_idx, active_prog, story_active, rag_context, turn_directive
+    ) -> str:
+        from core.program_config import replace_placeholders
+        from tools.lorebook import get_active_lore
+        from variables.settings import PROGRAMS_DIR
+
         post_blocks = []
 
         # World Info / Lore (placed in post_blocks so dynamic keyword triggers do not invalidate system prompt KV cache)
@@ -263,15 +232,14 @@ class OsHistoryAdapter(LocalHistoryAdapter):
             print(f"[lorebook] Injection error: {le}")
 
         try:
-            if self._cached_dyn_ctx is None:
-                from core.program_config import load_dynamic_runtime_context
-                previous_ts = next(
-                    (m["timestamp"] for m in reversed(filtered_history[:latest_user_idx]) if m.get("timestamp")),
-                    None,
-                ) if latest_user_idx > 0 else None
-                self._cached_dyn_ctx = load_dynamic_runtime_context(previous_ts).strip()
-            if self._cached_dyn_ctx:
-                post_blocks.append(self._cached_dyn_ctx)
+            from core.program_config import load_dynamic_runtime_context
+            previous_ts = next(
+                (m["timestamp"] for m in reversed(filtered_history[:latest_user_idx]) if m.get("timestamp")),
+                None,
+            ) if latest_user_idx > 0 else None
+            dyn_ctx = load_dynamic_runtime_context(previous_ts).strip()
+            if dyn_ctx:
+                post_blocks.append(dyn_ctx)
         except Exception as e:
             print(f"[runtime context] Injection error: {e}")
 
@@ -302,8 +270,6 @@ class OsHistoryAdapter(LocalHistoryAdapter):
 
         if rag_context:
             post_blocks.append(f"<knowledge_base>\n{rag_context}\n</knowledge_base>")
-        if memory_context:
-            post_blocks.append(f"<archived_memory>\n{memory_context}\n</archived_memory>")
 
         skill_query = _build_vector_query(filtered_history) or last_user_msg
         if skill_query:
@@ -338,13 +304,10 @@ class OsHistoryAdapter(LocalHistoryAdapter):
         except Exception as e:
             print(f"Error loading post-history instructions: {e}", flush=True)
 
-        full_post_injection = "\n\n".join(post_blocks)
+        if turn_directive:
+            post_blocks.append(turn_directive)
 
-        return self._build_tiered_messages(
-            system_content=system_content,
-            raw_messages=raw_messages,
-            post_injection=full_post_injection,
-        )
+        return "\n\n".join(post_blocks)
 
     def append_assistant_message(self, text: str, tool_calls_data: list, invocation_id: str, intermediate: bool = False, speaker_id: str = None):
         from core.mood_inversion import extract_and_strip_mood
@@ -417,12 +380,3 @@ class OsHistoryAdapter(LocalHistoryAdapter):
                 "tool_calls": [],
                 "timestamp": time.time(),
             })
-
-    def append_image_tool_events(self, tool_name: str, tool_args: dict, new_markdown: str, call_id: str, invocation_id: str):
-        pass
-
-    def post_process_thoughts(self, invocation_id: str):
-        pass
-
-    def save(self):
-        self.runner_obj._save_session_to_disk(self.session_id)

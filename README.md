@@ -67,6 +67,7 @@ Place your local models into the `models/` directory for **GGUF LLMs** and **SDX
 * **`models/checkpoints/`**: Place Stable Diffusion / SDXL SafeTensors checkpoints (e.g. `WAI_Illustrious-SDXL_v11.safetensors` or `sd_xl_base_1.0.safetensors`).
 * **`models/loras/`**: Place optional character or style LoRAs (`.safetensors`). Missing optional LoRAs in a workflow are bypassed automatically.
 * **`models/vae/`**: Place custom VAE weights (`.safetensors` / `.pt`).
+* **`models/workflows/`**: ComfyUI workflows (API format) for image and video generation. A minimal text-to-image starter, `ImageWorkflow.default.json`, works out of the box. To customize, save your own workflow as `ImageWorkflow.json` (or `VideoWorkflow.json`) in this folder; it takes precedence over the starter and stays out of git. Placeholders: `%prompt%`, `%negative_prompt%`, `%seed%`, `%model%`.
 
 ### 🧠 Suggested GGUF LLM Models
 

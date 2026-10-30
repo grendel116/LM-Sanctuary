@@ -1,6 +1,5 @@
 import ast
 import asyncio
-import json
 import os
 import re
 import threading
@@ -16,15 +15,6 @@ VECTOR_QUERY_MESSAGES = 3
 VECTOR_TOP_K = 4
 VECTOR_SCORE_THRESHOLD = 0.25
 VECTOR_TOKEN_BUDGET = 2048
-
-def atomic_save_json(path: str | Path, data: object, indent: int = 2):
-    """Atomically writes JSON to disk using a unique temporary file and replacement."""
-    target_path = str(path)
-    os.makedirs(os.path.dirname(os.path.abspath(target_path)), exist_ok=True)
-    temp_path = f"{target_path}.tmp_{uuid.uuid4().hex[:6]}"
-    with open(temp_path, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=indent, ensure_ascii=False)
-    os.replace(temp_path, target_path)
 
 TOOL_ALIASES = {
     "generate_program_portrait": "generate_local_image",
@@ -73,7 +63,6 @@ SINGLE_ASTERISK_RE = re.compile(r'(?<!\*)\*(?!\*)([\s\S]*?)(?<!\*)\*(?!\*)')
 STANDALONE_ASTERISK_RE = re.compile(r'(?<!\*)\*(?!\*)')
 MULTI_NEWLINE_RE = re.compile(r'\n\s*\n+')
 MULTI_SPACE_RE = re.compile(r' +')
-JSON_BLOCK_RE = re.compile(r'```(?:json)?\s*(\{[\s\S]*?\})\s*```|(\{[\s\S]*?\})', re.IGNORECASE)
 TOOL_ARG_RE = re.compile(r'(\w+)\s*=\s*(?:("""|\'\'\'|["\'])((?:\\.|(?!\2)[\s\S])*?)\2|([^,\s\)]+))', re.DOTALL)
 _TOOL_OPEN_RE = re.compile(r"\[([a-zA-Z_][\w\.:]*)\(")
 
@@ -451,22 +440,6 @@ def _get_safe_local_path(image_url: str) -> str | None:
     return str(Path("core", "programs", active_program, *cleaned_parts))
 
 
-def _format_thinking_and_text(thoughts_list: list[str], texts_list: list[str]) -> str:
-    """Combines thoughts and texts, normalizing <think> blocks."""
-    thoughts_str = "".join(thoughts_list).strip()
-    text_str = "".join(texts_list).strip()
-
-    extracted_thoughts = [m.group(1).strip() for m in THINK_TAG_PATTERN.finditer(text_str) if m.group(1).strip()]
-    cleaned_text = THINK_TAG_PATTERN.sub("", text_str).strip()
-
-    all_thoughts = [t for t in [thoughts_str] + extracted_thoughts if t]
-    combined_thoughts = "\n".join(all_thoughts).strip()
-
-    if combined_thoughts:
-        return f"<think>{combined_thoughts}</think>\n{cleaned_text}"
-    return cleaned_text
-
-
 def strip_story(text: str) -> str:
     """Strips action narration inside asterisks and internal thinking tags."""
     if not text:
@@ -498,44 +471,6 @@ def is_real_user_msg(msg: dict) -> bool:
     text = msg.get('text', '')
     invalid_triggers = ('[Tool Response', '[SYSTEM:', 'Generate a portrait of yourself', '[GENERATE_IMAGE:', '[GENERATE_IMAGEN:', 'generate_program_portrait')
     return not any(text.startswith(t) or t in text for t in invalid_triggers)
-
-
-def _convert_json_tool_calls_to_tags(text: str) -> str:
-    """Converts standard JSON tool call structures into internal [tool_name(args)] tag formats."""
-    if not text or "action" not in text or "action_input" not in text:
-        return text
-
-    def replace_match(match: re.Match) -> str:
-        block = match.group(1) or match.group(2)
-        try:
-            d = json.loads(block)
-            act, inp = d.get("action"), d.get("action_input")
-            if not act or inp is None:
-                return match.group(0)
-
-            norm_act = _normalize_tool_name(act)
-            if not hasattr(tools, norm_act) and norm_act not in ("generate_local_image", "generate_imagen"):
-                return match.group(0)
-
-            if isinstance(inp, str) and inp.strip().startswith("{"):
-                try:
-                    inp = json.loads(inp)
-                except Exception:
-                    pass
-
-            args_list = []
-            if isinstance(inp, dict):
-                for k, v in inp.items():
-                    val_str = f'"{v.replace("\\", "\\\\").replace('"', '\\"')}"' if isinstance(v, str) else str(v)
-                    args_list.append(f'{k}={val_str}')
-            elif isinstance(inp, str):
-                escaped = inp.replace('\\', '\\\\').replace('"', '\\"')
-                args_list.append(f'prompt="{escaped}"')
-
-        except Exception:
-            return match.group(0)
-
-    return JSON_BLOCK_RE.sub(replace_match, text)
 
 
 def scan_and_tag_image(image_source: str | bytes | Path) -> str:

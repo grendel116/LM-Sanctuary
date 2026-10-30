@@ -143,12 +143,6 @@ def get_tts_voice() -> str:
         voice = os.getenv("TTS_VOICE", "af_heart")
     return voice
 
-def set_tts_voice(voice: str):
-    os.environ["TTS_VOICE"] = voice
-    settings = _load_settings()
-    settings["tts_voice"] = voice
-    _save_settings(settings)
-
 def set_tts_voice_for_program(program_id: str, voice: str):
     settings = _load_settings()
     if "program_voices" not in settings:

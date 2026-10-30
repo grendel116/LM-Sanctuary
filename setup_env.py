@@ -5,11 +5,9 @@ Uses only Python standard library modules at startup so it can execute inside a 
 virtual environment before any third-party packages are installed.
 """
 
-import glob
 import hashlib
 import importlib.util
 import os
-import platform
 import shutil
 import subprocess
 import sys
@@ -22,7 +20,7 @@ ENV_EXAMPLE_FILE = BASE_DIR / ".env.example"
 STAMP_FILE = Path(sys.prefix) / ".sanctuary_install_stamp"
 CUSTOM_NODES_DIR = BASE_DIR / "core" / "comfy_engine" / "custom_nodes"
 
-# ComfyUI custom node packs required by core/skills/portrait_generation/ImageWorkflow.json
+# ComfyUI custom node packs for workflows that use FaceDetailer (Impact Pack) and Ultralytics detectors
 CUSTOM_NODE_PACKS = {
     "ComfyUI-Impact-Pack": "429d0159ad429e64d2b3916e6e7be9c22d025c3c",
     "ComfyUI-Impact-Subpack": "50c7b71a6a224734cc9b21963c6d1926816a97f1",

@@ -177,7 +177,7 @@ def install_comfy():
         print(f"[Installer] {resolution_status['progress']}", flush=True)
         extract_cmd = ["tar", "-xf", archive_path, "-C", parent_dir]
         subprocess.run(extract_cmd, check=True)
-        print(f"[Installer] Extraction finished.", flush=True)
+        print("[Installer] Extraction finished.", flush=True)
         
         # 5. Rename extracted directory to 'ComfyUI'
         extracted_dir_name = None
@@ -292,22 +292,6 @@ def trigger_install_comfy():
     thread.daemon = True
     thread.start()
     return True, "ComfyUI installation started in the background."
-
-def is_amd_gpu():
-    """Checks if the system has an AMD graphics card."""
-    try:
-        res = subprocess.run(["wmic", "path", "win32_VideoController", "get", "name"], capture_output=True, text=True, timeout=3.0)
-        if "amd" in res.stdout.lower() or "radeon" in res.stdout.lower():
-            return True
-    except Exception:
-        pass
-    try:
-        res = subprocess.run(["powershell", "-Command", "Get-CimInstance Win32_VideoController | Select-Object -ExpandProperty Name"], capture_output=True, text=True, timeout=3.0)
-        if "amd" in res.stdout.lower() or "radeon" in res.stdout.lower():
-            return True
-    except Exception:
-        pass
-    return False
 
 def start_comfy_server():
     """Starts the headless ComfyUI server in the background."""
