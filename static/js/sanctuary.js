@@ -3028,9 +3028,15 @@ async function submitDescriptionImport() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ name: name, description: desc, model: selectedModel })
         });
-        const data = await response.json();
-        if (data.error) {
-            throw new Error(data.error);
+        let data;
+        try {
+            data = await response.json();
+        } catch (_) {
+            const rawText = await response.text();
+            throw new Error(rawText || `Server error (${response.status})`);
+        }
+        if (!response.ok || (data && data.error)) {
+            throw new Error((data && data.error) || `Server error (${response.status})`);
         }
         
         showCustomAlert("Success", `Program '${data.name}' generated successfully!`);
@@ -3481,6 +3487,14 @@ async function deleteAssistant(assistantId, name) {
             if (data && data.status === 'success') {
                 showCustomAlert("Deleted", `Program <strong>${name}</strong> has been deleted.`);
                 
+                // Clear any cached theme or assistants list data for the deleted program
+                if (typeof programThemesCache !== 'undefined' && programThemesCache) {
+                    delete programThemesCache[assistantId];
+                }
+                if (typeof currentLoadedAssistants !== 'undefined' && Array.isArray(currentLoadedAssistants)) {
+                    currentLoadedAssistants = currentLoadedAssistants.filter(a => (a.id || a.program_id) !== assistantId);
+                }
+
                 // Allow backend state reload to settle
                 await new Promise(resolve => setTimeout(resolve, 300));
 

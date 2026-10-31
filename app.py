@@ -3085,8 +3085,17 @@ def delete_program():
         program_path = os.path.join(base_dir, 'core', 'programs', program_id)
         if not os.path.exists(program_path):
             return jsonify({'error': f"Program '{program_id}' does not exist"}), 404
+
+        to_remove = set()
+
+        # 1. Collect own sessions from disk
+        own_sessions_dir = os.path.join(program_path, 'sessions')
+        if os.path.isdir(own_sessions_dir):
+            for fname in os.listdir(own_sessions_dir):
+                if fname.endswith('.json'):
+                    to_remove.add(os.path.splitext(fname)[0])
             
-        # 1. Clean up all group sessions hosted by or involving this program across other programs
+        # 2. Clean up all group sessions hosted by or involving this program across other programs
         programs_dir = os.path.join(base_dir, 'core', 'programs')
         if os.path.isdir(programs_dir):
             for other_prog in os.listdir(programs_dir):
@@ -3096,11 +3105,13 @@ def delete_program():
                 for fname in list(os.listdir(other_sessions)):
                     if fname.startswith('group_') and fname.endswith('.json'):
                         fpath = os.path.join(other_sessions, fname)
+                        sid = os.path.splitext(fname)[0]
                         try:
                             with open(fpath, 'r', encoding='utf-8') as sf:
                                 sdata = json.load(sf)
                             gm = sdata.get('group_meta', {})
                             if gm.get('host_id') == program_id:
+                                to_remove.add(sid)
                                 os.remove(fpath)
                             elif program_id in gm.get('guest_ids', []):
                                 gm['guest_ids'] = [g for g in gm['guest_ids'] if g != program_id]
@@ -3110,33 +3121,43 @@ def delete_program():
                         except Exception as ex:
                             print(f"Error inspecting/cleaning group session {fname}: {ex}")
 
-        # 2. Clean up in-memory runner states
+        # 3. Clean up in-memory runner states
         with runner._lock:
-            to_remove = []
+            if hasattr(runner, 'sessions_program'):
+                for sid, prog in list(runner.sessions_program.items()):
+                    if prog == program_id:
+                        to_remove.add(sid)
+
             for sid, gmeta in list(getattr(runner, 'sessions_group_meta', {}).items()):
                 if gmeta.get('host_id') == program_id:
-                    to_remove.append(sid)
+                    to_remove.add(sid)
                 elif program_id in gmeta.get('guest_ids', []):
                     gmeta['guest_ids'] = [g for g in gmeta['guest_ids'] if g != program_id]
 
             for sid in to_remove:
                 runner.sessions_history.pop(sid, None)
-                runner.sessions_group_meta.pop(sid, None)
-                runner.sessions_memory_state.pop(sid, None)
-                runner.sessions_inversion_state.pop(sid, None)
-                try:
-                    from core.skills.vectorized_databank.databank import DataBankManager
-                    DataBankManager().delete_chat_history(sid)
-                except Exception:
-                    pass
+                if hasattr(runner, 'sessions_group_meta'):
+                    runner.sessions_group_meta.pop(sid, None)
+                if hasattr(runner, 'sessions_memory_state'):
+                    runner.sessions_memory_state.pop(sid, None)
+                if hasattr(runner, 'sessions_inversion_state'):
+                    runner.sessions_inversion_state.pop(sid, None)
+                if hasattr(runner, 'sessions_program'):
+                    runner.sessions_program.pop(sid, None)
+                if hasattr(runner, '_session_locks'):
+                    runner._session_locks.pop(sid, None)
+                if hasattr(runner, 'generating_sessions'):
+                    runner.generating_sessions.discard(sid)
+                cancelled_sessions.discard(sid)
+                voice_call_sessions.discard(sid)
 
-        # 3. If active session belongs to deleted program or was a deleted group session, reset to default
+        # 4. If active session belongs to deleted program or was a deleted group session, reset to default
         from runners.program import get_active_session, set_active_session
         curr_session = get_active_session()
         if curr_session in to_remove:
             set_active_session('default')
 
-        # 4. If the deleted program is currently active, switch to Sebile first
+        # 5. If the deleted program is currently active, switch to Sebile first
         from runners.program import get_active_program, set_active_program
         active_program = get_active_program()
         is_active = (program_id == active_program)
@@ -3148,13 +3169,50 @@ def delete_program():
             except Exception as e:
                 print(f"Error resetting active program to sebile: {e}")
                 
+            global _cached_active_program
+            _cached_active_program = "sebile"
+
             # Reload program config and re-initialize the runner
             reload_program_state()
-                 
-        # 5. Delete the program folder recursively
-        shutil.rmtree(program_path)
+            if hasattr(runner, 'sessions_inversion_state'):
+                runner.sessions_inversion_state.clear()
+
+        # 6. Clean project_settings.json (folders and program_voices)
+        from runners.program import _load_settings, _save_settings
+        settings = _load_settings()
+        settings_changed = False
+        norm_prog_path = os.path.normpath(program_path)
+        folders = settings.get("folders", [])
+        cleaned_folders = [f for f in folders if os.path.normpath(f) != norm_prog_path]
+        if len(cleaned_folders) != len(folders):
+            settings["folders"] = cleaned_folders
+            settings_changed = True
+        voices = settings.get("program_voices", {})
+        if program_id in voices:
+            voices.pop(program_id, None)
+            settings["program_voices"] = voices
+            settings_changed = True
+        if settings_changed:
+            _save_settings(settings)
+
+        # 7. Purge cached theme data
+        _theme_cache.pop(program_id, None)
+
+        # 8. Delete the program folder recursively
+        import stat
+        def _handle_remove_readonly(func, path, exc_info):
+            try:
+                os.chmod(path, stat.S_IWRITE)
+                func(path)
+            except Exception:
+                pass
+
+        shutil.rmtree(program_path, onerror=_handle_remove_readonly)
         
         return jsonify({'status': 'success', 'switched_to': 'sebile' if is_active else None})
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
     except Exception as e:
         traceback.print_exc()
         return jsonify({'error': str(e)}), 500
@@ -3718,11 +3776,23 @@ def rename_user_profile():
 
 
 
+def normalize_hex_color(color_val: str, default: str = "#38bdf8") -> str:
+    """Returns a valid 6-digit hex color string starting with #."""
+    if not isinstance(color_val, str):
+        return default
+    candidate = color_val.strip().lstrip("#")
+    if len(candidate) == 6 and all(c in "0123456789abcdefABCDEF" for c in candidate):
+        return f"#{candidate.lower()}"
+    if len(candidate) == 3 and all(c in "0123456789abcdefABCDEF" for c in candidate):
+        return f"#{''.join(c * 2 for c in candidate).lower()}"
+    return default
+
+
 def generate_character_theme(main_color, accent_color_a=None, accent_color_b=None):
-    hex_clean = main_color.lstrip('#')
-    r = int(hex_clean[0:2], 16)
-    g = int(hex_clean[2:4], 16)
-    b = int(hex_clean[4:6], 16)
+    clean_main = normalize_hex_color(main_color)
+    r = int(clean_main[1:3], 16)
+    g = int(clean_main[3:5], 16)
+    b = int(clean_main[5:7], 16)
     
     # Calculate perceived brightness for primary button text contrast
     brightness = (r * 299 + g * 587 + b * 114) / 1000
@@ -3745,12 +3815,17 @@ def generate_character_theme(main_color, accent_color_a=None, accent_color_b=Non
     
     if not accent_color_a:
         accent_color_a = action_color
+    else:
+        accent_color_a = normalize_hex_color(accent_color_a, action_color)
+        
     if not accent_color_b:
-        accent_color_b = main_color
+        accent_color_b = clean_main
+    else:
+        accent_color_b = normalize_hex_color(accent_color_b, clean_main)
         
     return {
-        "primary_accent": main_color,
-        "main_color": main_color,
+        "primary_accent": clean_main,
+        "main_color": clean_main,
         "accent_color_a": accent_color_a,
         "accent_color_b": accent_color_b,
         "primary_glow": f"rgba({r}, {g}, {b}, 0.08)",
@@ -3773,30 +3848,34 @@ def generate_character_json(
 
         prompt = f"""Design a SillyTavern chara_card_v3 character profile from the description below.
 
-    Input:
-    Name: {name}
-    Description: {description}
-    Personality hint: {personality or 'not specified'}
-    Scenario hint: {scenario or 'not specified'}
-    First message hint: {first_mes or 'not specified'}
+Input:
+Name: {name}
+Description: {description}
+Personality hint: {personality or 'not specified'}
+Scenario hint: {scenario or 'not specified'}
+First message hint: {first_mes or 'not specified'}
 
-    Output a single JSON object with EXACTLY these keys:
-    {{
-    "description": "2-4 sentence narrative bio. No physical appearance.",
-    "personality": "1-3 descriptive tags (e.g. Stoic, Loyal, Guarded).",
-    "scenario": "Short scene-setting sentence (one sentence).",
-    "first_mes": "In-character opening message (1-2 sentences, first person).",
-    "system_prompt": "Concise response style directive (e.g. contractions, tone, length).",
-    "image_positive": "Comma-separated tags for intrinsic physical traits only: hair color/style, eye color, face/skin, body build, and simple base garments (e.g. silver hair, purple eyes, fair skin, simple tunic). Do not include weapons, armor, accessories, quality buzzwords, backgrounds, poses, or narrative items.",
-    "image_negative": "Comma-separated tags for undesired physical traits and rendering artifacts (e.g. extra limbs, bad anatomy, deformed, mutated hands). Do not include story, armor, or narrative elements.",
-    "main_color": "#RRGGBB — a hex color representing this character.",
-    "inversion": {{
-        "intimate": "How they behave when intimate/warm.",
-        "excited": "How they behave when excited/playful.",
-        "intense": "How they behave when intense/focused.",
-        "sad": "How they behave when sad/empathetic."
-    }}
-    }}"""
+Output a single JSON object with EXACTLY these keys:
+{{
+  "description": "2-4 sentence narrative bio. No physical appearance.",
+  "personality": "1-3 descriptive tags (e.g. Stoic, Loyal, Guarded).",
+  "scenario": "Short scene-setting sentence (one sentence).",
+  "first_mes": "In-character opening message (1-2 sentences, first person).",
+  "system_prompt": "Concise response style directive (e.g. contractions, tone, length).",
+  "image_positive": "Comma-separated tags for intrinsic physical traits only: hair color/style, eye color, face/skin, body build, and simple base garments (e.g. silver hair, purple eyes, fair skin, simple tunic). Do not include weapons, armor, accessories, quality buzzwords, backgrounds, poses, or narrative items.",
+  "image_negative": "Comma-separated tags for undesired physical traits and rendering artifacts (e.g. extra limbs, bad anatomy, deformed, mutated hands). Do not include story, armor, or narrative elements.",
+  "main_color": "#38bdf8",
+  "inversion": {{
+    "intimate": "How they behave when intimate/warm.",
+    "excited": "How they behave when excited/playful.",
+    "intense": "How they behave when intense/focused.",
+    "sad": "How they behave when sad/empathetic."
+  }}
+}}
+
+Directives:
+- Output only valid JSON.
+- For main_color, provide an appropriate 6-character hex color code beginning with # that visually fits the character."""
 
         raw_response = None
         local_model = (
@@ -3806,7 +3885,11 @@ def generate_character_json(
         )
 
         endpoint = LOCAL_SERVER_URL.rstrip("/")
-        if not endpoint.endswith("/v1/chat/completions"):
+        if endpoint.endswith("/chat/completions"):
+            pass
+        elif endpoint.endswith("/v1"):
+            endpoint = f"{endpoint}/chat/completions"
+        else:
             endpoint = f"{endpoint}/v1/chat/completions"
 
         payload = {
@@ -3814,7 +3897,7 @@ def generate_character_json(
             "messages": [
                 {
                     "role": "system",
-                    "content": "You output valid JSON character cards.",
+                    "content": "You output valid JSON character cards. Output only the requested JSON object without markdown fences or reasoning.",
                 },
                 {"role": "user", "content": prompt},
             ],
@@ -3826,15 +3909,21 @@ def generate_character_json(
             from adapters.vram_orchestrator import start_llm
             start_llm(local_model)
             headers = get_local_server_headers()
-            res = httpx.post(
-                endpoint, json=payload, headers=headers, timeout=300.0
-            )
-            if res.status_code == 200:
-                raw_response = res.json()["choices"][0]["message"]["content"].strip()
-            else:
-                print(
-                    f"Local server returned non-200 status: {res.status_code} - {res.text}"
-                )
+            
+            # Poll with retry if local server is loading model (HTTP 503)
+            max_wait = 60.0
+            poll_start = time.time()
+            while time.time() - poll_start < max_wait:
+                res = httpx.post(endpoint, json=payload, headers=headers, timeout=300.0)
+                if res.status_code == 200:
+                    raw_response = res.json()["choices"][0]["message"]["content"].strip()
+                    break
+                elif res.status_code == 503:
+                    time.sleep(2.0)
+                    continue
+                else:
+                    print(f"Local server returned non-200 status: {res.status_code} - {res.text}")
+                    break
         except Exception as e:
             print(f"Error calling local model for card generation: {e}")
 
@@ -3852,9 +3941,28 @@ def generate_character_json(
                 if match:
                     cleaned = match.group(0)
 
-                parsed = json.loads(cleaned)
+                result = json.loads(cleaned)
+                if isinstance(result, dict):
+                    parsed = result
             except Exception as e:
                 print(f"Failed to parse card JSON: {e}. Raw response: {raw_response}")
+
+        raw_inversion = parsed.get("inversion")
+        if isinstance(raw_inversion, dict) and raw_inversion:
+            inversion = {
+                str(k).strip().lower(): str(v).strip()
+                for k, v in raw_inversion.items()
+                if v
+            }
+        else:
+            inversion = {
+                "intimate": f"{name} is now deeply affectionate and tender.",
+                "excited": f"{name} is now playful and energetic.",
+                "intense": f"{name} is now focused and direct.",
+                "sad": f"{name} is now empathetic and gentle.",
+            }
+
+        main_color = normalize_hex_color(parsed.get("main_color"))
 
         # 3. Construct the output card schema
         card = {
@@ -3895,14 +4003,8 @@ def generate_character_json(
                     }
                 },
             },
-            "_inversion": parsed.get("inversion")
-            or {
-                "intimate": f"{name} is now deeply affectionate and tender.",
-                "excited": f"{name} is now playful and energetic.",
-                "intense": f"{name} is now focused and direct.",
-                "sad": f"{name} is now empathetic and gentle.",
-            },
-            "_colors": {"main_color": parsed.get("main_color") or "#38bdf8"},
+            "_inversion": inversion,
+            "_colors": {"main_color": main_color},
         }
 
         return card
@@ -3911,15 +4013,23 @@ def generate_character_json(
 def finalize_imported_program(program_path, program_id, card_json):
     """Write inversion, theme, portraits dir, and chara_card_v3 JSON for a new program."""
     # Pop helper keys (not part of the card spec)
-    inversion = card_json.pop("_inversion", None) or card_json.pop("inversion", None) or {}
+    inversion = card_json.pop("_inversion", None) or card_json.pop("inversion", None)
+    if not isinstance(inversion, dict) or not inversion:
+        inversion = {
+            "intimate": f"{program_id.title()} is now deeply affectionate and tender.",
+            "excited": f"{program_id.title()} is now playful and energetic.",
+            "intense": f"{program_id.title()} is now focused and direct.",
+            "sad": f"{program_id.title()} is now empathetic and gentle."
+        }
+
     colors = card_json.pop("_colors", None) or card_json.pop("colors", None) or {}
+    main_color = normalize_hex_color(colors.get("main_color"))
 
     # Write inversion.json
     with open(os.path.join(program_path, 'inversion.json'), "w", encoding="utf-8") as f:
         json.dump(inversion, f, indent=2, ensure_ascii=False)
 
     # Generate theme from main_color
-    main_color = colors.get("main_color", "#38bdf8")
     theme_data = generate_character_theme(main_color)
     with open(os.path.join(program_path, 'theme.json'), "w", encoding="utf-8") as tf:
         json.dump(theme_data, tf, indent=2, ensure_ascii=False)
@@ -4160,19 +4270,6 @@ def import_tavern_program():
         program_path = os.path.join(base_dir, 'core', 'programs', program_id)
         if os.path.exists(program_path):
             return jsonify({'error': f"Program folder '{program_id}' already exists"}), 400
-        os.makedirs(program_path, exist_ok=True)
-
-        portraits_dir = os.path.join(program_path, 'portraits')
-        os.makedirs(portraits_dir, exist_ok=True)
-
-        # Save profile image if imported from PNG card
-        if is_png:
-            try:
-                profile_path = os.path.join(portraits_dir, 'profile.png')
-                with open(profile_path, 'wb') as pf:
-                    pf.write(file_bytes)
-            except Exception as pe:
-                print(f"Warning: Could not save profile portrait: {pe}")
 
         # Ensure sanctuary extension block
         exts = card_v3["data"].setdefault("extensions", {})
@@ -4188,22 +4285,38 @@ def import_tavern_program():
             "intense": f"{name} is now focused and direct.",
             "sad": f"{name} is now empathetic and gentle."
         }
-        main_color = sanctuary.pop("main_color", None) or card_v3.pop("_colors", {}).get("main_color", None) or "#38bdf8"
+        main_color = normalize_hex_color(sanctuary.pop("main_color", None) or card_v3.pop("_colors", {}).get("main_color", None))
 
         card_v3["_inversion"] = inversion
         card_v3["_colors"] = {"main_color": main_color}
+
+        os.makedirs(program_path, exist_ok=True)
+        portraits_dir = os.path.join(program_path, 'portraits')
+        os.makedirs(portraits_dir, exist_ok=True)
+
+        # Save profile image if imported from PNG card
+        if is_png:
+            try:
+                profile_path = os.path.join(portraits_dir, 'profile.png')
+                with open(profile_path, 'wb') as pf:
+                    pf.write(file_bytes)
+            except Exception as pe:
+                print(f"Warning: Could not save profile portrait: {pe}")
 
         finalize_imported_program(program_path, program_id, card_v3)
         return jsonify({'status': 'success', 'program_id': program_id, 'name': name})
 
     except Exception as e:
         traceback.print_exc()
+        if 'program_path' in locals() and program_path and os.path.exists(program_path):
+            shutil.rmtree(program_path, ignore_errors=True)
         return jsonify({'error': str(e)}), 500
 
 
 @app.route('/api/programs/import/describe', methods=['POST'])
 @requires_auth
 def import_describe_program():
+    program_path = None
     try:
         data = request.get_json(silent=True) or {}
         name = data.get('name', '').strip()
@@ -4221,17 +4334,18 @@ def import_describe_program():
         if os.path.exists(program_path):
             return jsonify({'error': f"Program folder '{program_id}' already exists"}), 400
             
-        os.makedirs(program_path, exist_ok=True)
-        
-        # Call consolidated JSON generator
+        # 1. Generate character card JSON first
         card_json = generate_character_json(name, description, "", "", "", model)
         
-        # Finalize program files (inversion, theme, portraits, and JSON profile)
+        # 2. Only create directory and write files once card generation succeeds
+        os.makedirs(program_path, exist_ok=True)
         finalize_imported_program(program_path, program_id, card_json)
             
         return jsonify({'status': 'success', 'program_id': program_id, 'name': name})
     except Exception as e:
         traceback.print_exc()
+        if program_path and os.path.exists(program_path):
+            shutil.rmtree(program_path, ignore_errors=True)
         return jsonify({'error': str(e)}), 500
 
 

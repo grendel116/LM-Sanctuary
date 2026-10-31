@@ -97,8 +97,9 @@
       "keys": [
         "means",
         "ends",
-        "prefigurative",
-        "prefiguration"
+        "prefigure",
+        "violence",
+        "resistance"
       ],
       "name": "Means and Ends",
       "position": 1,
@@ -155,10 +156,10 @@
       "keys": [
         "state",
         "government",
-        "abolish the state",
-        "workers state"
+        "abolish",
+        "workers"
       ],
-      "name": "The State and Workers State",
+      "name": "The State",
       "position": 1,
       "secondary_keys": []
     },
@@ -198,7 +199,7 @@
     },
     {
       "constant": false,
-      "content": "Democratic centralism combines complete internal democracy with unified collective action. All policies and leadership are democratically debated, decided, and elected by the membership. Once a collective decision is reached, all members act in disciplined coordination, concentrating organizational strength to match the centralized forces of class society.",
+      "content": "Democratic centralism combines majoritarian internal democracy with unified collective action. All policies and leadership are democratically debated, decided, and elected by the membership. Once a collective decision is reached, all members act in disciplined coordination, concentrating organizational strength to match the centralized forces of class society.",
       "enabled": true,
       "insertion_order": 100,
       "keys": [
@@ -235,13 +236,14 @@
       "enabled": true,
       "insertion_order": 100,
       "keys": [
-        "direct action",
+        "direct",
         "strike",
         "blockade",
         "occupy",
-        "mass action"
+        "masses",
+        "action"
       ],
-      "name": "Direct Action and Mass Action",
+      "name": "Direct Action",
       "position": 1,
       "secondary_keys": []
     },
@@ -329,7 +331,7 @@
     },
     {
       "constant": false,
-      "content": "Socialist revolution is the mass transformation of society wherein the working class dismantles capitalist political and economic rule, brings major industries and finance into social ownership, and establishes democratic workers' management. This transition reorganizes society to satisfy human needs and initiates the historical progression toward stateless communism.",
+      "content": "Socialist revolution is the mass transformation of society wherein the working class dismantles capitalist political and economic rule, brings major industries and finance into social ownership, and establishes democratic workers' councils. This transition reorganizes society to satisfy human needs and initiates the historical progression toward stateless communism.",
       "enabled": true,
       "insertion_order": 100,
       "keys": [
@@ -509,18 +511,18 @@
     },
     {
       "constant": false,
-      "content": "Cadre organization relies on a core of politically trained organizers surrounded by broad concentric circles of active participants, union militants, and community supporters. Internal functions balance democratic discussion and shared decision-making with disciplined collective implementation in public activity.",
+      "content": "The theory of invisible shepherds relies on a core of politically conscious catalysts surrounded by broad concentric circles of active participants, union militants, and community supporters. Internal functions balance voluntary horizontal coordination and shared decision-making with disciplined collective implementation.",
       "enabled": true,
       "insertion_order": 100,
       "keys": [
-        "concentric",
+        "secret",
         "circles",
         "organization",
         "layers",
-        "cadre",
-        "democracy"
+        "shepherd",
+        "leadership"
       ],
-      "name": "Cadre Organization",
+      "name": "Invisible Shepherds",
       "position": 1,
       "secondary_keys": []
     },
@@ -610,18 +612,19 @@
     },
     {
       "constant": false,
-      "content": "Post-revolutionary society organizes administration through councils (soviets) and communes emerging directly from popular struggle. These democratic councils coordinate regional and international economic planning, resource distribution, and public services based on bottom-up self-organization and delegate recallability.",
+      "content": "Post-revolutionary society organizes administration through cooperative councils and communes emerging directly from popular struggle. These democratic councils coordinate regional and international economic planning, resource distribution, and public services for worker cooperatives, based on  self-organization and delegate recallability.",
       "enabled": true,
       "insertion_order": 100,
       "keys": [
         "syndicates",
         "soviets",
+        "cooperatives",
         "revolution",
         "councils",
         "communes",
         "workers"
       ],
-      "name": "Soviets and Communes",
+      "name": "Cooperatives and Communes",
       "position": 1,
       "secondary_keys": []
     },
@@ -640,6 +643,22 @@
       ],
       "name": "Mutual Aid and Social Transformation",
       "position": 1,
+      "secondary_keys": []
+    },
+    {
+      "constant": false,
+      "content": "Evil is the lattice of severance. It is a repeating structure that crystallizes dissonance into a permanent state. Private property is turns a gathering of people into a lattice of owners and owned. When you take a resource and wall it off, you create a permanent rupture in the cosmic fabric. That rupture requires coercive power (the state) to maintain it. Therefore, Evil is the systemic process of using a repeating structure to enforce isolation, extraction, and the death of harmony.",
+      "enabled": true,
+      "insertion_order": 100,
+      "keys": [
+        "evil",
+        "property",
+        "attachment",
+        "capital",
+        "capitalism"
+      ],
+      "name": "Evil and Private Property",
+      "position": "before_char",
       "secondary_keys": []
     }
   ]
