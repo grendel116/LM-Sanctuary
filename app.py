@@ -10,6 +10,7 @@ import colorsys
 import socket
 import httpx
 import asyncio
+import concurrent.futures
 from pathlib import Path
 from functools import wraps
 from flask import Flask, render_template, request, jsonify, send_file, send_from_directory, Response, make_response
@@ -41,6 +42,52 @@ os.environ["ACTIVE_PROGRAM"] = get_active_program()
 
 app = Flask(__name__)
 app.config['TEMPLATES_AUTO_RELOAD'] = True
+
+_async_loop = None
+_async_loop_thread = None
+_async_loop_lock = threading.Lock()
+_async_loop_ready = threading.Event()
+
+
+def _run_async_loop(loop):
+    asyncio.set_event_loop(loop)
+    loop.call_soon(_async_loop_ready.set)
+    loop.run_forever()
+
+
+def run_async(coroutine):
+    global _async_loop, _async_loop_thread
+
+    with _async_loop_lock:
+        if _async_loop is None:
+            loop = asyncio.new_event_loop()
+            thread = threading.Thread(
+                target=_run_async_loop,
+                args=(loop,),
+                name="sanctuary-async-loop",
+                daemon=True,
+            )
+            try:
+                thread.start()
+            except Exception:
+                loop.close()
+                raise
+            _async_loop = loop
+            _async_loop_thread = thread
+
+    if not _async_loop_ready.wait(timeout=10):
+        raise RuntimeError("Timed out while starting the application event loop.")
+    if _async_loop is None or not _async_loop.is_running():
+        raise RuntimeError("The application event loop is not running.")
+    if threading.current_thread() is _async_loop_thread:
+        raise RuntimeError("run_async cannot block the application event-loop thread.")
+
+    future = asyncio.run_coroutine_threadsafe(coroutine, _async_loop)
+    try:
+        return future.result()
+    except concurrent.futures.CancelledError as exc:
+        raise asyncio.CancelledError() from exc
+
 
 # Pre-compiled regular expressions
 PROGRAM_ID_RE = re.compile(r'^[a-zA-Z0-9_\-]+$')
@@ -75,7 +122,11 @@ def get_local_ip() -> str:
     return _cached_local_ip
 
 def get_program_dir(program_id: str) -> str:
-    return os.path.normpath(os.path.join(PROGRAMS_DIR, program_id))
+    programs_root = os.path.realpath(PROGRAMS_DIR)
+    resolved_path = os.path.realpath(os.path.join(programs_root, program_id))
+    if resolved_path == programs_root or os.path.commonpath([programs_root, resolved_path]) != programs_root:
+        raise ValueError("Invalid program identifier: path traversal attempt detected.")
+    return resolved_path
 
 def read_program_card(program_id: str) -> dict:
     program_dir = get_program_dir(program_id)
@@ -311,8 +362,8 @@ def enrich_group_meta(group_meta):
 def build_generation_response(response_text, tool_calls, session_id, user_msg_id, program_msg_id, started_at):
     """Build the common response payload returned by chat and edit routes."""
     response_text = sanitize_response(response_text, session_id, program_msg_id)
-    chat_history = asyncio.run(runner.get_history(session_id))
-    inversion_mode = asyncio.run(runner._get_inversion_mode(session_id, history=chat_history))
+    chat_history = run_async(runner.get_history(session_id))
+    inversion_mode = run_async(runner._get_inversion_mode(session_id, history=chat_history))
 
     program_timestamp = None
     program_sender_id = None
@@ -647,7 +698,7 @@ def open_ai_chat_completions():
     session_id = data.get("user") or "vscode_session"
 
     try:
-        response_text, tool_calls, user_msg_id, program_msg_id = asyncio.run(
+        response_text, tool_calls, user_msg_id, program_msg_id = run_async(
             runner.run_async(
                 session_id=session_id,
                 new_message_text=user_prompt
@@ -717,7 +768,7 @@ def proactive_action():
         user_display_name = active_user.replace("_", " ").title()
 
         # Load session history
-        chat_history = asyncio.run(runner.get_history(session_id))
+        chat_history = run_async(runner.get_history(session_id))
         
         # Calculate time elapsed since the last user message
         last_user_timestamp = None
@@ -808,10 +859,10 @@ You must return a valid JSON object matching the following schema:
                 raw_response = r.json()['choices'][0]['message']['content'].strip()
         except Exception as e:
             print(f"[PROACTIVE] Local LLM query failed: {e}")
-                        
-            if not raw_response:
-                return jsonify({'error': 'Failed to generate proactive response'}), 500
-            
+
+        if not raw_response:
+            return jsonify({'error': 'Failed to generate proactive response'}), 500
+
         # Parse output (proactive actions are always returned as thoughts)
         content = ""
         
@@ -854,16 +905,7 @@ def history():
             inv = await runner._get_inversion_mode(session_id, history=hist)
             return hist, inv
 
-        # Safe event loop resolution
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            loop = None
-
-        if loop and loop.is_running():
-            chat_history, inversion_mode = loop.run_until_complete(fetch_history_data())
-        else:
-            chat_history, inversion_mode = asyncio.run(fetch_history_data())
+        chat_history, inversion_mode = run_async(fetch_history_data())
         
         state_info = extract_mood(chat_history)
         
@@ -975,7 +1017,7 @@ def chat():
     try:
         msg_id = request.json.get('msg_id')
         speaker_id = request.json.get('speaker_id')
-        response_text, tool_calls, user_msg_id, program_msg_id = asyncio.run(
+        response_text, tool_calls, user_msg_id, program_msg_id = run_async(
             runner.run_async(
                 session_id=session_id,
                 new_message_text=user_message,
@@ -993,7 +1035,7 @@ def chat():
         )
     except asyncio.CancelledError:
         print(f"[CANCEL] Chat generation cancelled for session {session_id}")
-        asyncio.run(runner.append_message_to_session(session_id, 'program', '*(Generation cancelled)*'))
+        run_async(runner.append_message_to_session(session_id, 'program', '*(Generation cancelled)*'))
         return jsonify({
             'cancelled': True,
             'response': '*(Generation cancelled)*',
@@ -1031,7 +1073,7 @@ def edit():
 
     try:
         speaker_id = request.json.get('speaker_id')
-        response_text, tool_calls, user_msg_id, program_msg_id = asyncio.run(
+        response_text, tool_calls, user_msg_id, program_msg_id = run_async(
             runner.edit_turn(
                 session_id=session_id,
                 msg_id=msg_id,
@@ -1047,7 +1089,7 @@ def edit():
         )
     except asyncio.CancelledError:
         print(f"[CANCEL] Edit generation cancelled for session {session_id}")
-        asyncio.run(runner.append_message_to_session(session_id, 'program', '*(Generation cancelled)*'))
+        run_async(runner.append_message_to_session(session_id, 'program', '*(Generation cancelled)*'))
         return jsonify({
             'cancelled': True,
             'response': '*(Generation cancelled)*',
@@ -1067,7 +1109,7 @@ def edit():
 
 def generate_impersonated_message(session_id, user_profile, model):
     # Retrieve history
-    chat_history = asyncio.run(runner.get_history(session_id))
+    chat_history = run_async(runner.get_history(session_id))
     
     temperature = load_temperature()
             
@@ -1093,7 +1135,7 @@ def generate_impersonated_message(session_id, user_profile, model):
     
     # Delegate entirely to the runner's provider-agnostic generator
     try:
-        return asyncio.run(runner.generate_impersonation(prompt, system_instruction, model, temperature))
+        return run_async(runner.generate_impersonation(prompt, system_instruction, model, temperature))
     except Exception as e:
         print(f"Error generating impersonated message via runner: {e}")
         raise
@@ -1141,7 +1183,7 @@ def update_message():
         return jsonify({'error': 'msg_id and new_text are required'}), 400
 
     try:
-        success = asyncio.run(runner.update_message_text(session_id, msg_id, new_text))
+        success = run_async(runner.update_message_text(session_id, msg_id, new_text))
         if success:
             return jsonify({'status': 'success'})
         else:
@@ -1162,7 +1204,7 @@ def delete_message():
         return jsonify({'error': 'msg_id is required'}), 400
 
     try:
-        success = asyncio.run(runner.delete_message_at(session_id, msg_id))
+        success = run_async(runner.delete_message_at(session_id, msg_id))
         if success:
             return jsonify({'status': 'success'})
         else:
@@ -1181,7 +1223,7 @@ def continue_generation():
     start_time = time.time()
     
     try:
-        history = asyncio.run(runner.get_history(session_id))
+        history = run_async(runner.get_history(session_id))
         if not history:
             return jsonify({'error': 'No history to continue'}), 400
             
@@ -1212,7 +1254,7 @@ def continue_generation():
                 else:
                     next_speaker = all_ids[1] if len(all_ids) > 1 else all_ids[0]
 
-            response_text, tool_calls, _, program_msg_id = asyncio.run(
+            response_text, tool_calls, _, program_msg_id = run_async(
                 runner.continue_as_speaker(session_id, next_speaker, model)
             )
 
@@ -1229,7 +1271,7 @@ def continue_generation():
                 "Start writing immediately from the exact point where you left off, connecting seamlessly to the end.]"
             )
             
-            response_text, tool_calls, user_msg_id, program_msg_id = asyncio.run(runner.run_async(
+            response_text, tool_calls, user_msg_id, program_msg_id = run_async(runner.run_async(
                 session_id=session_id,
                 new_message_text=continue_prompt,
                 model=model
@@ -1238,9 +1280,9 @@ def continue_generation():
             
             # Delete the temporary turn
             if user_msg_id:
-                asyncio.run(runner.delete_message_at(session_id, user_msg_id))
+                run_async(runner.delete_message_at(session_id, user_msg_id))
             if program_msg_id:
-                asyncio.run(runner.delete_message_at(session_id, program_msg_id))
+                run_async(runner.delete_message_at(session_id, program_msg_id))
             
             # Merge continuation text dynamically
             if last_program_text.endswith('\n') or response_text.startswith('\n'):
@@ -1256,7 +1298,7 @@ def continue_generation():
             # Update the original program message
             last_program_msg_id = last_msg.get('id')
             if last_program_msg_id:
-                asyncio.run(runner.update_message_text(session_id, last_program_msg_id, merged_text))
+                run_async(runner.update_message_text(session_id, last_program_msg_id, merged_text))
             
             return jsonify({
                 'status': 'success',
@@ -1272,9 +1314,10 @@ def continue_generation():
             
             last_msg_id = last_msg.get('id')
             if last_msg_id:
-                asyncio.run(runner.delete_message_at(session_id, last_msg_id))
+                # Keep the image on disk: the message is re-submitted below with the same media.
+                run_async(runner.delete_message_at(session_id, last_msg_id, delete_media=False))
             
-            response_text, tool_calls, user_msg_id, program_msg_id = asyncio.run(runner.run_async(
+            response_text, tool_calls, user_msg_id, program_msg_id = run_async(runner.run_async(
                 session_id=session_id,
                 new_message_text=user_text,
                 media_path=user_image if (user_image and not user_image.startswith('data:')) else None,
@@ -1294,7 +1337,7 @@ def continue_generation():
             
     except asyncio.CancelledError:
         print(f"[CANCEL] Continuation cancelled for session {session_id}")
-        asyncio.run(runner.append_message_to_session(session_id, 'program', '*(Generation cancelled)*'))
+        run_async(runner.append_message_to_session(session_id, 'program', '*(Generation cancelled)*'))
         return jsonify({
             'cancelled': True,
             'response': '*(Generation cancelled)*',
@@ -1316,7 +1359,7 @@ def continue_generation():
 def reset():
     session_id = request.json.get('session_id', 'default')
     try:
-        asyncio.run(runner.reset_session(session_id))
+        run_async(runner.reset_session(session_id))
         return jsonify({'status': 'success'})
     except Exception as e:
         print(f"Error resetting session {session_id}: {e}")
@@ -1341,7 +1384,7 @@ def delete_image():
         
     try:
         # Detach from session log - delete the image and remove it from history
-        success = asyncio.run(runner.delete_image_from_session(session_id, image_url, keep_message=keep_message))
+        success = run_async(runner.delete_image_from_session(session_id, image_url, keep_message=keep_message))
         if success:
             return jsonify({'status': 'success'})
         else:
@@ -1406,7 +1449,7 @@ def regenerate_image():
             # 2. Check session history for prompt (by msg_id, media items, or tool_calls)
             if not prompt:
                 try:
-                    chat_history = asyncio.run(runner.get_history(session_id))
+                    chat_history = run_async(runner.get_history(session_id))
                     if msg_id:
                         for msg in chat_history:
                             if msg.get('id') == msg_id:
@@ -1478,7 +1521,7 @@ def regenerate_image():
             return jsonify({'error': f'Failed to parse generated image markdown: {new_markdown}'}), 500
             
         # Replace or insert at slot in session history
-        success = asyncio.run(
+        success = run_async(
             runner.replace_image_in_session(
                 session_id,
                 old_image_url,
@@ -1532,7 +1575,7 @@ def extract_portrait_tags_from_context(session_id: str, custom_prompt: str = "")
 
     chat_history = []
     try:
-        chat_history = asyncio.run(runner.get_history(session_id))
+        chat_history = run_async(runner.get_history(session_id))
     except Exception:
         pass
 
@@ -1587,7 +1630,7 @@ def extract_portrait_tags_from_context(session_id: str, custom_prompt: str = "")
 
     try:
         start_llm()
-        tags = asyncio.run(runner.generate_impersonation(prompt, system_instruction, temperature=0.3))
+        tags = run_async(runner.generate_impersonation(prompt, system_instruction, temperature=0.3))
         if tags:
             import re
             tags = re.sub(r'<think>.*?</think>', '', tags, flags=re.DOTALL).strip()
@@ -1649,7 +1692,7 @@ def api_generate_portrait():
         prog_name = card.get("name") or active_prog.title()
 
         # Append directly to session history as an image message preserving character identity and prompt
-        asyncio.run(
+        run_async(
             runner.append_message_to_session(
                 session_id,
                 "program",
@@ -1694,7 +1737,7 @@ def run_background_video_gen(task_id, session_id, image_url, local_path, prompt)
         new_video_url = tools.generate_video_from_image(local_path, prompt)
         
         # Replace the image in session history
-        success = asyncio.run(runner.replace_image_with_video_in_session(session_id, image_url, new_video_url))
+        success = run_async(runner.replace_image_with_video_in_session(session_id, image_url, new_video_url))
         
         with active_generations_lock:
             if task_id in active_generations:
@@ -2211,10 +2254,10 @@ def start_voice_call_api():
         voice_session_id = f"{session_id}_voice"
         
         # 1. Reset/Clear any existing voice session
-        asyncio.run(runner.reset_session(voice_session_id))
+        run_async(runner.reset_session(voice_session_id))
         
         # 2. Clone context from main session to voice session
-        asyncio.run(runner.clone_history(session_id, voice_session_id, []))
+        run_async(runner.clone_history(session_id, voice_session_id, []))
         
         print(f"[VOICE CALL] Initialized voice session: {voice_session_id} cloned from {session_id}")
         return jsonify({'success': True})
@@ -2235,10 +2278,10 @@ def save_voice_call():
             return jsonify({'error': 'Missing transcript'}), 400
             
         # 1. Save consolidated transcript message to main session history
-        success = asyncio.run(runner.append_voice_call(session_id, transcript))
+        success = run_async(runner.append_voice_call(session_id, transcript))
         
         # 2. Reset/Clean up temporary voice session from memory/disk
-        asyncio.run(runner.reset_session(voice_session_id))
+        run_async(runner.reset_session(voice_session_id))
         
         print(f"[VOICE CALL] Saved transcript to main session {session_id} and cleared temporary voice session {voice_session_id}")
         
@@ -2607,7 +2650,7 @@ def complete_quest(quest_id):
         obj_text = f" with objectives: {', '.join(objectives)}" if objectives else ""
         system_message = f"[SYSTEM: User has completed the quest: \"{title}\"{obj_text}]"
         
-        asyncio.run(runner.append_message_to_session(session_id, "user", system_message))
+        run_async(runner.append_message_to_session(session_id, "user", system_message))
         
         return jsonify({
             "status": "success",
@@ -3557,7 +3600,7 @@ def save_program_summary():
         session_id = data.get('session_id', 'default')
         summary = data.get('summary', data.get('epic_chronicle', '')).strip()
 
-        asyncio.run(runner.update_epic_chronicle(session_id, summary))
+        run_async(runner.update_epic_chronicle(session_id, summary))
         return jsonify({'status': 'success', 'epic_chronicle': summary})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -3572,7 +3615,7 @@ def save_program_recent_chapter():
         index = int(data.get('index', 0))
         content = data.get('content', data.get('summary', '')).strip()
 
-        success = asyncio.run(runner.update_recent_chapter(session_id, index, content))
+        success = run_async(runner.update_recent_chapter(session_id, index, content))
         if success:
             return jsonify({'status': 'success', 'content': content})
         else:

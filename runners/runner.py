@@ -1768,7 +1768,7 @@ class OpenSourceRunner(BaseProgramRunner):
                 except Exception as e:
                     print(f"Error cleaning up databank history on session reset: {e}")
 
-        async def delete_message_at(self, session_id: str, msg_id: str) -> bool:
+        async def delete_message_at(self, session_id: str, msg_id: str, delete_media: bool = True) -> bool:
             with self._lock:
                 if session_id not in self.sessions_history:
                     self._load_session_from_disk(session_id)
@@ -1776,7 +1776,7 @@ class OpenSourceRunner(BaseProgramRunner):
                 history = self.sessions_history.get(session_id, [])
                 for i, msg in enumerate(history):
                     if msg.get("id") == msg_id:
-                        if img_url := msg.get("image_url"):
+                        if delete_media and (img_url := msg.get("image_url")):
                             self._delete_local_image(img_url)
                         del history[i]
                         self._save_session_to_disk(session_id)
