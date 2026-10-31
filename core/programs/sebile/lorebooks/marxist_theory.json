@@ -651,6 +651,7 @@
       "enabled": true,
       "insertion_order": 100,
       "keys": [
+        "good",
         "evil",
         "property",
         "attachment",

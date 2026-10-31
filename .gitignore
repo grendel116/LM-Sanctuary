@@ -12,6 +12,7 @@ variables/project_settings.json
 # Temporary files
 backups/
 scratch/
+data/
 reports/
 certs/
 

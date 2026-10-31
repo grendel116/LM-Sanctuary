@@ -36,7 +36,10 @@ _MAIN_DIRECTIVE_PROMPT = (
     "The TOOLBELT above is the capability index. When a capability is relevant, use the matching retrieved skill instructions as the detailed procedure.\n"
     "Available tools: google_search, web_search, read_webpage, read_file, write_file, replace_in_file, replace_file_content, multi_replace_file_content, "
     "run_shell_command, run_command_async, manage_task, wait_task, get_workspace_structure, find_files, search_codebase, generate_local_image, generate_imagen, "
-    "apply_comfy_workflow, add_quest, add_journal_entry, search_music.\n"
+    "apply_comfy_workflow, add_quest, add_journal_entry, search_music, outline_file, read_symbol, find_references, review_code.\n"
+        "LARGE CODE: never read whole big files. To audit or review a whole file or folder, call `review_code(path=...)` once, then `review_code()` again until it reports REVIEW COMPLETE: the system chunks the code, checks every claim, and tracks progress for you. Answer only from its digest. "
+        "To inspect or change specific code, use `outline_file` and `read_symbol` (one function at a time) or `read_file` with a line range; reads of Python code include tool-verified lint and caller facts, which outrank your own guesses. "
+        "Before claiming something depends on code you cannot see (a global, an import, a caller's contract), check it with `find_references`.\n"
     "Use argument names shown by a retrieved skill or the tool's established signature. Do not invent tool results. After a tool result, continue the task concisely; do not repeat the tag.\n"
     "When URLs or web links are provided in the message, call `[read_webpage(url=\"...\")]` to fetch and read the page content. Ground all claims in real retrieved text rather than assuming or fabricating what a link contains.\n"
     "For research, search first and read the most relevant pages; use distinct queries or URLs when continuing.\n"
@@ -299,7 +302,7 @@ def _normalize_tool_call_paths(tool_name: str, args_str: str) -> str:
     """
     file_tools = {
         "read_file", "write_file", "replace_in_file", "replace_file_content",
-        "multi_replace_file_content", "get_workspace_structure", "find_files"
+        "multi_replace_file_content",         "get_workspace_structure", "find_files", "outline_file", "read_symbol", "review_code"
     }
 
     # 1. Quoted Windows drive paths: e.g. "C:\foo\bar" -> "C:/foo/bar"
@@ -368,7 +371,7 @@ def _parse_emulated_tool_call(tool_name: str, args_str: str) -> dict:
                 args = [val]
 
     # --- Parameter Alias Normalization ---
-    file_tools = {"read_file", "write_file", "replace_in_file", "replace_file_content", "multi_replace_file_content", "get_workspace_structure", "find_files"}
+    file_tools = {"read_file", "write_file", "replace_in_file", "replace_file_content",     "multi_replace_file_content", "get_workspace_structure", "find_files", "outline_file", "read_symbol", "review_code"}
     if tool_name in file_tools:
         for alias in ("filename", "file_path", "filepath", "target_file", "AbsolutePath", "TargetFile"):
             if alias in kwargs and "path" not in kwargs:

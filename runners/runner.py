@@ -501,6 +501,8 @@ class BaseProgramRunner:
     ) -> tuple[str, list]:
         max_iterations = 8
         iteration = 0
+        best_pending, best_iter, nudges_since_progress = None, 0, 0
+        MAX_PLAN_ITERATIONS = 300
         all_tool_calls = []
         final_response_text = ""
         completed_final_turn = False
@@ -515,6 +517,17 @@ class BaseProgramRunner:
         while iteration < max_iterations:
             iteration += 1
 
+            # Long review jobs (review_code): extend the loop while units keep getting finished.
+            from tools.codejob import pending_units, continue_nudge
+            pending_now = pending_units(session_id) if any(
+                tc.get("type") == "call" and tc.get("name") == "review_code"
+                for tc in all_tool_calls
+            ) else 0
+            if pending_now:
+                if best_pending is None or pending_now < best_pending:
+                    best_pending, best_iter, nudges_since_progress = pending_now, iteration, 0
+                if iteration - best_iter <= 12 and iteration < MAX_PLAN_ITERATIONS:
+                    max_iterations = max(max_iterations, iteration + 2)
             # --- STAGE 1: LOCAL PREPROCESSING ---
             messages = adapter.get_openai_messages(
                 sys_instructions, rag_context, memory_context=memory_block, turn_directive=turn_directive
@@ -660,6 +673,22 @@ class BaseProgramRunner:
 
                 continue
             else:
+                # Model answered without a tool call while review units remain: push it to keep going.
+                if (
+                    pending_now
+                    and nudges_since_progress < 3
+                    and iteration < MAX_PLAN_ITERATIONS
+                    and not bot_response_text.lstrip().startswith("Error:")
+                    and session_id not in cancelled_sessions
+                ):
+                    nudges_since_progress += 1
+                    adapter.append_assistant_message(
+                        bot_response_text.strip() or "(continuing)", [], invocation_id, intermediate=True, speaker_id=speaker_id
+                    )
+                    adapter.append_tool_events([("review_code", {}, continue_nudge(session_id))], invocation_id)
+                    max_iterations = max(max_iterations, iteration + 2)
+                    continue
+
                 group_meta = getattr(self, "sessions_group_meta", {}).get(session_id)
                 bot_response_text = clean_group_speaker_response(bot_response_text, speaker_id, group_meta)
 

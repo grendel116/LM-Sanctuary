@@ -907,7 +907,8 @@ def read_file(path: str, start_line: int = None, end_line: int = None) -> str:
             next_start = e + 1
             next_end = min(total_lines, e + max_lines_per_read)
             body += f"\n\n... [Showing lines {s}-{e} of {total_lines}. Call read_file(path=\"{path}\", start_line={next_start}, end_line={next_end}) to view more.]"
-        return header + body
+        from tools.codefacts import facts as _facts
+        return header + body + _facts(normalized_path, s, e)
 
     except Exception as e:
         return f"Error reading file '{path}': {e}"
@@ -935,7 +936,7 @@ def write_file(path: str, content: str) -> str:
             
         with open(normalized_path, "w", encoding="utf-8") as f:
             f.write(content)
-        return f"Successfully wrote to file '{normalized_path}'."
+        return _codenav.with_verify(f"Successfully wrote to file '{normalized_path}'.", normalized_path)
     except Exception as e:
         return f"Error writing to file '{path}': {e}"
 
@@ -975,7 +976,7 @@ def replace_in_file(path: str, old_text: str, new_text: str) -> str:
             
         with open(normalized_path, "w", encoding="utf-8") as f:
             f.write(updated_content)
-        return f"Successfully replaced content in '{normalized_path}'."
+        return _codenav.with_verify(f"Successfully replaced content in '{normalized_path}'.", normalized_path)
     except Exception as e:
         return f"Error modifying file '{path}': {e}"
 
@@ -2081,7 +2082,7 @@ def replace_file_content(path: str, start_line: int, end_line: int, target_conte
         with open(normalized_path, "w", encoding="utf-8") as f:
             f.writelines(new_lines)
             
-        return f"Successfully modified lines {start_line}-{end_line} in '{normalized_path}'."
+        return _codenav.with_verify(f"Successfully modified lines {start_line}-{end_line} in '{normalized_path}'.", normalized_path)
     except Exception as e:
         return f"Error modifying file '{path}': {e}"
 
@@ -2147,7 +2148,7 @@ def multi_replace_file_content(path: str, replacement_chunks: list[dict]) -> str
         with open(normalized_path, "w", encoding="utf-8") as f:
             f.writelines(lines)
             
-        return f"Successfully applied {len(replacement_chunks)} replacements to '{normalized_path}'."
+        return _codenav.with_verify(f"Successfully applied {len(replacement_chunks)} replacements to '{normalized_path}'.", normalized_path)
     except Exception as e:
         return f"Error modifying file '{path}': {e}"
 
@@ -2185,6 +2186,14 @@ def add_quest(title: str, notes: str, due: str = None, location: str = "", remin
     if quest is None:
         return f"Quest '{title.strip()}' is already in the log."
     return f"Successfully added quest: '{quest['title']}' due {due_dt.strftime('%A, %B %d at %I:%M %p')} with {len(objectives)} objectives."
+
+from tools import codenav as _codenav
+from tools import codejob as _codejob
+
+outline_file = track_tool_activity(_codenav.outline_file)
+read_symbol = track_tool_activity(_codenav.read_symbol)
+find_references = track_tool_activity(_codenav.find_references)
+review_code = track_tool_activity(_codejob.review_code)
 
 @track_tool_activity
 def add_journal_entry(keyphrases: str, content: str) -> str:

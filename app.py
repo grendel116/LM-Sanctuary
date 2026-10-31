@@ -539,6 +539,8 @@ def crop_profile_picture():
         if source_image.startswith('/images/'):
             relative_path = source_image[len('/images/'):]
             source_path = os.path.normpath(os.path.join(program_dir, relative_path))
+            if os.path.commonpath([os.path.abspath(source_path), os.path.abspath(program_dir)]) != os.path.abspath(program_dir):
+                return jsonify({'error': 'Unsupported image path'}), 400
         elif source_image.startswith('/profile.png'):
             source_path = os.path.normpath(os.path.join(program_dir, 'portraits', 'profile.png'))
         else:
@@ -2392,6 +2394,7 @@ def databank_purge():
         return jsonify({"status": "success"})
     except Exception as e:
         print(f"Error purging databank: {e}")
+        return jsonify({"error": str(e)}), 500
 
 # ---------------------------------------------------------------------------
 # Lorebook routes
@@ -3210,9 +3213,6 @@ def delete_program():
         shutil.rmtree(program_path, onerror=_handle_remove_readonly)
         
         return jsonify({'status': 'success', 'switched_to': 'sebile' if is_active else None})
-    except Exception as e:
-        traceback.print_exc()
-        return jsonify({'error': str(e)}), 500
     except Exception as e:
         traceback.print_exc()
         return jsonify({'error': str(e)}), 500

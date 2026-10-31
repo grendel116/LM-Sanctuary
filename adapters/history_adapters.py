@@ -32,7 +32,7 @@ class OsHistoryAdapter:
     # History is cut in whole blocks of this many messages so the first kept message stays
     # the same across many turns, letting the server reuse the cached history prefix.
     HISTORY_CUT_STEP = 8
-    CHARS_PER_TOKEN = 3.5
+    CHARS_PER_TOKEN = 2.8
 
     @staticmethod
     def _content_len(content) -> int:
@@ -93,8 +93,28 @@ class OsHistoryAdapter:
         if cut:
             print(f"[CONTEXT] Dropped {cut} oldest messages to fit the context budget.", flush=True)
 
+        kept = list(chat_turns[cut:])
+        kept_lengths = lengths[cut:]
+        user_pos = (latest_user_idx - cut) if latest_user_idx is not None else -1
+        # Hard cap: if the current turn's own tool-loop steps still overflow, drop the oldest ones
+        # (the task ledger already carries their results), keeping the latest exchange.
+        if user_pos >= 0:
+            dropped = 0
+            while sum(kept_lengths) > available and len(kept) - user_pos - 1 > 2:
+                del kept[user_pos + 1:user_pos + 3]
+                del kept_lengths[user_pos + 1:user_pos + 3]
+                dropped += 2
+            if dropped:
+                print(f"[CONTEXT] Dropped {dropped} old tool-loop messages from the current turn.", flush=True)
+            if sum(kept_lengths) > available and len(kept) - user_pos - 1 >= 1:
+                last = kept[-1]
+                if isinstance(last.get("content"), str) and len(last["content"]) > 1500:
+                    over = sum(kept_lengths) - available
+                    keep_chars = max(1500, len(last["content"]) - over)
+                    last["content"] = last["content"][:keep_chars] + "\n... [output truncated to fit context; use read_symbol or a narrower range]"
+
         final_messages = [{"role": "system", "content": system_content.strip()}]
-        final_messages.extend(chat_turns[cut:])
+        final_messages.extend(kept)
 
         return _merge_consecutive_messages(final_messages)
 
@@ -128,6 +148,11 @@ class OsHistoryAdapter:
         is_group = bool(group_meta and group_meta.get("is_group"))
 
         raw_messages = []
+        last_tool_idx = max(
+            (i for i, m in enumerate(filtered_history)
+             if m.get("id", "").startswith("tool_") or m.get("text", "").startswith("[Tool Response from")),
+            default=-1,
+        )
         for idx, msg in enumerate(filtered_history):
             role = "assistant" if msg["role"] == "program" else "user"
             msg_id = msg.get("id", "")
@@ -160,6 +185,16 @@ class OsHistoryAdapter:
                     f"... [Earlier tool output compacted ({len(content_text)} chars)] ...\n"
                     f"{content_text[-200:]}"
                 )
+
+            # Within the current turn only the newest tool result stays in full; earlier ones were already
+            # distilled into the task ledger, and keeping them would overflow the window during long jobs.
+            if (
+                idx > latest_user_idx
+                and idx != last_tool_idx
+                and (msg_id.startswith("tool_") or content_text.startswith("[Tool Response from"))
+                and len(content_text) > 500
+            ):
+                content_text = f"{content_text[:300]}\n... [Earlier tool output compacted ({len(content_text)} chars); re-read if needed]"
 
             if idx == latest_user_idx:
                 img_src = (
@@ -207,11 +242,27 @@ class OsHistoryAdapter:
                 history, filtered_history, latest_user_idx, active_prog, story_active, rag_context, turn_directive
             )
 
-        return self._build_tiered_messages(
+        msgs = self._build_tiered_messages(
             system_content=system_content,
             raw_messages=raw_messages,
             post_injection=self._cached_post_injection,
         )
+
+        # A one-line note while a review job is unfinished lets a new turn resume it; it rides at the very end so only the tail misses the cache.
+        try:
+            from tools.codejob import get_job_block
+            plan_block = get_job_block(self.session_id)
+            if plan_block and msgs:
+                last = msgs[-1]
+                if last.get("role") == "user" and isinstance(last.get("content"), str):
+                    last["content"] = f"{last['content']}\n\n{plan_block}"
+                elif last.get("role") == "user" and isinstance(last.get("content"), list):
+                    last["content"].append({"type": "text", "text": f"\n\n{plan_block}"})
+                else:
+                    msgs.append({"role": "user", "content": plan_block})
+        except Exception as pe:
+            print(f"[review job] Injection error: {pe}")
+        return msgs
 
     def _build_post_injection(
         self, history, filtered_history, latest_user_idx, active_prog, story_active, rag_context, turn_directive
