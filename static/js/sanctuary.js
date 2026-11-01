@@ -204,13 +204,14 @@ async function softReloadApp() {
         const newHistory = (data.history || []).filter(msg => {
             if (msg.id && _hiddenPrefixes.some(p => msg.id.startsWith(p))) return false;
             if (msg.text && (
-                msg.text.startsWith('[SYSTEM:') ||
+                msg.text.toLowerCase().startsWith('[system:') ||
                 msg.text.startsWith('[Tool Response from') ||
                 msg.text.includes('Generate a portrait of yourself') ||
                 msg.text.includes('[GENERATE_IMAGE:') ||
                 msg.text.includes('[GENERATE_IMAGEN:') ||
                 msg.text.includes('[generate_program_portrait') ||
-                msg.text.includes('(Generation stopped)')
+                msg.text.includes('(Generation stopped)') ||
+                msg.text.includes('(Generation cancelled)')
             )) return false;
             return true;
         });
@@ -651,7 +652,7 @@ function generateMessageId(text, role = 'user') {
                 prefix = 'port_';
             } else if (text && text.startsWith("[SYSTEM: User has completed")) {
                 prefix = 'quest_';
-            } else if (text && text.startsWith("[SYSTEM:")) {
+            } else if (text && text.toLowerCase().startsWith("[system:")) {
                 prefix = 'sys_';
             } else if (text && text.startsWith("[Tool Response from")) {
                 prefix = 'tool_';
@@ -5413,7 +5414,8 @@ function renderMessage(msg, isLive = false) {
         text.includes("[GENERATE_IMAGEN:") ||
         text.includes("[generate_program_portrait") ||
         text.includes("(Generation stopped)") ||
-        text.startsWith("[SYSTEM:") ||
+        text.includes("(Generation cancelled)") ||
+        text.toLowerCase().startsWith("[system:") ||
         text.startsWith("[Tool Response from")
     )) return null;
 
@@ -6204,7 +6206,7 @@ async function sendMessage() {
             }
         }
         
-        if (data.response !== undefined) {
+        if (!data.cancelled && data.response !== undefined) {
             appendMessage('program', data.response, null, data.tool_calls, true, data.timestamp, data.duration, false, data.program_msg_id, data.sender_id, data.sender_name);
         } else if (data.error) {
             let errMsg = data.error;
@@ -6273,7 +6275,7 @@ async function executeGroupChainTurn(targetSpeaker) {
         }
 
         const data = await response.json();
-        if (data.response !== undefined) {
+        if (!data.cancelled && data.response !== undefined) {
             appendMessage('program', data.response, null, data.tool_calls, true, data.timestamp, data.duration, false, data.program_msg_id, data.sender_id, data.sender_name);
             if (data.state) {
                 updateHeartState(data.state, data.inversion_active, data.inversion_state, data.program_msg_id, true);
@@ -6346,7 +6348,7 @@ async function continueMessage() {
         }
         
         const data = await response.json();
-        if (data.response !== undefined) {
+        if (!data.cancelled && data.response !== undefined) {
             if (currentGroupMeta && currentGroupMeta.is_group) {
                 appendMessage('program', data.response, null, data.tool_calls, true, data.timestamp, data.duration, false, data.program_msg_id, data.sender_id, data.sender_name);
                 if (data.state) {
@@ -6691,7 +6693,7 @@ async function rerollMessage(trigger) {
             await loadHistory();
             return;
         }
-        if (data.response !== undefined) {
+        if (!data.cancelled && data.response !== undefined) {
             appendMessage('program', data.response, null, data.tool_calls, true, data.timestamp, data.duration, false, data.program_msg_id, data.sender_id, data.sender_name);
         }
         if (data.state) {
@@ -7674,21 +7676,19 @@ async function generatePortraitPrompt() {
         btn.style.opacity = '0.5';
     }
 
-    const typingIndicatorRow = document.createElement('div');
-    typingIndicatorRow.className = 'message-row program-row';
-    const profileUrl = typeof getProfileUrl === 'function' ? getProfileUrl() : '';
-    typingIndicatorRow.innerHTML = `
-        <div class="avatar-container">
-            <img class="avatar program-avatar" src="${profileUrl}" alt="Program">
-        </div>
-        <div class="message program">
-            <div class="typing-indicator">
-                <div class="typing-dot"></div>
-                <div class="typing-dot"></div>
-                <div class="typing-dot"></div>
-            </div>
-        </div>
-    `;
+    let targetSpeaker = activeProgramId;
+    if (currentGroupMeta && currentGroupMeta.is_group) {
+        const programRows = Array.from(chatContainer.querySelectorAll('.message-row.program-row'));
+        for (let i = programRows.length - 1; i >= 0; i--) {
+            const row = programRows[i];
+            if (row.dataset.senderId) {
+                targetSpeaker = row.dataset.senderId;
+                break;
+            }
+        }
+    }
+
+    const typingIndicatorRow = createTypingIndicatorRow(targetSpeaker);
     chatContainer.appendChild(typingIndicatorRow);
     chatContainer.scrollTop = chatContainer.scrollHeight;
 
@@ -7699,7 +7699,8 @@ async function generatePortraitPrompt() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 session_id: sessionId,
-                prompt: customPrompt
+                prompt: customPrompt,
+                speaker_id: targetSpeaker
             }),
             signal: chatAbortController.signal
         });
@@ -7810,6 +7811,8 @@ async function regenerateImage(buttonElement, oldImageUrl, prompt) {
     let succeeded = false;
     try {
         const bubble = container.closest('.message.program') || container.closest('.message');
+        const row = container.closest('.message-row.program-row');
+        const speakerId = row ? (row.dataset.senderId || null) : null;
         const msgId = container.dataset.msgId || (bubble ? bubble.dataset.msgId : null);
         const grid = container.closest('.portrait-grid');
         let slotIndex = 0;
@@ -7853,7 +7856,8 @@ async function regenerateImage(buttonElement, oldImageUrl, prompt) {
                 prompt: prompt || container.dataset.prompt || '',
                 msg_id: msgId,
                 slot_index: slotIndex,
-                use_imagen: useImagenMode
+                use_imagen: useImagenMode,
+                speaker_id: speakerId
             }),
             signal: chatAbortController.signal
         });

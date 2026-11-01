@@ -1035,10 +1035,8 @@ def chat():
         )
     except asyncio.CancelledError:
         print(f"[CANCEL] Chat generation cancelled for session {session_id}")
-        run_async(runner.append_message_to_session(session_id, 'program', '*(Generation cancelled)*'))
         return jsonify({
             'cancelled': True,
-            'response': '*(Generation cancelled)*',
             'tool_calls': [],
             'state': None,
             'inversion_active': '',
@@ -1089,10 +1087,8 @@ def edit():
         )
     except asyncio.CancelledError:
         print(f"[CANCEL] Edit generation cancelled for session {session_id}")
-        run_async(runner.append_message_to_session(session_id, 'program', '*(Generation cancelled)*'))
         return jsonify({
             'cancelled': True,
-            'response': '*(Generation cancelled)*',
             'tool_calls': [],
             'state': None,
             'inversion_active': '',
@@ -1270,19 +1266,21 @@ def continue_generation():
                 "[System: Continue your last message. Do NOT repeat or summarize your last message. "
                 "Start writing immediately from the exact point where you left off, connecting seamlessly to the end.]"
             )
-            
-            response_text, tool_calls, user_msg_id, program_msg_id = run_async(runner.run_async(
-                session_id=session_id,
-                new_message_text=continue_prompt,
-                model=model
-            ))
+            import uuid
+            temp_user_msg_id = f"sys_{uuid.uuid4().hex}"
+            program_msg_id = None
+            try:
+                response_text, tool_calls, user_msg_id, program_msg_id = run_async(runner.run_async(
+                    session_id=session_id,
+                    new_message_text=continue_prompt,
+                    model=model,
+                    msg_id=temp_user_msg_id
+                ))
+            finally:
+                run_async(runner.delete_message_at(session_id, temp_user_msg_id))
+                if program_msg_id:
+                    run_async(runner.delete_message_at(session_id, program_msg_id))
             duration = round(time.time() - start_time, 1)
-            
-            # Delete the temporary turn
-            if user_msg_id:
-                run_async(runner.delete_message_at(session_id, user_msg_id))
-            if program_msg_id:
-                run_async(runner.delete_message_at(session_id, program_msg_id))
             
             # Merge continuation text dynamically
             if last_program_text.endswith('\n') or response_text.startswith('\n'):
@@ -1337,10 +1335,8 @@ def continue_generation():
             
     except asyncio.CancelledError:
         print(f"[CANCEL] Continuation cancelled for session {session_id}")
-        run_async(runner.append_message_to_session(session_id, 'program', '*(Generation cancelled)*'))
         return jsonify({
             'cancelled': True,
-            'response': '*(Generation cancelled)*',
             'tool_calls': [],
             'duration': round(time.time() - start_time, 1)
         })
@@ -1427,71 +1423,83 @@ def regenerate_image():
         return jsonify({'error': 'Image generation engine is currently busy. Please retry in a moment.'}), 429
 
     try:
-        if not prompt:
-            import os
-            filename = os.path.basename(old_image_url) if old_image_url else ''
-            # 1. Try to find the prompt in the program sidecar JSON file (most reliable and clean)
-            if filename:
-                try:
-                    from runners.program import get_active_program
-                    active_program = get_active_program()
-                    json_path = find_image_sidecar_json(filename, active_program)
+        target_prog = request.json.get('speaker_id')
+        filename = os.path.basename(old_image_url) if old_image_url else ''
+        chat_history = []
+        try:
+            chat_history = run_async(runner.get_history(session_id))
+        except Exception:
+            pass
 
-                    if json_path and os.path.exists(json_path):
-                        with open(json_path, 'r', encoding='utf-8') as f:
-                            meta = json.load(f)
+        if not target_prog and msg_id and chat_history:
+            for msg in chat_history:
+                if msg.get('id') == msg_id and msg.get('sender_id'):
+                    target_prog = msg['sender_id']
+                    break
+
+        if filename:
+            try:
+                from runners.program import get_active_program
+                active_program = target_prog or get_active_program()
+                json_path = find_image_sidecar_json(filename, active_program)
+                if json_path and os.path.exists(json_path):
+                    with open(json_path, 'r', encoding='utf-8') as f:
+                        meta = json.load(f)
+                        if not prompt:
                             prompt = meta.get('prompt')
                             if prompt:
                                 print(f"[DEBUG REROLL] Found prompt in sidecar JSON: {prompt}")
-                except Exception as je:
-                    print(f"Error reading sidecar JSON: {je}")
+                        if not target_prog and meta.get('program_id'):
+                            target_prog = meta.get('program_id')
+            except Exception as je:
+                print(f"Error reading sidecar JSON: {je}")
 
+        if not target_prog and chat_history:
+            target_prog = resolve_portrait_speaker_id(session_id, chat_history)
+
+        if not prompt:
             # 2. Check session history for prompt (by msg_id, media items, or tool_calls)
-            if not prompt:
-                try:
-                    chat_history = run_async(runner.get_history(session_id))
-                    if msg_id:
-                        for msg in chat_history:
-                            if msg.get('id') == msg_id:
-                                for m in msg.get('media', []):
-                                    if m.get('prompt'):
-                                        prompt = m['prompt']
-                                        break
-                                if prompt:
+            try:
+                if msg_id:
+                    for msg in chat_history:
+                        if msg.get('id') == msg_id:
+                            for m in msg.get('media', []):
+                                if m.get('prompt'):
+                                    prompt = m['prompt']
                                     break
-                    if not prompt:
-                        for msg in chat_history:
-                            if msg_id and msg.get('id') != msg_id and filename:
-                                pass
-                            tool_calls = msg.get('tool_calls', [])
-                            if not tool_calls:
-                                continue
-                            calls = {}
-                            for tc in tool_calls:
-                                if tc.get('type') == 'call' and tc.get('name') in ('generate_program_portrait', 'generate_local_image'):
-                                    call_id = tc.get('id')
-                                    args = tc.get('args', {})
-                                    p = args.get('prompt') if isinstance(args, dict) else None
-                                    if call_id and p:
-                                        calls[call_id] = p
-                            if msg_id and msg.get('id') == msg_id and calls:
-                                prompt = next(iter(calls.values()))
-                                break
-                            for tc in tool_calls:
-                                if tc.get('type') == 'response' and tc.get('name') in ('generate_program_portrait', 'generate_local_image'):
-                                    call_id = tc.get('id')
-                                    response_val = tc.get('response', '')
-                                    if call_id in calls and filename and filename in response_val:
-                                        prompt = calls[call_id]
-                                        print(f"[DEBUG REROLL] Found prompt in history matching filename '{filename}': {prompt}")
-                                        break
                             if prompt:
                                 break
-                except Exception as he:
-                    print(f"Error scanning session history for prompt: {he}")
+                if not prompt:
+                    for msg in chat_history:
+                        tool_calls = msg.get('tool_calls', [])
+                        if not tool_calls:
+                            continue
+                        calls = {}
+                        for tc in tool_calls:
+                            if tc.get('type') == 'call' and tc.get('name') in ('generate_program_portrait', 'generate_local_image'):
+                                call_id = tc.get('id')
+                                args = tc.get('args', {})
+                                p = args.get('prompt') if isinstance(args, dict) else None
+                                if call_id and p:
+                                    calls[call_id] = p
+                        if msg_id and msg.get('id') == msg_id and calls:
+                            prompt = next(iter(calls.values()))
+                            break
+                        for tc in tool_calls:
+                            if tc.get('type') == 'response' and tc.get('name') in ('generate_program_portrait', 'generate_local_image'):
+                                call_id = tc.get('id')
+                                response_val = tc.get('response', '')
+                                if call_id in calls and filename and filename in response_val:
+                                    prompt = calls[call_id]
+                                    print(f"[DEBUG REROLL] Found prompt in history matching filename '{filename}': {prompt}")
+                                    break
+                        if prompt:
+                            break
+            except Exception as he:
+                print(f"Error scanning session history for prompt: {he}")
 
             if not prompt:
-                prompt = extract_portrait_tags_from_context(session_id, "")
+                prompt = extract_portrait_tags_from_context(session_id, "", program_id=target_prog)
 
             if not prompt:
                 return jsonify({'error': 'Original prompt not found. Unable to regenerate image.'}), 400
@@ -1501,6 +1509,7 @@ def regenerate_image():
 
         import tools.tools as tools
         tools.current_session_id.set(session_id)
+        tools.current_speaker_id.set(target_prog)
         with tools.session_tool_calls_lock:
             tools.session_tool_calls[session_id] = []
         use_imagen = request.json.get('use_imagen', False)
@@ -1508,7 +1517,7 @@ def regenerate_image():
         if use_imagen:
             new_markdown = tools.generate_imagen(prompt)
         else:
-            new_markdown = tools.generate_local_image(prompt, count=1)
+            new_markdown = tools.generate_local_image(prompt, count=1, program_id=target_prog)
         if new_markdown.startswith("Error"):
             return jsonify({'error': new_markdown}), 500
             
@@ -1529,6 +1538,7 @@ def regenerate_image():
                 new_prompt=prompt,
                 msg_id=msg_id,
                 slot_index=slot_index,
+                speaker_id=target_prog,
             )
         )
         if success:
@@ -1552,7 +1562,37 @@ def regenerate_image():
 _cached_portrait_tags: dict[tuple[str, str], str] = {}
 
 
-def extract_portrait_tags_from_context(session_id: str, custom_prompt: str = "") -> str:
+def resolve_portrait_speaker_id(session_id: str, chat_history: list = None, requested_speaker_id: str = None) -> str:
+    """Determines which character is the active subject for portrait generation in solo or group sessions."""
+    from runners.program import get_active_program
+    if requested_speaker_id and PROGRAM_ID_RE.match(str(requested_speaker_id)):
+        return str(requested_speaker_id)
+
+    if chat_history is None:
+        try:
+            chat_history = run_async(runner.get_history(session_id))
+        except Exception:
+            chat_history = []
+
+    for msg in reversed(chat_history):
+        if msg.get("role") == "program":
+            text = (msg.get("text") or "").strip()
+            msg_id = msg.get("id", "")
+            if msg_id.startswith("img_") or (text.startswith("![") and text.endswith(")") and not text):
+                continue
+            if not text:
+                continue
+            if msg.get("sender_id"):
+                return msg["sender_id"]
+
+    for msg in reversed(chat_history):
+        if msg.get("role") == "program" and msg.get("sender_id"):
+            return msg["sender_id"]
+
+    return get_active_program() or "sebile"
+
+
+def extract_portrait_tags_from_context(session_id: str, custom_prompt: str = "", program_id: str = None) -> str:
     """Extracts comma-separated visual tags from the latest conversation and character context.
     When the GPU is already in IMG mode (e.g., generating consecutive portraits without new chat turns),
     reuses the cached scene tags to avoid unloading SDXL and booting llama-server back and forth.
@@ -1564,20 +1604,27 @@ def extract_portrait_tags_from_context(session_id: str, custom_prompt: str = "")
     from core.program_config import _load_card_data, replace_placeholders
     from runners.program import get_active_program, get_active_user
 
-    active_prog = get_active_program()
-    cache_key = (active_prog, session_id)
-
-    card = _load_card_data(active_prog)
-    char_name = card.get("name") or active_prog.title()
-    description = replace_placeholders(card.get("description", "")).strip()
-    scenario = replace_placeholders(card.get("scenario", "")).strip()
-    user_name = get_active_user().replace("_", " ").title()
-
     chat_history = []
     try:
         chat_history = run_async(runner.get_history(session_id))
     except Exception:
         pass
+
+    target_prog = resolve_portrait_speaker_id(session_id, chat_history, program_id)
+    cache_key = (target_prog, session_id)
+
+    card = _load_card_data(target_prog)
+    char_name = card.get("name") or target_prog.title()
+    description = replace_placeholders(card.get("description", ""), program_id=target_prog).strip()
+
+    group_meta = getattr(runner, "sessions_group_meta", {}).get(session_id)
+    if group_meta and group_meta.get("is_group") and group_meta.get("host_id"):
+        host_card = _load_card_data(group_meta["host_id"])
+        raw_scenario = host_card.get("scenario", "") or card.get("scenario", "")
+    else:
+        raw_scenario = card.get("scenario", "")
+    scenario = replace_placeholders(raw_scenario, program_id=target_prog).strip()
+    user_name = get_active_user().replace("_", " ").title()
 
     recent_history = [
         msg for msg in chat_history
@@ -1602,7 +1649,10 @@ def extract_portrait_tags_from_context(session_id: str, custom_prompt: str = "")
 
     history_text = ""
     for msg in recent_history:
-        role = user_name if msg.get('role') == 'user' else char_name
+        if msg.get('role') == 'user':
+            role = user_name
+        else:
+            role = msg.get('sender_name') or char_name
         text_val = msg.get('text', '')
         history_text += f"{role}: {text_val}\n"
 
@@ -1637,7 +1687,7 @@ def extract_portrait_tags_from_context(session_id: str, custom_prompt: str = "")
             tags = tags.strip('`"\'').strip()
             if tags:
                 _cached_portrait_tags[cache_key] = tags
-                print(f"[Portrait] LLM extracted tags: {tags}", flush=True)
+                print(f"[Portrait] LLM extracted tags for {target_prog}: {tags}", flush=True)
                 return tags
     except Exception as e:
         print(f"[Portrait] Error querying LLM for tags: {e}", flush=True)
@@ -1650,6 +1700,7 @@ def extract_portrait_tags_from_context(session_id: str, custom_prompt: str = "")
 def api_generate_portrait():
     session_id = request.json.get('session_id', 'default')
     custom_prompt = request.json.get('prompt', '')
+    requested_speaker = request.json.get('speaker_id')
     cancelled_sessions.discard(session_id)
 
     if not _image_mutex.acquire(blocking=True, timeout=300.0):
@@ -1659,20 +1710,23 @@ def api_generate_portrait():
         if session_id in cancelled_sessions:
             return jsonify({'error': 'Portrait generation cancelled by user.'}), 400
 
+        target_prog = resolve_portrait_speaker_id(session_id, requested_speaker_id=requested_speaker)
+
         import tools.tools as tools
         tools.current_session_id.set(session_id)
+        tools.current_speaker_id.set(target_prog)
         with tools.session_tool_calls_lock:
             tools.session_tool_calls[session_id] = []
 
         # 1. Decoupled tag extraction via LLM (auto-starts LLM if paused)
-        extracted_tags = extract_portrait_tags_from_context(session_id, custom_prompt)
+        extracted_tags = extract_portrait_tags_from_context(session_id, custom_prompt, program_id=target_prog)
 
         if session_id in cancelled_sessions:
             return jsonify({'error': 'Portrait generation cancelled by user.'}), 400
 
         # 2. Local GPU image generation (unloads LLM before running diffusion engine)
         count = int(request.json.get('count', 3))
-        new_markdown = tools.generate_local_image(extracted_tags, count=count)
+        new_markdown = tools.generate_local_image(extracted_tags, count=count, program_id=target_prog)
 
         if session_id in cancelled_sessions:
             return jsonify({'error': 'Portrait generation cancelled by user.'}), 400
@@ -1685,11 +1739,9 @@ def api_generate_portrait():
         image_urls = re.findall(r'!\[[^\]]*\]\(([^)]+)\)', new_markdown)
         new_image_url = image_urls[0] if image_urls else None
 
-        from runners.program import get_active_program
         from core.program_config import _load_card_data
-        active_prog = get_active_program() or "sebile"
-        card = _load_card_data(active_prog)
-        prog_name = card.get("name") or active_prog.title()
+        card = _load_card_data(target_prog)
+        prog_name = card.get("name") or target_prog.title()
 
         # Append directly to session history as an image message preserving character identity and prompt
         run_async(
@@ -1697,7 +1749,7 @@ def api_generate_portrait():
                 session_id,
                 "program",
                 new_markdown,
-                sender_id=active_prog,
+                sender_id=target_prog,
                 sender_name=prog_name,
                 prompt=extracted_tags,
             )

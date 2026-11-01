@@ -245,7 +245,7 @@ def _build_vector_query(history: list[dict], max_messages: int = VECTOR_QUERY_ME
         if msg.get("role") not in valid_roles:
             continue
         text = msg.get("text", "").strip()
-        if not text or text.startswith(("[Tool Response", "[SYSTEM:")):
+        if not text or text.startswith("[Tool Response") or text.lower().startswith("[system:"):
             continue
         messages.append(text)
         if len(messages) >= max_messages:
@@ -440,7 +440,19 @@ def _get_safe_local_path(image_url: str) -> str | None:
         return None
 
     active_program = get_active_program()
-    return str(Path("core", "programs", active_program, *cleaned_parts))
+    primary = Path("core", "programs", active_program, *cleaned_parts)
+    if primary.exists():
+        return str(primary)
+
+    programs_root = Path("core", "programs")
+    if programs_root.is_dir():
+        for prog_dir in programs_root.iterdir():
+            if prog_dir.is_dir():
+                cand = prog_dir.joinpath(*cleaned_parts)
+                if cand.exists():
+                    return str(cand)
+
+    return str(primary)
 
 
 def strip_story(text: str) -> str:
@@ -464,6 +476,10 @@ def is_real_user_msg(msg: dict) -> bool:
     if msg.get('role') != 'user':
         return False
 
+    text = msg.get('text', '') or ''
+    if text.lower().startswith('[system:'):
+        return False
+
     msg_id = msg.get('id', '')
     if msg_id:
         if any(msg_id.startswith(p) for p in ('tool_', 'port_', 'quest_', 'sys_', 'itm_')):
@@ -471,7 +487,6 @@ def is_real_user_msg(msg: dict) -> bool:
         if any(msg_id.startswith(p) for p in ('usr_', 'img_')):
             return True
 
-    text = msg.get('text', '')
     invalid_triggers = ('[Tool Response', '[SYSTEM:', 'Generate a portrait of yourself', '[GENERATE_IMAGE:', '[GENERATE_IMAGEN:', 'generate_program_portrait')
     return not any(text.startswith(t) or t in text for t in invalid_triggers)
 
@@ -632,4 +647,4 @@ def extract_uploaded_file_content(file_path: str | Path, max_chars: int = 8000) 
 
     return f"[Attached File: {filename} ({ext.upper().lstrip('.')} Binary File, {file_size_kb} KB)]"
 
-
+

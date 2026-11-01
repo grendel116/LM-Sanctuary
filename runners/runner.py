@@ -389,7 +389,9 @@ class BaseProgramRunner:
                 msg for msg in history 
                 if msg.get("role") in ("user", "assistant", "program")
                 and not msg.get("id", "").startswith(hidden_prefixes)
-                and not (msg.get("text") or "").startswith(("[SYSTEM:", "[Tool Response from"))
+                and not (msg.get("text") or "").startswith("[Tool Response from")
+                and not (msg.get("text") or "").lower().startswith("[system:")
+                and (msg.get("text") or "").strip() not in ("*(Generation cancelled)*", "*(Generation stopped)*", "(Generation stopped)")
             ]
 
             # Pair dialogue into sequential (user, program) conversation turns
@@ -588,7 +590,7 @@ class BaseProgramRunner:
             bot_response_text = self._sanitize_thinking_tags(bot_response_text)
 
             matches = _extract_tool_calls(bot_response_text)
-            matches, bot_response_text = self._filter_story_mode_matches(matches, bot_response_text, session_id)
+            matches, bot_response_text = self._filter_story_mode_matches(matches, bot_response_text, speaker_id or self.program_id)
 
             if matches:
                 if session_id in cancelled_sessions:
@@ -596,6 +598,7 @@ class BaseProgramRunner:
 
                 clean_text = _strip_tool_calls(bot_response_text, matches)
 
+                tools.current_speaker_id.set(speaker_id)
                 loop = asyncio.get_running_loop()
                 tasks = [
                     loop.run_in_executor(
@@ -833,7 +836,7 @@ class BaseProgramRunner:
                     prefix = "port_"
                 elif text.startswith("[Tool Response from"):
                     prefix = "tool_"
-                elif text.startswith("[SYSTEM:") or role in ("system-memory", "system"):
+                elif text.lower().startswith("[system:") or role in ("system-memory", "system"):
                     prefix = "sys_"
                 elif role == "voice-call":
                     prefix = "vc_"
@@ -1385,7 +1388,9 @@ class OpenSourceRunner(BaseProgramRunner):
 
             media = self._extract_media_items(text, msg.get("image_url"), tool_calls)
             clean_text = re.sub(r"!\[[^\]]*\]\([^)]+\)", "", text).strip()
-            clean_text = clean_text.replace("(Generation stopped)", "").strip()
+            for marker in ("*(Generation cancelled)*", "*(Generation stopped)*", "(Generation cancelled)", "(Generation stopped)"):
+                clean_text = clean_text.replace(marker, "")
+            clean_text = clean_text.strip()
             tool_summary = self._consolidate_tools(tool_calls)
 
             image_tools = {
@@ -1465,15 +1470,17 @@ class OpenSourceRunner(BaseProgramRunner):
 
                 for msg in raw_history:
                     msg_id = msg.get("id", "")
-                    text = msg.get("text", "")
+                    text = msg.get("text", "") or ""
                     if msg.get("role") == "system-memory" or msg_id.startswith(hidden_prefixes):
                         continue
-                    if text.startswith(("[SYSTEM:", "[Tool Response from")) or any(
+                    if text.lower().startswith("[system:") or text.startswith("[Tool Response from") or any(
                         k in text for k in ("Generate a portrait of yourself", "[GENERATE_IMAGE:", "[GENERATE_IMAGEN:", "generate_program_portrait")
                     ):
                         continue
+                    if text.strip() in ("*(Generation cancelled)*", "*(Generation stopped)*", "(Generation cancelled)", "(Generation stopped)"):
+                        continue
                     if msg.get("role") == "program":
-                        if not (msg.get("text") or "").strip() and not msg.get("tool_calls"):
+                        if not text.strip() and not msg.get("tool_calls"):
                             continue
                     chat_history.append(self._normalize_message(msg))
 
@@ -1554,7 +1561,7 @@ class OpenSourceRunner(BaseProgramRunner):
                     prefix = "port_"
                 elif new_message_text.startswith("[Tool Response from"):
                     prefix = "tool_"
-                elif new_message_text.startswith("[SYSTEM:"):
+                elif new_message_text.lower().startswith("[system:"):
                     prefix = "sys_"
                 elif (media_path or image_data) and not new_message_text.strip():
                     prefix = "img_"
@@ -1722,15 +1729,18 @@ class OpenSourceRunner(BaseProgramRunner):
             card = _load_card_data(speaker_id)
             name = card.get("name") if card else speaker_id.title()
             prompt = f"[System: Speak in character as {name}. React or reply naturally to what was just said in the room.]"
+            temp_msg_id = f"sys_{uuid.uuid4().hex}"
 
-            response_text, tool_calls, prompt_msg_id, program_msg_id = await self.run_async(
-                session_id=session_id,
-                new_message_text=prompt,
-                model=model,
-                speaker_id=speaker_id,
-            )
-            if prompt_msg_id:
-                await self.delete_message_at(session_id, prompt_msg_id)
+            try:
+                response_text, tool_calls, prompt_msg_id, program_msg_id = await self.run_async(
+                    session_id=session_id,
+                    new_message_text=prompt,
+                    model=model,
+                    msg_id=temp_msg_id,
+                    speaker_id=speaker_id,
+                )
+            finally:
+                await self.delete_message_at(session_id, temp_msg_id)
             return response_text, tool_calls, None, program_msg_id
 
         async def reset_session(self, session_id: str):
@@ -1862,6 +1872,7 @@ class OpenSourceRunner(BaseProgramRunner):
             new_prompt: str = None,
             msg_id: str = None,
             slot_index: int = None,
+            speaker_id: str = None,
         ) -> bool:
             def _insert_at_slot(text_str: str, new_md: str, idx: int = None) -> str:
                 img_matches = list(re.finditer(r"!\[[^\]]*\]\([^)]+\)", text_str or ""))
@@ -1953,7 +1964,7 @@ class OpenSourceRunner(BaseProgramRunner):
                     elif msg_id:
                         from runners.program import get_active_program
                         from core.program_config import _load_card_data
-                        active_prog = get_active_program() or "sebile"
+                        active_prog = speaker_id or get_active_program() or "sebile"
                         card = _load_card_data(active_prog)
                         prog_name = card.get("name") or active_prog.title()
                         recreated_msg = {

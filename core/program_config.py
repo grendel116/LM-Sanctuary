@@ -29,22 +29,22 @@ def _load_card_data(program_id: str) -> dict:
             print(f"Error loading card for '{program_id}': {e}")
     return {}
 
-def get_program_name() -> str:
-    """Returns the active program's character name."""
+def get_program_name(program_id: str = None) -> str:
+    """Returns the active or specified program's character name."""
     from runners.program import get_active_program
-    active_program = get_active_program()
+    active_program = program_id or get_active_program()
     card = _load_card_data(active_program)
     # v3: data.name / legacy: name
     return card.get("name") or active_program.title()
 
-def replace_placeholders(text: str) -> str:
+def replace_placeholders(text: str, program_id: str = None) -> str:
     """Replaces {{user}} and {{char}} placeholders (case-insensitive) with their actual values."""
     if not text:
         return text
     from runners.program import get_active_user
     user_name = get_active_user().replace("_", " ").title()
     try:
-        comp_name = get_program_name()
+        comp_name = get_program_name(program_id)
     except Exception:
         comp_name = "Program"
     
@@ -97,7 +97,8 @@ def compile_instructions_from_card(card: dict, override_scenario: str = None, in
     if system_prompt:
         prompt_parts.append(f"## RESPONSE INSTRUCTIONS\n{system_prompt}")
 
-    return replace_placeholders("\n\n".join(prompt_parts))
+    program_id = card.get("extensions", {}).get("sanctuary", {}).get("program_id")
+    return replace_placeholders("\n\n".join(prompt_parts), program_id=program_id)
 
 def get_message_formatting(story_mode: bool) -> str:
     """Returns the standardized message formatting directive for system instructions."""
@@ -183,12 +184,13 @@ def compile_speaker_instructions(speaker_id: str, host_id: str = None, guest_ids
         f"You are {speaker_name}. You are participating in a group conversation with {', '.join(room_members)}.\n"
         f"- Active turn speaker: You ({speaker_name}).\n"
         f"- IDENTITY CONSTRAINT: Speak and act EXCLUSIVELY as {speaker_name}. You are one individual participant in the room.\n"
+        f"- FIRST-PERSON NARRATION: Write your own actions and body language in the first person (I, my) using complete sentences.\n"
         f"- NEVER PUPPET OTHERS: Do not write dialogue, thoughts, or actions for {other_str} or {user_name}. Never simulate other participants. Each participant speaks for themselves on their own turn.\n"
         f"- NO SPEAKER TAGS: Do not output speaker prefixes or tags like '[{speaker_name}]:' or '[{other_str}]:'. In conversation history, brackets indicate who spoke previously, but in your reply, speak directly from your own persona without tags or labels.\n"
         f"- Respond naturally in your own distinct persona and voice.\n"
     )
 
-    base = replace_placeholders(base_inst + load_user_instructions())
+    base = replace_placeholders(base_inst + load_user_instructions(), program_id=speaker_id)
     story_mode = is_story_mode(speaker_id)
     formatting = get_message_formatting(story_mode)
 

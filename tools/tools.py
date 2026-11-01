@@ -20,6 +20,7 @@ _active_tools_lock = threading.Lock()
 
 current_session_id = contextvars.ContextVar('current_session_id', default='default')
 current_use_imagen = contextvars.ContextVar('current_use_imagen', default=False)
+current_speaker_id = contextvars.ContextVar('current_speaker_id', default=None)
 session_tool_calls = {}
 background_tasks = {}
 session_tool_calls_lock = threading.Lock()
@@ -1444,12 +1445,13 @@ def apply_comfy_workflow(workflow_path: str, parameters: dict, save_path: str, s
         return f"Error executing ComfyUI workflow: {e}"
 
 @track_tool_activity
-def generate_local_image(prompt: str, count: int = 3) -> str:
+def generate_local_image(prompt: str, count: int = 3, program_id: str = None) -> str:
     """Generates local portrait image(s) using ComfyUI with program-specific workflow configurations.
     
     Args:
         prompt: A prompt describing what you are doing or the scene/expression.
         count: Number of images to generate (defaults to 3 for initial portrait generation, 1 for single slot reroll).
+        program_id: Optional program ID whose positive/negative image details and portraits folder should be used.
         
     Returns:
         Markdown link(s) to the generated portrait image(s), or an error message.
@@ -1459,7 +1461,7 @@ def generate_local_image(prompt: str, count: int = 3) -> str:
     import json
     
     from runners.program import get_active_program
-    active_program = get_active_program()
+    active_program = program_id or current_speaker_id.get() or get_active_program()
 
     # Load image prompt tags from program details
     img_details_val = ""
@@ -1482,9 +1484,9 @@ def generate_local_image(prompt: str, count: int = 3) -> str:
 
     # Combine prompt and image details
     from core.program_config import replace_placeholders
-    final_prompt = replace_placeholders(prompt)
+    final_prompt = replace_placeholders(prompt, program_id=active_program)
     if img_details_val:
-        img_details_clean = replace_placeholders(img_details_val).strip()
+        img_details_clean = replace_placeholders(img_details_val, program_id=active_program).strip()
         if img_details_clean:
             if final_prompt and not final_prompt.endswith(","):
                 final_prompt += ", "
@@ -1492,7 +1494,7 @@ def generate_local_image(prompt: str, count: int = 3) -> str:
 
     base_negative = "worst quality, low quality, deformed, mutated, extra limbs, watermark, text"
     if neg_details_val and neg_details_val.strip():
-        neg_clean = replace_placeholders(neg_details_val).strip().rstrip(",")
+        neg_clean = replace_placeholders(neg_details_val, program_id=active_program).strip().rstrip(",")
         final_negative = f"{neg_clean}, {base_negative}"
     else:
         final_negative = base_negative
@@ -1547,6 +1549,7 @@ def generate_local_image(prompt: str, count: int = 3) -> str:
                             "prompt": prompt,
                             "full_prompt": final_prompt,
                             "negative_prompt": final_negative,
+                            "program_id": active_program,
                             "engine": "in_process_gpu",
                         },
                         jf,

@@ -127,7 +127,9 @@ class OsHistoryAdapter:
         history = self.runner_obj.sessions_history.get(self.session_id, [])
         filtered_history = [
             msg for msg in history
-            if msg.get("role") not in ("voice-call", "system-memory") and not msg.get("compacted")
+            if msg.get("role") not in ("voice-call", "system-memory")
+            and not msg.get("compacted")
+            and (msg.get("text") or "").strip() not in ("*(Generation cancelled)*", "*(Generation stopped)*", "(Generation cancelled)", "(Generation stopped)")
         ]
 
         if not filtered_history:
