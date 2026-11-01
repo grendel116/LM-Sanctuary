@@ -28,10 +28,10 @@ class DataBankManager:
             active_program = get_active_program()
             db_dir = os.path.join(base_core, "programs", active_program)
         
-        os.makedirs(db_dir, exist_ok=True)
         self.db_path = os.path.join(db_dir, "databank.json")
-                
-        self._init_db()
+        prog_name = os.path.basename(os.path.normpath(db_dir))
+        if os.path.isdir(db_dir) and (prog_name == "sebile" or os.path.isfile(os.path.join(db_dir, f"{prog_name}.json"))):
+            self._init_db()
 
     def _init_db(self):
         if not os.path.exists(self.db_path):
@@ -48,7 +48,10 @@ class DataBankManager:
 
     def _save_data(self, path, data):
         try:
-            os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+            parent_dir = os.path.dirname(os.path.abspath(path))
+            prog_name = os.path.basename(parent_dir)
+            if not os.path.isdir(parent_dir) or (prog_name != "sebile" and not os.path.isfile(os.path.join(parent_dir, f"{prog_name}.json"))):
+                return
             temp_path = f"{path}.tmp"
             with open(temp_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)

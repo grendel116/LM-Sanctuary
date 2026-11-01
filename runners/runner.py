@@ -20,6 +20,7 @@ project_root = Path(__file__).resolve().parent.parent
 PROGRAMS_DIR = project_root / "core" / "programs"
 
 # Local imports follow below...
+import tools.tools as tools
 from variables.settings import get_local_server_headers
 from adapters.history_adapters import OsHistoryAdapter
 from core.mood_inversion import get_directive, is_enabled, new_state, update_state
@@ -753,8 +754,10 @@ class BaseProgramRunner:
     @property
     def sessions_dir(self) -> str:
         prog = getattr(self, "program_id", None) or get_active_program()
-        path = os.path.join(project_root, "core", "programs", prog, "sessions")
-        os.makedirs(path, exist_ok=True)
+        prog_dir = os.path.join(project_root, "core", "programs", prog)
+        path = os.path.join(prog_dir, "sessions")
+        if os.path.isdir(prog_dir) and (prog == "sebile" or os.path.isfile(os.path.join(prog_dir, f"{prog}.json"))):
+            os.makedirs(path, exist_ok=True)
         return path
 
     def _get_session_path(self, session_id: str, program_id: str = None) -> str:
@@ -798,7 +801,6 @@ class BaseProgramRunner:
 
         prog = program_id or getattr(self, "sessions_program", {}).get(session_id) or getattr(self, "program_id", None) or get_active_program()
         target_dir = os.path.join(project_root, "core", "programs", prog, "sessions")
-        os.makedirs(target_dir, exist_ok=True)
         return os.path.join(target_dir, f"{safe_id}.json")
 
     async def replace_image_with_video_in_session(self, session_id: str, old_image_url: str, new_video_url: str) -> bool:
@@ -820,7 +822,8 @@ class BaseProgramRunner:
         """Appends a new raw message to the session history."""
         with self._lock:
             if session_id not in self.sessions_history:
-                self.sessions_history[session_id] = []
+                self._load_session_from_disk(session_id)
+                self.sessions_history.setdefault(session_id, [])
 
             if not msg_id:
                 if text.startswith("[SYSTEM: User has completed"):
@@ -848,7 +851,7 @@ class BaseProgramRunner:
 
             from runners.program import get_active_program
             from core.program_config import _load_card_data
-            active_prog = get_active_program() or "sebile"
+            active_prog = sender_id or get_active_program() or "sebile"
             card = _load_card_data(active_prog)
             prog_name = card.get("name") or active_prog.title()
 
@@ -861,7 +864,7 @@ class BaseProgramRunner:
             if prompt:
                 msg["prompt"] = prompt
             if role == "program":
-                msg["sender_id"] = sender_id or active_prog
+                msg["sender_id"] = active_prog
                 msg["sender_name"] = sender_name or prog_name
 
             self.sessions_history[session_id].append(msg)
@@ -870,10 +873,11 @@ class BaseProgramRunner:
 
     async def append_voice_call(self, session_id: str, transcript: str, timestamp: float = None, start_time: float = None) -> bool:
         """Appends a voice call transcript entry to the session history."""
-        if session_id not in self.sessions_history:
-            self.sessions_history[session_id] = []
-
         with self._lock:
+            if session_id not in self.sessions_history:
+                self._load_session_from_disk(session_id)
+                self.sessions_history.setdefault(session_id, [])
+
             voice_msg = {
                 "id": f"voice_{uuid.uuid4().hex}",
                 "role": "voice-call",
@@ -1230,6 +1234,16 @@ class OpenSourceRunner(BaseProgramRunner):
             with self._lock:
                 try:
                     prog = getattr(self, "sessions_program", {}).get(session_id) or getattr(self, "program_id", None) or get_active_program()
+                    target_path = self._get_session_path(session_id, program_id=prog)
+                    sessions_dir = os.path.dirname(target_path)
+                    prog_dir = os.path.dirname(sessions_dir)
+                    prog_folder_name = os.path.basename(prog_dir)
+                    if not os.path.isdir(prog_dir) or (
+                        prog_folder_name != "sebile"
+                        and not os.path.isfile(os.path.join(prog_dir, f"{prog_folder_name}.json"))
+                    ):
+                        return
+
                     memory_meta = self._get_memory_meta(session_id)
                     memory_meta.pop("unsummarized_buffer", None)
 
@@ -1246,9 +1260,17 @@ class OpenSourceRunner(BaseProgramRunner):
                     }
                     if session_id in self.sessions_group_meta:
                         data["group_meta"] = self.sessions_group_meta[session_id]
+                    elif os.path.exists(target_path):
+                        try:
+                            with open(target_path, "r", encoding="utf-8") as ef:
+                                existing = json.load(ef)
+                            if isinstance(existing, dict) and existing.get("group_meta"):
+                                self.sessions_group_meta[session_id] = existing["group_meta"]
+                                data["group_meta"] = existing["group_meta"]
+                        except Exception:
+                            pass
 
-                    target_path = self._get_session_path(session_id, program_id=prog)
-                    os.makedirs(os.path.dirname(target_path), exist_ok=True)
+                    os.makedirs(sessions_dir, exist_ok=True)
                     temp_path = target_path + ".tmp"
                     with open(temp_path, "w", encoding="utf-8") as f:
                         json.dump(data, f, indent=2, ensure_ascii=False)
@@ -1306,6 +1328,8 @@ class OpenSourceRunner(BaseProgramRunner):
             history = self.sessions_history.setdefault(session_id, [])
 
             if not history:
+                if isinstance(session_id, str) and session_id.startswith("group_") and session_id not in self.sessions_group_meta:
+                    return
                 try:
                     from core.program_config import get_program_greeting, replace_placeholders
 
@@ -1403,12 +1427,22 @@ class OpenSourceRunner(BaseProgramRunner):
                 None,
             )
 
+            role = msg.get("role", "user")
+            sender_id = msg.get("sender_id")
+            sender_name = msg.get("sender_name")
+
             for m in media:
                 if image_prompt:
                     m.setdefault("prompt", image_prompt)
-                if not m.get("prompt") and m.get("url"):
+                if m.get("url"):
                     local_img = _get_safe_local_path(m["url"])
                     if local_img:
+                        norm_local = os.path.normpath(local_img)
+                        progs_norm = os.path.normpath(str(PROGRAMS_DIR)) + os.sep
+                        if norm_local.startswith(progs_norm):
+                            rel_prog = norm_local[len(progs_norm):].split(os.sep, 1)[0]
+                            if rel_prog:
+                                m.setdefault("program_id", rel_prog)
                         sidecar_path = os.path.splitext(local_img)[0] + ".json"
                         if os.path.exists(sidecar_path):
                             try:
@@ -1416,14 +1450,22 @@ class OpenSourceRunner(BaseProgramRunner):
                                     s_data = json.load(sf)
                                     if s_prompt := s_data.get("prompt"):
                                         m["prompt"] = s_prompt
+                                    if s_prog := s_data.get("program_id"):
+                                        m["program_id"] = s_prog
                             except Exception:
                                 pass
+                if role == "program" and sender_id and not m.get("program_id"):
+                    m["program_id"] = sender_id
 
-            role = msg.get("role", "user")
-            sender_id = msg.get("sender_id")
-            sender_name = msg.get("sender_name")
             if not sender_id and role == "program":
-                sender_id = get_active_program()
+                sender_id = next((m.get("program_id") for m in media if m.get("program_id")), None) or get_active_program()
+            if role == "program" and sender_id and not sender_name:
+                try:
+                    from core.program_config import _load_card_data
+                    s_card = _load_card_data(sender_id)
+                    sender_name = (s_card.get("name") if s_card else None) or sender_id.title()
+                except Exception:
+                    sender_name = sender_id.title()
 
             return {
                 "id": msg.get("id", ""),

@@ -28,7 +28,10 @@ def _read(path: str) -> list[dict]:
 
 
 def _write(path: str, quests: list[dict]):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+    parent_dir = os.path.dirname(path)
+    prog_name = os.path.basename(parent_dir)
+    if not os.path.isdir(parent_dir) or (prog_name != "sebile" and not os.path.isfile(os.path.join(parent_dir, f"{prog_name}.json"))):
+        return
     temp_path = f"{path}.{uuid.uuid4().hex}.tmp"
     with open(temp_path, "w", encoding="utf-8") as f:
         json.dump(quests, f, indent=2, ensure_ascii=False)

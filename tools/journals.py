@@ -25,8 +25,10 @@ def get_journal_entries(program_id: str = None) -> list:
 def save_journal_entries(entries: list, program_id: str = None):
     path = _get_journals_path(program_id)
     try:
-        # Ensure parent folder exists
-        os.makedirs(os.path.dirname(path), exist_ok=True)
+        parent_dir = os.path.dirname(path)
+        prog_name = os.path.basename(parent_dir)
+        if not os.path.isdir(parent_dir) or (prog_name != "sebile" and not os.path.isfile(os.path.join(parent_dir, f"{prog_name}.json"))):
+            return
         temp_path = path + ".tmp"
         with open(temp_path, "w", encoding="utf-8") as f:
             json.dump(entries, f, indent=2, ensure_ascii=False)

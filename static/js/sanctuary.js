@@ -175,29 +175,57 @@ async function softReloadApp() {
         } else {
             programWelcomeMessage = null;
         }
-        
+
         if (data.active_program) {
+            activeProgramId = data.active_program;
             applyTheme(data.active_program, data.theme);
         }
-        if (data.character_name) {
-            activeProgramName = data.character_name;
-            const programTitle = "Sanctuary";
-            document.title = programTitle;
-            
+
+        if (data.group_meta && data.group_meta.is_group) {
+            currentGroupMeta = data.group_meta;
+            selectedGroupProgramIds = [
+                currentGroupMeta.host_id,
+                ...(currentGroupMeta.guest_ids || [])
+            ];
+            const groupTitle = "Sanctuary";
+            document.title = groupTitle;
             const headerTitle = document.querySelector('.header-title-area h1');
             if (headerTitle) {
-                headerTitle.textContent = programTitle;
+                headerTitle.textContent = groupTitle;
             }
-            
             const userInput = document.getElementById('user-input');
             if (userInput) {
-                userInput.placeholder = "Ask " + data.character_name;
+                userInput.placeholder = "Message group...";
+            }
+            if (currentGroupMeta.members) {
+                currentGroupMeta.members.forEach(m => {
+                    if (m.theme) {
+                        cacheProgramTheme(m.id, m.theme);
+                    }
+                });
+            }
+        } else {
+            currentGroupMeta = null;
+            selectedGroupProgramIds = [];
+            if (data.character_name) {
+                activeProgramName = data.character_name;
+                const programTitle = "Sanctuary";
+                document.title = programTitle;
+                
+                const headerTitle = document.querySelector('.header-title-area h1');
+                if (headerTitle) {
+                    headerTitle.textContent = programTitle;
+                }
+                
+                const userInput = document.getElementById('user-input');
+                if (userInput) {
+                    userInput.placeholder = "Ask " + data.character_name;
+                }
             }
         }
         
         // Refresh avatar profile buster and select model options
         profileCacheBuster = Date.now();
-        updateProfileImages();
         modelInitPromise = initializeModelSelect();
 
         const _hiddenPrefixes = ['port_', 'quest_', 'tool_', 'sys_', 'itm_'];
@@ -1804,6 +1832,7 @@ function getProfileUrl() {
 
 // Helper to update profile/list avatars, automatically restoring from circle placeholder DIVs to IMGs
 function updateAvatarElement(el, newSrc) {
+    const speakerId = el.getAttribute('data-sender-id') || el.closest('.message-row')?.dataset?.senderId || null;
     if (el.classList.contains('avatar-circle') || el.tagName === 'DIV') {
         const img = document.createElement('img');
         img.className = el.className.replace('avatar-circle', '').trim();
@@ -1817,28 +1846,31 @@ function updateAvatarElement(el, newSrc) {
             }
         }
         
-        img.style.cssText = el.style.cssText;
         img.style.display = 'block';
         
         if (el.onclick) {
             img.onclick = el.onclick;
         } else if (el.classList.contains('program-avatar')) {
-            img.onclick = () => expandImage(newSrc);
+            img.onclick = () => expandImage(newSrc, speakerId);
         }
         
         el.replaceWith(img);
     } else {
         el.src = newSrc;
         if (el.classList.contains('program-avatar')) {
-            el.onclick = () => expandImage(newSrc);
+            el.onclick = () => expandImage(newSrc, speakerId);
         }
     }
 }
 
 // --- updateProfileImages ---
-function updateProfileImages() {
-    const url = getProfileUrl();
+function updateProfileImages(targetProgramId = null) {
     document.querySelectorAll('.program-avatar').forEach(img => {
+        const speakerId = img.getAttribute('data-sender-id') || img.closest('.message-row')?.dataset?.senderId || activeProgramId;
+        if (targetProgramId && speakerId && speakerId !== targetProgramId) {
+            return;
+        }
+        const url = speakerId ? `/programs/${speakerId}/profile.png?t=${profileCacheBuster}` : getProfileUrl();
         updateAvatarElement(img, url);
     });
 }
@@ -5469,11 +5501,15 @@ function renderMessage(msg, isLive = false) {
 
         const avatar = document.createElement('img');
         avatar.className = 'avatar program-avatar';
+        avatar.setAttribute('data-sender-id', speakerId);
+        if (msg.sender_name) {
+            avatar.setAttribute('data-name', msg.sender_name);
+        }
         const profileUrl = speakerId ? `/programs/${speakerId}/profile.png?t=${profileCacheBuster}` : getProfileUrl();
         avatar.src = profileUrl;
         avatar.alt = msg.sender_name || 'Program';
         avatar.title = msg.sender_name ? `${msg.sender_name} (Click to expand)` : 'Click to expand profile';
-        avatar.onclick = () => expandImage(profileUrl);
+        avatar.onclick = () => expandImage(profileUrl, speakerId);
         avatarContainer.appendChild(avatar);
         row.appendChild(avatarContainer);
     }
@@ -5750,7 +5786,11 @@ function renderMessage(msg, isLive = false) {
                     portraitGrid.appendChild(videoContainer);
                 } else {
                     const itemPrompt = mediaItem.prompt || sharedPrompt;
-                    const imgContainer = createPortraitCardElement(imgUrl, itemPrompt, msgId, role);
+                    const itemProgramId = mediaItem.program_id || (role === 'program' ? (msg.sender_id || activeProgramId) : null);
+                    const imgContainer = createPortraitCardElement(imgUrl, itemPrompt, msgId, role, itemProgramId);
+                    if (itemProgramId && imgUrl) {
+                        imageOwners[getRelativePath(imgUrl)] = itemProgramId;
+                    }
                     portraitGrid.appendChild(imgContainer);
                 }
             });
@@ -6069,9 +6109,10 @@ function createTypingIndicatorRow(speakerId = null) {
     avatarContainer.className = 'avatar-container';
     const avatar = document.createElement('img');
     avatar.className = 'avatar program-avatar';
+    avatar.setAttribute('data-sender-id', targetId);
     avatar.src = profileUrl;
     avatar.alt = targetId ? targetId.charAt(0).toUpperCase() + targetId.slice(1) : 'Program';
-    avatar.onclick = () => expandImage(profileUrl);
+    avatar.onclick = () => expandImage(profileUrl, targetId);
     avatarContainer.appendChild(avatar);
     typingIndicatorRow.appendChild(avatarContainer);
 
@@ -6882,6 +6923,12 @@ async function loadServerImages() {
         if (data.images) {
             serverImages = data.images;
         }
+        if (data.images_by_program) {
+            serverImagesByProgram = data.images_by_program;
+        }
+        if (data.image_owners) {
+            Object.assign(imageOwners, data.image_owners);
+        }
         
         if (typeof pollQueueStatus === 'function') {
             pollQueueStatus();
@@ -6889,6 +6936,47 @@ async function loadServerImages() {
     } catch (e) {
         console.error("Error loading server images:", e);
     }
+}
+
+// Helper to resolve the owner program ID for an image
+function resolveImageOwner(src, fallbackProgramId = null) {
+    if (!src) return fallbackProgramId || activeProgramId;
+    const rel = getRelativePath(src);
+
+    // Direct owner map check
+    if (imageOwners[rel]) {
+        return imageOwners[rel];
+    }
+
+    // Check profile picture path pattern: /programs/<id>/profile.png
+    const progProfileMatch = rel.match(/^\/?programs\/([^/]+)\/profile\.(png|svg)/i);
+    if (progProfileMatch) {
+        return progProfileMatch[1];
+    }
+
+    // Check DOM elements showing this image
+    const imgs = document.querySelectorAll('.message-image-container img, .portrait-grid img');
+    for (const img of imgs) {
+        if (getRelativePath(img.src) === rel) {
+            const container = img.closest('.message-image-container');
+            if (container && container.dataset.speakerId) {
+                return container.dataset.speakerId;
+            }
+            const row = img.closest('.message-row');
+            if (row && row.dataset.senderId) {
+                return row.dataset.senderId;
+            }
+        }
+    }
+
+    // Check serverImagesByProgram
+    for (const [progId, progImgs] of Object.entries(serverImagesByProgram)) {
+        if (Array.isArray(progImgs) && progImgs.some(p => getRelativePath(p) === rel)) {
+            return progId;
+        }
+    }
+
+    return fallbackProgramId || activeProgramId;
 }
 
 // Helper to check if a path refers to a profile picture
@@ -6900,11 +6988,18 @@ function isProfileImage(path) {
 }
 
 // --- getGalleryImages ---
-function getGalleryImages() {
+function getGalleryImages(targetProgramId = null) {
     const imgs = [];
     
-    // Add server-side generated portraits and media
-    if (Array.isArray(serverImages)) {
+    // When targetProgramId is specified, restrict to that program's images
+    if (targetProgramId && serverImagesByProgram[targetProgramId]) {
+        serverImagesByProgram[targetProgramId].forEach(img => {
+            const rel = getRelativePath(img);
+            if (!isProfileImage(rel) && !imgs.includes(rel)) {
+                imgs.push(rel);
+            }
+        });
+    } else if (!targetProgramId && Array.isArray(serverImages)) {
         serverImages.forEach(img => {
             const rel = getRelativePath(img);
             if (!isProfileImage(rel) && !imgs.includes(rel)) {
@@ -6916,6 +7011,9 @@ function getGalleryImages() {
     // Collect any additional message images and videos currently in the DOM
     const rows = document.querySelectorAll('.message-row');
     rows.forEach(row => {
+        if (targetProgramId && row.dataset.senderId && row.dataset.senderId !== targetProgramId) {
+            return;
+        }
         const bubble = row.querySelector('.message');
         if (bubble) {
             const messageImgs = bubble.querySelectorAll('img');
@@ -6944,11 +7042,12 @@ function getGalleryImages() {
 }
 
 // --- expandImage ---
-function expandImage(src) {
-    galleryImages = getGalleryImages();
+function expandImage(src, speakerId = null) {
+    currentModalProgramId = speakerId || resolveImageOwner(src, (currentGroupMeta && currentGroupMeta.is_group) ? null : activeProgramId);
+    galleryImages = getGalleryImages(currentModalProgramId);
     
     if (galleryImages.length === 0) {
-        showCustomAlert("No Media", "No portraits or generated images exist in this sanctuary yet.");
+        showCustomAlert("No Media", "No portraits or generated images exist for this character yet.");
         return;
     }
 
@@ -7061,7 +7160,7 @@ function nextGalleryImage(event) {
 }
 
 // --- createPortraitCardElement ---
-function createPortraitCardElement(imgUrl, prompt, msgId, role = 'program') {
+function createPortraitCardElement(imgUrl, prompt, msgId, role = 'program', speakerId = null) {
     const imgContainer = document.createElement('div');
     imgContainer.className = 'message-image-container';
     if (imgUrl) {
@@ -7070,6 +7169,9 @@ function createPortraitCardElement(imgUrl, prompt, msgId, role = 'program') {
     imgContainer.dataset.prompt = prompt || '';
     if (msgId) {
         imgContainer.dataset.msgId = msgId;
+    }
+    if (speakerId) {
+        imgContainer.dataset.speakerId = speakerId;
     }
 
     const overlay = document.createElement('div');
@@ -7198,7 +7300,7 @@ function createPortraitCardElement(imgUrl, prompt, msgId, role = 'program') {
         img.src = imgUrl;
         img.style.cursor = 'pointer';
         img.title = 'Click to expand';
-        img.onclick = () => expandImage(imgContainer.dataset.imageUrl || img.src);
+        img.onclick = () => expandImage(imgContainer.dataset.imageUrl || img.src, speakerId || imgContainer.dataset.speakerId || imgContainer.closest('.message-row')?.dataset?.senderId);
         imgContainer.appendChild(img);
     }
 
@@ -7479,6 +7581,7 @@ function setCurrentImageAsProfile(event) {
     const currentSrc = galleryImages[currentGalleryIndex];
     if (!currentSrc || isProfileImage(currentSrc)) return;
 
+    cropTargetProgramId = resolveImageOwner(currentSrc, currentModalProgramId || activeProgramId);
     closeModal();
     cropSourcePath = currentSrc;
 
@@ -7599,6 +7702,7 @@ async function saveCroppedProfile(event) {
     closeCropModal();
     
     try {
+        const targetProg = cropTargetProgramId || currentModalProgramId || activeProgramId;
         const response = await fetch('/api/programs/profile_picture/crop', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -7607,14 +7711,19 @@ async function saveCroppedProfile(event) {
                 x: cropData.x,
                 y: cropData.y,
                 width: cropData.width,
-                height: cropData.height
+                height: cropData.height,
+                program_id: targetProg
             })
         });
         
         if (response.ok) {
+            const data = await response.json();
+            const updatedProg = data.program_id || targetProg;
             profileCacheBuster = Date.now();
-            updateProfileImages();
+            updateProfileImages(updatedProg);
             document.querySelectorAll('.program-list-avatar').forEach(img => {
+                const progId = img.getAttribute('data-id');
+                if (progId && progId !== updatedProg) return;
                 const originalSrc = img.tagName === 'DIV' ? img.getAttribute('src') : img.src;
                 if (originalSrc) {
                     const newSrc = originalSrc.split('?')[0] + `?t=${profileCacheBuster}`;
@@ -7677,13 +7786,23 @@ async function generatePortraitPrompt() {
     }
 
     let targetSpeaker = activeProgramId;
+    const customPrompt = userInput ? userInput.value.trim() : "";
+
     if (currentGroupMeta && currentGroupMeta.is_group) {
-        const programRows = Array.from(chatContainer.querySelectorAll('.message-row.program-row'));
-        for (let i = programRows.length - 1; i >= 0; i--) {
-            const row = programRows[i];
-            if (row.dataset.senderId) {
-                targetSpeaker = row.dataset.senderId;
-                break;
+        if (customPrompt && typeof detectTargetGroupSpeaker === 'function') {
+            const detected = detectTargetGroupSpeaker(customPrompt);
+            if (detected) {
+                targetSpeaker = detected;
+            }
+        }
+        if (!targetSpeaker || targetSpeaker === activeProgramId) {
+            const programRows = Array.from(chatContainer.querySelectorAll('.message-row.program-row'));
+            for (let i = programRows.length - 1; i >= 0; i--) {
+                const row = programRows[i];
+                if (row.dataset.senderId) {
+                    targetSpeaker = row.dataset.senderId;
+                    break;
+                }
             }
         }
     }
@@ -7693,7 +7812,6 @@ async function generatePortraitPrompt() {
     chatContainer.scrollTop = chatContainer.scrollHeight;
 
     try {
-        const customPrompt = userInput ? userInput.value.trim() : "";
         const response = await fetch('/api/portrait/generate', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -7900,7 +8018,7 @@ async function regenerateImage(buttonElement, oldImageUrl, prompt) {
                 placeholder.remove();
             }
             img.src = data.new_image_url;
-            img.onclick = () => expandImage(container.dataset.imageUrl || img.src);
+            img.onclick = () => expandImage(container.dataset.imageUrl || img.src, speakerId || container.dataset.speakerId || container.closest('.message-row')?.dataset?.senderId);
 
             if (grid) {
                 updatePortraitGridToolbar(grid);
@@ -9612,6 +9730,25 @@ function startSSE() {
                 }
                 // Refresh model dropdown to reflect online/offline changes
                 initializeModelSelect();
+
+                // Cross-device sync: If active program was deleted or removed from server, switch to active_program / Sebile
+                if (Array.isArray(status.programs) && activeProgramId && !status.programs.includes(activeProgramId)) {
+                    const fallback = status.active_program || 'sebile';
+                    if (typeof selectAssistant === 'function') {
+                        selectAssistant(fallback);
+                    }
+                }
+
+                // If assistant modal is open, refresh if listed programs don't match
+                const assistantModal = document.getElementById('assistant-modal');
+                if (assistantModal && assistantModal.style.display !== 'none' && Array.isArray(status.programs)) {
+                    if (typeof currentLoadedAssistants !== 'undefined' && Array.isArray(currentLoadedAssistants)) {
+                        const hasDeleted = currentLoadedAssistants.some(p => !status.programs.includes(p.id));
+                        if (hasDeleted && typeof openAssistantModal === 'function') {
+                            openAssistantModal();
+                        }
+                    }
+                }
             } catch (err) {
                 console.error('SSE parse error:', err);
             }
@@ -9663,6 +9800,10 @@ function startSSE() {
 }
 
 let serverImages = [];
+let serverImagesByProgram = {};
+let imageOwners = {};
+let currentModalProgramId = null;
+let cropTargetProgramId = null;
 
 let galleryImages = [];
 let currentGalleryIndex = -1;
@@ -9922,15 +10063,30 @@ function switchToCircleAvatar(img) {
         name = img.getAttribute('data-name') || '';
         color = img.getAttribute('data-color') || '';
     } else {
-        name = activeProgramName || '';
+        const speakerId = img.getAttribute('data-sender-id') || img.closest('.message-row')?.dataset?.senderId;
+        if (speakerId && currentGroupMeta && currentGroupMeta.members) {
+            const member = currentGroupMeta.members.find(m => m.id === speakerId);
+            if (member) {
+                name = member.name || speakerId;
+                const cachedTheme = programThemesCache[speakerId] || member.theme;
+                if (cachedTheme) {
+                    color = cachedTheme.primary_accent || cachedTheme.main_color;
+                }
+            }
+        }
+        if (!name) {
+            name = img.getAttribute('data-name') || activeProgramName || '';
+        }
         if (!name) {
             const input = document.getElementById('user-input');
             if (input && input.placeholder && input.placeholder.startsWith('Ask ')) {
                 name = input.placeholder.replace('Ask ', '');
             }
         }
-        color = getComputedStyle(document.documentElement).getPropertyValue('--primary-accent').trim() || '#38bdf8';
-        useAccent = true;
+        if (!color) {
+            color = getComputedStyle(document.documentElement).getPropertyValue('--primary-accent').trim() || '#38bdf8';
+            useAccent = true;
+        }
     }
     
     if (!name) name = 'Program';

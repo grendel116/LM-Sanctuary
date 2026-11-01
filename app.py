@@ -529,11 +529,14 @@ def app_icon():
 
 @app.route('/profile.png')
 def profile_png():
+    import io
     from runners.program import get_active_program
     active_program = get_active_program()
     path_png = os.path.join('core', 'programs', active_program, 'portraits', 'profile.png')
     if os.path.exists(path_png):
-        response = send_file(path_png)
+        with open(path_png, 'rb') as f:
+            buf = io.BytesIO(f.read())
+        response = send_file(buf, mimetype='image/png', download_name='profile.png')
         from flask import make_response
         res = make_response(response)
         res.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
@@ -544,11 +547,14 @@ def profile_png():
 
 @app.route('/programs/<program_id>/profile.png')
 def program_profile_png(program_id):
+    import io
     if not PROGRAM_ID_RE.match(program_id):
         return "Invalid program ID", 400
     path_png = os.path.join(get_program_dir(program_id), 'portraits', 'profile.png')
     if os.path.exists(path_png):
-        response = send_file(path_png)
+        with open(path_png, 'rb') as f:
+            buf = io.BytesIO(f.read())
+        response = send_file(buf, mimetype='image/png', download_name='profile.png')
         res = make_response(response)
         res.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
         return res
@@ -565,6 +571,8 @@ def crop_profile_picture():
         from variables.settings import PROGRAMS_DIR
         from runners.program import get_active_program
         from PIL import Image
+        from urllib.parse import unquote
+        import mimetypes
         
         data = request.get_json(silent=True) or {}
         source_image = data.get('source_image', '')
@@ -579,26 +587,60 @@ def crop_profile_picture():
         # Strip query parameters and decode URL encoding
         if '?' in source_image:
             source_image = source_image.split('?')[0]
-        from urllib.parse import unquote
         source_image = unquote(source_image)
 
-        program_id = data.get('program_id') or get_active_program()
+        requested_program_id = data.get('program_id')
+        program_id = requested_program_id or get_active_program()
         program_dir = os.path.join(PROGRAMS_DIR, program_id)
         
         # Resolve source image path from the URL path to a local file path
-        # Source paths arrive as /images/portraits/xyz.png or /images/xyz.png
+        source_path = None
+        detected_owner = None
         if source_image.startswith('/images/'):
             relative_path = source_image[len('/images/'):]
-            source_path = os.path.normpath(os.path.join(program_dir, relative_path))
-            if os.path.commonpath([os.path.abspath(source_path), os.path.abspath(program_dir)]) != os.path.abspath(program_dir):
+            cand_path = os.path.normpath(os.path.join(program_dir, relative_path))
+            if os.path.commonpath([os.path.abspath(cand_path), os.path.abspath(program_dir)]) != os.path.abspath(program_dir):
                 return jsonify({'error': 'Unsupported image path'}), 400
+            if os.path.exists(cand_path):
+                source_path = cand_path
+                detected_owner = program_id
+            elif os.path.isdir(PROGRAMS_DIR):
+                for alt_prog in os.listdir(PROGRAMS_DIR):
+                    alt_dir = os.path.join(PROGRAMS_DIR, alt_prog)
+                    if not os.path.isdir(alt_dir):
+                        continue
+                    alt_cand = os.path.normpath(os.path.join(alt_dir, relative_path))
+                    if os.path.commonpath([os.path.abspath(alt_cand), os.path.abspath(alt_dir)]) == os.path.abspath(alt_dir):
+                        if os.path.isfile(alt_cand):
+                            source_path = alt_cand
+                            detected_owner = alt_prog
+                            break
+            if source_path:
+                sidecar_path = os.path.splitext(source_path)[0] + '.json'
+                if os.path.exists(sidecar_path):
+                    try:
+                        with open(sidecar_path, 'r', encoding='utf-8') as sf:
+                            s_data = json.load(sf)
+                        if s_data.get('program_id'):
+                            detected_owner = s_data['program_id']
+                    except Exception:
+                        pass
+        elif source_image.startswith('/programs/') and source_image.endswith('/profile.png'):
+            parts = source_image.strip('/').split('/')
+            if len(parts) == 3 and PROGRAM_ID_RE.match(parts[1]):
+                detected_owner = parts[1]
+                source_path = os.path.normpath(os.path.join(PROGRAMS_DIR, detected_owner, 'portraits', 'profile.png'))
         elif source_image.startswith('/profile.png'):
             source_path = os.path.normpath(os.path.join(program_dir, 'portraits', 'profile.png'))
         else:
             return jsonify({'error': 'Unsupported image path'}), 400
         
-        if not os.path.exists(source_path):
+        if not source_path or not os.path.exists(source_path):
             return jsonify({'error': f'Source image not found: {source_image}'}), 404
+
+        if not requested_program_id and detected_owner:
+            program_id = detected_owner
+            program_dir = os.path.join(PROGRAMS_DIR, program_id)
         
         # Crop and resize with PIL
         with Image.open(source_path) as img:
@@ -622,7 +664,11 @@ def crop_profile_picture():
         cropped.save(dest_path, 'PNG')
         
         print(f"[PROFILE CROP] program={program_id}, source={source_path}, crop=({x},{y},{w},{h}), dest={dest_path}")
-        return jsonify({'status': 'success', 'message': 'Profile picture cropped and saved successfully.'})
+        return jsonify({
+            'status': 'success',
+            'program_id': program_id,
+            'message': 'Profile picture cropped and saved successfully.'
+        })
     except Exception as e:
         print(f"Error cropping profile picture: {e}")
         return jsonify({'error': str(e)}), 500
@@ -636,22 +682,34 @@ def serve_sparkle_mp3():
 @app.route('/images/<path:filename>')
 @requires_auth
 def serve_image(filename):
+    import io
+    import mimetypes
     from runners.program import get_active_program
     active_program = get_active_program() or os.getenv("ACTIVE_PROGRAM", "sebile")
-    program_dir = os.path.join(base_dir, 'core', 'programs', active_program)
-    candidate_path = os.path.join(program_dir, filename)
-    if os.path.exists(candidate_path):
-        return send_from_directory(program_dir, filename)
-
     programs_root = os.path.join(base_dir, 'core', 'programs')
-    if os.path.isdir(programs_root):
+    program_dir = os.path.join(programs_root, active_program)
+
+    target_path = None
+    cand_path = os.path.normpath(os.path.join(program_dir, filename))
+    if os.path.commonpath([os.path.abspath(cand_path), os.path.abspath(program_dir)]) == os.path.abspath(program_dir) and os.path.isfile(cand_path):
+        target_path = cand_path
+    elif os.path.isdir(programs_root):
         for prog in os.listdir(programs_root):
             alt_dir = os.path.join(programs_root, prog)
-            alt_path = os.path.join(alt_dir, filename)
-            if os.path.isfile(alt_path):
-                return send_from_directory(alt_dir, filename)
+            if not os.path.isdir(alt_dir):
+                continue
+            alt_path = os.path.normpath(os.path.join(alt_dir, filename))
+            if os.path.commonpath([os.path.abspath(alt_path), os.path.abspath(alt_dir)]) == os.path.abspath(alt_dir) and os.path.isfile(alt_path):
+                target_path = alt_path
+                break
 
-    return send_from_directory(program_dir, filename)
+    if not target_path:
+        return "Image not found", 404
+
+    mime_type, _ = mimetypes.guess_type(target_path)
+    with open(target_path, 'rb') as f:
+        buf = io.BytesIO(f.read())
+    return send_file(buf, mimetype=mime_type or 'application/octet-stream', download_name=os.path.basename(target_path))
 
 @app.route('/api/get_image_prompt', methods=['GET'])
 @requires_auth
@@ -1562,9 +1620,20 @@ def regenerate_image():
 _cached_portrait_tags: dict[tuple[str, str], str] = {}
 
 
-def resolve_portrait_speaker_id(session_id: str, chat_history: list = None, requested_speaker_id: str = None) -> str:
+def resolve_portrait_speaker_id(session_id: str, chat_history: list = None, requested_speaker_id: str = None, custom_prompt: str = None) -> str:
     """Determines which character is the active subject for portrait generation in solo or group sessions."""
     from runners.program import get_active_program
+    from runners.runner import detect_addressed_speaker
+
+    group_meta = getattr(runner, "sessions_group_meta", {}).get(session_id)
+    if group_meta and group_meta.get("is_group") and custom_prompt and custom_prompt.strip():
+        host_id = group_meta.get("host_id")
+        guest_ids = group_meta.get("guest_ids", [])
+        all_ids = [p for p in ([host_id] + [g for g in guest_ids if g != host_id]) if p]
+        addressed = detect_addressed_speaker(custom_prompt, all_ids)
+        if addressed:
+            return addressed
+
     if requested_speaker_id and PROGRAM_ID_RE.match(str(requested_speaker_id)):
         return str(requested_speaker_id)
 
@@ -1710,7 +1779,7 @@ def api_generate_portrait():
         if session_id in cancelled_sessions:
             return jsonify({'error': 'Portrait generation cancelled by user.'}), 400
 
-        target_prog = resolve_portrait_speaker_id(session_id, requested_speaker_id=requested_speaker)
+        target_prog = resolve_portrait_speaker_id(session_id, requested_speaker_id=requested_speaker, custom_prompt=custom_prompt)
 
         import tools.tools as tools
         tools.current_session_id.set(session_id)
@@ -1877,26 +1946,54 @@ def list_generations():
 @requires_auth
 def list_images():
     try:
-        active_program = os.getenv("ACTIVE_PROGRAM", "sebile")
-        program_dir = os.path.join('core', 'programs', active_program)
-        all_items = []
+        from runners.program import get_active_program
+        requested_program = request.args.get('program_id')
+        active_program = requested_program or get_active_program() or os.getenv("ACTIVE_PROGRAM", "sebile")
+        programs_root = os.path.join('core', 'programs')
         valid_exts = ('.png', '.jpg', '.jpeg', '.gif', '.mp4', '.webm')
 
-        for folder in ('portraits', 'media'):
-            target_dir = os.path.join(program_dir, folder)
-            if os.path.exists(target_dir):
-                for f in os.listdir(target_dir):
-                    if f.lower().endswith(valid_exts) and f.lower() not in ('profile.png', 'profile.svg'):
-                        full_path = os.path.join(target_dir, f)
-                        if os.path.isfile(full_path):
-                            all_items.append({
-                                'url': f"/images/{folder}/{f}",
-                                'mtime': os.path.getmtime(full_path)
-                            })
+        images_by_program = {}
+        image_owners = {}
 
-        all_items.sort(key=lambda x: x['mtime'], reverse=True)
-        image_urls = [x['url'] for x in all_items]
-        return jsonify({'images': image_urls})
+        if os.path.isdir(programs_root):
+            for prog in os.listdir(programs_root):
+                prog_dir = os.path.join(programs_root, prog)
+                if not os.path.isdir(prog_dir):
+                    continue
+                prog_items = []
+                for folder in ('portraits', 'media'):
+                    target_dir = os.path.join(prog_dir, folder)
+                    if os.path.exists(target_dir):
+                        for f in os.listdir(target_dir):
+                            if f.lower().endswith(valid_exts) and f.lower() not in ('profile.png', 'profile.svg'):
+                                full_path = os.path.join(target_dir, f)
+                                if os.path.isfile(full_path):
+                                    url = f"/images/{folder}/{f}"
+                                    owner = prog
+                                    sidecar = os.path.splitext(full_path)[0] + '.json'
+                                    if os.path.exists(sidecar):
+                                        try:
+                                            with open(sidecar, 'r', encoding='utf-8') as sf:
+                                                sdata = json.load(sf)
+                                            if sdata.get('program_id'):
+                                                owner = sdata['program_id']
+                                        except Exception:
+                                            pass
+                                    prog_items.append({
+                                        'url': url,
+                                        'mtime': os.path.getmtime(full_path),
+                                        'owner': owner
+                                    })
+                                    image_owners[url] = owner
+                prog_items.sort(key=lambda x: x['mtime'], reverse=True)
+                images_by_program[prog] = [x['url'] for x in prog_items]
+
+        image_urls = images_by_program.get(active_program, [])
+        return jsonify({
+            'images': image_urls,
+            'images_by_program': images_by_program,
+            'image_owners': image_owners
+        })
     except Exception as e:
         print(f"Error listing images: {e}")
         return jsonify({'error': str(e)}), 500
@@ -2793,7 +2890,7 @@ def list_sessions():
                             with open(fpath, "r", encoding="utf-8") as sf:
                                 sdata = json.load(sf)
                             gm = sdata.get("group_meta")
-                            if gm and gm.get("host_id") and gm.get("host_id") != active_program:
+                            if not gm or not gm.get("is_group") or not gm.get("host_id") or gm.get("host_id") != active_program or not gm.get("guest_ids"):
                                 try:
                                     os.remove(fpath)
                                 except Exception:
@@ -2831,6 +2928,15 @@ def list_programs():
             for folder in os.listdir(PROGRAMS_DIR):
                 folder_path = get_program_dir(folder)
                 if os.path.isdir(folder_path):
+                    if folder != "sebile":
+                        has_json = os.path.isfile(os.path.join(folder_path, f"{folder}.json"))
+                        has_md = any(f.lower().endswith(".md") for f in os.listdir(folder_path))
+                        if not has_json and not has_md:
+                            try:
+                                shutil.rmtree(folder_path, ignore_errors=True)
+                            except Exception:
+                                pass
+                            continue
                     program_name = folder.title()
                     card = read_program_card(folder)
                     if card.get("name"):
@@ -2902,6 +3008,7 @@ def select_program():
 
         from core.program_config import get_program_name
         program_name = get_program_name()
+        broadcast_status()
         return jsonify({
             'status': 'success',
             'active': program_id,
@@ -2947,6 +3054,8 @@ def start_group_session():
 
         # Set active program to Host so theme, heart pulse, and mood belonging stay intact
         os.environ["ACTIVE_PROGRAM"] = host_id
+        global _cached_active_program
+        _cached_active_program = host_id
         try:
             from runners.program import set_active_program
             set_active_program(host_id)
@@ -2994,6 +3103,7 @@ def start_group_session():
         mood_meta = get_program_mood_metadata(host_id)
         from core.program_config import get_program_name
         program_name = get_program_name()
+        broadcast_status()
 
         return jsonify({
             'status': 'success',
@@ -3073,12 +3183,15 @@ def update_group_session_members():
                 except Exception:
                     pass
             os.environ["ACTIVE_PROGRAM"] = target_host_id
+            global _cached_active_program
+            _cached_active_program = target_host_id
             try:
                 from runners.program import set_active_program
                 set_active_program(target_host_id)
             except Exception:
                 pass
             reload_program_state()
+            broadcast_status()
         else:
             with open(old_session_path, 'w', encoding='utf-8') as f:
                 json.dump(session_data, f, indent=2, ensure_ascii=False)
@@ -3181,12 +3294,9 @@ def delete_program():
             return jsonify({'error': 'Cannot delete default program Sebile'}), 400
             
         program_path = os.path.join(base_dir, 'core', 'programs', program_id)
-        if not os.path.exists(program_path):
-            return jsonify({'error': f"Program '{program_id}' does not exist"}), 404
-
         to_remove = set()
 
-        # 1. Collect own sessions from disk
+        # 1. Collect own sessions from disk (if folder still exists)
         own_sessions_dir = os.path.join(program_path, 'sessions')
         if os.path.isdir(own_sessions_dir):
             for fname in os.listdir(own_sessions_dir):
@@ -3208,14 +3318,18 @@ def delete_program():
                             with open(fpath, 'r', encoding='utf-8') as sf:
                                 sdata = json.load(sf)
                             gm = sdata.get('group_meta', {})
-                            if gm.get('host_id') == program_id:
+                            if gm.get('host_id') == program_id or not gm.get('host_id'):
                                 to_remove.add(sid)
                                 os.remove(fpath)
                             elif program_id in gm.get('guest_ids', []):
                                 gm['guest_ids'] = [g for g in gm['guest_ids'] if g != program_id]
-                                sdata['group_meta'] = gm
-                                with open(fpath, 'w', encoding='utf-8') as sf:
-                                    json.dump(sdata, sf, indent=2, ensure_ascii=False)
+                                if not gm['guest_ids']:
+                                    to_remove.add(sid)
+                                    os.remove(fpath)
+                                else:
+                                    sdata['group_meta'] = gm
+                                    with open(fpath, 'w', encoding='utf-8') as sf:
+                                        json.dump(sdata, sf, indent=2, ensure_ascii=False)
                         except Exception as ex:
                             print(f"Error inspecting/cleaning group session {fname}: {ex}")
 
@@ -3227,10 +3341,12 @@ def delete_program():
                         to_remove.add(sid)
 
             for sid, gmeta in list(getattr(runner, 'sessions_group_meta', {}).items()):
-                if gmeta.get('host_id') == program_id:
+                if gmeta.get('host_id') == program_id or not gmeta.get('host_id'):
                     to_remove.add(sid)
                 elif program_id in gmeta.get('guest_ids', []):
                     gmeta['guest_ids'] = [g for g in gmeta['guest_ids'] if g != program_id]
+                    if not gmeta['guest_ids']:
+                        to_remove.add(sid)
 
             for sid in to_remove:
                 runner.sessions_history.pop(sid, None)
@@ -3257,8 +3373,13 @@ def delete_program():
 
         # 5. If the deleted program is currently active, switch to Sebile first
         from runners.program import get_active_program, set_active_program
+        global _cached_active_program
         active_program = get_active_program()
-        is_active = (program_id == active_program)
+        is_active = (
+            program_id == active_program
+            or getattr(runner, 'program_id', None) == program_id
+            or _cached_active_program == program_id
+        )
         if is_active:
             os.environ["ACTIVE_PROGRAM"] = "sebile"
             try:
@@ -3267,7 +3388,6 @@ def delete_program():
             except Exception as e:
                 print(f"Error resetting active program to sebile: {e}")
                 
-            global _cached_active_program
             _cached_active_program = "sebile"
 
             # Reload program config and re-initialize the runner
@@ -3297,16 +3417,35 @@ def delete_program():
         _theme_cache.pop(program_id, None)
 
         # 8. Delete the program folder recursively
-        import stat
-        def _handle_remove_readonly(func, path, exc_info):
-            try:
-                os.chmod(path, stat.S_IWRITE)
-                func(path)
-            except Exception:
-                pass
+        if os.path.exists(program_path):
+            import gc
+            import stat
+            gc.collect()
 
-        shutil.rmtree(program_path, onerror=_handle_remove_readonly)
+            def _handle_remove_readonly(func, path, exc_info):
+                try:
+                    os.chmod(path, stat.S_IWRITE)
+                    gc.collect()
+                    func(path)
+                except Exception:
+                    try:
+                        time.sleep(0.05)
+                        gc.collect()
+                        os.chmod(path, stat.S_IWRITE)
+                        func(path)
+                    except Exception as retry_err:
+                        print(f"[delete_program] Failed to remove {path}: {retry_err}")
+
+            shutil.rmtree(program_path, onerror=_handle_remove_readonly)
+            if os.path.exists(program_path):
+                time.sleep(0.1)
+                gc.collect()
+                shutil.rmtree(program_path, onerror=_handle_remove_readonly)
+
+            if os.path.exists(program_path):
+                return jsonify({'error': f"Failed to completely remove directory for '{program_id}'"}), 500
         
+        broadcast_status()
         return jsonify({'status': 'success', 'switched_to': 'sebile' if is_active else None})
     except Exception as e:
         traceback.print_exc()
@@ -3420,6 +3559,7 @@ def rename_program():
             
             # Reload configuration
             reload_program_state()
+            broadcast_status()
             
             return jsonify({
                 'status': 'success',
@@ -4399,6 +4539,7 @@ def import_tavern_program():
                 print(f"Warning: Could not save profile portrait: {pe}")
 
         finalize_imported_program(program_path, program_id, card_v3)
+        broadcast_status()
         return jsonify({'status': 'success', 'program_id': program_id, 'name': name})
 
     except Exception as e:
@@ -4435,6 +4576,7 @@ def import_describe_program():
         # 2. Only create directory and write files once card generation succeeds
         os.makedirs(program_path, exist_ok=True)
         finalize_imported_program(program_path, program_id, card_json)
+        broadcast_status()
             
         return jsonify({'status': 'success', 'program_id': program_id, 'name': name})
     except Exception as e:
@@ -4471,6 +4613,14 @@ def _get_current_status():
     comfy_running_state = comfy_manager.check_comfy_running(force_refresh=True)
     if not comfy_running_state and getattr(comfy_manager, '_starting', False):
         comfy_running_state = "starting"
+
+    valid_programs = []
+    if os.path.exists(PROGRAMS_DIR):
+        for folder in sorted(os.listdir(PROGRAMS_DIR)):
+            folder_path = os.path.join(PROGRAMS_DIR, folder)
+            if os.path.isdir(folder_path):
+                if folder == "sebile" or os.path.isfile(os.path.join(folder_path, f"{folder}.json")) or any(f.lower().endswith(".md") for f in os.listdir(folder_path)):
+                    valid_programs.append(folder)
         
     return {
         "remote_configured": is_remote_configured,
@@ -4481,6 +4631,8 @@ def _get_current_status():
         "comfy_installed": comfy_manager.check_comfy_installed(),
         "comfy_running": comfy_running_state,
         "temperature": temperature,
+        "active_program": get_active_program(),
+        "programs": valid_programs,
         "env_path": os.path.abspath(os.path.join(base_dir, '.env')),
     }
 
