@@ -7,7 +7,7 @@ Here, you roleplay, code, and chat with AI Programs on your own machine.
 
 ## ✨ THE ETHOS
 
-I believe in seizing AI and the means of production into collective ownership. Until then, we must decentralize and localize infrastructure. The Sanctuary is a unified program home built on human-in-the-loop engagement.
+The Sanctuary is a unified program home built on human-in-the-loop engagement.
 
 1. **Roleplay**: Uncensored conversation. Talk to programs as assistants.
 2. **Coding**: Build software. Your programs read and write files directly on your own drive.
@@ -37,25 +37,33 @@ Here is what a Sanctuary session looks like:
 These are the things your program can do on your computer. By default, before the AI changes anything (like writing a file or running a command), it will ask for your approval. You can turn this off by changing the security setting to "Auto Mode" so the AI runs on its own. `/api/session_tool_calls` show you what the AI is doing.
 
 > [!WARNING]
-> **Security Warning**: Letting your program run commands (`run_command_async`, `run_shell_command`) and change files (`replace_file_content`, `write_file`) gives them full control over your computer. **Be very careful. Do not give these tools to AI models that you do not trust.** A bad AI could run harmful code, delete your files, or steal your passwords. Always read what the AI wants to do before you click approve. You can also run this program in a safe container (a sandbox) to protect your computer.
+> **Security Warning**: Letting your program run commands (`run_command_async`, `run_shell_command`) and change files (`replace_file_content`, `replace_in_file`, `write_file`) gives them full control over your computer. **Be very careful. Do not give these tools to AI models that you do not trust.** A bad AI could run harmful code, delete your files, or steal your passwords. Always read what the AI wants to do before you click approve. You can also run this program in a safe container (a sandbox) to protect your computer.
 
-### Local Workspace Operations (Offline)
-* **Read File** (`read_file`): Read file contents on your local drive.
-* **Write File** (`write_file`): Create new files or overwrite existing files.
-* **Edit File** (`replace_file_content` / `multi_replace_file_content`): Swap single or multiple non-contiguous text blocks inside files with line-bounded precision.
+### Local Workspace Operations & Code Intelligence (Offline)
+* **Read File** (`read_file`): Read file contents on your local drive with optional line boundaries. For Python files, automatically appends tool-verified lint diagnostics and caller facts for the inspected range.
+* **Write File** (`write_file`): Create new files or overwrite existing files, followed by automatic syntax and lint verification.
+* **Edit File** (`replace_file_content` / `multi_replace_file_content` / `replace_in_file`): Swap single or multiple non-contiguous text blocks inside files with line-bounded precision or exact text matching, followed by automatic syntax and lint verification.
 * **Map Directory** (`get_workspace_structure`): Read directory layouts and tree structures.
-* **Find Code** (`search_codebase`): Search codebase for keywords.
+* **Find Files** (`find_files`): Locate files across the workspace matching filename patterns and wildcards.
+* **Find Code** (`search_codebase`): Search codebase content for keywords.
+* **Outline Symbols** (`outline_file`): Read structural definitions (functions, classes, methods) and line spans across source files to navigate large files without overflowing context.
+* **Read Symbol** (`read_symbol`): Inspect an exact function or class definition with line numbers, relevant file imports, in-range lint diagnostics, and call graph facts without loading entire large files into context.
+* **Find References** (`find_references`): Map symbol usage across the project using AST-derived call graphs (callers and callees) alongside whole-repo textual references.
+* **Audit & Review Code** (`review_code`): System-orchestrated large-code review engine. Partitions files into risk-ordered units with complete coverage, checks worker claims mechanically against code ranges, incorporates direct linter findings, and verifies reports through a skeptic pass before generating a structured digest.
 * **Shell Execution** (`run_shell_command` / `run_command_async`): Run terminal commands, or spawn headless asynchronous background subprocesses with background reading threads streaming stdout/stderr asynchronously (allowing the program to multitask and write to stdin).
 * **Task Manager** (`manage_task` / `wait_task`): Monitor, write to stdin, kill, or block and wait on active background commands.
 * **Add Quest** (`add_quest`): Create and append a structured task or chore to the user's local quest log with objectives, target date/time, coordinates/address, and alarm offsets.
+* **Add Journal Memory** (`add_journal_entry`): Autonomously record permanent personal facts, core relationships, and milestones into the program's long-term memory journal (`journals.json`).
 
 ### Network Grounding & Research (Online)
 * **Unified Web Search** (`web_search`): A unified search client that queries SearXNG (for Baidu/Yandex/Bing), DuckDuckGo, Brave, and Tavily concurrently. It aggregates and deduplicates URLs, supports concurrent page content enrichment for thin search results, and provides explicit query prefix routing (e.g. `github: query`, `arxiv: query`, `hn: query`, `wikipedia: query`).
 * **Read URL** (`read_webpage`): Fetch and extract text content from any webpage.
+* **Music Discovery** (`search_music`): Explore deep cuts, forgotten artists, rare grooves, and liner-note lore across curated modes (`deep_cuts`, `kexp`, `theme_time`, `bandcamp`, `artist`).
 
 ### Generative Media Engines (Local)
-* **Hardware-Aware Local LLM Engine (`llama-server`)**: Automatic GPU detection (NVIDIA CUDA, AMD ROCm/HIP, Vulkan, or Apple Metal) with automatic binary provisioning, KV prefix cache reuse (`--cache-reuse`), and real-time token streaming. Also discovers existing `.gguf` models in `~/.lmstudio/models/` automatically.
+* **Hardware-Aware Local LLM Engine (`llama-server`)**: Automatic GPU detection (NVIDIA CUDA, AMD ROCm/HIP, Vulkan, or Apple Metal) with automatic binary provisioning, KV prefix cache reuse (`--cache-reuse`), automatic context sizing fitted to free VRAM (`LOCAL_CONTEXT=auto`), and real-time token streaming. Also discovers existing `.gguf` models in `~/.lmstudio/models/` automatically.
 * **Native In-Process Diffusion Engine** (`generate_local_image`): Real-time GPU-accelerated SDXL diffusion (CUDA or DirectML) using SafeTensors checkpoints and optional LoRAs, coordinated by an automatic VRAM orchestrator so LLM and Diffusion never compete for GPU memory.
+* **ComfyUI Workflows** (`apply_comfy_workflow` / `generate_video_from_image`): Run ComfyUI image and video workflows via the local ComfyUI API backend with dynamic template parameter replacement.
 
 ---
 

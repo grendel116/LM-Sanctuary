@@ -17,6 +17,76 @@ _on_status_change = None  # Callback set by app.py to broadcast SSE events
 _cached_gpu_type = None
 _http_session = None
 
+def read_trained_context(model_path: str) -> int:
+    """Reads '<arch>.context_length' from the GGUF header; returns 0 if unavailable."""
+    import struct
+    sizes = {0: 1, 1: 1, 2: 2, 3: 2, 4: 4, 5: 4, 6: 4, 7: 1, 10: 8, 11: 8, 12: 8}
+    fmts = {0: "<B", 1: "<b", 2: "<H", 3: "<h", 4: "<I", 5: "<i", 10: "<Q", 11: "<q"}
+    try:
+        with open(model_path, "rb") as f:
+            def rd(fmt):
+                return struct.unpack(fmt, f.read(struct.calcsize(fmt)))[0]
+
+            def rd_str():
+                return f.read(rd("<Q")).decode("utf-8", "replace")
+
+            def skip(t):
+                if t == 8:
+                    rd_str()
+                elif t == 9:
+                    et, n = rd("<I"), rd("<Q")
+                    for _ in range(n):
+                        skip(et)
+                else:
+                    f.seek(sizes[t], 1)
+
+            if f.read(4) != b"GGUF":
+                return 0
+            rd("<I")
+            rd("<Q")
+            n_kv = rd("<Q")
+            for _ in range(n_kv):
+                key, t = rd_str(), rd("<I")
+                if key.endswith(".context_length") and t in fmts:
+                    return int(rd(fmts[t]))
+                skip(t)
+    except Exception:
+        pass
+    return 0
+
+
+def resolve_context_size(model_path: str, gpu_layers: str, ctk: str, ctv: str) -> str:
+    """Returns the context size: a numeric LOCAL_CONTEXT is used as-is; 'auto' (default)
+    asks llama-fit-params for the largest context fitting free device memory, clamped to
+    the model's trained context and [LOCAL_CONTEXT_MIN, LOCAL_CONTEXT_MAX]."""
+    setting = (os.getenv("LOCAL_CONTEXT") or "auto").strip().lower()
+    if setting.isdigit():
+        return setting
+    lo = int(os.getenv("LOCAL_CONTEXT_MIN", "8192"))
+    trained = read_trained_context(model_path)
+    hi = min(int(os.getenv("LOCAL_CONTEXT_MAX", "65536")), trained or 65536)
+    lo = min(lo, hi)
+    margin = os.getenv("LOCAL_VRAM_MARGIN_MB", "1536")
+    exe = os.path.join(LLAMA_BIN_DIR, "llama-fit-params.exe" if os.name == "nt" else "llama-fit-params")
+    fitted = 0
+    if os.path.exists(exe):
+        try:
+            import re
+            res = subprocess.run(
+                [exe, "-m", model_path, "-ngl", gpu_layers, "-fa", "on", "-ctk", ctk, "-ctv", ctv,
+                 "-fitc", str(lo), "-fitt", margin],
+                capture_output=True, text=True, timeout=60,
+            )
+            m = re.search(r"(?:^|\s)-c\s+(\d+)", res.stdout)
+            if m:
+                fitted = int(m.group(1))
+        except Exception as e:
+            print(f"[llama-runner] Context auto-detect failed: {e}", flush=True)
+    size = min(hi, max(lo, fitted)) if fitted else min(hi, 8192)
+    print(f"[llama-runner] Auto context: fit={fitted or 'n/a'}, trained={trained or 'n/a'} -> using {size}", flush=True)
+    return str(size)
+
+
 def _get_http_session() -> requests.Session:
     global _http_session
     if _http_session is None:
@@ -321,7 +391,6 @@ def start_local_server(model_key=None):
         except Exception:
             pass
 
-    context_size = os.getenv("LOCAL_CONTEXT", "8192")
     gpu_layers = os.getenv("LOCAL_GPU_LAYERS", "99")
     flash_attn = os.getenv("LOCAL_FLASH_ATTN", "true").lower() == "true"
     no_mmap = os.getenv("LOCAL_NO_MMAP", "false").lower() == "true"
@@ -329,6 +398,8 @@ def start_local_server(model_key=None):
     ubatch_size = os.getenv("LOCAL_UBATCH_SIZE", "2048")
     ctk = os.getenv("LOCAL_CACHE_TYPE_K", "q8_0")
     ctv = os.getenv("LOCAL_CACHE_TYPE_V", "q8_0")
+    context_size = resolve_context_size(model_path, gpu_layers, ctk, ctv)
+    os.environ["LOCAL_CONTEXT"] = context_size
     
     cmd = [
         SERVER_EXE,

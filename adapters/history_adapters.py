@@ -25,9 +25,9 @@ class OsHistoryAdapter:
 
     def _get_max_input_tokens(self) -> int:
         local_context = os.getenv("LOCAL_CONTEXT", "8192")
-        if local_context and local_context.isdigit():
-            return max(4096, int(local_context) - 2048)
-        return 6500
+        if not (local_context and local_context.isdigit()):
+            local_context = "8192"
+        return max(4096, int(local_context) - 2048)
 
     # History is cut in whole blocks of this many messages so the first kept message stays
     # the same across many turns, letting the server reuse the cached history prefix.
