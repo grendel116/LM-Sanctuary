@@ -26,6 +26,8 @@ from adapters.history_adapters import OsHistoryAdapter
 from core.mood_inversion import get_directive, is_enabled, new_state, update_state
 from runners.program import get_active_program
 from utils.utils import (
+    CHANNEL_TAG_RE,
+    THINK_TAG_PATTERN as THINK_TAG_RE,
     _build_tool_calls_pair,
     _build_vector_query,
     _execute_emulated_tool,
@@ -44,13 +46,6 @@ load_dotenv()
 LOCAL_SERVER_URL = os.environ.get("LOCAL_SERVER_URL")
 
 # --- PRE-COMPILED REGULAR EXPRESSIONS ---
-THINK_TAG_RE = re.compile(
-    r"(?:<think>|\[think\]|<thought>|\[thought\]|<\|thought\|>|<\|channel\|>thought|<channel\|>thought)"
-    r"[\s\S]*?"
-    r"(?:</think>|\[/think\]|</thought>|\[/thought\]|<\|thought\|>|<\|channel\|>|<channel\|>|<\/\s*think>|\[\s*/\s*think\s*\]|$)",
-    flags=re.IGNORECASE,
-)
-CHANNEL_TAG_RE = re.compile(r"<\|channel\|>|<channel\|>", flags=re.IGNORECASE)
 IMAGE_EMBED_RE = re.compile(r"(?<!\!)(\[[^\]]*\]\(/images/(?:portraits|media)/[^)]+\))")
 RAW_IMAGE_PATH_RE = re.compile(
     r"(?<![\([/])(/images/(?:portraits|media)/[a-zA-Z0-9_\-\.]+\.(?:png|jpg|jpeg|webp|gif|mp4))"
@@ -185,6 +180,7 @@ class BaseProgramRunner:
         self.sessions_group_meta: dict = {}  # Tracks group session participants (host & guests)
         self.sessions_program: dict = {}  # Tracks program owner for each session
         self.generating_sessions: set[str] = set()
+        self._memory_pipeline_sessions: set[str] = set()
 
     def _get_memory_meta(self, session_id: str) -> dict:
         """Helper to ensure session memory state exists."""
@@ -303,20 +299,6 @@ class BaseProgramRunner:
 
             print(f"Local server error: {response.status_code} - {response.text}", flush=True)
         except Exception as e:
-            # Query in-process engine if standalone server is unavailable
-            try:
-                from runners import engine_llm
-                if engine_llm.is_loaded():
-                    raw_text = await asyncio.to_thread(
-                        engine_llm.generate_text,
-                        [{"role": "user", "content": prompt}],
-                        0.3,
-                        512
-                    )
-                    if raw_text:
-                        return THINK_TAG_RE.sub("", raw_text).strip()
-            except Exception:
-                pass
             print(f"Error in summary generation task: {e}", flush=True)
 
         return err_msg
@@ -376,79 +358,103 @@ class BaseProgramRunner:
             err_msg="Distillation failed due to connection error.",
         )
 
+    def _count_unsummarized_turns(self, session_id: str) -> tuple[list[tuple[dict, dict]], int]:
+        """Returns (paired_dialogue_turns, last_summarized_turn) for a session."""
+        meta = self._get_memory_meta(session_id)
+        history = self.sessions_history.get(session_id, [])
+        hidden_prefixes = ("tool_", "port_", "quest_", "sys_", "itm_")
+        dialogue_messages = [
+            msg for msg in history
+            if msg.get("role") in ("user", "assistant", "program")
+            and not msg.get("id", "").startswith(hidden_prefixes)
+            and not (msg.get("text") or "").startswith("[Tool Response from")
+            and not (msg.get("text") or "").lower().startswith("[system:")
+            and (msg.get("text") or "").strip() not in ("*(Generation cancelled)*", "*(Generation stopped)*", "(Generation cancelled)", "(Generation stopped)")
+        ]
+        turns = []
+        start_idx = 1 if (dialogue_messages and dialogue_messages[0].get("role") == "program") else 0
+        for i in range(start_idx, len(dialogue_messages) - 1, 2):
+            turns.append((dialogue_messages[i], dialogue_messages[i + 1]))
+
+        last_turn = meta.get("last_summarized_turn", 0)
+        if last_turn > len(turns):
+            last_turn = 0
+            meta["last_summarized_turn"] = 0
+        return turns, last_turn
+
+    @staticmethod
+    def _get_chapter_turns() -> int:
+        raw = os.getenv("LOCAL_CHAT_BUDGET", "4096")
+        budget = int(raw) if (raw and raw.isdigit()) else 4096
+        return max(8, min(18, round(budget / 340)))
+
     async def _process_memory_pipeline(self, session_id: str, active_model: str, program_id: str = None):
-        """Processes 12-turn conversation chapters and distills up to 3 recent chapters into the core chronicle."""
+        """Processes conversation chapters and distills older chapters into the core chronicle."""
+        if session_id in self._memory_pipeline_sessions:
+            return
+        self._memory_pipeline_sessions.add(session_id)
         try:
             prog = program_id or getattr(self, "sessions_program", {}).get(session_id) or getattr(self, "program_id", None) or get_active_program()
             if hasattr(self, "sessions_program"):
                 self.sessions_program[session_id] = prog
-            meta = self._get_memory_meta(session_id)
-            history = self.sessions_history.get(session_id, [])
 
-            hidden_prefixes = ("tool_", "port_", "quest_", "sys_", "itm_")
-            dialogue_messages = [
-                msg for msg in history 
-                if msg.get("role") in ("user", "assistant", "program")
-                and not msg.get("id", "").startswith(hidden_prefixes)
-                and not (msg.get("text") or "").startswith("[Tool Response from")
-                and not (msg.get("text") or "").lower().startswith("[system:")
-                and (msg.get("text") or "").strip() not in ("*(Generation cancelled)*", "*(Generation stopped)*", "(Generation stopped)")
-            ]
-
-            # Pair dialogue into sequential (user, program) conversation turns
-            turns = []
-            start_idx = 1 if (dialogue_messages and dialogue_messages[0].get("role") == "program") else 0
-            for i in range(start_idx, len(dialogue_messages) - 1, 2):
-                turns.append((dialogue_messages[i], dialogue_messages[i + 1]))
-
+            turns, last_turn = self._count_unsummarized_turns(session_id)
             total_turns = len(turns)
-            last_turn = meta.get("last_summarized_turn", 0)
+            chapter_len = self._get_chapter_turns()
 
-            # Reset pointer if history was rewound or cleared
-            if last_turn > total_turns:
-                last_turn = 0
-                meta["last_summarized_turn"] = 0
-
-            # Process all unsummarized 12-turn chapters
-            while total_turns - last_turn >= 12:
-                chapter_turns = turns[last_turn : last_turn + 12]
+            # Process all unsummarized chapters
+            while total_turns - last_turn >= chapter_len:
+                chapter_turns = turns[last_turn : last_turn + chapter_len]
                 formatted_turns = "\n".join(
                     f"User: {(u.get('text') or u.get('content') or '')[:1000]}\n"
                     f"Program: {(b.get('text') or b.get('content') or '')[:1000]}"
                     for u, b in chapter_turns
                 )
 
+                prior_chapters = list(self._get_memory_meta(session_id).get("recent_chapters", []))
                 chapter_summary = await self._generate_local_summary(
                     text_to_summarize=formatted_turns,
                     active_model=active_model,
-                    prior_memories=meta.get("recent_chapters", [])
+                    prior_memories=prior_chapters,
                 )
 
                 if not chapter_summary or chapter_summary.startswith("Memory compaction summary generation failed"):
                     print(f"[MEMORY PIPELINE] Summary generation halted at turn {last_turn}", flush=True)
                     break
 
-                meta.setdefault("recent_chapters", []).append(chapter_summary)
-                last_turn += 12
-                meta["last_summarized_turn"] = last_turn
+                last_turn += chapter_len
+                with self._lock:
+                    meta = self._get_memory_meta(session_id)
+                    meta.setdefault("recent_chapters", []).append(chapter_summary)
+                    meta["last_summarized_turn"] = last_turn
+                    chapters_to_distill = []
+                    while len(meta["recent_chapters"]) > 2:
+                        chapters_to_distill.append(meta["recent_chapters"].pop(0))
 
-                # Maintain strictly at most 2 recent chapters; distill older chapters into the single epic chronicle
-                while len(meta["recent_chapters"]) > 2:
-                    oldest_chapter = meta["recent_chapters"].pop(0)
+                for oldest_chapter in chapters_to_distill:
+                    prior_epic = self._get_memory_meta(session_id).get("epic_chronicle", "")
                     epic_summary = await self._distill_epic_chronicle(
                         text_to_distill=oldest_chapter,
                         active_model=active_model,
-                        prior_epic=meta.get("epic_chronicle", "")
+                        prior_epic=prior_epic,
                     )
                     if epic_summary and not epic_summary.startswith("Distillation failed"):
-                        meta["epic_chronicle"] = epic_summary
+                        with self._lock:
+                            self._get_memory_meta(session_id)["epic_chronicle"] = epic_summary
 
                 self._save_session_to_disk(session_id)
         except Exception as e:
             print(f"[MEMORY PIPELINE ERROR] Failed processing session {session_id}: {e}", flush=True)
+        finally:
+            self._memory_pipeline_sessions.discard(session_id)
 
     def trigger_memory_pipeline(self, session_id: str, active_model: str = "", program_id: str = None):
-        """Dispatches memory summarization in a persistent background worker thread."""
+        """Dispatches memory summarization in a background thread only when a full chapter of unsummarized turns exists."""
+        if session_id in self._memory_pipeline_sessions:
+            return
+        turns, last_turn = self._count_unsummarized_turns(session_id)
+        if len(turns) - last_turn < self._get_chapter_turns():
+            return
         prog = program_id or getattr(self, "sessions_program", {}).get(session_id) or getattr(self, "program_id", None) or get_active_program()
         _run_async_in_background_thread(
             self._process_memory_pipeline(session_id, active_model=active_model, program_id=prog)
@@ -541,11 +547,12 @@ class BaseProgramRunner:
             url = LOCAL_SERVER_URL
             headers = get_local_server_headers()
 
-            max_tokens_limit = 2048
+            ctx_raw = os.getenv("LOCAL_CONTEXT", "8192")
+            active_ctx = int(ctx_raw) if (ctx_raw and ctx_raw.isdigit()) else 8192
+            max_tokens_limit = max(1536, min(4096, active_ctx // 6))
 
             from variables.settings import is_thinking_enabled, DISABLED_THINKING
             from core.banned_words import get_logit_bias_dict
-            from runners import engine_llm
 
             payload = {
                 "messages": messages,
@@ -571,21 +578,7 @@ class BaseProgramRunner:
                     bot_response_text = f"Error: {response.text}"
                 print(f"[DEBUG STATUS] {response.status_code}", flush=True)
             except Exception as e:
-                # Query in-process engine if external server is offline
-                try:
-                    from runners import engine_llm
-                    if engine_llm.is_loaded():
-                        bot_response_text = await asyncio.to_thread(
-                            engine_llm.generate_text,
-                            messages,
-                            temperature,
-                            max_tokens_limit
-                        )
-                except Exception:
-                    pass
-
-                if not bot_response_text:
-                    bot_response_text = f"Error: Could not connect to LLM ({e}). Ensure local llama-server is running."
+                bot_response_text = f"Error: Could not connect to LLM ({e}). Ensure local llama-server is running."
 
             # --- STAGE 3: POST-PROCESSING (TOOLS & CLEANUP) ---
             bot_response_text = self._sanitize_thinking_tags(bot_response_text)
@@ -641,7 +634,6 @@ class BaseProgramRunner:
                     "generate_local_image",
                     "generate_program_portrait",
                     "generate_general_image",
-                    "generate_imagen",
                     "apply_comfy_workflow",
                     "generate_video_from_image",
                 }
@@ -651,7 +643,6 @@ class BaseProgramRunner:
                         "generate_local_image",
                         "generate_program_portrait",
                         "generate_general_image",
-                        "generate_imagen",
                         "apply_comfy_workflow",
                     }
                     if any(t_name in image_tools for t_name, _, _ in results):
@@ -929,8 +920,24 @@ class BaseProgramRunner:
                 return True
         return False
 
+    async def set_message_duration(self, session_id: str, msg_id: str, seconds: float) -> bool:
+        """Records how long a turn took on the message it produced."""
+        if not msg_id:
+            return False
+        with self._lock:
+            for msg in self.sessions_history.get(session_id, []):
+                if msg.get("id") == msg_id:
+                    msg["duration"] = seconds
+                    self._save_session_to_disk(session_id)
+                    return True
+        return False
+
     async def update_message_text(self, session_id: str, msg_id: str, new_text: str) -> bool:
-        """Finds a message by its ID and updates its text."""
+        """Finds a message by its ID and replaces its prose, keeping the images it carries.
+
+        Clients only ever see the prose (the wire form strips image markdown into `media`),
+        so the stored image markdown is re-attached here, where it lives.
+        """
         # Ensure session is loaded in memory
         if session_id not in self.sessions_history:
             self._load_session_from_disk(session_id)
@@ -947,7 +954,9 @@ class BaseProgramRunner:
                 # Check exact match or if msg_id matches part of a compound ID
                 current_id = msg.get("id", "")
                 if current_id == msg_id or msg_id in current_id:
-                    msg["text"] = new_text
+                    images = re.findall(r"!\[[^\]]*\]\([^)]+\)", msg.get("text") or "")
+                    prose = (new_text or "").strip()
+                    msg["text"] = "\n\n".join(part for part in (prose, "\n".join(images)) if part)
                     updated = True
                     break
             
@@ -1163,14 +1172,9 @@ class OpenSourceRunner(BaseProgramRunner):
 
         def __init__(self, app_name="Sanctuary", program_id=None):
             super().__init__(app_name, program_id=program_id)
-            self.sessions_history = {}
-            self.sessions_inversion_state = {}
-            self.sessions_memory_state = {}
-            self.sessions_program = {}
             self._lock = threading.RLock()
             # One generation at a time per session; history reads stay available meanwhile
             self._session_locks: dict[str, threading.Lock] = {}
-            self.generating_sessions: set[str] = set()
 
         def _session_lock(self, session_id: str) -> threading.Lock:
             with self._lock:
@@ -1209,23 +1213,6 @@ class OpenSourceRunner(BaseProgramRunner):
                     return THINK_TAG_RE.sub("", content).strip()
             except Exception as e:
                 print(f"[Impersonate] Error during impersonation request: {e}", flush=True)
-                try:
-                    from runners import engine_llm
-                    if engine_llm.is_loaded():
-                        messages = [
-                            {"role": "system", "content": system_instruction},
-                            {"role": "user", "content": prompt},
-                        ]
-                        raw_text = await asyncio.to_thread(
-                            engine_llm.generate_text,
-                            messages,
-                            temperature,
-                            512
-                        )
-                        if raw_text:
-                            return THINK_TAG_RE.sub("", raw_text).strip()
-                except Exception:
-                    pass
                 raise
 
             return ""
@@ -1247,10 +1234,9 @@ class OpenSourceRunner(BaseProgramRunner):
                     memory_meta = self._get_memory_meta(session_id)
                     memory_meta.pop("unsummarized_buffer", None)
 
-                    # Ensure default factory or imported default function is used
                     inversion_state = self.sessions_inversion_state.get(
-                        session_id, 
-                        self.new_state() if hasattr(self, "new_state") else {}
+                        session_id,
+                        new_state(prog),
                     )
 
                     data = {
@@ -1308,17 +1294,16 @@ class OpenSourceRunner(BaseProgramRunner):
                 self.sessions_inversion_state[session_id] = data.get("inversion_state", new_state(prog))
                 if "group_meta" in data:
                     self.sessions_group_meta[session_id] = data["group_meta"]
-                
-                memory_state = data.get("memory_state", {})
-                # Strip legacy unsummarized_buffer if loading an older default.json
-                memory_state.pop("unsummarized_buffer", None)
-                memory_state.setdefault("recent_chapters", [])
-                memory_state.setdefault("epic_chronicle", "")
-                memory_state.setdefault("last_summarized_turn", 0)
-                if len(memory_state["recent_chapters"]) > 2:
-                    memory_state["recent_chapters"] = memory_state["recent_chapters"][-2:]
-                
-                self.sessions_memory_state[session_id] = memory_state
+
+                if session_id not in self._memory_pipeline_sessions:
+                    memory_state = data.get("memory_state", {})
+                    memory_state.pop("unsummarized_buffer", None)
+                    memory_state.setdefault("recent_chapters", [])
+                    memory_state.setdefault("epic_chronicle", "")
+                    memory_state.setdefault("last_summarized_turn", 0)
+                    if len(memory_state["recent_chapters"]) > 2:
+                        memory_state["recent_chapters"] = memory_state["recent_chapters"][-2:]
+                    self.sessions_memory_state[session_id] = memory_state
             except Exception as e:
                 print(f"Error loading session {session_id} from disk: {e}")
 
@@ -1475,6 +1460,7 @@ class OpenSourceRunner(BaseProgramRunner):
                 "tool_summary": tool_summary,
                 "tool_calls": tool_calls,
                 "timestamp": msg.get("timestamp"),
+                "duration": msg.get("duration"),
                 "mood": msg.get("mood"),
                 "inversion_active": msg.get("inversion_active", ""),
                 "sender_id": sender_id,
@@ -1516,7 +1502,7 @@ class OpenSourceRunner(BaseProgramRunner):
                     if msg.get("role") == "system-memory" or msg_id.startswith(hidden_prefixes):
                         continue
                     if text.lower().startswith("[system:") or text.startswith("[Tool Response from") or any(
-                        k in text for k in ("Generate a portrait of yourself", "[GENERATE_IMAGE:", "[GENERATE_IMAGEN:", "generate_program_portrait")
+                        k in text for k in ("Generate a portrait of yourself", "[GENERATE_IMAGE:", "generate_program_portrait")
                     ):
                         continue
                     if text.strip() in ("*(Generation cancelled)*", "*(Generation stopped)*", "(Generation cancelled)", "(Generation stopped)"):
@@ -1596,7 +1582,6 @@ class OpenSourceRunner(BaseProgramRunner):
                     for k in (
                         "Generate a portrait of yourself",
                         "[GENERATE_IMAGE:",
-                        "[GENERATE_IMAGEN:",
                         "generate_program_portrait",
                     )
                 ):
@@ -1813,13 +1798,6 @@ class OpenSourceRunner(BaseProgramRunner):
                                 except Exception:
                                     pass
 
-                try:
-                    from core.skills.vectorized_databank.databank import DataBankManager
-
-                    DataBankManager().delete_chat_history(session_id)
-                except Exception as e:
-                    print(f"Error cleaning up databank history on session reset: {e}")
-
         async def delete_message_at(self, session_id: str, msg_id: str, delete_media: bool = True) -> bool:
             with self._lock:
                 if session_id not in self.sessions_history:
@@ -1989,7 +1967,6 @@ class OpenSourceRunner(BaseProgramRunner):
                                 if tc.get("type") == "response" and tc.get("name") in (
                                     "generate_local_image",
                                     "generate_program_portrait",
-                                    "generate_imagen",
                                 ):
                                     tc["response"] = _insert_at_slot(tc.get("response", ""), new_md, slot_index)
                                     inserted_in_tc = True

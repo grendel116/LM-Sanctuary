@@ -40,7 +40,7 @@ _VERIFY_SYSTEM = (
     "'reason' = one sentence citing the lines. "
     'Respond with JSON only: {"guarded": true | false, "assumes": "...", "reason": "..."}'
 )
-_THINK_RE = re.compile(r"<think>[\s\S]*?(?:</think>|$)|\[think\][\s\S]*?(?:\[/think\]|$)", re.IGNORECASE)
+from utils.utils import THINK_TAG_PATTERN as _THINK_RE
 
 
 # ---------------------------------------------------------------- storage
@@ -370,7 +370,7 @@ def _digest(job: dict) -> str:
     return "\n".join(out)
 
 
-def review_code(path: str = "", goal: str = "", max_lines: int = 150) -> str:
+def review_code(path: str = "", goal: str = "", max_lines: int = 0) -> str:
     """Reviews a whole file or folder for bugs, one verified chunk at a time, without filling your context. The system splits the code so
     every line is covered, checks each claim with tools and a second review, and returns a verified digest. Call it with a path to START,
     then call it again with no arguments until it reports REVIEW COMPLETE (each call works through a batch of chunks). Then answer the user.
@@ -378,7 +378,7 @@ def review_code(path: str = "", goal: str = "", max_lines: int = 150) -> str:
     Args:
         path: File or folder to review. Leave empty to continue the job already in progress.
         goal: What to look for, e.g. "bugs and security problems". Defaults to a general defect review.
-        max_lines: Target lines per chunk (60-250).
+        max_lines: Target lines per chunk (60-250); 0 auto-scales from active context size.
     """
     try:
         sid = _sid()
@@ -391,7 +391,8 @@ def review_code(path: str = "", goal: str = "", max_lines: int = 150) -> str:
                 files = _collect_files(resolved)
                 if not files:
                     return f"Error: no source files found under '{path}'."
-                units = _plan(files, resolved if os.path.isdir(resolved) else os.path.dirname(resolved), max(60, min(250, int(max_lines))))
+                target_lines = int(max_lines) if int(max_lines or 0) > 0 else max(90, min(220, _context() // 80))
+                units = _plan(files, resolved if os.path.isdir(resolved) else os.path.dirname(resolved), max(60, min(250, target_lines)))
                 job = {"goal": goal.strip() or "find real bugs, crashes, security problems and data-loss risks", "units": units}
                 _save(sid, job)
             else:

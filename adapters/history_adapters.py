@@ -4,11 +4,9 @@ import time
 import uuid
 from pathlib import Path
 
-import tools.tools as tools
 from utils.utils import (
     _MAIN_DIRECTIVE_PROMPT,
     _STORY_MODE_DIRECTIVE_PROMPT,
-    _build_vector_query,
     _merge_consecutive_messages,
 )
 
@@ -23,16 +21,30 @@ class OsHistoryAdapter:
         self.query_vector = query_vector
         self._cached_post_injection = None
 
-    def _get_max_input_tokens(self) -> int:
-        local_context = os.getenv("LOCAL_CONTEXT", "8192")
-        if not (local_context and local_context.isdigit()):
-            local_context = "8192"
-        return max(4096, int(local_context) - 2048)
+    def _get_chat_budget(self) -> int:
+        chat_budget = os.getenv("LOCAL_CHAT_BUDGET", "4096")
+        if chat_budget and chat_budget.isdigit():
+            return max(2048, int(chat_budget))
+        return 4096
 
-    # History is cut in whole blocks of this many messages so the first kept message stays
-    # the same across many turns, letting the server reuse the cached history prefix.
-    HISTORY_CUT_STEP = 8
-    CHARS_PER_TOKEN = 2.8
+    def _get_max_input_tokens(self, in_tool_loop: bool = False) -> int:
+        # Conversational turns stay within LOCAL_CHAT_BUDGET so memory + vectors replace long-context prefill.
+        # Active tool-loop iterations expand into the allocated KV context so file/web reads fit in full.
+        chat_budget = self._get_chat_budget()
+        if not in_tool_loop:
+            return chat_budget
+        ctx_raw = os.getenv("LOCAL_CONTEXT", "8192")
+        active_ctx = int(ctx_raw) if (ctx_raw and ctx_raw.isdigit()) else 8192
+        return max(chat_budget, min(active_ctx - 2048, int(active_ctx * 0.75)))
+
+    def _get_bridge_turns(self) -> int:
+        # Scales the verbatim bridge window (4 to 10 user+program turn pairs) to the active chat budget.
+        return max(4, min(10, round(self._get_chat_budget() / 680)))
+
+    def _get_history_cut_step(self) -> int:
+        return (self._get_bridge_turns() // 2 + 2) * 2
+
+    CHARS_PER_TOKEN = 3.5
 
     @staticmethod
     def _content_len(content) -> int:
@@ -45,7 +57,8 @@ class OsHistoryAdapter:
         system_content: str,
         raw_messages: list[dict],
         post_injection: str,
-        max_input_tokens: int | None = None
+        max_input_tokens: int | None = None,
+        in_tool_loop: bool = False,
     ) -> list[dict]:
         """
         Assembles the OpenAI payload in prefix-cache order:
@@ -54,7 +67,7 @@ class OsHistoryAdapter:
           3. Latest user turn with the per-turn post-injection appended.
         """
         if max_input_tokens is None:
-            max_input_tokens = self._get_max_input_tokens()
+            max_input_tokens = self._get_max_input_tokens(in_tool_loop=in_tool_loop)
         char_budget = int(max_input_tokens * self.CHARS_PER_TOKEN)
 
         chat_turns = [m for m in raw_messages if m.get("role") != "system"]
@@ -86,10 +99,11 @@ class OsHistoryAdapter:
         lengths = [self._content_len(t.get("content")) for t in chat_turns]
         available = char_budget - len(system_content)
         protected_from = latest_user_idx if latest_user_idx is not None else len(chat_turns)
+        cut_step = self._get_history_cut_step()
 
         cut = 0
         while cut < protected_from and sum(lengths[cut:]) > available:
-            cut = min(cut + self.HISTORY_CUT_STEP, protected_from)
+            cut = min(cut + cut_step, protected_from)
         if cut:
             print(f"[CONTEXT] Dropped {cut} oldest messages to fit the context budget.", flush=True)
 
@@ -135,6 +149,32 @@ class OsHistoryAdapter:
         if not filtered_history:
             return [{"role": "system", "content": sys_inst}]
 
+        # Anchor the verbatim dialogue window to the 12-turn memory compaction cycle:
+        # turns older than (last_summarized_turn - bridge_turns) are already distilled
+        # in `epic_chronicle` and `recent_chapters`, so dropping them keeps the prompt compact
+        # and shifts the history prefix only when a new 12-turn chapter is summarized.
+        meta = self.runner_obj._get_memory_meta(self.session_id)
+        last_summarized_turn = meta.get("last_summarized_turn", 0)
+        bridge_turns = self._get_bridge_turns()
+        if last_summarized_turn > 0:
+            hidden_prefixes = ("tool_", "port_", "quest_", "sys_", "itm_")
+            dialogue_indices = [
+                i for i, m in enumerate(filtered_history)
+                if m.get("role") in ("user", "assistant", "program")
+                and not m.get("id", "").startswith(hidden_prefixes)
+                and not (m.get("text") or "").startswith("[Tool Response from")
+                and not (m.get("text") or "").lower().startswith("[system:")
+            ]
+            start_offset = 1 if (dialogue_indices and filtered_history[dialogue_indices[0]].get("role") == "program") else 0
+            total_paired_turns = (len(dialogue_indices) - start_offset) // 2
+            if last_summarized_turn <= total_paired_turns:
+                cutoff_turn = max(0, last_summarized_turn - bridge_turns)
+                if cutoff_turn > 0:
+                    cutoff_diag_pos = start_offset + (cutoff_turn * 2)
+                    if cutoff_diag_pos < len(dialogue_indices):
+                        first_kept_idx = dialogue_indices[cutoff_diag_pos]
+                        filtered_history = filtered_history[first_kept_idx:]
+
         latest_user_idx = -1
         has_new_image = bool((self.image_data and self.image_mime) or self.file_path_resolved)
 
@@ -155,6 +195,10 @@ class OsHistoryAdapter:
              if m.get("id", "").startswith("tool_") or m.get("text", "").startswith("[Tool Response from")),
             default=-1,
         )
+        in_tool_loop = latest_user_idx >= 0 and last_tool_idx > latest_user_idx
+        prior_tool_cap = max(800, int(self._get_chat_budget() * 0.20))
+        loop_tool_cap = max(600, int(self._get_max_input_tokens(in_tool_loop=True) * 0.12))
+
         for idx, msg in enumerate(filtered_history):
             role = "assistant" if msg["role"] == "program" else "user"
             msg_id = msg.get("id", "")
@@ -180,12 +224,14 @@ class OsHistoryAdapter:
             if (
                 idx < latest_user_idx
                 and (msg_id.startswith("tool_") or content_text.startswith("[Tool Response from"))
-                and len(content_text) > 800
+                and len(content_text) > prior_tool_cap
             ):
+                head_len = int(prior_tool_cap * 0.55)
+                tail_len = int(prior_tool_cap * 0.25)
                 content_text = (
-                    f"{content_text[:450]}\n"
+                    f"{content_text[:head_len]}\n"
                     f"... [Earlier tool output compacted ({len(content_text)} chars)] ...\n"
-                    f"{content_text[-200:]}"
+                    f"{content_text[-tail_len:]}"
                 )
 
             # Within the current turn only the newest tool result stays in full; earlier ones were already
@@ -194,9 +240,9 @@ class OsHistoryAdapter:
                 idx > latest_user_idx
                 and idx != last_tool_idx
                 and (msg_id.startswith("tool_") or content_text.startswith("[Tool Response from"))
-                and len(content_text) > 500
+                and len(content_text) > loop_tool_cap
             ):
-                content_text = f"{content_text[:300]}\n... [Earlier tool output compacted ({len(content_text)} chars); re-read if needed]"
+                content_text = f"{content_text[:int(loop_tool_cap * 0.6)]}\n... [Earlier tool output compacted ({len(content_text)} chars); re-read if needed]"
 
             if idx == latest_user_idx:
                 img_src = (
@@ -229,8 +275,6 @@ class OsHistoryAdapter:
         story_active = is_story_mode(active_prog)
 
         directive = _STORY_MODE_DIRECTIVE_PROMPT if story_active else _MAIN_DIRECTIVE_PROMPT
-        if not tools.current_use_imagen.get():
-            directive = "\n".join(line for line in directive.split("\n") if "generate_imagen" not in line)
 
         # Static instructions first, then the memory chronicle (refreshed once every 12 turns).
         system_content = f"{sys_inst}{directive}"
@@ -248,6 +292,7 @@ class OsHistoryAdapter:
             system_content=system_content,
             raw_messages=raw_messages,
             post_injection=self._cached_post_injection,
+            in_tool_loop=in_tool_loop,
         )
 
         # A one-line note while a review job is unfinished lets a new turn resume it; it rides at the very end so only the tail misses the cache.
@@ -324,16 +369,14 @@ class OsHistoryAdapter:
         if rag_context:
             post_blocks.append(f"<knowledge_base>\n{rag_context}\n</knowledge_base>")
 
-        skill_query = _build_vector_query(filtered_history) or last_user_msg
-        if skill_query:
+        if last_user_msg:
             try:
                 from core.skill_retriever import retrieve_skill_instructions
                 skills = retrieve_skill_instructions(
-                    query=skill_query,
+                    query=last_user_msg,
                     story_active=story_active,
-                    threshold=0.35,
+                    threshold=0.38,
                     top_k=2,
-                    query_vector=self.query_vector,
                 )
                 if skills:
                     post_blocks.append(skills)

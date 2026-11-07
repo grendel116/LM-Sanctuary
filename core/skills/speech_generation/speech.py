@@ -1,7 +1,6 @@
 import os
 import re
 import requests
-import base64
 from dotenv import load_dotenv
 
 # Ensure environment is loaded
@@ -77,115 +76,19 @@ class LocalSpeechProvider(BaseSpeechProvider):
             print(f"Local Kokoro TTS generation error: {e}")
             return False
 
-class ElevenLabsSpeechProvider(BaseSpeechProvider):
-    def __init__(self):
-        self.api_key = os.getenv("ELEVENLABS_API_KEY")
-        self.voice_id = os.getenv("ELEVENLABS_VOICE_ID", "21m00Tcm4TlvDq8ikWAM")  # Default female voice
-        
-    def generate(self, text: str, output_path: str) -> bool:
-        if not self.api_key:
-            print("ElevenLabs API Key is missing from .env configuration.")
-            return False
-            
-        url = f"https://api.elevenlabs.io/v1/text-to-speech/{self.voice_id}"
-        headers = {
-            "xi-api-key": self.api_key,
-            "Content-Type": "application/json"
-        }
-        data = {
-            "text": text,
-            "model_id": "eleven_monolingual_v1",
-            "voice_settings": {
-                "stability": 0.5,
-                "similarity_boost": 0.75
-            }
-        }
-        try:
-            response = requests.post(url, json=data, headers=headers)
-            if response.status_code != 200:
-                print(f"ElevenLabs TTS error: Status {response.status_code} - {response.text}")
-                return False
-                
-            with open(output_path, 'wb') as f:
-                f.write(response.content)
-            return True
-        except Exception as e:
-            print(f"ElevenLabs TTS exception: {e}")
-            return False
-
-class GoogleSpeechProvider(BaseSpeechProvider):
-    def __init__(self):
-        self.voice_name = os.getenv("GOOGLE_TTS_VOICE_NAME", "en-US-Neural2-F")
-        
-    def _get_access_token(self):
-        try:
-            import google.auth
-            import google.auth.transport.requests
-            credentials, project = google.auth.default(scopes=['https://www.googleapis.com/auth/cloud-platform'])
-            req = google.auth.transport.requests.Request()
-            credentials.refresh(req)
-            return credentials.token
-        except Exception as e:
-            print(f"Google Auth failed for TTS: {e}")
-            return None
-
-    def generate(self, text: str, output_path: str) -> bool:
-        token = self._get_access_token()
-        if not token:
-            print("Google Cloud credentials not found or failed to authorize.")
-            return False
-            
-        url = "https://texttospeech.googleapis.com/v1/text:synthesize"
-        headers = {
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json"
-        }
-        payload = {
-            "input": {"text": text},
-            "voice": {
-                "languageCode": "en-US",
-                "name": self.voice_name
-            },
-            "audioConfig": {
-                "audioEncoding": "MP3"
-            }
-        }
-        try:
-            response = requests.post(url, json=payload, headers=headers)
-            if response.status_code != 200:
-                print(f"Google Cloud TTS error: Status {response.status_code} - {response.text}")
-                return False
-                
-            resp_data = response.json()
-            audio_content = base64.b64decode(resp_data["audioContent"])
-            with open(output_path, 'wb') as f:
-                f.write(audio_content)
-            return True
-        except Exception as e:
-            print(f"Google Cloud TTS exception: {e}")
-            return False
-
 class SpeechManager:
     _instance = None
     
     def __new__(cls):
         if cls._instance is None:
             cls._instance = super(SpeechManager, cls).__new__(cls)
-            cls._instance.provider_name = os.getenv("TTS_PROVIDER", "local").lower()
+            cls._instance.provider_name = "local"
             cls._instance.cache_dir = os.path.join(
                 os.path.dirname(os.path.abspath(__file__)),
                 "speech_cache"
             )
             os.makedirs(cls._instance.cache_dir, exist_ok=True)
-            
-            # Select provider
-            if cls._instance.provider_name == "elevenlabs":
-                cls._instance.provider = ElevenLabsSpeechProvider()
-            elif cls._instance.provider_name == "google":
-                cls._instance.provider = GoogleSpeechProvider()
-            else:
-                cls._instance.provider = LocalSpeechProvider()
-                
+            cls._instance.provider = LocalSpeechProvider()
             print(f"SpeechManager active provider: {cls._instance.provider_name}")
         return cls._instance
 
@@ -201,9 +104,7 @@ class SpeechManager:
         if not clean_text:
             return ""
             
-        # Determine extension based on provider
-        ext = "wav" if self.provider_name == "local" else "mp3"
-        filename = f"{message_id}.{ext}"
+        filename = f"{message_id}.wav"
         full_path = os.path.join(self.cache_dir, filename)
         
         # If cache exists, return URL directly

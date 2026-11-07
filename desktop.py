@@ -23,7 +23,7 @@ SPLASH_COLOR = "#0d0d12"
 os.environ["WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"] = (
     "--use-fake-ui-for-media-stream "
     "--autoplay-policy=no-user-gesture-required "
-    "--enable-features=SpeechRecognition,MediaStream "
+    "--enable-features=MediaStream "
     "--unsafely-treat-insecure-origin-as-secure=http://127.0.0.1:5000,http://localhost:5000"
 )
 

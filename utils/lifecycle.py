@@ -53,7 +53,7 @@ def _terminate_children(grace: float = 3.0):
 
 
 def shutdown():
-    """Terminates all tracked child processes and clears temp directories. Runs once."""
+    """Terminates all tracked child processes. Runs once."""
     global _shutdown_done
     with _children_lock:
         if _shutdown_done:
@@ -61,12 +61,6 @@ def shutdown():
         _shutdown_done = True
 
     _terminate_children()
-
-    try:
-        from adapters.comfy_manager import clear_temp_directories
-        clear_temp_directories()
-    except Exception:
-        pass
 
 
 def _bind_children_to_job():

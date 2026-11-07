@@ -163,19 +163,11 @@ def get_toolbelt_block(story_active: bool = False) -> str:
 
 
 def _keyword_match(query: str, record: dict) -> bool:
-    """Checks if the query contains any of the skill's trigger keywords.
-
-    Short triggers (3 chars or fewer) require word boundary matching.
-    Longer triggers use substring matching.
-    """
+    """Checks if the query contains any of the skill's trigger keywords on word boundaries."""
     query_lower = query.lower()
     for trigger in record["triggers"]:
-        if len(trigger) <= 3:
-            if re.search(r'\b' + re.escape(trigger) + r'\b', query_lower):
-                return True
-        else:
-            if trigger in query_lower:
-                return True
+        if trigger and re.search(rf"\b{re.escape(trigger)}\b", query_lower):
+            return True
     return False
 
 

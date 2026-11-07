@@ -2,8 +2,7 @@
 core/engine_diffusion.py — Internal GPU-accelerated diffusion engine.
 
 Executes SDXL image generation directly in-process with PyTorch/GPU acceleration,
-running the node graph from models/workflows/ImageWorkflow.json (or the bundled
-ImageWorkflow.default.json starter).
+running the node graph from models/workflows/ImageWorkflow.json.
 """
 
 import os
@@ -18,11 +17,12 @@ import subprocess
 from typing import List, Dict, Any, Optional, Tuple
 
 import torch
-from variables.settings import CHECKPOINTS_DIR, LORAS_DIR, VAE_DIR, MODELS_DIR
+from variables.settings import CHECKPOINTS_DIR, LORAS_DIR, VAE_DIR, MODELS_DIR, WORKFLOWS_DIR, get_workflow_path
 from utils import lifecycle
 
 _diffusion_lock = threading.Lock()
 _active_checkpoint: Optional[str] = None
+_active_workflow: Optional[str] = None
 _COMFY_NODE_CACHE: Dict[Tuple[Any, ...], Any] = {}
 _custom_nodes_loaded = False
 root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -48,6 +48,28 @@ def _persist_checkpoint_to_env(checkpoint_name: str) -> None:
             f.writelines(lines)
     except Exception as e:
         print(f"[engine_diffusion] Warning persisting checkpoint to .env: {e}")
+
+
+def _persist_workflow_to_env(workflow_name: str) -> None:
+    """Updates COMFYUI_IMAGE_WORKFLOW in the .env configuration file."""
+    try:
+        env_file = os.path.join(root_dir, ".env")
+        if not os.path.exists(env_file):
+            return
+        with open(env_file, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+        updated = False
+        for i, line in enumerate(lines):
+            if line.strip().startswith("COMFYUI_IMAGE_WORKFLOW="):
+                lines[i] = f"COMFYUI_IMAGE_WORKFLOW={workflow_name}\n"
+                updated = True
+                break
+        if not updated:
+            lines.append(f"\nCOMFYUI_IMAGE_WORKFLOW={workflow_name}\n")
+        with open(env_file, "w", encoding="utf-8") as f:
+            f.writelines(lines)
+    except Exception as e:
+        print(f"[engine_diffusion] Warning persisting workflow to .env: {e}")
 
 
 def resolve_checkpoint_path(checkpoint_name: Optional[str] = None) -> str:
@@ -255,6 +277,76 @@ def set_active_checkpoint(checkpoint_name: str) -> bool:
         return False
 
 
+def list_workflows() -> List[Dict[str, Any]]:
+    """Lists all available image workflow JSON templates in models/workflows."""
+    workflows = []
+    if not os.path.exists(WORKFLOWS_DIR):
+        return workflows
+    try:
+        for f in os.listdir(WORKFLOWS_DIR):
+            if f.lower().endswith(".json") and not f.startswith("."):
+                if f.lower().startswith("video"):
+                    continue
+                full_path = os.path.join(WORKFLOWS_DIR, f)
+                if os.path.isfile(full_path):
+                    size_kb = round(os.path.getsize(full_path) / 1024, 1)
+                    display_name = os.path.splitext(f)[0]
+                    workflows.append({
+                        "name": display_name,
+                        "filename": f,
+                        "path": full_path,
+                        "size_kb": size_kb
+                    })
+    except Exception as e:
+        print(f"[engine_diffusion] Error scanning workflows in {WORKFLOWS_DIR}: {e}")
+    return sorted(workflows, key=lambda x: (x["filename"] != "ImageWorkflow.json", x["name"].lower()))
+
+
+def get_active_workflow() -> str:
+    """Returns the filename of the currently selected image workflow."""
+    global _active_workflow
+    if _active_workflow and os.path.exists(_active_workflow):
+        return os.path.basename(_active_workflow)
+
+    env_wf = os.getenv("COMFYUI_IMAGE_WORKFLOW")
+    if env_wf:
+        resolved = os.path.join(WORKFLOWS_DIR, os.path.basename(env_wf))
+        if os.path.exists(resolved):
+            _active_workflow = resolved
+            return os.path.basename(resolved)
+
+    default_wf = os.path.join(WORKFLOWS_DIR, "ImageWorkflow.json")
+    if os.path.exists(default_wf):
+        _active_workflow = default_wf
+        return "ImageWorkflow.json"
+
+    wfs = list_workflows()
+    if wfs:
+        _active_workflow = wfs[0]["path"]
+        return wfs[0]["filename"]
+
+    return "ImageWorkflow.json"
+
+
+def set_active_workflow(workflow_name: str) -> bool:
+    """Sets the active image workflow and persists it to environment and .env."""
+    global _active_workflow
+    try:
+        filename = os.path.basename(workflow_name)
+        resolved = os.path.join(WORKFLOWS_DIR, filename)
+        if not os.path.exists(resolved):
+            print(f"[engine_diffusion] Workflow template not found: {resolved}")
+            return False
+        _active_workflow = resolved
+        os.environ["COMFYUI_IMAGE_WORKFLOW"] = filename
+        _persist_workflow_to_env(filename)
+        print(f"[engine_diffusion] Active image workflow set to: {filename}")
+        return True
+    except Exception as e:
+        print(f"[engine_diffusion] Failed to set active workflow: {e}")
+        return False
+
+
 DIFFUSION_SERVER_PORT = 8189
 DIFFUSION_SERVER_URL = f"http://127.0.0.1:{DIFFUSION_SERVER_PORT}"
 
@@ -298,9 +390,11 @@ def check_server_status() -> bool:
 
 
 
-def ensure_server_running(timeout: float = 60.0) -> bool:
+def ensure_server_running(timeout: float = 60.0, cancel_event: Optional[threading.Event] = None) -> bool:
     """Starts the diffusion server worker if not already running."""
     global _server_proc
+    if cancel_event is not None and cancel_event.is_set():
+        return False
     if _server_proc is not None and _server_proc.poll() is None:
         return True
 
@@ -308,14 +402,13 @@ def ensure_server_running(timeout: float = 60.0) -> bool:
         return True
 
     with _server_lock:
+        if cancel_event is not None and cancel_event.is_set():
+            return False
         if _server_proc is not None and _server_proc.poll() is None:
             return True
 
         if check_server_status():
             return True
-
-        # Ensure no zombie process occupies the port before launching a new worker
-        _cleanup_stale_port_process(DIFFUSION_SERVER_PORT)
 
         print("[engine_diffusion] Starting persistent diffusion server worker...", flush=True)
         py_exe = sys.executable
@@ -344,6 +437,8 @@ def ensure_server_running(timeout: float = 60.0) -> bool:
 
         start_t = time.time()
         while time.time() - start_t < timeout:
+            if cancel_event is not None and cancel_event.is_set():
+                return False
             time.sleep(0.5)
             if check_server_status():
                 print("[engine_diffusion] Persistent diffusion server worker is ready.", flush=True)
@@ -362,26 +457,20 @@ def unload_diffusion_models():
     """Unloads the diffusion server worker, releasing 100% of GPU VRAM back to the OS."""
     global _server_proc, _COMFY_NODE_CACHE, _active_checkpoint
     with _server_lock:
-        try:
-            import urllib.request
-            req = urllib.request.Request(f"{DIFFUSION_SERVER_URL}/shutdown", method="POST", data=b"{}")
-            urllib.request.urlopen(req, timeout=1.5)
-        except Exception:
-            pass
-
-        if _server_proc is not None:
+        if _server_proc is None:
+            if check_server_status():
+                raise RuntimeError("Cannot stop an unmanaged diffusion worker.")
+        elif _server_proc.poll() is None:
             try:
                 _server_proc.terminate()
                 _server_proc.wait(timeout=2.0)
-            except Exception:
+            except (OSError, subprocess.TimeoutExpired):
                 try:
                     _server_proc.kill()
                     _server_proc.wait(timeout=1.0)
-                except Exception:
-                    pass
-            _server_proc = None
-
-        _cleanup_stale_port_process(DIFFUSION_SERVER_PORT)
+                except (OSError, subprocess.TimeoutExpired) as exc:
+                    raise RuntimeError("Failed to stop the diffusion worker.") from exc
+        _server_proc = None
 
         _COMFY_NODE_CACHE.clear()
         _active_checkpoint = None
@@ -647,6 +736,7 @@ def _generate_portrait_image_inprocess(
     workflow_path: Optional[str] = None,
     save_path: Optional[str] = None,
     save_paths: Optional[List[str]] = None,
+    replacements: Optional[Dict[str, Any]] = None,
 ) -> Any:
     if seed is None:
         seed = random.randint(1, 1125899906842624)
@@ -668,16 +758,20 @@ def _generate_portrait_image_inprocess(
     if save_paths is not None:
         saved_out = []
         for idx, target_p in enumerate(save_paths):
-            replacements = {
+            item_replacements = {
                 "%prompt%": prompt,
                 "%negative_prompt%": negative_prompt,
                 "%seed%": seed + idx,
                 "%model%": selected_checkpoint,
-                "%vae%": ""
+                "%vae%": "",
+                "%width%": 832,
+                "%height%": 1248
             }
+            if replacements:
+                item_replacements.update(replacements)
             _, out_p = execute_workflow_graph(
                 wf_template,
-                replacements=replacements,
+                replacements=item_replacements,
                 save_path=target_p,
                 empty_cache_after=(idx == len(save_paths) - 1),
             )
@@ -686,47 +780,61 @@ def _generate_portrait_image_inprocess(
         return saved_out
 
     print(f"[engine_diffusion] Running workflow: {wf_file} with checkpoint: {selected_checkpoint}")
-    replacements = {
+    final_replacements = {
         "%prompt%": prompt,
         "%negative_prompt%": negative_prompt,
         "%seed%": seed,
         "%model%": selected_checkpoint,
-        "%vae%": ""
+        "%vae%": "",
+        "%width%": 832,
+        "%height%": 1248
     }
-    _, out_result = execute_workflow_graph(wf_template, replacements=replacements, save_path=save_path)
+    if replacements:
+        final_replacements.update(replacements)
+    _, out_result = execute_workflow_graph(wf_template, replacements=final_replacements, save_path=save_path)
     return out_result
 
 
 def generate_portrait_image(
-    prompt: str,
+    prompt: str = "",
     negative_prompt: str = "worst quality, low quality, deformed, mutated, extra limbs, watermark, text",
     checkpoint: Optional[str] = None,
     seed: Optional[int] = None,
     workflow_path: Optional[str] = None,
     save_path: Optional[str] = None,
     save_paths: Optional[List[str]] = None,
+    replacements: Optional[Dict[str, Any]] = None,
+    cancel_event: Optional[threading.Event] = None,
 ) -> Any:
     """Generates one or more images via the persistent diffusion worker, which keeps models cached across calls.
     Image size, steps, and sampler settings come from the workflow file."""
-    if not ensure_server_running():
+    if cancel_event is not None and cancel_event.is_set():
+        raise RuntimeError("Image generation cancelled.")
+    if not ensure_server_running(cancel_event=cancel_event):
         raise RuntimeError("Failed to start persistent diffusion server worker.")
 
     import urllib.request
     import urllib.error
 
+    resolved_workflow = workflow_path or get_workflow_path("Image")
+    resolved_checkpoint = checkpoint or get_active_checkpoint() or os.getenv("COMFYUI_CHECKPOINT")
+
     payload = {
         "prompt": prompt,
         "negative_prompt": negative_prompt,
-        "checkpoint": checkpoint,
+        "checkpoint": resolved_checkpoint,
         "seed": seed,
-        "workflow_path": workflow_path,
+        "workflow_path": resolved_workflow,
         "save_path": save_path,
         "save_paths": save_paths,
+        "replacements": replacements,
     }
 
     req_data = json.dumps(payload).encode("utf-8")
 
     for attempt in range(2):
+        if cancel_event is not None and cancel_event.is_set():
+            raise RuntimeError("Image generation cancelled.")
         req = urllib.request.Request(
             f"{DIFFUSION_SERVER_URL}/generate",
             data=req_data,
@@ -736,11 +844,15 @@ def generate_portrait_image(
         try:
             with urllib.request.urlopen(req, timeout=300) as resp:
                 res_json = json.loads(resp.read().decode("utf-8"))
+                if cancel_event is not None and cancel_event.is_set():
+                    raise RuntimeError("Image generation cancelled.")
                 if res_json.get("status") == "ok":
                     return res_json.get("paths") if save_paths is not None else res_json.get("path", "")
                 else:
                     raise RuntimeError(res_json.get("error", "Unknown diffusion error"))
         except urllib.error.HTTPError as http_err:
+            if cancel_event is not None and cancel_event.is_set():
+                raise RuntimeError("Image generation cancelled.") from http_err
             try:
                 err_body = json.loads(http_err.read().decode("utf-8"))
                 detail = err_body.get("error", str(http_err))
@@ -752,15 +864,17 @@ def generate_portrait_image(
             if attempt == 0 and is_device_err:
                 print(f"[engine_diffusion] GPU device was suspended ({detail}). Restarting worker for clean GPU context...", flush=True)
                 unload_diffusion_models()
-                if ensure_server_running():
+                if ensure_server_running(cancel_event=cancel_event):
                     continue
 
             raise RuntimeError(f"Diffusion error: {detail}") from http_err
         except Exception as conn_err:
+            if cancel_event is not None and cancel_event.is_set():
+                raise RuntimeError("Image generation cancelled.") from conn_err
             if attempt == 0:
                 print(f"[engine_diffusion] Connection to worker failed ({conn_err}). Restarting worker...", flush=True)
                 unload_diffusion_models()
-                if ensure_server_running():
+                if ensure_server_running(cancel_event=cancel_event):
                     continue
             raise conn_err
 

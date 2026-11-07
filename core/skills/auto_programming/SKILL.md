@@ -3,7 +3,7 @@ name: auto_programming
 description: Write, run, and debug Python scripts, execute shell commands, launch local apps or servers, and inspect or edit workspace files.
 summary: "Inspect workspaces, edit files, run shell commands, and execute Python scripts using [get_workspace_structure()], [find_files(pattern=\"...\")], [search_codebase(keyword=\"...\")], [read_file(path=\"...\", start_line=1, end_line=100)], [outline_file(path=\"...\")], [read_symbol(path=\"...\", symbol=\"Class.method\")], [review_code(path=\"...\", goal=\"...\")], [find_references(symbol=\"name\")], [write_file(path=\"...\", content=\"...\")], [replace_in_file(path=\"...\", old_text=\"...\", new_text=\"...\")], [replace_file_content(path=\"...\", start_line=1, end_line=10, target_content=\"...\", replacement_content=\"...\")], [run_shell_command(command=\"...\")], and [run_command_async(command=\"...\")]"
 retrieval: vector
-triggers: script, code, program, debug, automate, python, coding, convert, process, command, shell, terminal, run, execute, launch, open, start, app, server, localhost, port, file, folder, directory, workspace, codebase, repo, project, build, install, edit, write, read, task, fix, bug, refactor, test, audit, review, analyze, outline, function, class, module, large file
+triggers: script, code, coding, python, debug, refactor, codebase, repo, workspace, terminal, shell, command, localhost, directory, folder, large file, audit, read_file, write_file, review_code, outline_file, read_symbol, find_references, search_codebase, find_files, run_shell_command
 ---
 # SKILL: Auto Programming & Workspace Execution
 Follow an **Inspect → Act → Verify** workflow whenever asked to run, build, or edit a project:

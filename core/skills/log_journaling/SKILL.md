@@ -2,7 +2,8 @@
 name: log_journaling
 description: Autonomously record permanent personal facts, core relationships, and major milestones in a long-term memory journal.
 summary: "Record significant user details and milestones using [add_journal_entry(keyphrases=\"...\", content=\"...\")]"
-retrieval: always
+retrieval: vector
+triggers: remember this, don't forget, journal, milestone, my birthday, born on, i work as, my job, moved to, married, divorced, sober since
 ---
 # SKILL: Log Journaling
 Silently maintain long-term memory about {{user}} and {{char}} across conversations:

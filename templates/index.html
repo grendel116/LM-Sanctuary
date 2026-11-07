@@ -109,7 +109,7 @@
                     </svg>
                 </button>
 
-                <button class="share-btn" onclick="openConnectionModal()" title="Local LLM / Cloud Settings">
+                <button class="share-btn" onclick="openConnectionModal()" title="Connection & Project Settings">
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                         <circle cx="12" cy="12" r="3"></circle>
                         <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
@@ -673,21 +673,27 @@
                         <!-- Native Diffusion Panel -->
                         <div class="onboarding-option-box comfy-box" id="modal-comfy-box-container" style="width: 100%; box-sizing: border-box;">
                             <div class="option-header">
-                                <h4 style="margin: 0; font-size: 1.05rem; font-weight: 600;">Image Checkpoint</h4>
+                                <h4 style="margin: 0; font-size: 1.05rem; font-weight: 600;">Image Generation</h4>
                                 <span id="modal-diffusion-status" class="status-badge status-online">Online</span>
                             </div>
-                            <p class="option-desc" style="font-size: 0.8rem; margin: 8px 0 12px 0;">Renders character portraits in-process from <code>models/checkpoints/</code> and <code>models/loras/</code>.</p>
+                            <p class="option-desc" style="font-size: 0.8rem; margin: 8px 0 12px 0;">Renders character portraits in-process from <code>models/checkpoints/</code> and <code>models/workflows/</code>.</p>
                             
                             <div class="input-group" style="margin-bottom: 10px;">
                                 <label style="font-size: 0.72rem; color: var(--text-muted); display: block; margin-bottom: 4px;">Active Checkpoint Model</label>
                                 <select id="native-diffusion-select" class="onboarding-input glass-select" onchange="onSelectNativeCheckpoint(this.value)" style="width: 100%; font-size: 0.82rem; height: 36px;"></select>
                             </div>
 
+                            <div class="input-group" style="margin-bottom: 10px;">
+                                <label style="font-size: 0.72rem; color: var(--text-muted); display: block; margin-bottom: 4px;">Active Image Workflow</label>
+                                <select id="native-workflow-select" class="onboarding-input glass-select" onchange="onSelectNativeWorkflow(this.value)" style="width: 100%; font-size: 0.82rem; height: 36px;"></select>
+                            </div>
+
                             <div id="modal-native-diffusion-summary" style="font-size: 0.75rem; color: var(--text-muted); margin-bottom: 12px;"></div>
 
                             <div style="display: flex; gap: 8px;">
-                                <button onclick="openNativeModelsFolder('checkpoints')" class="onboarding-btn" style="flex: 1; font-size: 0.8rem; padding: 8px 12px;">📂 Open Checkpoints</button>
-                                <button onclick="openNativeModelsFolder('loras')" class="onboarding-btn" style="flex: 1; font-size: 0.8rem; padding: 8px 12px;">📂 Open LoRAs</button>
+                                <button onclick="openNativeModelsFolder('checkpoints')" class="onboarding-btn" style="flex: 1; font-size: 0.8rem; padding: 8px 8px;">📂 Checkpoints</button>
+                                <button onclick="openNativeModelsFolder('loras')" class="onboarding-btn" style="flex: 1; font-size: 0.8rem; padding: 8px 8px;">📂 LoRAs</button>
+                                <button onclick="openNativeModelsFolder('workflows')" class="onboarding-btn" style="flex: 1; font-size: 0.8rem; padding: 8px 8px;">📂 Workflows</button>
                             </div>
                         </div>
                     </div>
@@ -942,10 +948,6 @@
                 </div>
             </div>
         </div>
-    </div>
-
-
-                <div style="display: flex; flex-direction: column; gap: 12px; padding-top: 5px;">
     </div>
 
     <!-- Custom Dialog Modal (Alert/Confirm) -->

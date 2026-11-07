@@ -274,28 +274,8 @@ def load_dynamic_runtime_context(previous_message_ts: float | None = None) -> st
     )
 
     quest_block = _quest_schedule_block(now)
-    
-    try:
-        from tools.tools import get_project_folders
-        folders_str = ", ".join(get_project_folders())
-    except Exception:
-        folders_str = ""
-    folders_line = f"- Workspace Folders: {folders_str}\n" if folders_str else ""
-
-    env_block = (
-        "### SYSTEM ENVIRONMENT CONTEXT\n"
-        "- Active Engine Backend: open-source local runner\n"
-        f"- Host OS: Windows\n"
-        f"- Active Python Executable: {sys.executable}\n"
-        f"{folders_line}"
-    )
-    
-    blocks = [b for b in (temporal_block, quest_block, env_block) if b]
-    return (
-        "\n\n# DYNAMIC RUNTIME CONTEXT\n"
-        "Use the following parameters to ground time-sensitive requests or environmental checks:\n\n"
-        + "\n".join(blocks)
-    )
+    blocks = [b for b in (temporal_block, quest_block) if b]
+    return "\n\n# DYNAMIC RUNTIME CONTEXT\n" + "\n".join(blocks)
 
 def load_user_instructions() -> str:
     """Reads the active user profile configuration from variables/user_profiles/*.md 

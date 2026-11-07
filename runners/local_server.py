@@ -6,6 +6,7 @@ import requests
 import threading
 
 from utils import lifecycle
+from adapters.vram_orchestrator import serialized_gpu_operation
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LLAMA_BIN_DIR = os.path.join(BASE_DIR, "utils", "llama-bin")
@@ -17,11 +18,14 @@ _on_status_change = None  # Callback set by app.py to broadcast SSE events
 _cached_gpu_type = None
 _http_session = None
 
-def read_trained_context(model_path: str) -> int:
-    """Reads '<arch>.context_length' from the GGUF header; returns 0 if unavailable."""
+def read_gguf_metadata(model_path: str) -> dict:
+    """Reads architectural dimensions and sampling defaults directly from the GGUF binary header."""
     import struct
     sizes = {0: 1, 1: 1, 2: 2, 3: 2, 4: 4, 5: 4, 6: 4, 7: 1, 10: 8, 11: 8, 12: 8}
-    fmts = {0: "<B", 1: "<b", 2: "<H", 3: "<h", 4: "<I", 5: "<i", 10: "<Q", 11: "<q"}
+    fmts = {0: "<B", 1: "<b", 2: "<H", 3: "<h", 4: "<I", 5: "<i", 6: "<f", 7: "<?", 10: "<Q", 11: "<q", 12: "<d"}
+    meta: dict = {}
+    if not model_path or not os.path.exists(model_path):
+        return meta
     try:
         with open(model_path, "rb") as f:
             def rd(fmt):
@@ -30,61 +34,337 @@ def read_trained_context(model_path: str) -> int:
             def rd_str():
                 return f.read(rd("<Q")).decode("utf-8", "replace")
 
+            def rd_val(t):
+                if t == 8:
+                    return rd_str()
+                if t == 9:
+                    et, n = rd("<I"), rd("<Q")
+                    return [rd_val(et) for _ in range(n)]
+                return rd(fmts[t])
+
             def skip(t):
                 if t == 8:
                     rd_str()
                 elif t == 9:
                     et, n = rd("<I"), rd("<Q")
-                    for _ in range(n):
-                        skip(et)
+                    if et in sizes and n > 0:
+                        f.seek(sizes[et] * n, 1)
+                    else:
+                        for _ in range(n):
+                            skip(et)
                 else:
                     f.seek(sizes[t], 1)
 
             if f.read(4) != b"GGUF":
-                return 0
+                return meta
             rd("<I")
             rd("<Q")
             n_kv = rd("<Q")
+            wanted_suffixes = (
+                ".context_length",
+                ".block_count",
+                ".embedding_length",
+                ".attention.head_count",
+                ".attention.head_count_kv",
+                ".attention.key_length",
+                ".attention.value_length",
+                ".attention.key_length_swa",
+                ".attention.value_length_swa",
+                ".attention.sliding_window",
+                ".attention.sliding_window_pattern",
+            )
+            wanted_exact = {
+                "general.architecture",
+                "general.size_label",
+                "general.sampling.temp",
+                "general.sampling.top_p",
+                "general.sampling.top_k",
+            }
             for _ in range(n_kv):
                 key, t = rd_str(), rd("<I")
-                if key.endswith(".context_length") and t in fmts:
-                    return int(rd(fmts[t]))
-                skip(t)
+                if key in wanted_exact or key.endswith(wanted_suffixes):
+                    val = rd_val(t)
+                    short_key = key.split(".", 1)[-1] if not key.startswith("general.") else key
+                    meta[short_key] = val
+                else:
+                    skip(t)
     except Exception:
         pass
-    return 0
+    swa_pattern = meta.get("attention.sliding_window_pattern")
+    meta["has_swa"] = bool(
+        meta.get("attention.sliding_window")
+        and isinstance(swa_pattern, list)
+        and any(swa_pattern)
+    )
+    return meta
 
 
-def resolve_context_size(model_path: str, gpu_layers: str, ctk: str, ctv: str) -> str:
-    """Returns the context size: a numeric LOCAL_CONTEXT is used as-is; 'auto' (default)
-    asks llama-fit-params for the largest context fitting free device memory, clamped to
-    the model's trained context and [LOCAL_CONTEXT_MIN, LOCAL_CONTEXT_MAX]."""
-    setting = (os.getenv("LOCAL_CONTEXT") or "auto").strip().lower()
-    if setting.isdigit():
-        return setting
-    lo = int(os.getenv("LOCAL_CONTEXT_MIN", "8192"))
-    trained = read_trained_context(model_path)
-    hi = min(int(os.getenv("LOCAL_CONTEXT_MAX", "65536")), trained or 65536)
-    lo = min(lo, hi)
-    margin = os.getenv("LOCAL_VRAM_MARGIN_MB", "1536")
+def read_trained_context(model_path: str) -> int:
+    """Reads '<arch>.context_length' from the GGUF header; returns 0 if unavailable."""
+    return int(read_gguf_metadata(model_path).get("context_length") or 0)
+
+
+def _kv_quant_bytes_per_elem(qtype: str) -> float:
+    q = (qtype or "q8_0").strip().lower()
+    if q in ("f32", "fp32"):
+        return 4.0
+    if q in ("f16", "bf16", "fp16"):
+        return 2.0
+    if q.startswith("q8"):
+        return 1.0625
+    if q.startswith("q5"):
+        return 0.6875
+    if q.startswith("q4") or q.startswith("iq4"):
+        return 0.5625
+    return 1.0625
+
+
+def estimate_kv_cache_mib(meta: dict, ctx_tokens: int, ubatch_size: int = 512, ctk: str = "q8_0", ctv: str = "q8_0") -> float:
+    """Computes physical KV cache footprint in MiB from GGUF layer/head dimensions (including hybrid SWA ring buffers)."""
+    n_layer = int(meta.get("block_count") or 0)
+    if n_layer <= 0 or ctx_tokens <= 0:
+        return 0.0
+
+    n_embd = int(meta.get("embedding_length") or 4096)
+    n_head = int(meta.get("attention.head_count") or 32)
+    default_head_dim = max(64, n_embd // max(1, n_head))
+    d_k_full = int(meta.get("attention.key_length") or default_head_dim)
+    d_v_full = int(meta.get("attention.value_length") or default_head_dim)
+    d_k_swa = int(meta.get("attention.key_length_swa") or d_k_full)
+    d_v_swa = int(meta.get("attention.value_length_swa") or d_v_full)
+
+    raw_hkv = meta.get("attention.head_count_kv")
+    if isinstance(raw_hkv, list) and len(raw_hkv) == n_layer:
+        hkv_per_layer = [int(x) for x in raw_hkv]
+    else:
+        scalar_hkv = int(raw_hkv[0] if isinstance(raw_hkv, list) and raw_hkv else (raw_hkv or max(1, n_head // 4)))
+        hkv_per_layer = [scalar_hkv] * n_layer
+
+    swa_win = int(meta.get("attention.sliding_window") or 0)
+    swa_pat = meta.get("attention.sliding_window_pattern")
+    has_pat = isinstance(swa_pat, list) and len(swa_pat) == n_layer and swa_win > 0
+    swa_tokens = min(ctx_tokens, swa_win + max(512, ubatch_size)) if swa_win > 0 else ctx_tokens
+
+    bk = _kv_quant_bytes_per_elem(ctk)
+    bv = _kv_quant_bytes_per_elem(ctv)
+
+    total_bytes = 0.0
+    for idx in range(n_layer):
+        hkv = hkv_per_layer[idx]
+        if has_pat and bool(swa_pat[idx]):
+            layer_tokens = swa_tokens
+            layer_bytes_per_tok = hkv * (d_k_swa * bk + d_v_swa * bv)
+        else:
+            layer_tokens = ctx_tokens
+            layer_bytes_per_tok = hkv * (d_k_full * bk + d_v_full * bv)
+        total_bytes += layer_tokens * layer_bytes_per_tok
+
+    return total_bytes / (1024.0 * 1024.0)
+
+
+def probe_fit_memory_mib(
+    model_path: str,
+    ctx_tokens: int,
+    batch_size: int = 2048,
+    ubatch_size: int = 512,
+    ctk: str = "q8_0",
+    ctv: str = "q8_0",
+) -> tuple[int, int, int] | None:
+    """Queries `llama-fit-params -fitp on` (~70ms) for exact (model_mib, context_mib, compute_mib) on the GPU."""
     exe = os.path.join(LLAMA_BIN_DIR, "llama-fit-params.exe" if os.name == "nt" else "llama-fit-params")
-    fitted = 0
-    if os.path.exists(exe):
-        try:
-            import re
-            res = subprocess.run(
-                [exe, "-m", model_path, "-ngl", gpu_layers, "-fa", "on", "-ctk", ctk, "-ctv", ctv,
-                 "-fitc", str(lo), "-fitt", margin],
-                capture_output=True, text=True, timeout=60,
-            )
-            m = re.search(r"(?:^|\s)-c\s+(\d+)", res.stdout)
-            if m:
-                fitted = int(m.group(1))
-        except Exception as e:
-            print(f"[llama-runner] Context auto-detect failed: {e}", flush=True)
-    size = min(hi, max(lo, fitted)) if fitted else min(hi, 8192)
-    print(f"[llama-runner] Auto context: fit={fitted or 'n/a'}, trained={trained or 'n/a'} -> using {size}", flush=True)
-    return str(size)
+    if not os.path.exists(exe) or not os.path.exists(model_path):
+        return None
+    try:
+        res = subprocess.run(
+            [
+                exe, "-m", model_path,
+                "-c", str(ctx_tokens),
+                "-b", str(batch_size),
+                "-ub", str(ubatch_size),
+                "-fa", "on",
+                "-ctk", ctk,
+                "-ctv", ctv,
+                "-fitp", "on",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+        )
+        for line in (res.stdout or "").splitlines():
+            parts = line.strip().split()
+            if len(parts) >= 4 and parts[0].lower() != "host" and all(p.isdigit() for p in parts[1:4]):
+                return int(parts[1]), int(parts[2]), int(parts[3])
+    except Exception:
+        pass
+    return None
+
+
+def get_device_vram() -> tuple[int, int]:
+    """Returns (total_vram_mib, free_vram_mib) from the active hardware GPU device, or (0, 0) if none."""
+    if not os.path.exists(SERVER_EXE):
+        return 0, 0
+    try:
+        flags = subprocess.CREATE_NO_WINDOW if (os.name == "nt" and hasattr(subprocess, "CREATE_NO_WINDOW")) else 0
+        out = subprocess.check_output(
+            [SERVER_EXE, "--list-devices"],
+            text=True,
+            stderr=subprocess.STDOUT,
+            timeout=5.0,
+            creationflags=flags,
+        )
+        if "(none)" in out.lower() or ":" not in out:
+            return 0, 0
+        import re
+        m = re.search(r"\((\d+)\s*MiB(?:,\s*(\d+)\s*MiB free)?\)", out)
+        if m:
+            total_mib = int(m.group(1))
+            free_mib = int(m.group(2)) if m.group(2) else max(0, total_mib - 2048)
+            return total_mib, free_mib
+    except Exception as e:
+        print(f"[llama-runner] Could not query device VRAM: {e}", flush=True)
+    return 0, 0
+
+
+def resolve_runtime_profile(model_path: str) -> dict:
+    """Programmatically derives context size, KV cache quantization, batch/ubatch sizes, GPU layer offload,
+    and the conversational prompt crossover budget from GGUF metadata and physical GPU VRAM."""
+    meta = read_gguf_metadata(model_path)
+    trained = int(meta.get("context_length") or 0)
+    n_layers = int(meta.get("block_count") or 0)
+    model_size_bytes = os.path.getsize(model_path) if (model_path and os.path.exists(model_path)) else 0
+    model_size_mib = int(model_size_bytes / (1024 * 1024))
+
+    total_vram, _ = get_device_vram()
+    user_margin = os.getenv("LOCAL_VRAM_MARGIN_MB", "").strip()
+    if user_margin.isdigit():
+        margin_mib = int(user_margin)
+    elif total_vram > 0:
+        # Scale OS/display reserve margin proportionally (11% of total VRAM, clamped between 1536 and 2816 MiB)
+        margin_mib = max(1536, min(2816, int(total_vram * 0.11)))
+    else:
+        margin_mib = 2048
+
+    usable_vram = max(0, total_vram - margin_mib) if total_vram > 0 else 0
+    vram_headroom = usable_vram - model_size_mib if total_vram > 0 else 4096
+
+    # 1. KV Cache Quantization (ctk / ctv)
+    raw_ctk = (os.getenv("LOCAL_CACHE_TYPE_K") or "auto").strip().lower()
+    raw_ctv = (os.getenv("LOCAL_CACHE_TYPE_V") or "auto").strip().lower()
+    auto_quant = "q4_0" if (total_vram > 0 and vram_headroom < 2200) else "q8_0"
+    ctk = auto_quant if raw_ctk in ("", "auto") else raw_ctk
+    ctv = auto_quant if raw_ctv in ("", "auto") else raw_ctv
+
+    # 2. Batch & Micro-Batch Sizes (-b / -ub)
+    # Compute buffer scales nearly linearly with -ub (572 MiB @ ub=512, 1397 MiB @ ub=1024, 2797 MiB @ ub=2048 on 31B).
+    raw_b = (os.getenv("LOCAL_BATCH_SIZE") or "auto").strip().lower()
+    raw_ub = (os.getenv("LOCAL_UBATCH_SIZE") or "auto").strip().lower()
+    if raw_ub.isdigit():
+        ubatch_size = int(raw_ub)
+    elif total_vram == 0 or vram_headroom < 3200:
+        ubatch_size = 512
+    elif vram_headroom < 7500:
+        ubatch_size = 1024
+    else:
+        ubatch_size = 2048
+
+    if raw_b.isdigit():
+        batch_size = max(ubatch_size, int(raw_b))
+    else:
+        batch_size = max(ubatch_size, 1024 if vram_headroom < 2000 else 2048)
+
+    # 3. GPU Layer Offload (-ngl)
+    raw_ngl = (os.getenv("LOCAL_GPU_LAYERS") or "auto").strip().lower()
+    if raw_ngl.isdigit() and raw_ngl != "99":
+        gpu_layers = raw_ngl
+    elif total_vram > 0 and model_size_mib > 0 and usable_vram < model_size_mib + 1024 and n_layers > 0:
+        # Partial offload when model + minimal KV cache exceeds usable VRAM
+        avail_for_weights = max(0, usable_vram - 1280)
+        fitted_layers = max(0, min(n_layers, int((avail_for_weights / max(1, model_size_mib)) * n_layers)))
+        gpu_layers = str(fitted_layers)
+    else:
+        gpu_layers = "99"
+
+    # 4. Context Size (-c)
+    is_large_model = model_size_mib > 14000
+    is_medium_model = 7000 < model_size_mib <= 14000
+    default_ceiling = 16384 if is_large_model else (24576 if is_medium_model else 32768)
+
+    lo = int(os.getenv("LOCAL_CONTEXT_MIN", "8192"))
+    max_env = (os.getenv("LOCAL_CONTEXT_MAX") or "").strip()
+    hi = int(max_env) if max_env.isdigit() else default_ceiling
+    if trained > 0:
+        hi = min(hi, trained)
+    lo = min(lo, hi)
+
+    ctx_setting = (os.getenv("LOCAL_CONTEXT") or "auto").strip().lower()
+    if ctx_setting.isdigit():
+        ctx_size = int(ctx_setting)
+    else:
+        # Probe exact memory curve from llama-fit-params (-fitp on) at lo and hi, or fall back to GGUF header formula
+        probe_lo = probe_fit_memory_mib(model_path, lo, batch_size, ubatch_size, ctk, ctv)
+        if probe_lo is not None and total_vram > 0:
+            model_mib, kv_lo_mib, comp_lo_mib = probe_lo
+            probe_hi = probe_fit_memory_mib(model_path, hi, batch_size, ubatch_size, ctk, ctv) if hi > lo else probe_lo
+            if probe_hi is not None and hi > lo:
+                _, kv_hi_mib, comp_hi_mib = probe_hi
+                marginal_mib_per_tok = max(0.005, ((kv_hi_mib + comp_hi_mib) - (kv_lo_mib + comp_lo_mib)) / float(hi - lo))
+            else:
+                marginal_mib_per_tok = max(0.01, kv_lo_mib / float(max(1, lo)))
+            base_used = model_mib + kv_lo_mib + comp_lo_mib
+            extra_mib = max(0, usable_vram - base_used)
+            vram_limit_tokens = lo + int(extra_mib / marginal_mib_per_tok)
+            safe_fit = max(lo, min(hi, (vram_limit_tokens // 1024) * 1024))
+        elif total_vram > 0 and model_size_mib > 0:
+            est_lo = estimate_kv_cache_mib(meta, lo, ubatch_size, ctk, ctv)
+            est_hi = estimate_kv_cache_mib(meta, hi, ubatch_size, ctk, ctv)
+            comp_est = 560 if ubatch_size <= 512 else (1400 if ubatch_size <= 1024 else 2750)
+            if est_lo > 0 and hi > lo:
+                marginal = max(0.005, (est_hi - est_lo) / float(hi - lo))
+                extra_mib = max(0, usable_vram - model_size_mib - int(est_lo) - comp_est)
+                vram_limit_tokens = lo + int(extra_mib / marginal)
+                safe_fit = max(lo, min(hi, (vram_limit_tokens // 1024) * 1024))
+            else:
+                safe_fit = lo
+        else:
+            safe_fit = hi
+        ctx_size = max(lo, (safe_fit // 1024) * 1024)
+
+    # 5. Conversational Prompt Crossover Budget (LOCAL_CHAT_BUDGET)
+    # Balances active dialogue window against quadratic attention prefill latency so memory + vectors
+    # take over before prefill slows down interactive turns.
+    raw_chat_budget = (os.getenv("LOCAL_CHAT_BUDGET_OVERRIDE") or "").strip()
+    if raw_chat_budget.isdigit():
+        chat_budget = max(2048, int(raw_chat_budget))
+    elif is_large_model:
+        chat_budget = min(4096, max(2560, int(ctx_size * 0.34)))
+    elif is_medium_model:
+        chat_budget = min(6144, max(3072, int(ctx_size * 0.40)))
+    else:
+        chat_budget = min(8192, max(4096, int(ctx_size * 0.50)))
+    chat_budget = (chat_budget // 256) * 256
+
+    print(
+        f"[llama-runner] Hardware profile: model={model_size_mib}MB, vram={total_vram}MB (margin={margin_mib}MB), "
+        f"ctx={ctx_size}, chat_budget={chat_budget}, b={batch_size}, ub={ubatch_size}, kv={ctk}/{ctv}, ngl={gpu_layers}, swa={meta.get('has_swa', False)}",
+        flush=True,
+    )
+    return {
+        "context_size": str(ctx_size),
+        "chat_budget": str(chat_budget),
+        "batch_size": str(batch_size),
+        "ubatch_size": str(ubatch_size),
+        "ctk": ctk,
+        "ctv": ctv,
+        "gpu_layers": gpu_layers,
+        "has_swa": bool(meta.get("has_swa")),
+        "meta": meta,
+    }
+
+
+def resolve_context_size(model_path: str, gpu_layers: str = "auto", ctk: str = "auto", ctv: str = "auto") -> str:
+    """Returns the resolved context size string for `model_path`."""
+    return resolve_runtime_profile(model_path)["context_size"]
 
 
 def _get_http_session() -> requests.Session:
@@ -112,20 +392,8 @@ def _has_windows_rocm_sdk() -> bool:
 
 def has_gpu_devices() -> bool:
     """Verifies that the installed llama-server binary enumerates at least one hardware GPU device."""
-    if not os.path.exists(SERVER_EXE):
-        return False
-    try:
-        flags = subprocess.CREATE_NO_WINDOW if (os.name == "nt" and hasattr(subprocess, "CREATE_NO_WINDOW")) else 0
-        out = subprocess.check_output(
-            [SERVER_EXE, "--list-devices"],
-            text=True,
-            stderr=subprocess.STDOUT,
-            timeout=5.0,
-            creationflags=flags,
-        )
-        return "(none)" not in out.lower() and ":" in out
-    except Exception:
-        return False
+    total, _ = get_device_vram()
+    return total > 0
 
 
 def detect_gpu_type() -> str:
@@ -162,6 +430,7 @@ def detect_gpu_type() -> str:
             text=True,
             stderr=subprocess.DEVNULL,
             timeout=5.0,
+            creationflags=subprocess.CREATE_NO_WINDOW,
         )
         output_lower = output.lower()
         if "nvidia" in output_lower:
@@ -294,6 +563,108 @@ def download_llama_server(override_gpu_type: str | None = None):
         print(f"[llama-runner] Error installing: {e}", flush=True)
         return False
 
+_local_models_list_cached = None
+_local_models_list_cache_time = 0.0
+
+
+def _persist_model_to_env(model_name: str) -> None:
+    try:
+        env_path = os.path.join(BASE_DIR, ".env")
+        if os.path.exists(env_path):
+            with open(env_path, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+            updated = False
+            for i, line in enumerate(lines):
+                if line.strip().startswith("LOCAL_MODEL_NAME="):
+                    lines[i] = f"LOCAL_MODEL_NAME={model_name}\n"
+                    updated = True
+                    break
+            if not updated:
+                lines.append(f"\nLOCAL_MODEL_NAME={model_name}\n")
+            with open(env_path, "w", encoding="utf-8") as f:
+                f.writelines(lines)
+        os.environ["LOCAL_MODEL_NAME"] = model_name
+    except Exception:
+        pass
+
+
+def scan_gguf_files(base_dir):
+    models = []
+    try:
+        for root, _, files in os.walk(base_dir):
+            for file in files:
+                if file.lower().endswith(".gguf"):
+                    rel_path = os.path.relpath(os.path.join(root, file), base_dir)
+                    models.append(rel_path.replace("\\", "/"))
+    except Exception:
+        pass
+    return models
+
+
+def list_local_models(force_refresh=False):
+    global _local_models_list_cached, _local_models_list_cache_time
+    now = time.time()
+    if not force_refresh and _local_models_list_cached is not None and (now - _local_models_list_cache_time < 5.0):
+        return _local_models_list_cached
+
+    user_profile = os.environ.get("USERPROFILE") or os.path.expanduser("~")
+    base_models_dir = os.path.join(BASE_DIR, "models")
+    lm_studio_models_dir = os.path.join(user_profile, ".lmstudio", "models")
+
+    models = []
+    if os.path.exists(base_models_dir):
+        models.extend(scan_gguf_files(base_models_dir))
+    if os.path.exists(lm_studio_models_dir):
+        models.extend(scan_gguf_files(lm_studio_models_dir))
+
+    _local_models_list_cached = sorted(list(set(models)))
+    _local_models_list_cache_time = now
+    return _local_models_list_cached
+
+
+def list_gguf_models():
+    """Lists all discovered GGUF models in models/ and ~/.lmstudio/models/ with metadata."""
+    from variables.settings import LLM_MODELS_DIR, MODELS_DIR
+    user_profile = os.environ.get("USERPROFILE") or os.path.expanduser("~")
+    lm_studio_models_dir = os.path.join(user_profile, ".lmstudio", "models")
+    models = []
+    seen = set()
+
+    for search_dir in (LLM_MODELS_DIR, MODELS_DIR, lm_studio_models_dir):
+        if not os.path.exists(search_dir):
+            continue
+        try:
+            for root, _, files in os.walk(search_dir):
+                for f in files:
+                    if f.lower().endswith(".gguf") and f not in seen:
+                        seen.add(f)
+                        full_path = os.path.join(root, f)
+                        size_gb = round(os.path.getsize(full_path) / (1024 ** 3), 2)
+                        models.append({
+                            "name": f,
+                            "filename": f,
+                            "path": full_path,
+                            "size_gb": size_gb,
+                            "folder": os.path.relpath(root, MODELS_DIR) if full_path.startswith(MODELS_DIR) else "lmstudio"
+                        })
+        except Exception as e:
+            print(f"[llama-runner] Error scanning directory {search_dir}: {e}")
+
+    return sorted(models, key=lambda x: x["name"])
+
+
+def get_loaded_model_name():
+    """Returns the filename of the active or configured GGUF model."""
+    target = _current_model or os.getenv("LOCAL_MODEL_NAME", "")
+    if target:
+        resolved = resolve_model_path(target)
+        return os.path.basename(resolved or target)
+    downloaded = list_local_models()
+    if downloaded:
+        return os.path.basename(downloaded[0])
+    return None
+
+
 def resolve_model_path(model_key):
     if not model_key or not model_key.strip(): return None
     user_profile = os.environ.get("USERPROFILE") or os.path.expanduser("~")
@@ -307,7 +678,6 @@ def resolve_model_path(model_key):
         return resolved
 
     clean_key = os.path.basename(model_key).lower()
-    from adapters.local_llm_manager import list_local_models
     downloaded = list_local_models()
     for d in downloaded:
         if os.path.basename(d).lower() == clean_key or clean_key in d.lower():
@@ -318,9 +688,11 @@ def resolve_model_path(model_key):
 
 _current_model = None
 
+@serialized_gpu_operation
 def start_local_server(model_key=None):
     global _proc, _current_model, _starting
     
+    explicit_selection = bool(model_key and model_key != "local-llm")
     if not model_key or model_key == "local-llm":
         model_key = os.getenv("LOCAL_MODEL_NAME", "")
 
@@ -331,13 +703,15 @@ def start_local_server(model_key=None):
     is_online = check_local_server_status()
     model_path = resolve_model_path(model_key)
     if not model_path:
-        from adapters.local_llm_manager import list_local_models
         downloaded = list_local_models()
         if downloaded:
             model_key = downloaded[0]
             model_path = resolve_model_path(model_key)
+            _persist_model_to_env(model_key)
         if not model_path:
             return False, f"Model not found: {model_key}"
+    elif explicit_selection:
+        _persist_model_to_env(model_key)
         
     gpu_type = detect_gpu_type()
     gpu_type_file = os.path.join(LLAMA_BIN_DIR, "installed_gpu_type.txt")
@@ -361,11 +735,17 @@ def start_local_server(model_key=None):
                     val_base = os.path.basename(val).lower()
                     if val_base == target_base or val.lower() == model_key.lower():
                         _current_model = model_key
+                        if not os.getenv("LOCAL_CHAT_BUDGET") or os.getenv("LOCAL_CONTEXT", "auto") == "auto":
+                            prof = resolve_runtime_profile(model_path)
+                            os.environ["LOCAL_CONTEXT"] = prof["context_size"]
+                            os.environ["LOCAL_CHAT_BUDGET"] = prof["chat_budget"]
                         return True, "Online (already running)"
                         
     # If online with another model, mismatched GPU backend, or booting up, stop first to be clean
     if is_online:
-        stop_local_server()
+        stopped, message = stop_local_server()
+        if not stopped:
+            return False, message
         
     if not os.getenv("LOCAL_MODEL_NAME") and model_key:
         os.environ["LOCAL_MODEL_NAME"] = model_key
@@ -376,11 +756,15 @@ def start_local_server(model_key=None):
     elif installed_type != gpu_type:
         print(f"[llama-runner] Reinstalling llama-server: installed type '{installed_type}' differs from detected GPU type '{gpu_type}'", flush=True)
         reinstall = True
-        stop_local_server()
+        stopped, message = stop_local_server()
+        if not stopped:
+            return False, message
     elif not has_gpu_devices():
         print(f"[llama-runner] Installed llama-server ({installed_type}) detected 0 GPU devices; reinstalling...", flush=True)
         reinstall = True
-        stop_local_server()
+        stopped, message = stop_local_server()
+        if not stopped:
+            return False, message
             
     if reinstall:
         if not download_llama_server():
@@ -391,16 +775,19 @@ def start_local_server(model_key=None):
         except Exception:
             pass
 
-    gpu_layers = os.getenv("LOCAL_GPU_LAYERS", "99")
+    profile = resolve_runtime_profile(model_path)
+    gpu_layers = profile["gpu_layers"]
+    batch_size = profile["batch_size"]
+    ubatch_size = profile["ubatch_size"]
+    ctk = profile["ctk"]
+    ctv = profile["ctv"]
+    context_size = profile["context_size"]
+    os.environ["LOCAL_CONTEXT"] = context_size
+    os.environ["LOCAL_CHAT_BUDGET"] = profile["chat_budget"]
+
     flash_attn = os.getenv("LOCAL_FLASH_ATTN", "true").lower() == "true"
     no_mmap = os.getenv("LOCAL_NO_MMAP", "false").lower() == "true"
-    batch_size = os.getenv("LOCAL_BATCH_SIZE", "2048")
-    ubatch_size = os.getenv("LOCAL_UBATCH_SIZE", "2048")
-    ctk = os.getenv("LOCAL_CACHE_TYPE_K", "q8_0")
-    ctv = os.getenv("LOCAL_CACHE_TYPE_V", "q8_0")
-    context_size = resolve_context_size(model_path, gpu_layers, ctk, ctv)
-    os.environ["LOCAL_CONTEXT"] = context_size
-    
+
     cmd = [
         SERVER_EXE,
         "-m", model_path,
@@ -411,12 +798,13 @@ def start_local_server(model_key=None):
         "--host", "127.0.0.1",
         "-ngl", gpu_layers,
         "-np", "1",
-        "--cache-reuse", "64",
-        "-fa", "on",
+        "-fa", "on" if flash_attn else "off",
         "-ctk", ctk,
         "-ctv", ctv,
-        "--no-warmup"
+        "--no-warmup",
     ]
+    if not profile.get("has_swa"):
+        cmd.extend(["--cache-reuse", "64"])
 
     if no_mmap:
         cmd.append("--no-mmap")
@@ -424,9 +812,6 @@ def start_local_server(model_key=None):
     from variables.settings import is_thinking_enabled
     if not is_thinking_enabled():
         cmd.extend(["--reasoning", "off", "--reasoning-budget", "0"])
-
-    if flash_attn and "-fa" not in cmd:
-        cmd.extend(["-fa", "on"])
     # --- AUTOMATIC LOGIT BIAS INJECTION ---
     try:
         from core.banned_words import generate_llama_cli_args
@@ -483,24 +868,7 @@ def start_local_server(model_key=None):
             _starting = False
         return False, str(e)
 
-def _kill_all_llama_processes():
-    if os.name == 'nt':
-        try:
-            flags = subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0x08000000
-            subprocess.run(
-                ["taskkill", "/F", "/IM", "llama-server.exe"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                creationflags=flags
-            )
-        except Exception:
-            pass
-    else:
-        try:
-            subprocess.run(["pkill", "-9", "-f", "llama-server"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        except Exception:
-            pass
-
+@serialized_gpu_operation
 def stop_local_server():
     global _proc, _current_model, _starting, _http_session
     _current_model = None
@@ -515,19 +883,22 @@ def stop_local_server():
             pass
         _http_session = None
 
-    if _proc:
+    if _proc and _proc.poll() is None:
         try:
             _proc.terminate()
             _proc.wait(timeout=1.5)
-        except Exception:
+        except subprocess.TimeoutExpired:
             try:
                 _proc.kill()
-            except Exception:
-                pass
-        _proc = None
-        
-    _kill_all_llama_processes()
-    time.sleep(1.0)
+                _proc.wait(timeout=2.0)
+            except (OSError, subprocess.TimeoutExpired) as e:
+                return False, f"Could not stop the managed llama-server process: {e}"
+        except OSError as e:
+            return False, f"Could not stop the managed llama-server process: {e}"
+    _proc = None
+
+    if check_local_server_status():
+        return False, "A local server is still listening on port 1234; stop it before switching to image mode."
     return True, "Stopped"
 
 def check_local_server_status():
@@ -557,7 +928,6 @@ def is_model_loaded(model_key=None) -> bool:
 
     target_path = resolve_model_path(model_key) if model_key else None
     if not target_path:
-        from adapters.local_llm_manager import list_local_models
         downloaded = list_local_models()
         if downloaded:
             target_path = resolve_model_path(downloaded[0])
@@ -597,8 +967,7 @@ def ensure_server_online(model_key=None, timeout=120.0) -> bool:
         return True
 
     print(f"[Local LLM] Server offline or switching model. Starting server (model: {model_key or 'default'})...", flush=True)
-    from adapters import local_llm_manager
-    success, msg = local_llm_manager.start_server(model_key)
+    success, msg = start_local_server(model_key)
     if not success:
         print(f"[Local LLM] Failed to start local server: {msg}", flush=True)
         return False
@@ -619,35 +988,3 @@ def ensure_server_online(model_key=None, timeout=120.0) -> bool:
 
     print(f"[Local LLM] Server startup timed out after {timeout}s.", flush=True)
     return False
-
-async def ensure_server_online_async(model_key=None, timeout=120.0) -> bool:
-    """Async variant of ensure_server_online that yields control via asyncio.sleep."""
-    import asyncio
-    if not model_key or model_key == "local-llm":
-        model_key = os.getenv("LOCAL_MODEL_NAME", "")
-
-    if is_model_loaded(model_key):
-        return True
-
-    print(f"[Local LLM] Server offline or switching model. Starting server async (model: {model_key or 'default'})...", flush=True)
-    from adapters import local_llm_manager
-    success, msg = local_llm_manager.start_server(model_key)
-    if not success:
-        print(f"[Local LLM] Failed to start local server: {msg}", flush=True)
-        return False
-
-    start_wait = time.time()
-    poll_interval = 0.25
-    while time.time() - start_wait < timeout:
-        await asyncio.sleep(poll_interval)
-        poll_interval = min(poll_interval * 2, 1.0)
-        status = check_local_server_status()
-        if status is True:
-            if is_model_loaded(model_key):
-                return True
-        elif status is False and _proc and _proc.poll() is not None:
-            print(f"[Local LLM] Server process exited during startup with code {_proc.poll()}.", flush=True)
-            return False
-
-    print(f"[Local LLM] Server startup timed out after {timeout}s.", flush=True)
-    return False

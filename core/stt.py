@@ -1,4 +1,4 @@
-﻿"""
+"""
 core/stt.py — Local offline Speech-to-Text engine using faster-whisper.
 """
 
@@ -19,8 +19,9 @@ def get_whisper_model():
                 try:
                     from faster_whisper import WhisperModel
                     model_size = os.getenv("LOCAL_STT_MODEL", "tiny.en")
-                    _model = WhisperModel(model_size, device="cpu", compute_type="int8")
-                    print(f"[STT] Loaded local faster-whisper model ({model_size}) successfully.")
+                    cpu_threads = max(2, min(8, (os.cpu_count() or 4) // 2))
+                    _model = WhisperModel(model_size, device="cpu", compute_type="int8", cpu_threads=cpu_threads)
+                    print(f"[STT] Loaded local faster-whisper model ({model_size}, threads={cpu_threads}) successfully.")
                 except Exception as e:
                     print(f"[STT] Error loading faster-whisper: {e}")
     return _model

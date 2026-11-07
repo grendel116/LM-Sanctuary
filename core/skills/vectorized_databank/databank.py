@@ -13,9 +13,9 @@ def get_embedding_model():
     if _embedding_model is None:
         from sentence_transformers import SentenceTransformer
         try:
-            _embedding_model = SentenceTransformer('all-MiniLM-L6-v2', local_files_only=True)
+            _embedding_model = SentenceTransformer('all-MiniLM-L6-v2', device="cpu", local_files_only=True)
         except Exception:
-            _embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
+            _embedding_model = SentenceTransformer('all-MiniLM-L6-v2', device="cpu")
     return _embedding_model
 
 

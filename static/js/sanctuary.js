@@ -8,25 +8,13 @@
 window.onerror = function(message, source, lineno, colno, error) {
     const errorMsg = `JS Error: ${message} at ${source}:${lineno}:${colno}`;
     console.error(errorMsg);
-    if (typeof showDebugToast === 'function') {
-        showDebugToast(errorMsg);
-    } else {
-        setTimeout(() => {
-            if (typeof showDebugToast === 'function') showDebugToast(errorMsg);
-        }, 1000);
-    }
+    showDebugToast(errorMsg);
     return false;
 };
 window.addEventListener('unhandledrejection', function(event) {
     const errorMsg = `Unhandled Promise Rejection: ${event.reason}`;
     console.error(errorMsg);
-    if (typeof showDebugToast === 'function') {
-        showDebugToast(errorMsg);
-    } else {
-        setTimeout(() => {
-            if (typeof showDebugToast === 'function') showDebugToast(errorMsg);
-        }, 1000);
-    }
+    showDebugToast(errorMsg);
 });
 
 function showDebugToast(message) {
@@ -82,7 +70,6 @@ const safeSessionStorage = {
 };
 
 const appConfig = window.__SANCTUARY_CONFIG || {};
-const localIp = appConfig.localIp || "127.0.0.1";
 const chatContainer = document.getElementById('chat-container');
 const userInput = document.getElementById('user-input');
 let programWelcomeMessage = null;
@@ -162,187 +149,151 @@ function reloadApp(skipSave = false, forceHardReload = false) {
 
 
 
+// --- History pipeline: one fetch, one metadata step, one DOM reconciliation ---
+
+async function fetchHistory() {
+    const [historyRes] = await Promise.all([
+        fetch(`/history?session_id=${sessionId}&t=${Date.now()}`),
+        loadServerImages()
+    ]);
+    return historyRes.json();
+}
+
+function applyHistoryMeta(data) {
+    programWelcomeMessage = data.welcome_message || null;
+
+    if (data.active_program) {
+        activeProgramId = data.active_program;
+        applyTheme(data.active_program, data.theme);
+    }
+    if (data.character_name) {
+        activeProgramName = data.character_name;
+    }
+
+    const input = document.getElementById('user-input');
+    if (data.group_meta && data.group_meta.is_group) {
+        currentGroupMeta = data.group_meta;
+        selectedGroupProgramIds = [currentGroupMeta.host_id, ...(currentGroupMeta.guest_ids || [])];
+        if (input) input.placeholder = "Message group...";
+        (currentGroupMeta.members || []).forEach(m => {
+            if (m && m.theme) cacheProgramTheme(m.id, m.theme);
+        });
+        selectedGroupProgramIds.forEach(pid => {
+            if (pid && !programThemesCache[pid]) getOrFetchProgramTheme(pid);
+        });
+    } else {
+        currentGroupMeta = null;
+        selectedGroupProgramIds = [];
+        if (input && data.character_name) input.placeholder = "Ask " + data.character_name;
+    }
+}
+
+function applyHistoryState(data) {
+    if (data.history) {
+        syncMoodHistoryFromChat(data.history);
+    }
+    if (data.state) {
+        updateHeartState(data.state, data.inversion_active, data.inversion_state, null, false);
+    }
+    inversionActive = data.inversion_active || "";
+
+    // A reply started before this page loaded (e.g. the app was closed mid-generation)
+    if (data.generating && !isGenerating) {
+        watchServerGeneration();
+    }
+}
+
+const LIVE_ROW_SELECTOR = '.message-row:not(#welcome-message)';
+
+// Drop every row, welcome included. The bottom sentinel is not a row and stays.
+function clearChatRows() {
+    chatContainer.querySelectorAll('.message-row').forEach(row => row.remove());
+}
+
+function nextLiveRow(el) {
+    let n = el.nextElementSibling;
+    while (n && !n.matches(LIVE_ROW_SELECTOR)) n = n.nextElementSibling;
+    return n;
+}
+
+// Bring the DOM rows in line with `history`: drop rows the server no longer has,
+// rebuild rows whose content hash changed, insert missing rows, fix ordering.
+// Never scrolls; callers own scroll posture. Returns { changed, visibleCount }.
+function reconcileChat(history) {
+    const messages = history;
+    const wanted = new Set(messages.map(msg => msg.id).filter(Boolean));
+    let changed = false;
+
+    const rowsById = new Map();
+    chatContainer.querySelectorAll(LIVE_ROW_SELECTOR).forEach(row => {
+        const rowId = row.dataset.msgId;
+        if (!rowId) return;
+        const isTransient = row.querySelector('[data-is-transient="true"]') || row.dataset.isTransient === "true";
+        if (!wanted.has(rowId) && !isTransient) {
+            row.remove();
+            changed = true;
+        } else {
+            rowsById.set(rowId, row);
+        }
+    });
+
+    const sentinel = document.getElementById('bottom-sentinel');
+    let cursor = chatContainer.querySelector(LIVE_ROW_SELECTOR);
+
+    for (const msg of messages) {
+        let row = msg.id ? rowsById.get(msg.id) : null;
+
+        if (row && row.dataset.contentHash !== computeContentHash(msg)) {
+            const fresh = buildMessageRow(msg);
+            if (fresh) {
+                chatContainer.replaceChild(fresh, row);
+                if (row === cursor) cursor = fresh;
+                row = fresh;
+                changed = true;
+            }
+        } else if (!row) {
+            row = buildMessageRow(msg);
+            if (row) changed = true;
+        }
+        if (!row) continue;
+
+        if (row === cursor) {
+            cursor = nextLiveRow(cursor);
+        } else {
+            chatContainer.insertBefore(row, cursor || sentinel);
+            changed = true;
+        }
+    }
+
+    if (messages.length > 0) {
+        const welcome = document.getElementById('welcome-message');
+        if (welcome) welcome.remove();
+    }
+    return { changed, visibleCount: messages.length };
+}
+
 async function softReloadApp() {
     try {
-        const [historyRes, _] = await Promise.all([
-            fetch(`/history?session_id=${sessionId}&t=${Date.now()}`),
-            loadServerImages()
-        ]);
-        const data = await historyRes.json();
-        
-        if (data.welcome_message) {
-            programWelcomeMessage = data.welcome_message;
-        } else {
-            programWelcomeMessage = null;
-        }
+        const data = await fetchHistory();
+        applyHistoryMeta(data);
 
-        if (data.active_program) {
-            activeProgramId = data.active_program;
-            applyTheme(data.active_program, data.theme);
-        }
-
-        if (data.group_meta && data.group_meta.is_group) {
-            currentGroupMeta = data.group_meta;
-            selectedGroupProgramIds = [
-                currentGroupMeta.host_id,
-                ...(currentGroupMeta.guest_ids || [])
-            ];
-            const groupTitle = "Sanctuary";
-            document.title = groupTitle;
-            const headerTitle = document.querySelector('.header-title-area h1');
-            if (headerTitle) {
-                headerTitle.textContent = groupTitle;
-            }
-            const userInput = document.getElementById('user-input');
-            if (userInput) {
-                userInput.placeholder = "Message group...";
-            }
-            if (currentGroupMeta.members) {
-                currentGroupMeta.members.forEach(m => {
-                    if (m.theme) {
-                        cacheProgramTheme(m.id, m.theme);
-                    }
-                });
-            }
-        } else {
-            currentGroupMeta = null;
-            selectedGroupProgramIds = [];
-            if (data.character_name) {
-                activeProgramName = data.character_name;
-                const programTitle = "Sanctuary";
-                document.title = programTitle;
-                
-                const headerTitle = document.querySelector('.header-title-area h1');
-                if (headerTitle) {
-                    headerTitle.textContent = programTitle;
-                }
-                
-                const userInput = document.getElementById('user-input');
-                if (userInput) {
-                    userInput.placeholder = "Ask " + data.character_name;
-                }
-            }
-        }
-        
-        // Refresh avatar profile buster and select model options
-        profileCacheBuster = Date.now();
+        // Refresh avatar sources and select model options
+        updateProfileImages();
         modelInitPromise = initializeModelSelect();
 
-        const _hiddenPrefixes = ['port_', 'quest_', 'tool_', 'sys_', 'itm_'];
-        const newHistory = (data.history || []).filter(msg => {
-            if (msg.id && _hiddenPrefixes.some(p => msg.id.startsWith(p))) return false;
-            if (msg.text && (
-                msg.text.toLowerCase().startsWith('[system:') ||
-                msg.text.startsWith('[Tool Response from') ||
-                msg.text.includes('Generate a portrait of yourself') ||
-                msg.text.includes('[GENERATE_IMAGE:') ||
-                msg.text.includes('[GENERATE_IMAGEN:') ||
-                msg.text.includes('[generate_program_portrait') ||
-                msg.text.includes('(Generation stopped)') ||
-                msg.text.includes('(Generation cancelled)')
-            )) return false;
-            return true;
-        });
-        
         // Temporarily disable smooth scroll while updating/diffing the DOM
         chatContainer.classList.remove('smooth-scroll');
-
-        // Snapshot scroll position before DOM mutations to keep the viewport anchored
         const savedScrollTop = chatContainer.scrollTop;
 
-        let domUpdated = false;
-        
-        // Pre-remove any message rows from the DOM that are no longer in the server history.
-        // This keeps indices perfectly aligned and prevents shifting issues during updates.
-        const newHistoryIds = new Set(newHistory.map(msg => msg.id).filter(Boolean));
-        const currentLiveRows = Array.from(chatContainer.querySelectorAll('.message-row:not(#welcome-message):not(#onboarding-container)'));
-        currentLiveRows.forEach(row => {
-            const rowId = row.dataset.msgId;
-            const isTransient = row.querySelector('[data-is-transient="true"]') || row.dataset.isTransient === "true";
-            if (rowId && !newHistoryIds.has(rowId) && !isTransient) {
-                row.remove();
-                domUpdated = true;
-            }
-        });
-        
-        newHistory.forEach((msg, idx) => {
-            const msgId = msg.id;
-            const hash = computeContentHash(msg);
-            
-            // Find if a row with this msgId already exists in the DOM
-            let existingRow = null;
-            if (msgId) {
-                existingRow = chatContainer.querySelector(`.message-row[data-msg-id="${msgId}"]`);
-            }
-            
-            if (existingRow) {
-                if (existingRow.dataset.contentHash !== hash) {
-                    // Elements changed, replace in-place
-                    const newRow = renderMessage(msg);
-                    chatContainer.replaceChild(newRow, existingRow);
-                    existingRow = newRow;
-                    domUpdated = true;
-                }
-            } else {
-                // Element is new, create it
-                existingRow = renderMessage(msg);
-                domUpdated = true;
-            }
-            
-            if (existingRow) {
-                // Ensure existingRow is at the correct position (relative to message-rows)
-                const liveRows = Array.from(chatContainer.querySelectorAll('.message-row:not(#welcome-message):not(#onboarding-container)'));
-                const currentChildAtIdx = liveRows[idx];
-                if (currentChildAtIdx !== existingRow) {
-                    if (currentChildAtIdx) {
-                        chatContainer.insertBefore(existingRow, currentChildAtIdx);
-                    } else {
-                        const sentinel = document.getElementById('bottom-sentinel');
-                        if (sentinel) {
-                            chatContainer.insertBefore(existingRow, sentinel);
-                        } else {
-                            chatContainer.appendChild(existingRow);
-                        }
-                    }
-                    domUpdated = true;
-                }
-            }
-        });
-        
-        // Clean onboarding or welcome if we now have messages
-        if (newHistory.length > 0) {
-            const welcome = document.getElementById('welcome-message');
-            if (welcome) welcome.remove();
-            const onboarding = document.getElementById('onboarding-container');
-            if (onboarding) onboarding.remove();
-        } else {
-            if (!connectionStatus.remote_configured  && !connectionStatus.local_online) {
-                showOnboardingCard();
-            } else {
-                showWelcomeMessage();
-            }
+        const { changed, visibleCount } = reconcileChat(data.history || []);
+        if (visibleCount === 0) {
+            showWelcomeMessage();
         }
-        
-        if (data.history) {
-            syncMoodHistoryFromChat(data.history);
-        }
-        if (data.state) {
-            updateHeartState(data.state, data.inversion_active, data.inversion_state, null, false);
-        }
-        inversionActive = data.inversion_active || "";
+        applyHistoryState(data);
 
-        // A reply started before this page loaded (e.g. the app was closed mid-generation)
-        if (data.generating && !isGenerating) {
-            watchServerGeneration();
-        }
-        
         // Maintain scroll posture
-        if (domUpdated) {
-            if (isAtBottom) {
-                chatContainer.scrollTop = chatContainer.scrollHeight;
-            } else {
-                chatContainer.scrollTop = savedScrollTop;
-            }
+        if (changed) {
+            chatContainer.scrollTop = isAtBottom ? chatContainer.scrollHeight : savedScrollTop;
         }
     } catch (error) {
         console.error("Error soft-reloading chat history:", error);
@@ -369,7 +320,6 @@ if (userInput) {
 
 // TTS Configuration and State
 let ttsAutoSpeak = appConfig.ttsAutoSpeak || false;
-const ttsProvider = appConfig.ttsProvider || "local";
 // Mood and Emotional State Metadata
 // Dynamic Program Mood Registry & CMYK Palette State
 let activeProgramMoods = (window.__SANCTUARY_CONFIG && window.__SANCTUARY_CONFIG.programMoods) || null;
@@ -663,49 +613,14 @@ function getRelativePath(url) {
     }
 }
 
-// --- generateMessageId ---
-function generateMessageId(text, role = 'user') {
-    let prefix = 'msg_';
-    if (role === 'program' || role === 'user') {
-        if (text && text.trim().startsWith('![') && text.trim().endsWith(')')) {
-            prefix = 'img_';
-        } else if (role === 'program') {
-            if (text && (text.includes('Error') || text.includes('failed') || text.includes('momentarily overwhelmed'))) {
-                prefix = 'err_';
-            } else {
-                prefix = 'prgm_';
-            }
-        } else {
-            if (text && (text.includes("Generate a portrait of yourself") || text.includes("[GENERATE_IMAGE:") || text.includes("[GENERATE_IMAGEN:"))) {
-                prefix = 'port_';
-            } else if (text && text.startsWith("[SYSTEM: User has completed")) {
-                prefix = 'quest_';
-            } else if (text && text.toLowerCase().startsWith("[system:")) {
-                prefix = 'sys_';
-            } else if (text && text.startsWith("[Tool Response from")) {
-                prefix = 'tool_';
-            } else {
-                prefix = 'usr_';
-            }
-        }
-    } else if (role === 'voice-call') {
-        prefix = 'vc_';
-    } else if (role === 'system-memory' || role === 'system') {
-        prefix = 'sys_';
-    }
-    let hash = 0;
-    const str = text || '';
-    for (let i = 0; i < str.length; i++) {
-        const char = str.charCodeAt(i);
-        hash = ((hash << 5) - hash) + char;
-        hash = hash & hash;
-    }
-    return prefix + Math.abs(hash).toString(36) + '_' + str.length;
+// --- localMessageId: temporary id for a row the server has not stored ---
+function localMessageId() {
+    return 'local_' + Math.random().toString(36).slice(2, 11) + Date.now().toString(36);
 }
 
 // --- escapeHtml ---
 function escapeHtml(text) {
-    return text
+    return String(text ?? '')
         .replace(/&/g, "&amp;")
         .replace(/</g, "&lt;")
         .replace(/>/g, "&gt;")
@@ -818,14 +733,6 @@ function setupCustomDropdown(select) {
     });
     trigger.addEventListener("click", (e) => e.stopPropagation());
 
-    // Document pointerdown outside to close
-    document.addEventListener("pointerdown", (e) => {
-        if (!container.contains(e.target)) {
-            container.classList.remove("open");
-            list.style.display = "none";
-        }
-    });
-
     // Initial build
     rebuild();
 
@@ -879,8 +786,32 @@ function setupCustomDropdown(select) {
     attrObserver.observe(select, { attributes: true, attributeFilter: ["disabled"] });
 }
 
+// One outside-press handler closes every open custom dropdown.
+document.addEventListener("pointerdown", (e) => {
+    document.querySelectorAll(".custom-dropdown-container.open").forEach(c => {
+        if (c.contains(e.target)) return;
+        c.classList.remove("open");
+        const l = c.querySelector(".custom-dropdown-list");
+        if (l) l.style.display = "none";
+    });
+});
+
+// Upgrade every select.glass-select present now and every one inserted later.
+function setupGlassSelects(root) {
+    if (root.matches && root.matches("select.glass-select")) setupCustomDropdown(root);
+    root.querySelectorAll("select.glass-select").forEach(setupCustomDropdown);
+}
+setupGlassSelects(document);
+new MutationObserver((mutations) => {
+    for (const m of mutations) {
+        for (const node of m.addedNodes) {
+            if (node.nodeType === Node.ELEMENT_NODE) setupGlassSelects(node);
+        }
+    }
+}).observe(document.body, { childList: true, subtree: true });
+
 /* ==========================================================================
-   III. 2. ONBOARDING & GLOBAL CONFIG CONTROLLERS
+   III. 2. CONNECTION & MODEL CONTROLLERS
    ========================================================================== */
 
 // --- initializeModelSelect ---
@@ -895,9 +826,6 @@ async function initializeModelSelect() {
         if (data.status) {
             connectionStatus = data.status;
             updateConnectionModalStatus();
-            if (document.getElementById('onboarding-container')) {
-                showOnboardingCard();
-            }
         }
 
         // Check if the models list has actually changed
@@ -935,71 +863,6 @@ async function initializeModelSelect() {
     }
 }
 
-// --- showOnboardingCard ---
-function showOnboardingCard() {
-    // Remove existing welcome or onboarding card
-    const welcome = document.getElementById('welcome-message');
-    if (welcome) welcome.remove();
-    
-    const onboarding = document.getElementById('onboarding-container');
-    if (onboarding) onboarding.remove();
-
-    // Disabled onboarding card render
-    return;
-}
-
-// --- saveConfigData ---
-async function saveConfigData(apiKey, projectId, remoteModel = null) {
-    if (!apiKey && !projectId && !remoteModel) {
-        showCustomAlert("Validation Error", "Please provide at least one configuration value.");
-        return;
-    }
-    try {
-        const bodyObj = {};
-        if (apiKey) bodyObj.remote_api_key = apiKey;
-        if (projectId) bodyObj.remote_cloud_url = projectId;
-        if (remoteModel) bodyObj.remote_model = remoteModel;
-
-        const res = await fetch('/api/save_config', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(bodyObj)
-        });
-        const data = await res.json();
-        if (data.error) {
-            showCustomAlert("Error Saving Config", data.error);
-        } else {
-            showCustomAlert("Configuration Saved", "Your credentials have been successfully updated.");
-            await initializeModelSelect();
-            if (connectionStatus.remote_configured  || connectionStatus.local_online) {
-                const onboarding = document.getElementById('onboarding-container');
-                if (onboarding) onboarding.remove();
-                showWelcomeMessage();
-            }
-            closeConnectionModal();
-        }
-    } catch (e) {
-        console.error("Error saving config:", e);
-        showCustomAlert("Error", "Failed to contact server to save config.");
-    }
-}
-
-// --- saveOnboardingConfig ---
-function saveOnboardingConfig() {
-    const apiKey = document.getElementById('onboarding-api-key')?.value;
-    const projectId = document.getElementById('onboarding-project-id')?.value;
-    const remoteModel = document.getElementById('onboarding-remote-model')?.value;
-    saveConfigData(apiKey, projectId, remoteModel);
-}
-
-// --- saveModalConfig ---
-function saveModalConfig() {
-    const apiKey = document.getElementById('modal-api-key')?.value;
-    const projectId = document.getElementById('modal-project-id')?.value;
-    const remoteModel = document.getElementById('modal-remote-model')?.value;
-    saveConfigData(apiKey, projectId, remoteModel);
-}
-
 // --- Slider Handlers ---
 function onDynamismSliderInput(val) {
     const currentVal = document.getElementById('dynamism-current-val');
@@ -1034,9 +897,6 @@ async function verifyConnections(isSilent = false) {
     try {
         await initializeModelSelect();
         if (connectionStatus.remote_configured  || connectionStatus.local_online) {
-            const onboarding = document.getElementById('onboarding-container');
-            if (onboarding) onboarding.remove();
-            
             let welcome = document.getElementById('welcome-message');
             if (!welcome) {
                 showWelcomeMessage();
@@ -1054,163 +914,9 @@ async function verifyConnections(isSilent = false) {
     }
 }
 
-// --- checkOnboardingStatus ---
-function checkOnboardingStatus() {
-    verifyConnections();
-}
-
-// --- checkModalStatus ---
-function checkModalStatus() {
-    verifyConnections();
-}
-
 /* ==========================================================================
    IV. 3. SERVER CONTROL MIDDLEWARE
    ========================================================================== */
-
-// --- installLocalLLM ---
-async function installLocalLLM(btn) {
-    btn.disabled = true;
-    btn.innerHTML = `<span class="animate-spin" style="display: inline-block; width: 14px; height: 14px; border: 2px solid currentColor; border-top-color: transparent; border-radius: 50%; margin-right: 8px; vertical-align: middle;"></span>Installing CLI...`;
-    const prog = document.getElementById('local-install-progress');
-    if (prog) prog.style.display = 'block';
-    try {
-        const res = await fetch('/api/local_llm/install', { method: 'POST' });
-        const data = await res.json();
-        if (data.success) {
-            // Start status polling
-            pollInstallStatus(btn);
-        } else {
-            showCustomAlert("Installation Failed", `Failed to initiate installation: ${data.message}`);
-            btn.disabled = false;
-            btn.textContent = "Install llama-server";
-        }
-    } catch (e) {
-        showCustomAlert("Error", "Error communicating with server.");
-        btn.disabled = false;
-        btn.textContent = "Install llama-server";
-    }
-}
-
-// --- pollInstallStatus ---
-function pollInstallStatus(btn) {
-    const interval = setInterval(async () => {
-        try {
-            const res = await fetch('/api/local_llm/status');
-            const data = await res.json();
-            if (data.installed) {
-                clearInterval(interval);
-                await startLocalLLM();
-                await initializeModelSelect();
-                if (document.getElementById('onboarding-container')) {
-                    showOnboardingCard();
-                }
-                updateConnectionModalStatus();
-            }
-        } catch (e) {
-            console.error("Error polling installation status:", e);
-        }
-    }, 3000);
-}
-
-// --- startLocalLLM ---
-async function startLocalLLM(btn) {
-    if (_localStarting) return;
-    _localStarting = true;
-    if (btn) {
-        btn.disabled = true;
-        btn.innerHTML = `<span class="animate-spin" style="display: inline-block; width: 14px; height: 14px; border: 2px solid currentColor; border-top-color: transparent; border-radius: 50%; margin-right: 8px; vertical-align: middle;"></span>Starting...`;
-    }
-    connectionStatus.local_online = 'starting';
-    updateConnectionModalStatus();
-    if (document.getElementById('onboarding-container')) {
-        showOnboardingCard();
-    }
-    try {
-        const res = await fetch('/api/local_llm/start', { method: 'POST' });
-        if (!res.ok) {
-            throw new Error(`Server returned status ${res.status}`);
-        }
-        const data = await res.json();
-        if (!data.success) {
-            connectionStatus.local_online = false;
-            showCustomAlert("Failed to Start", data.message);
-        }
-    } catch (e) {
-        console.error("startLocalLLM Error:", e);
-        connectionStatus.local_online = false;
-        showCustomAlert("Error", e.message || "Failed to initiate server start.");
-    } finally {
-        _localStarting = false;
-        updateConnectionModalStatus();
-    }
-}
-
-// --- stopLocalLLM ---
-async function stopLocalLLM(btn) {
-    if (_localStopping) return;
-    _localStopping = true;
-    if (btn) {
-        btn.disabled = true;
-        btn.innerHTML = `<span class="animate-spin" style="display: inline-block; width: 14px; height: 14px; border: 2px solid currentColor; border-top-color: transparent; border-radius: 50%; margin-right: 8px; vertical-align: middle;"></span>Stopping server...`;
-    }
-    // Optimistic UI state
-    connectionStatus.local_online = 'stopping';
-    updateConnectionModalStatus();
-    try {
-        const res = await fetch('/api/local_llm/stop', { method: 'POST' });
-        const data = await res.json();
-        if (data.success) {
-            connectionStatus.local_online = false;
-            await initializeModelSelect();
-        } else {
-            connectionStatus.local_online = true; // Rollback
-            showCustomAlert("Failed to Stop", data.message);
-        }
-    } catch (e) {
-        connectionStatus.local_online = true; // Rollback
-        showCustomAlert("Error", "Failed to communicate with server.");
-    } finally {
-        _localStopping = false;
-        updateConnectionModalStatus();
-    }
-}
-
-// --- stopComfyUI ---
-async function stopComfyUI(btn) {
-    if (_comfyStopping) return;
-    _comfyStopping = true;
-    if (btn) {
-        btn.disabled = true;
-        btn.innerHTML = `<span class="animate-spin" style="display: inline-block; width: 14px; height: 14px; border: 2px solid currentColor; border-top-color: transparent; border-radius: 50%; margin-right: 8px; vertical-align: middle;"></span>Stopping ComfyUI...`;
-    }
-    // Optimistic UI state
-    comfyStatus.running = 'stopping';
-    updateComfyModalStatus(true);
-    try {
-        const res = await fetch('/api/comfy/stop', { method: 'POST' });
-        const data = await res.json();
-        if (data.success) {
-            comfyStatus.running = false;
-        } else {
-            comfyStatus.running = true; // Rollback
-            showCustomAlert("Failed to Stop", data.message);
-        }
-    } catch (e) {
-        comfyStatus.running = true; // Rollback
-        showCustomAlert("Error", "Failed to stop ComfyUI.");
-    } finally {
-        _comfyStopping = false;
-        updateComfyModalStatus(true);
-    }
-}
-
-// --- Imagen Mode Switch ---
-let useImagenMode = false;
-const savedImagenMode = safeLocalStorage.getItem('arena_use_imagen');
-if (savedImagenMode === 'true') {
-    useImagenMode = true;
-}
 
 // --- formatBytes helper ---
 function formatBytes(bytes) {
@@ -1219,503 +925,6 @@ function formatBytes(bytes) {
     const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
     const i = Math.floor(Math.log(bytes) / Math.log(k));
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
-}
-
-// --- searchHFModels ---
-async function searchHFModels(inputId, resultsId) {
-    const input = document.getElementById(inputId);
-    const container = document.getElementById(resultsId);
-    if (!input || !container) return;
-    const query = input.value.trim();
-    if (!query) return;
-
-    container.innerHTML = '<div style="color: var(--text-muted); font-size: 0.75rem; text-align: center; width: 100%; margin: 10px 0;">Searching Hugging Face...</div>';
-    try {
-        const res = await fetch(`/api/local_llm/search?query=${encodeURIComponent(query)}`);
-        const data = await res.json();
-        const results = data.results || [];
-        if (results.length === 0) {
-            container.innerHTML = '<div style="color: var(--text-muted); font-size: 0.75rem; text-align: center; width: 100%; margin: 10px 0;">No GGUF models found.</div>';
-            return;
-        }
-        container.innerHTML = '';
-        results.forEach(m => {
-            const item = document.createElement('div');
-            item.style.cssText = 'display: flex; flex-direction: column; padding: 10px; background: rgba(255,255,255,0.03); border: 1px solid var(--border-color); border-radius: 8px; width: 100%; box-sizing: border-box; gap: 8px; margin-bottom: 6px;';
-            item.innerHTML = `
-                <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%;">
-                    <div style="min-width: 0; flex: 1; text-align: left;">
-                        <div style="font-weight: 600; font-size: 0.78rem; color: var(--text-main); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;" title="${m.id}">${m.id}</div>
-                        <div style="font-size: 0.65rem; color: var(--text-muted); margin-top: 2px;">Likes: ${m.likes} • Downloads: ${m.downloads}</div>
-                    </div>
-                    <button onclick="expandHFRepo('${m.id}', this)" class="onboarding-btn" style="margin: 0; padding: 2px 8px; font-size: 0.7rem; height: 24px; flex-shrink: 0; background: var(--border-color); color: var(--text-main); border: 1px solid var(--border-color); border-radius: 4px;">Show Files</button>
-                </div>
-                <div class="repo-files-container" style="display: none; border-top: 1px solid rgba(255,255,255,0.05); padding-top: 8px; margin-top: 4px; flex-direction: column; gap: 6px;"></div>
-            `;
-            container.appendChild(item);
-        });
-    } catch (e) {
-        container.innerHTML = '<div style="color: #fca5a5; font-size: 0.75rem; text-align: center; width: 100%; margin: 10px 0;">Search failed.</div>';
-    }
-}
-
-// --- expandHFRepo ---
-async function expandHFRepo(repoId, btn) {
-    const card = btn.closest('div').parentNode;
-    const filesContainer = card.querySelector('.repo-files-container');
-    if (!filesContainer) return;
-    
-    if (filesContainer.style.display === 'flex') {
-        filesContainer.style.display = 'none';
-        btn.textContent = "Show Files";
-        return;
-    }
-    
-    filesContainer.style.display = 'flex';
-    filesContainer.innerHTML = '<div style="color: var(--text-muted); font-size: 0.65rem; text-align: center; width: 100%; margin: 5px 0;">Loading variants...</div>';
-    btn.textContent = "Hide Files";
-    
-    try {
-        const res = await fetch(`/api/local_llm/huggingface/files?repo_id=${encodeURIComponent(repoId)}`);
-        const data = await res.json();
-        const files = data.files || [];
-        if (files.length === 0) {
-            filesContainer.innerHTML = '<div style="color: var(--text-muted); font-size: 0.65rem; text-align: center; width: 100%; margin: 5px 0;">No GGUF variants found in this repo.</div>';
-            return;
-        }
-        filesContainer.innerHTML = '';
-        files.forEach(f => {
-            const fileRow = document.createElement('div');
-            fileRow.style.cssText = 'display: flex; flex-direction: column; font-size: 0.7rem; background: rgba(0,0,0,0.15); padding: 8px; border-radius: 6px; gap: 6px; width: 100%; box-sizing: border-box; border: 1px solid rgba(255,255,255,0.03);';
-            const trackingName = `${repoId}@${f.filename}`;
-            const cleanId = trackingName.replace(/[^a-zA-Z0-9]/g, '');
-            fileRow.innerHTML = `
-                <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%;">
-                    <div style="flex: 1; min-width: 0; text-align: left;">
-                        <div style="font-weight: 500; text-overflow: ellipsis; overflow: hidden; white-space: nowrap; color: var(--text-main);" title="${f.filename}">${f.filename}</div>
-                        <div style="font-size: 0.62rem; color: var(--text-muted); margin-top: 1px;">Size: ${formatBytes(f.size)} • Quant: ${f.quantization || 'Unknown'}</div>
-                    </div>
-                    <button onclick="downloadHFModel('${repoId}', '${f.filename}', this)" class="onboarding-btn" style="margin: 0; padding: 2px 6px; font-size: 0.65rem; height: 20px; flex-shrink: 0; border-radius: 4px;">Download</button>
-                </div>
-                <div class="progress-wrapper-${cleanId}" style="display: none; width: 100%;">
-                    <div style="display: flex; justify-content: space-between; font-size: 0.58rem; color: var(--text-muted); margin-bottom: 2px; width: 100%;">
-                        <span class="pct-span">0%</span>
-                        <span class="speed-span">0 MB/s</span>
-                        <span class="eta-span">--:--</span>
-                    </div>
-                    <div style="background: rgba(255,255,255,0.08); border-radius: 3px; height: 4px; overflow: hidden; width: 100%;">
-                        <div class="bar-span" style="background: var(--primary-accent); height: 100%; width: 0%; transition: width 0.3s ease;"></div>
-                    </div>
-                </div>
-            `;
-            filesContainer.appendChild(fileRow);
-        });
-    } catch (e) {
-        filesContainer.innerHTML = '<div style="color: #fca5a5; font-size: 0.65rem; text-align: center; width: 100%; margin: 5px 0;">Failed to load files.</div>';
-    }
-}
-
-// --- downloadHFModel ---
-async function downloadHFModel(repoId, quantization, btn) {
-    btn.disabled = true;
-    btn.textContent = "Requesting...";
-    const trackingName = `${repoId}@${quantization}`;
-    const cleanId = trackingName.replace(/[^a-zA-Z0-9]/g, '');
-    const row = btn.closest('div').parentNode;
-    const progressWrapper = row.querySelector(`.progress-wrapper-${cleanId}`);
-    if (progressWrapper) progressWrapper.style.display = 'block';
-
-    try {
-        const res = await fetch('/api/local_llm/download', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ model_name: repoId, quantization: quantization })
-        });
-        const data = await res.json();
-        if (data.success) {
-            btn.textContent = "Downloading...";
-            pollDownloadProgress(trackingName, progressWrapper, btn);
-        } else {
-            showCustomAlert("Download Failed", data.error || data.message || "Failed to start download.");
-            btn.disabled = false;
-            btn.textContent = "Download";
-            if (progressWrapper) progressWrapper.style.display = 'none';
-        }
-    } catch (e) {
-        showCustomAlert("Error", "Failed to connect to server.");
-        btn.disabled = false;
-        btn.textContent = "Download";
-        if (progressWrapper) progressWrapper.style.display = 'none';
-    }
-}
-
-// --- pollDownloadProgress ---
-function pollDownloadProgress(trackingName, progressWrapper, btn) {
-    const interval = setInterval(async () => {
-        try {
-            const res = await fetch('/api/local_llm/status');
-            const data = await res.json();
-            const statusObj = data.download_status[trackingName];
-            if (statusObj) {
-                const pctSpan = progressWrapper.querySelector('.pct-span');
-                const speedSpan = progressWrapper.querySelector('.speed-span');
-                const etaSpan = progressWrapper.querySelector('.eta-span');
-                const barSpan = progressWrapper.querySelector('.bar-span');
-
-                if (statusObj.status === 'downloading') {
-                    const downloaded = statusObj.downloaded_bytes || 0;
-                    const total = statusObj.total_size_bytes || 1;
-                    const percent = (downloaded / total * 100).toFixed(1);
-                    const speed = ((statusObj.bytes_per_second || 0) / 1024 / 1024).toFixed(2);
-                    
-                    if (pctSpan) pctSpan.textContent = `${percent}%`;
-                    if (speedSpan) speedSpan.textContent = `${speed} MB/s`;
-                    if (barSpan) barSpan.style.width = `${percent}%`;
-
-                    if (statusObj.estimated_completion && etaSpan) {
-                        const remainingMs = new Date(statusObj.estimated_completion) - new Date();
-                        const remainingSec = Math.max(0, Math.floor(remainingMs / 1000));
-                        const min = Math.floor(remainingSec / 60);
-                        const sec = remainingSec % 60;
-                        etaSpan.textContent = `ETA: ${min}m ${sec}s`;
-                    }
-                } else if (statusObj.status === 'completed') {
-                    clearInterval(interval);
-                    btn.textContent = "Downloaded";
-                    btn.style.background = "#10b981"; // green style
-                    btn.disabled = true;
-                    if (pctSpan) pctSpan.textContent = "100%";
-                    if (barSpan) barSpan.style.width = "100%";
-                    if (etaSpan) etaSpan.textContent = "Finished";
-                    await initializeModelSelect();
-                    fetchAndRenderLocalModels();
-                } else if (statusObj.status === 'failed') {
-                    clearInterval(interval);
-                    showCustomAlert("Download Failed", `Model download failed:<br><code style="color: #fca5a5; font-size: 0.75rem;">${statusObj.error || 'Unknown error'}</code>`);
-                    btn.disabled = false;
-                    btn.textContent = "Download";
-                    if (progressWrapper) progressWrapper.style.display = 'none';
-                }
-            }
-        } catch (e) {
-            console.error("Error polling download progress:", e);
-        }
-    }, 2000);
-}
-
-// --- fetchAndRenderLocalModels ---
-async function fetchAndRenderLocalModels() {
-    const listContainer = document.getElementById('modal-local-models-list');
-    if (!listContainer) return;
-    
-    if (!listContainer.innerHTML.trim()) {
-        listContainer.innerHTML = '<div style="color: var(--text-muted); font-size: 0.75rem; margin-top: 10px;">Loading downloaded models...</div>';
-    }
-    try {
-        const res = await fetch('/api/local_llm/status');
-        const data = await res.json();
-        
-        const downloaded = data.downloaded_models || [];
-        const loaded = data.loaded_models || [];
-        
-        // Filter out embedding models from display list
-        const chatModels = downloaded.filter(m => !(m.toLowerCase().includes("embed") || m.toLowerCase().includes("nomic")));
-        
-        if (chatModels.length === 0) {
-            listContainer.innerHTML = '<div style="color: var(--text-muted); font-size: 0.75rem; margin-top: 15px; border-top: 1px solid var(--border-color); padding-top: 15px;">No downloaded chat models found on disk.</div>';
-            return;
-        }
-        
-        let html = '<div style="margin-top: 15px; border-top: 1px solid var(--border-color); padding-top: 15px; text-align: left;">';
-        html += '<div style="font-size: 0.8rem; font-weight: 600; color: var(--text-color); margin-bottom: 8px;">Manage Downloaded Models:</div>';
-        html += '<div style="display: flex; flex-direction: column; gap: 8px; max-height: 160px; overflow-y: auto; padding-right: 4px; box-sizing: border-box;">';
-        
-        chatModels.forEach(modelKey => {
-            const displayName = modelKey.includes('/') ? modelKey.split('/').pop() : modelKey;
-            
-            // Check if this model (or a close variant) is loaded
-            const isLoaded = loaded.some(loadedVal => {
-                const loadedNorm = loadedVal.toLowerCase().replace(".gguf", "").replace(/[^a-z0-9]/g, "");
-                const downloadedNorm = modelKey.toLowerCase().replace(".gguf", "").replace(/[^a-z0-9]/g, "");
-                return downloadedNorm.includes(loadedNorm) || loadedNorm.includes(downloadedNorm);
-            });
-            
-            html += `
-                <div style="display: flex; align-items: center; justify-content: space-between; background: rgba(255,255,255,0.03); padding: 8px; border-radius: 6px; border: 1px solid var(--border-color); gap: 10px;">
-                    <div style="flex: 1; min-width: 0;">
-                        <div style="font-size: 0.78rem; font-weight: 500; text-overflow: ellipsis; overflow: hidden; white-space: nowrap;" title="${displayName}">${displayName}</div>
-                        <div style="font-size: 0.65rem; color: var(--text-muted); text-overflow: ellipsis; overflow: hidden; white-space: nowrap;">${modelKey}</div>
-                    </div>
-                    <div style="display: flex; gap: 6px;">
-                        ${isLoaded ? 
-                            `<button onclick="unloadLocalModel('${modelKey.replace(/\\/g, '\\\\')}', this)" class="onboarding-btn" style="margin: 0; padding: 4px 8px; font-size: 0.7rem; border-radius: 4px;">Unload</button>` : 
-                            `<button onclick="loadLocalModelDirect('${modelKey.replace(/\\/g, '\\\\')}', this)" class="onboarding-btn" style="margin: 0; padding: 4px 8px; font-size: 0.7rem; border-radius: 4px;">Load</button>`
-                        }
-                        <button onclick="deleteLocalModel('${modelKey.replace(/\\/g, '\\\\')}', this)" class="onboarding-btn" style="margin: 0; padding: 4px 8px; font-size: 0.7rem; border-radius: 4px;">Delete</button>
-                    </div>
-                </div>
-            `;
-        });
-        
-        html += '</div></div>';
-        listContainer.innerHTML = html;
-    } catch (e) {
-        console.error("Error fetching local models detail:", e);
-        listContainer.innerHTML = '<div style="color: #fca5a5; font-size: 0.75rem; margin-top: 10px;">Failed to fetch model list.</div>';
-    }
-}
-
-// --- unloadLocalModel ---
-async function unloadLocalModel(modelKey, btn) {
-    btn.disabled = true;
-    btn.textContent = "Unloading...";
-    try {
-        const res = await fetch('/api/local_llm/unload', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ model_name: modelKey })
-        });
-        const data = await res.json();
-        if (data.success) {
-            await initializeModelSelect();
-            fetchAndRenderLocalModels();
-        } else {
-            showCustomAlert("Error", data.message || "Failed to unload model.");
-            btn.disabled = false;
-            btn.textContent = "Unload";
-        }
-    } catch (e) {
-        console.error(e);
-        btn.disabled = false;
-        btn.textContent = "Unload";
-    }
-}
-
-// --- loadLocalModelDirect ---
-async function loadLocalModelDirect(modelKey, btn) {
-    btn.disabled = true;
-    btn.textContent = "Loading...";
-    try {
-        const res = await fetch('/api/local_llm/load', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ model_name: modelKey })
-        });
-        const data = await res.json();
-        if (data.success) {
-            await initializeModelSelect();
-            fetchAndRenderLocalModels();
-        } else {
-            showCustomAlert("Error", data.message || "Failed to load model.");
-            btn.disabled = false;
-            btn.textContent = "Load";
-        }
-    } catch (e) {
-        console.error(e);
-        btn.disabled = false;
-        btn.textContent = "Load";
-    }
-}
-
-// --- deleteLocalModel ---
-async function deleteLocalModel(modelKey, btn) {
-    showCustomConfirm("Delete Model", `Are you sure you want to permanently delete this model from disk?<br><code style="font-size: 0.7rem; color: #fca5a5; word-break: break-all;">${modelKey}</code>`, async () => {
-        btn.disabled = true;
-        btn.textContent = "Deleting...";
-        try {
-            const res = await fetch('/api/local_llm/delete', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ model_name: modelKey })
-            });
-            const data = await res.json();
-            if (data.success) {
-                await initializeModelSelect();
-                fetchAndRenderLocalModels();
-            } else {
-                showCustomAlert("Error", data.message || "Failed to delete model.");
-                btn.disabled = false;
-                btn.textContent = "Delete";
-            }
-        } catch (e) {
-            console.error(e);
-            btn.disabled = false;
-            btn.textContent = "Delete";
-        }
-    });
-}
-
-// --- downloadComfyCheckpoint ---
-async function downloadComfyCheckpoint(url, filename, btn) {
-    if (btn) {
-        btn.disabled = true;
-        btn.textContent = "Starting...";
-    }
-    try {
-        const res = await fetch('/api/comfy/checkpoints/download', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ url: url, filename: filename })
-        });
-        const data = await res.json();
-        if (data.success) {
-            pollComfyCheckpointDownloads();
-        } else {
-            showCustomAlert("Error", data.message || "Failed to start download");
-            if (btn) {
-                btn.disabled = false;
-                btn.textContent = "Download";
-            }
-        }
-    } catch (e) {
-        showCustomAlert("Error", "Connection error. Failed to start download.");
-        if (btn) {
-            btn.disabled = false;
-            btn.textContent = "Download";
-        }
-    }
-}
-
-// --- pollComfyCheckpointDownloads ---
-async function pollComfyCheckpointDownloads() {
-    try {
-        const res = await fetch('/api/comfy/checkpoints/download_status');
-        const status = await res.json();
-        
-        const container = document.getElementById('comfy-checkpoint-downloads-container');
-        const list = document.getElementById('comfy-checkpoint-downloads-list');
-        if (!container || !list) return;
-        
-        const filenames = Object.keys(status);
-        let activeCount = 0;
-        
-        if (filenames.length === 0) {
-            container.style.display = 'none';
-            return;
-        }
-        
-        let html = '';
-        filenames.forEach(filename => {
-            const info = status[filename];
-            if (info.status === 'downloading') {
-                activeCount++;
-                html += `
-                    <div style="background: rgba(255,255,255,0.02); border: 1px solid var(--border-color); padding: 6px; border-radius: 4px;">
-                        <div style="display: flex; justify-content: space-between; margin-bottom: 4px;">
-                            <span style="font-weight: 500; font-size: 0.72rem; text-overflow: ellipsis; overflow: hidden; white-space: nowrap; max-width: 70%;" title="${filename}">${filename}</span>
-                            <span>${info.progress}%</span>
-                        </div>
-                        <div style="width: 100%; height: 4px; background: rgba(255,255,255,0.1); border-radius: 2px; overflow: hidden;">
-                            <div style="width: ${info.progress}%; height: 100%; background: var(--primary-accent); transition: width 0.3s;"></div>
-                        </div>
-                    </div>
-                `;
-            } else if (info.status === 'completed') {
-                html += `
-                    <div style="background: rgba(34, 197, 94, 0.05); border: 1px solid rgba(34, 197, 94, 0.2); padding: 6px; border-radius: 4px; display: flex; justify-content: space-between; align-items: center;">
-                        <span style="font-size: 0.72rem; text-overflow: ellipsis; overflow: hidden; white-space: nowrap; max-width: 80%; color: #86efac;" title="${filename}">${filename}</span>
-                        <span style="color: #86efac; font-size: 0.65rem; font-weight: 600;">Done</span>
-                    </div>
-                `;
-            } else if (info.status === 'failed') {
-                html += `
-                    <div style="background: rgba(239, 68, 68, 0.05); border: 1px solid rgba(239, 68, 68, 0.2); padding: 6px; border-radius: 4px;">
-                        <div style="font-size: 0.72rem; text-overflow: ellipsis; overflow: hidden; white-space: nowrap; color: #fca5a5;" title="${filename}">${filename}</div>
-                        <div style="font-size: 0.62rem; color: #fca5a5; margin-top: 2px;">Error: ${info.error || 'Failed'}</div>
-                    </div>
-                `;
-            }
-        });
-        
-        list.innerHTML = html;
-        container.style.display = 'block';
-        
-        if (activeCount > 0) {
-            if (comfyDownloadTimer) clearTimeout(comfyDownloadTimer);
-            comfyDownloadTimer = setTimeout(pollComfyCheckpointDownloads, 2000);
-        } else {
-            fetchComfyCheckpoints();
-        }
-    } catch (e) {
-        console.error("Error polling comfy checkpoint downloads:", e);
-    }
-}
-
-// --- installComfyUI ---
-async function installComfyUI(btn) {
-    btn.disabled = true;
-    btn.innerHTML = `<span class="animate-spin" style="display: inline-block; width: 14px; height: 14px; border: 2px solid currentColor; border-top-color: transparent; border-radius: 50%; margin-right: 8px; vertical-align: middle;"></span>Starting installation...`;
-    try {
-        const res = await fetch('/api/comfy/install', { method: 'POST' });
-        const data = await res.json();
-        if (data.success) {
-            // Update state immediately to show progress bar and start background polling
-            updateComfyModalStatus();
-        } else {
-            showCustomAlert("Installation Failed", data.message);
-            btn.disabled = false;
-            btn.textContent = "Auto-Install ComfyUI";
-        }
-    } catch (e) {
-        showCustomAlert("Error", "Failed to contact backend.");
-        btn.disabled = false;
-        btn.textContent = "Auto-Install ComfyUI";
-    }
-}
-
-// --- startComfyUI ---
-async function startComfyUI(btn) {
-    if (_comfyStarting) return;
-    _comfyStarting = true;
-    // Optimistic UI state
-    comfyStatus.running = 'starting';
-    updateComfyModalStatus(true);
-    if (document.getElementById('onboarding-container')) {
-        showOnboardingCard();
-    }
-    try {
-        const res = await fetch('/api/comfy/start', { method: 'POST' });
-        const data = await res.json();
-        if (!data.success) {
-            comfyStatus.running = false;
-            showCustomAlert("Failed to Start", data.message);
-        }
-    } catch (e) {
-        comfyStatus.running = false;
-        showCustomAlert("Error", "Failed to start ComfyUI.");
-    } finally {
-        _comfyStarting = false;
-        updateComfyModalStatus(true);
-    }
-}
-
-// --- resolveWorkflowDependencies ---
-async function resolveWorkflowDependencies(btn) {
-    if (_comfyResolving) return;
-    _comfyResolving = true;
-    btn.disabled = true;
-    btn.innerHTML = `<span class="animate-spin" style="display: inline-block; width: 14px; height: 14px; border: 2px solid currentColor; border-top-color: transparent; border-radius: 50%; margin-right: 8px; vertical-align: middle;"></span>Analyzing Workflow...`;
-    try {
-        const res = await fetch('/api/comfy/resolve_workflow', { 
-            method: 'POST', 
-            headers: { 'Content-Type': 'application/json' }, 
-            body: JSON.stringify({}) 
-        });
-        const data = await res.json();
-        if (data.success) {
-            updateComfyModalStatus();
-        } else {
-            showCustomAlert("Resolution Failed", data.error || data.message);
-            btn.disabled = false;
-            btn.textContent = "Resolve Workflow Dependencies";
-        }
-    } catch (e) {
-        showCustomAlert("Error", "Failed to trigger dependency resolution.");
-        btn.disabled = false;
-        btn.textContent = "Resolve Workflow Dependencies";
-    } finally {
-        _comfyResolving = false;
-    }
 }
 
 /* ==========================================================================
@@ -1873,6 +1082,17 @@ function updateProfileImages(targetProgramId = null) {
         const url = speakerId ? `/programs/${speakerId}/profile.png?t=${profileCacheBuster}` : getProfileUrl();
         updateAvatarElement(img, url);
     });
+    document.querySelectorAll('.program-list-avatar').forEach(img => {
+        const source = img.getAttribute('src') || '';
+        const match = source.match(/^\/programs\/([^/]+)\/profile\.png/i);
+        const speakerId = img.getAttribute('data-id') || (match && match[1]);
+        if (!speakerId || (targetProgramId && speakerId !== targetProgramId)) return;
+        updateAvatarElement(img, `/programs/${speakerId}/profile.png?t=${profileCacheBuster}`);
+    });
+    const voiceAvatar = document.getElementById('voice-call-program-avatar');
+    if (voiceAvatar && (!targetProgramId || targetProgramId === activeProgramId)) {
+        updateAvatarElement(voiceAvatar, getProfileUrl());
+    }
 }
 
 // --- Program theme caching & per-bubble theme applying ---
@@ -1977,46 +1197,8 @@ function updateConnectionStatus(status) {
     
     const headerStatusText = document.getElementById('header-status-text');
     const headerHeart = document.getElementById('header-heart-pulse');
-    
-    const remoteBadges = [
-        document.getElementById('onboarding-remote-status'),
-        document.getElementById('modal-remote-status')
-    ];
-    const localLLMBadges = [
-        document.getElementById('onboarding-local-status'),
-        document.getElementById('modal-local-status')
-    ];
-    
-    // Update remote badges
-    remoteBadges.forEach(badge => {
-        if (!badge) return;
-        if (status.remote_configured ) {
-            badge.textContent = "Configured";
-            badge.className = "status-badge status-configured";
-        } else {
-            badge.textContent = "Unconfigured";
-            badge.className = "status-badge status-unconfigured";
-        }
-    });
-    
-    // Update Local LLM badges
-    localLLMBadges.forEach(badge => {
-        if (!badge) return;
-        if (status.local_online === true || status.local_online === 'online') {
-            badge.textContent = "Online";
-            badge.className = "status-badge status-online";
-        } else if (status.local_online === 'starting') {
-            badge.textContent = "Starting...";
-            badge.className = "status-badge status-starting";
-        } else if (status.local_online === 'stopping') {
-            badge.textContent = "Stopping...";
-            badge.className = "status-badge status-starting";
-        } else {
-            badge.textContent = "Offline";
-            badge.className = "status-badge status-offline";
-        }
-    });
-    
+
+    // #modal-local-status is written only by fetchNativeModelsSummary (models present on disk).
     // Update Header status indicator
     if (headerStatusText) {
         if (status.remote_configured  || status.local_online) {
@@ -2032,10 +1214,6 @@ function updateConnectionStatus(status) {
 
 // --- updateConnectionModalStatus ---
 function updateConnectionModalStatus() {
-    const modalApiKey = document.getElementById('modal-api-key');
-    const modalProjectId = document.getElementById('modal-project-id');
-    const modalRemoteModel = document.getElementById('modal-remote-model');
-    
     // Dynamically set dynamism slider
     const tempVal = connectionStatus.temperature !== undefined ? connectionStatus.temperature : 0.95;
     const dynamismSlider = document.getElementById('dynamism-slider');
@@ -2043,17 +1221,6 @@ function updateConnectionModalStatus() {
     if (dynamismSlider) {
         dynamismSlider.value = tempVal;
         if (dynamismCurrentVal) dynamismCurrentVal.textContent = parseFloat(tempVal).toFixed(2);
-    }
-    
-    if (connectionStatus.remote_configured ) {
-        if (modalApiKey && !modalApiKey.value) modalApiKey.placeholder = "•••••••••••••••• (Configured)";
-        if (modalProjectId && !modalProjectId.value && connectionStatus.remote_url) {
-            modalProjectId.value = connectionStatus.remote_url;
-        }
-    }
-    
-    if (modalRemoteModel && !modalRemoteModel.value && connectionStatus.remote_model) {
-        modalRemoteModel.value = connectionStatus.remote_model;
     }
     
     const envPathEl = document.querySelector('.env-path');
@@ -2065,20 +1232,12 @@ function updateConnectionModalStatus() {
     fetchNativeModelsSummary();
 }
 
-// --- updateComfyModalStatus ---
-async function updateComfyModalStatus() {
-    fetchNativeModelsSummary();
-}
-
-
-
 // --- openConnectionModal ---
 function openConnectionModal() {
     document.getElementById('connection-modal').style.display = 'flex';
     switchConnectionTab('engine');
     updateConnectionModalStatus();
     verifyConnections(true);
-    updateComfyModalStatus();
     loadProjectSettings();
 }
 
@@ -2122,21 +1281,6 @@ function switchConnectionTab(tab) {
 // --- closeConnectionModal ---
 function closeConnectionModal() {
     document.getElementById('connection-modal').style.display = 'none';
-    _comfyCheckpointsInitialized = false;
-    if (_comfyUpdateTimer) {
-        clearTimeout(_comfyUpdateTimer);
-        _comfyUpdateTimer = null;
-    }
-}
-
-// --- openUserProfileModal ---
-function openUserProfileModal() {
-    openAssistantModal('user');
-}
-
-// --- closeUserProfileModal ---
-function closeUserProfileModal() {
-    closeAssistantModal();
 }
 
 // --- changeModel ---
@@ -2540,11 +1684,7 @@ async function activateUserProfile(profileId) {
 
         selectedEditingProfileId = profileId;
 
-        const messagesList = document.getElementById('messages-list');
-        if (messagesList) {
-            messagesList.innerHTML = "";
-            showWelcomeMessage();
-        }
+        showWelcomeMessage();
 
         await loadUserProfiles();
     } catch (e) {
@@ -2614,11 +1754,7 @@ async function saveActiveUserProfile() {
 
         showCustomAlert("Success", `User profile saved and applied as active persona!`);
 
-        const messagesList = document.getElementById('messages-list');
-        if (messagesList) {
-            messagesList.innerHTML = "";
-            showWelcomeMessage();
-        }
+        showWelcomeMessage();
 
         await loadUserProfiles();
         closeUserProfileEditor();
@@ -2660,11 +1796,7 @@ async function createNewUserProfile() {
 
         selectedEditingProfileId = sanitizedId;
 
-        const messagesList = document.getElementById('messages-list');
-        if (messagesList) {
-            messagesList.innerHTML = "";
-            showWelcomeMessage();
-        }
+        showWelcomeMessage();
 
         await loadUserProfiles();
         openUserProfileEditor(sanitizedId);
@@ -2694,11 +1826,7 @@ async function deleteUserProfileById(targetProfileId) {
                 showCustomAlert("Profile Deleted", `User profile '${displayTitle}' has been deleted.`);
 
                 if (profileId === activeUserProfile) {
-                    const messagesList = document.getElementById('messages-list');
-                    if (messagesList) {
-                        messagesList.innerHTML = "";
-                        showWelcomeMessage();
-                    }
+                    showWelcomeMessage();
                 }
 
                 selectedEditingProfileId = "";
@@ -2940,6 +2068,8 @@ function switchAssistantModalTab(tab) {
 }
 
 // --- openImportProgramModal ---
+let selectedTavernCardFile = null;
+
 function openImportProgramModal() {
     closeAssistantModal(false);
     document.getElementById('import-program-modal').style.display = 'flex';
@@ -3183,6 +2313,7 @@ function renderProgramsList(assistants, activeId) {
         img.src = `/programs/${assistant.id}/profile.png?t=${profileCacheBuster}`;
         img.alt = assistant.name;
         img.setAttribute('data-name', assistant.name);
+        img.setAttribute('data-id', assistant.id);
         img.setAttribute('data-color', assistant.theme_color || '#38bdf8');
         img.style.cssText = `
             width: 44px;
@@ -3316,11 +2447,6 @@ async function startGroupSession() {
             sessionId = data.session_id;
             sessionFromUrl = true;
             safeLocalStorage.setItem('program_session_id', data.session_id);
-            const sessionDisplay = document.getElementById('session-id-display');
-            if (sessionDisplay) {
-                sessionDisplay.textContent = `• ID: ${sessionId.slice(-4)}`;
-                sessionDisplay.title = `Full Session ID: ${sessionId}`;
-            }
 
             currentGroupMeta = {
                 is_group: true,
@@ -3329,8 +2455,7 @@ async function startGroupSession() {
             };
             selectedGroupProgramIds = [currentGroupMeta.host_id, ...(currentGroupMeta.guest_ids || [])];
 
-            const chatContainer = document.getElementById('chat-container');
-            if (chatContainer) chatContainer.innerHTML = '';
+            clearChatRows();
             loadHistory();
         } else {
             showCustomAlert("Group Session Failed", data.error || "Could not start group session.");
@@ -3434,15 +2559,12 @@ async function selectAssistant(assistantId) {
             
             // Reset proactive thought state for new assistant
             hideThoughtBubbleOverlay();
-            currentProactiveThoughtText = "";
             hasTriggeredInitialProactive = false;
             lastProactiveThoughtTime = 0;
-            lastUserMessageTime = Date.now();
             
             // Reset the chat container and reload history for new assistant
-            const chatContainer = document.getElementById('chat-container');
-            chatContainer.innerHTML = '';
-            
+            clearChatRows();
+
             // Dynamically update UI text properties
             document.title = "Sanctuary";
             const h1Element = document.querySelector('header h1');
@@ -3470,11 +2592,6 @@ async function selectAssistant(assistantId) {
                 url.searchParams.delete('session_id');
                 window.history.pushState({}, '', url.toString());
             } catch (ue) {}
-            const sessionDisplay = document.getElementById('session-id-display');
-            if (sessionDisplay) {
-                sessionDisplay.textContent = `• ID: default`;
-                sessionDisplay.title = `Full Session ID: default`;
-            }
 
             // Re-request history and dynamic configuration
             modelInitPromise = initializeModelSelect();
@@ -3521,22 +2638,18 @@ async function deleteAssistant(assistantId, name) {
                 showCustomAlert("Deleted", `Program <strong>${name}</strong> has been deleted.`);
                 
                 // Clear any cached theme or assistants list data for the deleted program
-                if (typeof programThemesCache !== 'undefined' && programThemesCache) {
-                    delete programThemesCache[assistantId];
-                }
-                if (typeof currentLoadedAssistants !== 'undefined' && Array.isArray(currentLoadedAssistants)) {
-                    currentLoadedAssistants = currentLoadedAssistants.filter(a => (a.id || a.program_id) !== assistantId);
-                }
+                delete programThemesCache[assistantId];
+                currentLoadedAssistants = currentLoadedAssistants.filter(a => (a.id || a.program_id) !== assistantId);
 
                 // Allow backend state reload to settle
                 await new Promise(resolve => setTimeout(resolve, 300));
 
                 try {
-                    const isGroupHost = (typeof currentGroupMeta !== 'undefined' && currentGroupMeta && currentGroupMeta.host_id === assistantId);
-                    if (data.switched_to === 'sebile' || (typeof activeProgramId !== 'undefined' && activeProgramId === assistantId) || (typeof activeProgram !== 'undefined' && activeProgram === assistantId) || isGroupHost) {
+                    const isGroupHost = (currentGroupMeta && currentGroupMeta.host_id === assistantId);
+                    if (data.switched_to === 'sebile' || activeProgramId === assistantId || isGroupHost) {
                         selectAssistant('sebile');
                     } else {
-                        if (typeof currentGroupMeta !== 'undefined' && currentGroupMeta && currentGroupMeta.guest_ids) {
+                        if (currentGroupMeta && currentGroupMeta.guest_ids) {
                             currentGroupMeta.guest_ids = currentGroupMeta.guest_ids.filter(id => id !== assistantId);
                         }
                         if (Array.isArray(selectedGroupProgramIds)) {
@@ -3561,7 +2674,7 @@ async function deleteAssistant(assistantId, name) {
 
 // Helper to check if Davy is the active user persona
 function isDavyActiveUser() {
-    const usr = ((typeof activeUserProfile !== 'undefined' && activeUserProfile) || 
+    const usr = (activeUserProfile || 
                  (window.__SANCTUARY_CONFIG && window.__SANCTUARY_CONFIG.activeUser) || '').toLowerCase();
     return usr === 'davy';
 }
@@ -3915,6 +3028,7 @@ async function saveProgramProfile() {
         return;
     }
     
+    const originalProgramId = currentEditingProgramId;
     let targetProgramId = currentEditingProgramId;
     let wasActive = false;
     
@@ -3979,9 +3093,7 @@ async function saveProgramProfile() {
         
         document.getElementById('program-profile-modal').style.display = 'none';
         
-        // If the edited program is currently active, reload active session details
-        const activeProgramText = document.getElementById('user-input');
-        if (wasActive || (activeProgramText && (activeProgramText.placeholder.toLowerCase().includes(currentEditingProgramId) || activeProgramText.placeholder.toLowerCase().includes(targetProgramId)))) {
+        if (wasActive || activeProgramId === originalProgramId || activeProgramId === targetProgramId) {
             await selectAssistant(targetProgramId);
         } else {
             openAssistantModal();
@@ -4004,7 +3116,7 @@ function renderEpicChronicleView() {
     epicContainer.innerHTML = '';
     
     const userDisplayName = getUserDisplayName();
-    const programDisplayName = (typeof activeProgramName !== 'undefined' && activeProgramName) ? activeProgramName : 'Program';
+    const programDisplayName = activeProgramName || 'Program';
     
     const chronicle = (currentEpicChronicleRaw || '').trim();
     if (chronicle) {
@@ -4082,8 +3194,8 @@ async function saveEpicChronicle() {
     if (!textarea) return;
     
     const newSummary = textarea.value.trim();
-    const progId = (typeof activeProgramId !== 'undefined' && activeProgramId) || (typeof activeProgramName !== 'undefined' && activeProgramName ? activeProgramName.toLowerCase() : '') || 'sebile';
-    const activeSession = (typeof sessionId !== 'undefined' && sessionId) ? sessionId : ((typeof currentSessionId !== 'undefined' && currentSessionId) ? currentSessionId : 'default');
+    const progId = activeProgramId || (activeProgramName ? activeProgramName.toLowerCase() : '') || 'sebile';
+    const activeSession = sessionId || 'default';
     
     if (saveBtn) {
         saveBtn.disabled = true;
@@ -4125,7 +3237,7 @@ function renderRecentChaptersView() {
     chaptersContainer.innerHTML = '';
     
     const userDisplayName = getUserDisplayName();
-    const programDisplayName = (typeof activeProgramName !== 'undefined' && activeProgramName) ? activeProgramName : 'Program';
+    const programDisplayName = activeProgramName || 'Program';
     
     if (!currentRecentChaptersRaw || currentRecentChaptersRaw.length === 0) {
         chaptersContainer.innerHTML = '<div class="empty-state">No recent summaries compiled yet (distilled every 12 conversation turns).</div>';
@@ -4232,8 +3344,8 @@ async function saveRecentChapter(idx) {
     if (!textarea) return;
     
     const newContent = textarea.value.trim();
-    const progId = (typeof activeProgramId !== 'undefined' && activeProgramId) || (typeof activeProgramName !== 'undefined' && activeProgramName ? activeProgramName.toLowerCase() : '') || 'sebile';
-    const activeSession = (typeof sessionId !== 'undefined' && sessionId) ? sessionId : ((typeof currentSessionId !== 'undefined' && currentSessionId) ? currentSessionId : 'default');
+    const progId = activeProgramId || (activeProgramName ? activeProgramName.toLowerCase() : '') || 'sebile';
+    const activeSession = sessionId || 'default';
     
     if (saveBtn) {
         saveBtn.disabled = true;
@@ -4268,7 +3380,7 @@ async function saveRecentChapter(idx) {
 }
 
 async function loadProgramJournals() {
-    const progId = (typeof activeProgramId !== 'undefined' && activeProgramId) || (typeof activeProgramName !== 'undefined' && activeProgramName ? activeProgramName.toLowerCase() : '') || 'sebile';
+    const progId = activeProgramId || (activeProgramName ? activeProgramName.toLowerCase() : '') || 'sebile';
     
     const journalsContainer = document.getElementById('program-journals-list');
     const epicContainer = document.getElementById('program-epic-chronicle-container');
@@ -4279,7 +3391,7 @@ async function loadProgramJournals() {
     }
     
     try {
-        const activeSession = (typeof sessionId !== 'undefined' && sessionId) ? sessionId : ((typeof currentSessionId !== 'undefined' && currentSessionId) ? currentSessionId : 'default');
+        const activeSession = sessionId || 'default';
         const res = await fetch(`/api/programs/journals?program_id=${encodeURIComponent(progId)}&session_id=${encodeURIComponent(activeSession)}&t=${Date.now()}`);
         const data = await res.json();
         if (data.error) throw new Error(data.error);
@@ -4362,7 +3474,7 @@ async function loadProgramJournals() {
     }
 }
 async function deleteProgramJournalEntry(entryId) {
-    const progId = (typeof activeProgramId !== 'undefined' && activeProgramId) || (typeof activeProgramName !== 'undefined' && activeProgramName ? activeProgramName.toLowerCase() : '') || 'sebile';
+    const progId = activeProgramId || (activeProgramName ? activeProgramName.toLowerCase() : '') || 'sebile';
     showCustomConfirm(
         "Delete Memory Entry",
         "Are you sure you want to permanently delete this memory entry? The program will forget this context immediately.",
@@ -4392,7 +3504,7 @@ async function deleteProgramJournalEntry(entryId) {
 // --- getUserDisplayName ---
 function getUserDisplayName(userId) {
     const id = userId || activeUserProfile || window.__SANCTUARY_CONFIG.activeUser;
-    if (typeof userProfiles !== 'undefined' && userProfiles.length > 0) {
+    if (userProfiles.length > 0) {
         const activeProf = userProfiles.find(p => p.id === id);
         if (activeProf && activeProf.name) {
             return activeProf.name;
@@ -4404,7 +3516,7 @@ function getUserDisplayName(userId) {
 // --- showWelcomeMessage ---
 function showWelcomeMessage() {
     // Do not show welcome message if there is already active chat history visible
-    const visibleMessages = chatContainer.querySelectorAll('.message-row:not(#welcome-message):not(#onboarding-container)');
+    const visibleMessages = chatContainer.querySelectorAll('.message-row:not(#welcome-message)');
     if (visibleMessages.length > 0) return;
 
     let welcome = document.getElementById('welcome-message');
@@ -4446,6 +3558,8 @@ function showWelcomeMessage() {
         welcome.dataset.msgId = welcome.dataset.msgId || 'first_mes_welcome';
         welcome.dataset.role = 'program';
         welcome.dataset.rawText = resolvedGreeting;
+        const avatar = welcome.querySelector('.program-avatar');
+        if (avatar) updateAvatarElement(avatar, getProfileUrl());
         const textDiv = welcome.querySelector('.message-text');
         if (textDiv) {
             textDiv.innerHTML = parsedText;
@@ -4475,84 +3589,19 @@ async function loadHistory() {
                         safeLocalStorage.setItem('program_session_id', 'default');
                     }
                     
-                    // Update the UI header ID display if it exists
-                    const sessionDisplay = document.getElementById('session-id-display');
-                    if (sessionDisplay) {
-                        sessionDisplay.textContent = `• ID: ${sessionId.slice(-4)}`;
-                        sessionDisplay.title = `Full Session ID: ${sessionId}`;
-                    }
                 }
             } catch (err) {
                 console.error("Error verifying last opened session:", err);
             }
         }
 
-        // Fetch history and server images concurrently
-        const [historyRes, _] = await Promise.all([
-            fetch(`/history?session_id=${sessionId}&t=${Date.now()}`),
-            loadServerImages()
-        ]);
-        const data = await historyRes.json();
-        if (data.welcome_message) {
-            programWelcomeMessage = data.welcome_message;
-        } else {
-            programWelcomeMessage = null;
-        }
-        if (data.active_program) {
-            activeProgramId = data.active_program;
-            applyTheme(data.active_program, data.theme);
-        }
-        if (data.character_name) {
-            activeProgramName = data.character_name;
-            const programTitle = "Sanctuary";
-            document.title = programTitle;
-            
-            const headerTitle = document.querySelector('.header-title-area h1');
-            if (headerTitle) {
-                headerTitle.textContent = programTitle;
-            }
-            
-            const userInput = document.getElementById('user-input');
-            if (userInput) {
-                userInput.placeholder = "Ask " + data.character_name;
-            }
-        }
-        if (data.group_meta && data.group_meta.is_group) {
-            currentGroupMeta = data.group_meta;
-            selectedGroupProgramIds = [data.group_meta.host_id, ...(data.group_meta.guest_ids || [])];
-            const groupInput = document.getElementById('user-input');
-            if (groupInput) {
-                groupInput.placeholder = "Message group...";
-            }
-            if (Array.isArray(data.group_meta.members)) {
-                data.group_meta.members.forEach(m => {
-                    if (m && m.theme) {
-                        cacheProgramTheme(m.id, m.theme);
-                    }
-                });
-            }
-            selectedGroupProgramIds.forEach(pid => {
-                if (pid && !programThemesCache[pid]) {
-                    getOrFetchProgramTheme(pid);
-                }
-            });
-        } else {
-            currentGroupMeta = null;
-        }
-        chatContainer.innerHTML = '';
-        if (data.history && data.history.length > 0) {
-            // Remove welcome message or onboarding card
-            const welcome = document.getElementById('welcome-message');
-            if (welcome) welcome.remove();
-            const onboarding = document.getElementById('onboarding-container');
-            if (onboarding) onboarding.remove();
-            
-            // Render history
-            (data.history || []).forEach(msg => {
-                renderMessage(msg);
-            });
-        } else {
-            // History is empty! Wait for model initialization and health checks to complete if they haven't yet
+        const data = await fetchHistory();
+        applyHistoryMeta(data);
+
+        clearChatRows();
+        const { visibleCount } = reconcileChat(data.history || []);
+        if (visibleCount === 0) {
+            // Wait for model initialization and health checks to complete if they haven't yet
             if (modelInitPromise) {
                 try {
                     // Wait at most 2 seconds for model initialization status
@@ -4565,33 +3614,17 @@ async function loadHistory() {
                 }
             }
 
-            // Check connection status
-            if (!connectionStatus.remote_configured  && !connectionStatus.local_online) {
-                showOnboardingCard();
-            } else {
-                showWelcomeMessage();
-                // On a new chat session (no history), default to local model
-                const defaultModel = safeLocalStorage.getItem('program_default_model') || 'local-llm';
-                selectedModel = defaultModel;
-                safeLocalStorage.setItem('program_selected_model', selectedModel);
-                const modelSelectElement = document.getElementById('model-select');
-                if (modelSelectElement) {
-                    modelSelectElement.value = selectedModel;
-                }
+            showWelcomeMessage();
+            // On a new chat session (no history), default to local model
+            const defaultModel = safeLocalStorage.getItem('program_default_model') || 'local-llm';
+            selectedModel = defaultModel;
+            safeLocalStorage.setItem('program_selected_model', selectedModel);
+            const modelSelectElement = document.getElementById('model-select');
+            if (modelSelectElement) {
+                modelSelectElement.value = selectedModel;
             }
         }
-        if (data.history) {
-            syncMoodHistoryFromChat(data.history);
-        }
-        if (data.state) {
-            updateHeartState(data.state, data.inversion_active, data.inversion_state, null, false);
-        }
-        inversionActive = data.inversion_active || "";
-
-        // A reply started before this page loaded (e.g. the app was closed mid-generation)
-        if (data.generating && !isGenerating) {
-            watchServerGeneration();
-        }
+        applyHistoryState(data);
 
         // Restore scroll position
         const savedScrollPos = safeSessionStorage.getItem('chat_scroll_pos');
@@ -4615,20 +3648,14 @@ async function loadHistory() {
                 ]);
             } catch (e) {}
         }
-        if (!connectionStatus.remote_configured  && !connectionStatus.local_online) {
-            showOnboardingCard();
-        } else {
-            showWelcomeMessage();
-        }
+        showWelcomeMessage();
     } finally {
         // Re-enable smooth scroll after a brief delay to avoid animating the initial position
         setTimeout(() => {
             chatContainer.classList.add('smooth-scroll');
         }, 50);
         hideLoadingOverlay();
-        if (typeof startSSE === 'function') {
-            startSSE();
-        }
+        startSSE();
     }
 }
 
@@ -4714,47 +3741,12 @@ function hideLoadingOverlay() {
 // Timeout guard so the splash overlay is never stuck on screen
 setTimeout(hideLoadingOverlay, 2500);
 
-// --- resetSession ---
-async function resetSession() {
-    showCustomConfirm("Reset Session", "Are you sure you want to reset the chat session and clear the context window?", async () => {
-        try {
-            await fetch('/reset', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ session_id: sessionId })
-            });
-        } catch (e) {
-            console.error("Failed to reset session on server:", e);
-        }
-        localStorage.removeItem('program_session_id');
-        localStorage.removeItem('program_selected_model');
-        reloadApp(true, true);
-    });
-}
-
 /* ==========================================================================
    IX. 8. MESSAGE RENDERING & POST-PROCESSING
    ========================================================================== */
 
 let currentPlayingBtn = null;
 let currentAudio = null;
-
-// --- toggleAutoSpeak ---
-function toggleAutoSpeak() {
-    ttsAutoSpeak = !ttsAutoSpeak;
-    const btn = document.getElementById('tts-toggle-btn');
-    if (btn) {
-        if (ttsAutoSpeak) {
-            btn.classList.add('active');
-        } else {
-            btn.classList.remove('active');
-            if (currentAudio) {
-                currentAudio.pause();
-            }
-            resetSpeakButtons();
-        }
-    }
-}
 
 // --- resetSpeakButtons ---
 function resetSpeakButtons() {
@@ -4776,11 +3768,8 @@ async function speakMessage(btn) {
     if (!bubble) return;
     
     const msgId = bubble.dataset.msgId;
-    let rawText = bubble.dataset.rawText || '';
-    
-    // Clean up thinking block before speaking
-    rawText = rawText.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
-    
+    const rawText = bubble.dataset.rawText || '';
+
     // If already playing this message, pause it
     if (currentPlayingBtn === btn) {
         if (currentAudio) {
@@ -4850,14 +3839,6 @@ async function speakMessage(btn) {
         resetSpeakButtons();
     }
 }
-// --- toggleThinkingBlock ---
-function toggleThinkingBlock(headerElement) {
-    const body = headerElement.nextElementSibling;
-    const chevron = headerElement.querySelector('.thinking-block-chevron');
-    body.classList.toggle('expanded');
-    chevron.textContent = body.classList.contains('expanded') ? '▲' : '▼';
-}
-
 // --- formatMessageTimestamp ---
 function formatMessageTimestamp(timestamp) {
     if (!timestamp) return '';
@@ -4877,6 +3858,76 @@ function formatMessageTimestamp(timestamp) {
         const dateStr = date.toLocaleDateString(undefined, dateOptions);
         return `${dateStr}, ${timeStr}`;
     }
+}
+
+// --- Tool activity log: one card, one item builder, shared by live and completed renderers ---
+
+// Find or build the logs card inside a message bubble. Returns its label and body.
+function ensureLogsCard(bubble) {
+    let container = bubble.querySelector('.antigravity-logs-container');
+    if (!container) {
+        container = document.createElement('div');
+        container.className = 'antigravity-logs-container';
+        bubble.appendChild(container);
+    }
+
+    let card = container.querySelector('.antigravity-logs-card');
+    if (!card) {
+        card = document.createElement('div');
+        card.className = 'antigravity-logs-card';
+
+        const header = document.createElement('div');
+        header.className = 'antigravity-logs-header';
+        header.innerHTML = `
+            <span class="ag-timer-icon">${getLogIconSvg('timer')}</span>
+            <span class="ag-timer-text"></span>
+            <span class="ag-header-chevron">▼</span>
+        `;
+
+        const body = document.createElement('div');
+        body.className = 'antigravity-logs-body';
+        body.style.display = 'none';
+
+        header.onclick = (e) => {
+            e.stopPropagation();
+            const isExpanded = body.style.display === 'flex' || body.style.display === 'block';
+            body.style.display = isExpanded ? 'none' : 'flex';
+            header.querySelector('.ag-header-chevron').classList.toggle('expanded', !isExpanded);
+        };
+
+        card.appendChild(header);
+        card.appendChild(body);
+        container.appendChild(card);
+    }
+
+    return {
+        label: card.querySelector('.ag-timer-text'),
+        body: card.querySelector('.antigravity-logs-body')
+    };
+}
+
+// One log row plus its collapsible detail pane. `icon` is trusted SVG; every other field is escaped.
+function createLogItem({ icon, action, target, suffix, detail }) {
+    const itemEl = document.createElement('div');
+    itemEl.className = 'antigravity-log-item';
+    itemEl.innerHTML = `
+        <span class="ag-log-icon">${icon}</span>
+        <span class="ag-log-action">${escapeHtml(action)}</span>
+        <span class="ag-log-target">${escapeHtml(target)}</span>
+        <span class="ag-log-suffix">${escapeHtml(suffix)}</span>
+    `;
+
+    const detailEl = document.createElement('div');
+    detailEl.className = 'antigravity-log-detail';
+    detailEl.style.display = 'none';
+    detailEl.innerHTML = `<pre><code>${escapeHtml(detail)}</code></pre>`;
+
+    itemEl.onclick = (e) => {
+        e.stopPropagation();
+        detailEl.style.display = detailEl.style.display === 'block' ? 'none' : 'block';
+    };
+
+    return { item: itemEl, detail: detailEl };
 }
 
 // --- renderCompletedLogs ---
@@ -4964,48 +4015,18 @@ function renderCompletedLogs(bubble, toolCalls, duration = null) {
             return null;
         };
 
-        const escapeHtml = (text) => {
-            if (!text) return '';
-            return String(text)
-                .replace(/&/g, '&amp;')
-                .replace(/</g, '&lt;')
-                .replace(/>/g, '&gt;')
-                .replace(/"/g, '&quot;')
-                .replace(/'/g, '&#039;');
-        };
-
-        const createLogItemElement = (item) => {
-            const itemEl = document.createElement('div');
-            itemEl.className = 'antigravity-log-item';
-            itemEl.innerHTML = `
-                <span class="ag-log-icon">${item.icon}</span>
-                <span class="ag-log-action">${item.action}</span>
-                <span class="ag-log-target">${item.target}</span>
-                <span class="ag-log-suffix">${item.suffix}</span>
-            `;
-
-            const detailEl = document.createElement('div');
-            detailEl.className = 'antigravity-log-detail';
-            detailEl.style.display = 'none';
-            
+        const toLogItem = (item) => {
             let argsFormatted = '';
             if (item.args && Object.keys(item.args).length > 0) {
                 argsFormatted = `Parameters:\n${JSON.stringify(item.args, null, 2)}\n\n`;
             }
-            
-            let responseText = item.response || 'No response data';
-            
-            detailEl.innerHTML = `
-                <pre><code>${argsFormatted}Response:\n${escapeHtml(responseText)}</code></pre>
-            `;
-
-            itemEl.onclick = (e) => {
-                e.stopPropagation();
-                const isExpanded = detailEl.style.display === 'block';
-                detailEl.style.display = isExpanded ? 'none' : 'block';
-            };
-
-            return { item: itemEl, detail: detailEl };
+            return createLogItem({
+                icon: item.icon,
+                action: item.action,
+                target: item.target,
+                suffix: item.suffix,
+                detail: `${argsFormatted}Response:\n${item.response || 'No response data'}`
+            });
         };
 
         const formattedItems = pairedTools.map(tool => {
@@ -5150,21 +4171,8 @@ function renderCompletedLogs(bubble, toolCalls, duration = null) {
 
         const subheaderText = parts.length > 0 ? `Explored ${parts.join(', ')}` : 'Explored workspace';
 
-        const logsCard = document.createElement('div');
-        logsCard.className = 'antigravity-logs-card';
-
-        const header = document.createElement('div');
-        header.className = 'antigravity-logs-header';
-        const durationText = duration ? `Worked for ${duration}s` : 'Activity Log';
-        header.innerHTML = `
-            <span class="ag-timer-icon">${getLogIconSvg('timer')}</span>
-            <span>${durationText}</span>
-            <span class="ag-header-chevron">▼</span>
-        `;
-
-        const body = document.createElement('div');
-        body.className = 'antigravity-logs-body';
-        body.style.display = 'none';
+        const { label, body } = ensureLogsCard(bubble);
+        label.textContent = duration ? `Worked for ${duration}s` : 'Activity Log';
 
         if (explorationItems.length > 0) {
             const exploreContainer = document.createElement('div');
@@ -5182,7 +4190,7 @@ function renderCompletedLogs(bubble, toolCalls, duration = null) {
             exploreBody.style.display = 'none';
 
             explorationItems.forEach(item => {
-                const itemEl = createLogItemElement(item);
+                const itemEl = toLogItem(item);
                 exploreBody.appendChild(itemEl.item);
                 exploreBody.appendChild(itemEl.detail);
             });
@@ -5200,21 +4208,12 @@ function renderCompletedLogs(bubble, toolCalls, duration = null) {
         }
 
         mutationItems.forEach(item => {
-            const itemEl = createLogItemElement(item);
+            const itemEl = toLogItem(item);
             itemEl.item.classList.add('mutation-item');
             body.appendChild(itemEl.item);
             body.appendChild(itemEl.detail);
         });
 
-        header.onclick = () => {
-            const isExpanded = body.style.display === 'flex' || body.style.display === 'block';
-            body.style.display = isExpanded ? 'none' : 'flex';
-            header.querySelector('.ag-header-chevron').classList.toggle('expanded', !isExpanded);
-        };
-
-        logsCard.appendChild(header);
-        logsCard.appendChild(body);
-        logsContainer.appendChild(logsCard);
     }
 }
 
@@ -5226,7 +4225,10 @@ function computeContentHash(msg) {
         msg.text,
         (msg.media || []).map(m => m.url),
         (msg.tool_calls || []).map(t => t.id),
-        msg.timestamp
+        msg.timestamp,
+        msg.duration,
+        msg.sender_id,
+        msg.sender_name
     ]);
     let hash = 0;
     for (let i = 0; i < str.length; i++) {
@@ -5236,86 +4238,14 @@ function computeContentHash(msg) {
     return 'h_' + Math.abs(hash).toString(36);
 }
 
-// --- normalizeChatResponse ---
-function normalizeChatResponse(data) {
-    const text = data.response || '';
-    const media = [];
-    
-    // Extract markdown images from response text
-    const imgRegex = /!\[([^\]]*)\]\(([^)]+)\)/g;
-    let match;
-    let cleanText = text;
-    while ((match = imgRegex.exec(text)) !== null) {
-        const url = match[2];
-        media.push({
-            url: url,
-            type: url.toLowerCase().endsWith('.mp4') ? 'video' : 'image'
-        });
-    }
-    cleanText = text.replace(imgRegex, '').trim();
-
-    // Extract markdown images from tool calls responses
-    const toolCalls = data.tool_calls || [];
-    toolCalls.forEach(tc => {
-        if (tc.type === 'response' && typeof tc.response === 'string') {
-            let tcMatch;
-            const tcImgRegex = /!\[([^\]]*)\]\(([^)]+)\)/g;
-            while ((tcMatch = tcImgRegex.exec(tc.response)) !== null) {
-                const tcUrl = tcMatch[2];
-                if (!media.some(m => m.url === tcUrl)) {
-                    media.push({
-                        url: tcUrl,
-                        type: tcUrl.toLowerCase().endsWith('.mp4') ? 'video' : 'image'
-                    });
-                }
-            }
-        }
-    });
-
-    // Determine portrait/image prompt from tool calls
-    let imagePrompt = null;
-    const imgCall = toolCalls.find(tc => tc.type === 'call' && [
-        'generate_program_portrait', 'generate_local_image',
-        'generate_imagen', 'generate_general_image'
-    ].includes(tc.name));
-    if (imgCall && imgCall.args && imgCall.args.prompt) {
-        imagePrompt = imgCall.args.prompt;
-    }
-
-    if (imagePrompt) {
-        media.forEach(m => {
-            m.prompt = imagePrompt;
-        });
-    }
-
-    return {
-        id: data.program_msg_id,
-        role: 'program',
-        text: cleanText,
-        media: media,
-        tool_calls: toolCalls,
-        timestamp: data.timestamp,
-        duration: data.duration,
-        mood: data.state,
-        inversion_active: data.inversion_active || '',
-        editable: true,
-        deletable: true
-    };
-}
-
-// --- renderVoiceCallRow ---
-function renderVoiceCallRow(msg) {
-    const welcome = document.getElementById('welcome-message');
-    if (welcome) welcome.remove();
-    const onboarding = document.getElementById('onboarding-container');
-    if (onboarding) onboarding.remove();
-
+// --- buildVoiceCallRow ---
+function buildVoiceCallRow(msg) {
     const row = document.createElement('div');
     row.className = 'message-row voice-call-row';
     row.dataset.role = 'voice-call';
     row.dataset.rawText = msg.text || '';
     row.dataset.timestamp = msg.timestamp || '';
-    row.dataset.msgId = msg.id || generateMessageId(msg.text, 'voice-call');
+    row.dataset.msgId = msg.id || localMessageId();
     row.dataset.contentHash = computeContentHash(msg);
 
     let transcriptData = { duration: '0s', turns: [] };
@@ -5421,50 +4351,44 @@ function renderVoiceCallRow(msg) {
             toggleBtn.textContent = 'Show Transcript';
         }
     };
-    
-    chatContainer.appendChild(row);
-    chatContainer.scrollTop = chatContainer.scrollHeight;
+
     return row;
 }
 
-// --- renderMessage ---
+// --- appendRow: place a built row at the end of the chat and follow it ---
+function appendRow(row) {
+    const welcome = document.getElementById('welcome-message');
+    if (welcome) welcome.remove();
+    chatContainer.appendChild(row);
+    chatContainer.scrollTop = chatContainer.scrollHeight;
+}
+
+// --- renderMessage: build a row and append it live ---
 function renderMessage(msg, isLive = false) {
+    const row = buildMessageRow(msg, isLive);
+    if (!row) return null;
+    appendRow(row);
+
+    if (row.dataset.role === 'program' && isLive && ttsAutoSpeak) {
+        setTimeout(() => {
+            const speakBtn = row.querySelector('.speak-btn');
+            if (speakBtn) speakMessage(speakBtn);
+        }, 100);
+    }
+    return row;
+}
+
+// --- buildMessageRow: construct a row element; touches no live DOM ---
+function buildMessageRow(msg, isLive = false) {
     if (msg.role === 'voice-call') {
-        return renderVoiceCallRow(msg);
+        return buildVoiceCallRow(msg);
     }
 
     const role = msg.role;
     const text = msg.text || '';
+    const msgId = msg.id || localMessageId();
 
-// Client-side hidden prefix check
-    const _hiddenPrefixes = ['port_', 'quest_', 'tool_', 'sys_', 'itm_'];
-    if (msg.id && _hiddenPrefixes.some(p => msg.id.startsWith(p))) return null;
-    
-    if (text && (
-        text.includes("Generate a portrait of yourself") || 
-        text.includes("[GENERATE_IMAGE:") || 
-        text.includes("[GENERATE_IMAGEN:") ||
-        text.includes("[generate_program_portrait") ||
-        text.includes("(Generation stopped)") ||
-        text.includes("(Generation cancelled)") ||
-        text.toLowerCase().startsWith("[system:") ||
-        text.startsWith("[Tool Response from")
-    )) return null;
-
-    const welcome = document.getElementById('welcome-message');
-    if (welcome) welcome.remove();
-    const onboarding = document.getElementById('onboarding-container');
-    if (onboarding) onboarding.remove();
-
-    const msgId = msg.id || generateMessageId(text, role);
-
-    const isMsgTransient = msg.isTransient || (role === 'program' && (
-        text === '*(Generation stopped)*' || 
-        text === '*(Generation cancelled)*' || 
-        text === 'Error connecting to the Sanctuary.' ||
-        text === 'The Sanctuary is taking a while to restart. Please refresh manually.' ||
-        (!msg.timestamp && !isLive && text.includes('Error'))
-    ));
+    const isMsgTransient = !!msg.isTransient;
 
     // Extract portrait prompt
     let portraitPrompt = null;
@@ -5681,43 +4605,7 @@ function renderMessage(msg, isLive = false) {
         }
 
         if (item.type === 'text') {
-            let actualResponse = item.content;
-            if (role === 'program') {
-                let thoughts = [];
-                let tempText = item.content;
-                while (true) {
-                    const openMatch = tempText.match(/(?:<think>|\[think\]|<thought>|\[thought\]|<\|thought\|>|<\|channel\|>thought|<channel\|>thought)/i);
-                    if (!openMatch) break;
-                    
-                    const openIdx = openMatch.index;
-                    const openTagLength = openMatch[0].length;
-                    const beforeText = tempText.substring(0, openIdx);
-                    const remainingText = tempText.substring(openIdx + openTagLength);
-                    
-                    const closePattern = /(?:<\/think>|\[\/think\]|<\/thought>|\[\/thought\]|<\|\/thought\|>|<\|channel\|>|<channel\|>|<\/\s*think>|\[\s*\/think\s*\])/i;
-                    const closeMatch = remainingText.match(closePattern);
-                    
-                    if (closeMatch) {
-                        const closeIdx = closeMatch.index;
-                        const closeTagLength = closeMatch[0].length;
-                        
-                        const thought = remainingText.substring(0, closeIdx).trim();
-                        if (thought) thoughts.push(thought);
-                        
-                        const afterText = remainingText.substring(closeIdx + closeTagLength);
-                        tempText = beforeText + afterText;
-                    } else {
-                        const thought = remainingText.trim();
-                        if (thought) thoughts.push(thought);
-                        tempText = beforeText;
-                        break;
-                    }
-                }
-                
-                let thoughtContent = thoughts.join("\n\n").trim();
-                actualResponse = tempText.replace(/<\|channel\|>|<channel\|>/gi, '').trim();
-
-            }
+            const actualResponse = item.content;
 
             if (actualResponse) {
                 const textDiv = document.createElement('div');
@@ -5770,6 +4658,8 @@ function renderMessage(msg, isLive = false) {
             mediaList.forEach((mediaItem) => {
                 const imgUrl = mediaItem.url;
                 const isVideoItem = mediaItem.type === 'video';
+                const itemProgramId = mediaItem.program_id || (role === 'program' ? (msg.sender_id || activeProgramId) : null);
+                registerClientMedia(imgUrl, itemProgramId);
 
                 if (isVideoItem) {
                     const videoContainer = document.createElement('div');
@@ -5786,11 +4676,7 @@ function renderMessage(msg, isLive = false) {
                     portraitGrid.appendChild(videoContainer);
                 } else {
                     const itemPrompt = mediaItem.prompt || sharedPrompt;
-                    const itemProgramId = mediaItem.program_id || (role === 'program' ? (msg.sender_id || activeProgramId) : null);
                     const imgContainer = createPortraitCardElement(imgUrl, itemPrompt, msgId, role, itemProgramId);
-                    if (itemProgramId && imgUrl) {
-                        imageOwners[getRelativePath(imgUrl)] = itemProgramId;
-                    }
                     portraitGrid.appendChild(imgContainer);
                 }
             });
@@ -5807,78 +4693,29 @@ function renderMessage(msg, isLive = false) {
     });
 
     row.appendChild(bubblesContainer);
-    chatContainer.appendChild(row);
-    chatContainer.scrollTop = chatContainer.scrollHeight;
-
-    if (role === 'program' && isLive && ttsAutoSpeak) {
-        setTimeout(() => {
-            const speakBtn = bubblesContainer.querySelector('.speak-btn');
-            if (speakBtn) speakMessage(speakBtn);
-        }, 100);
-    }
-
     return row;
 }
 
-// --- appendMessage ---
-function appendMessage(role, text, imageUrl = null, toolCalls = null, isLive = false, timestamp = null, duration = null, isTransient = false, msgId = null, senderId = null, senderName = null) {
-    const media = [];
-    if (imageUrl) {
-        media.push({
-            url: imageUrl,
-            type: imageUrl.toLowerCase().endsWith('.mp4') ? 'video' : 'image'
-        });
-    }
-    let cleanText = text || '';
-    if (role === 'user' || role === 'program') {
-        const imgRegex = /!\[([^\]]*)\]\(([^)]+)\)/g;
-        let match;
-        while ((match = imgRegex.exec(cleanText)) !== null) {
-            const url = match[2];
-            if (!media.some(m => m.url === url)) {
-                media.push({
-                    url: url,
-                    type: url.toLowerCase().endsWith('.mp4') ? 'video' : 'image'
-                });
-            }
-        }
-        cleanText = cleanText.replace(imgRegex, '').trim();
-
-        if (toolCalls && Array.isArray(toolCalls)) {
-            toolCalls.forEach(tc => {
-                if (tc.type === 'response' && typeof tc.response === 'string') {
-                    let tcMatch;
-                    const tcImgRegex = /!\[([^\]]*)\]\(([^)]+)\)/g;
-                    while ((tcMatch = tcImgRegex.exec(tc.response)) !== null) {
-                        const tcUrl = tcMatch[2];
-                        if (!media.some(m => m.url === tcUrl)) {
-                            media.push({
-                                url: tcUrl,
-                                type: tcUrl.toLowerCase().endsWith('.mp4') ? 'video' : 'image'
-                            });
-                        }
-                    }
-                }
-            });
-        }
-    }
-
-    const msg = {
-        id: msgId || generateMessageId(text, role),
+// --- appendLocalMessage ---
+// Shows a row the server did not produce: the user's just-sent turn, a transient notice,
+// or a voice-call record. Every stored turn arrives as a server message and goes to renderMessage.
+function appendLocalMessage(role, text, { imageUrl = null, timestamp = null, isTransient = false, isLive = false } = {}) {
+    const media = imageUrl
+        ? [{ url: imageUrl, type: imageUrl.toLowerCase().endsWith('.mp4') ? 'video' : 'image' }]
+        : [];
+    return renderMessage({
+        id: localMessageId(),
         role: role,
-        text: cleanText,
+        text: text || '',
         media: media,
-        tool_calls: toolCalls,
+        tool_calls: [],
         timestamp: timestamp,
-        duration: duration,
-        isTransient: isTransient,
-        mood: null,
-        sender_id: senderId,
-        sender_name: senderName,
-        editable: role === 'user' || role === 'program',
-        deletable: true
-    };
-    return renderMessage(msg, isLive);
+        isTransient: isTransient
+    }, isLive);
+}
+
+function appendNotice(text) {
+    return appendLocalMessage('program', text, { isTransient: true });
 }
 
 // --- postProcessMessageHTML ---
@@ -5929,11 +4766,6 @@ function postProcessMessageHTML(element) {
 /* ==========================================================================
    X. 9. CHAT TURN PROCESSING
    ========================================================================== */
-
-// --- triggerFileInput ---
-function triggerFileInput() {
-    imageInput.click();
-}
 
 // --- handleFileSelect ---
 async function handleFileSelect(event) {
@@ -5992,7 +4824,6 @@ async function handleFileSelect(event) {
 
 // --- clearAttachment ---
 function clearAttachment() {
-    attachedBase64 = null;
     attachedMime = null;
     attachedMediaPath = null;
     imageInput.value = '';
@@ -6003,16 +4834,6 @@ function clearAttachment() {
     if (previewVideo) {
         previewVideo.src = '';
         previewVideo.style.display = 'none';
-    }
-}
-
-// --- handleSuccessReload ---
-function handleSuccessReload(data) {
-    const executedTools = data && data.tool_calls && data.tool_calls.length > 0;
-    if (hasApprovedToolThisTurn || executedTools) {
-        setTimeout(() => {
-            reloadApp();
-        }, 1500);
     }
 }
 
@@ -6034,7 +4855,7 @@ function handleToolReloadOrRecovery() {
                 if (checkAttempts > 20) {
                     clearInterval(checkInterval);
                     document.getElementById('reconnect-modal').style.display = 'none';
-                    appendMessage('program', 'The Sanctuary is taking a while to restart. Please refresh manually.');
+                    appendNotice('The Sanctuary is taking a while to restart. Please refresh manually.');
                 }
             }
         }, 2000);
@@ -6149,63 +4970,119 @@ function createTypingIndicatorRow(speakerId = null) {
     return typingIndicatorRow;
 }
 
+// --- Generation turn: one lifecycle shared by send, continue, reroll and group-chain hops ---
+
+const RATE_LIMIT_MESSAGE = "The Sanctuary is momentarily overwhelmed (Rate Limit 429: Resource Exhausted). Let us pause, take a slow breath, and try our chavruta again in 15 seconds.";
+
+function friendlyTurnError(errMsg) {
+    return (errMsg.includes("429") || errMsg.includes("RESOURCE_EXHAUSTED")) ? RATE_LIMIT_MESSAGE : errMsg;
+}
+
+function chainAborted() {
+    return !!(chatAbortController && chatAbortController.signal.aborted);
+}
+
+function showTypingRow(speaker) {
+    const row = createTypingIndicatorRow(speaker);
+    chatContainer.appendChild(row);
+    chatContainer.scrollTop = chatContainer.scrollHeight;
+    return row;
+}
+
+// Lock the input, start tool polling, and arm a fresh abort controller.
+function beginTurn() {
+    hasApprovedToolThisTurn = false;
+    const heart = document.querySelector('.heart-pulse');
+    if (heart) heart.classList.add('jiggling');
+    setGenerating(true);
+    userInput.disabled = true;
+    userInput.placeholder = "";
+    updateInputGlow();
+    startToolPolling();
+    if (chatAbortController) chatAbortController.abort();
+    chatAbortController = new AbortController();
+}
+
+async function endTurn() {
+    stopToolPolling();
+    setGenerating(false);
+    userInput.disabled = false;
+    restoreInputPlaceholder();
+    updateInputGlow();
+    const heart = document.querySelector('.heart-pulse');
+    if (heart) heart.classList.remove('jiggling');
+    await initializeModelSelect();
+}
+
+// POST a turn request; the typing row leaves as soon as the response arrives.
+async function postTurn(url, body, typingRow) {
+    const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+        signal: chatAbortController ? chatAbortController.signal : undefined
+    });
+    typingRow.remove();
+    return response.json();
+}
+
+// Render one finished program turn, then follow any group-chain hop.
+async function renderTurnResult(data) {
+    if (!data.cancelled && data.message) {
+        renderMessage(data.message, true);
+    }
+    if (data.state) {
+        updateHeartState(data.state, data.inversion_active, data.inversion_state, data.program_msg_id, true);
+    }
+    if (data.inversion_active && !inversionActive) {
+        triggerHeartBurst();
+    }
+    inversionActive = data.inversion_active || "";
+
+    if (data.chain_continue && data.next_speaker && !chainAborted()) {
+        await executeGroupChainTurn(data.next_speaker);
+    }
+}
+
+// A full turn: lock, show typing, POST, render via onData, recover via onConnectionError, unlock.
+async function runTurn({ url, body, speaker, onData, onConnectionError }) {
+    beginTurn();
+    const typingRow = showTypingRow(speaker);
+    try {
+        await onData(await postTurn(url, body, typingRow));
+    } catch (error) {
+        typingRow.remove();
+        if (error.name !== 'AbortError') await onConnectionError(error);
+        handleToolReloadOrRecovery();
+    } finally {
+        await endTurn();
+    }
+}
+
 // --- sendMessage ---
 async function sendMessage() {
     hideThoughtBubbleOverlay();
-    currentProactiveThoughtText = "";
-    lastUserMessageTime = Date.now();
     hasTriggeredInitialProactive = false;
     lastProactiveThoughtTime = 0;
     const text = userInput.value.trim();
-    if (!text && !attachedBase64 && !attachedMediaPath) {
-        const messageRows = chatContainer.querySelectorAll('.message-row:not(#welcome-message):not(#onboarding-container)');
-        if (messageRows.length === 0) {
+    if (!text && !attachedMediaPath) {
+        if (!chatContainer.querySelector(LIVE_ROW_SELECTOR)) {
             return;
         }
         await continueMessage();
         return;
     }
 
-    hasApprovedToolThisTurn = false;
-    setGenerating(true);
-    userInput.disabled = true;
-    userInput.placeholder = "";
-    updateInputGlow();
-
-    let userImageUrl = null;
-    if (attachedMediaPath) {
-        userImageUrl = attachedMediaPath;
-    } else if (attachedBase64) {
-        userImageUrl = `data:${attachedMime};base64,${attachedBase64}`;
-    }
-    let prefix = 'usr_';
-    if (text && (text.includes("Generate a portrait of yourself") || text.includes("[GENERATE_IMAGE:") || text.includes("[GENERATE_IMAGEN:"))) {
-        prefix = 'port_';
-    } else if (text && text.startsWith("[SYSTEM: User has completed")) {
-        prefix = 'quest_';
-    } else if (text && text.startsWith("[Tool Response from")) {
-        prefix = 'tool_';
-    }
-    const userMsgId = prefix + Math.random().toString(36).substr(2, 9) + Date.now().toString(36);
-    appendMessage('user', text, userImageUrl, null, false, Date.now() / 1000, null, false, userMsgId);
-
-    // Trigger heart jiggle on high user interaction or when Program is generating/responding
-    const heartElement = document.querySelector('.heart-pulse');
-    if (heartElement) {
-        heartElement.classList.add('jiggling');
-    }
+    appendLocalMessage('user', text, { imageUrl: attachedMediaPath, timestamp: Date.now() / 1000 });
 
     const targetSpeaker = (currentGroupMeta && currentGroupMeta.is_group) ? detectTargetGroupSpeaker(text) : null;
 
     const payload = {
         message: text || "",
-        msg_id: userMsgId,
-        image_data: attachedBase64,
         image_mime: attachedMime,
         media_path: attachedMediaPath,
         session_id: sessionId,
         model: selectedModel,
-        use_imagen: useImagenMode,
         speaker_id: targetSpeaker
     };
 
@@ -6213,128 +5090,48 @@ async function sendMessage() {
     userInput.style.height = '24px';
     sessionStorage.removeItem('staged_message');
     clearAttachment();
-    updateInputGlow();
 
-    const typingIndicatorRow = createTypingIndicatorRow(targetSpeaker);
-    chatContainer.appendChild(typingIndicatorRow);
-    chatContainer.scrollTop = chatContainer.scrollHeight;
-
-    startToolPolling();
-    if (chatAbortController) {
-        chatAbortController.abort();
-    }
-    chatAbortController = new AbortController();
-    try {
-        const response = await fetch('/chat', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload),
-            signal: chatAbortController.signal
-        });
-        
-        chatContainer.removeChild(typingIndicatorRow);
-
-        const data = await response.json();
-        
-        // Update user message row/bubble msgId
-        const userBubbles = Array.from(chatContainer.querySelectorAll('.message.user'));
-        const lastUserBubble = userBubbles[userBubbles.length - 1];
-        if (lastUserBubble && data.user_msg_id) {
-            lastUserBubble.dataset.msgId = data.user_msg_id;
-            const row = lastUserBubble.closest('.message-row');
-            if (row) {
-                row.dataset.msgId = data.user_msg_id;
+    await runTurn({
+        url: '/chat',
+        body: payload,
+        speaker: targetSpeaker,
+        onData: async (data) => {
+            // Update user message row/bubble msgId
+            const userBubbles = Array.from(chatContainer.querySelectorAll('.message.user'));
+            const lastUserBubble = userBubbles[userBubbles.length - 1];
+            if (lastUserBubble && data.user_msg_id) {
+                lastUserBubble.dataset.msgId = data.user_msg_id;
+                const row = lastUserBubble.closest('.message-row');
+                if (row) {
+                    row.dataset.msgId = data.user_msg_id;
+                }
             }
-        }
-        
-        if (!data.cancelled && data.response !== undefined) {
-            appendMessage('program', data.response, null, data.tool_calls, true, data.timestamp, data.duration, false, data.program_msg_id, data.sender_id, data.sender_name);
-        } else if (data.error) {
-            let errMsg = data.error;
-            if (errMsg.includes("429") || errMsg.includes("RESOURCE_EXHAUSTED")) {
-                errMsg = "The Sanctuary is momentarily overwhelmed (Rate Limit 429: Resource Exhausted). Let us pause, take a slow breath, and try our chavruta again in 15 seconds.";
-            }
-            appendMessage('program', errMsg);
-        }
-        if (data.state) {
-            updateHeartState(data.state, data.inversion_active, data.inversion_state, data.program_msg_id, true);
-        }
-        if (data.inversion_active && !inversionActive) {
-            triggerHeartBurst();
-        }
-        inversionActive = data.inversion_active || "";
-        handleSuccessReload(data);
 
-        if (data.chain_continue && data.next_speaker && !(chatAbortController && chatAbortController.signal.aborted)) {
-            await executeGroupChainTurn(data.next_speaker);
-        }
-    } catch (error) {
-        if (chatContainer.contains(typingIndicatorRow)) {
-            chatContainer.removeChild(typingIndicatorRow);
-        }
-        if (error.name !== 'AbortError') {
-            appendMessage('program', 'Error connecting to the Sanctuary.');
-        }
-        handleToolReloadOrRecovery();
-    } finally {
-        setGenerating(false);
-        userInput.disabled = false;
-        restoreInputPlaceholder();
-        updateInputGlow();
-        stopToolPolling();
-        if (heartElement) {
-            heartElement.classList.remove('jiggling');
-        }
-        await initializeModelSelect();
-    }
+            const hasReply = !data.cancelled && data.response !== undefined;
+            if (!hasReply && data.error) {
+                appendNotice(friendlyTurnError(data.error));
+            }
+            await renderTurnResult(data);
+        },
+        onConnectionError: () => appendNotice('Error connecting to the Sanctuary.')
+    });
 }
 
 async function executeGroupChainTurn(targetSpeaker) {
-    if (!targetSpeaker || (chatAbortController && chatAbortController.signal.aborted)) {
+    if (!targetSpeaker || chainAborted()) {
         return;
     }
 
-    const typingIndicatorRow = createTypingIndicatorRow(targetSpeaker);
-    chatContainer.appendChild(typingIndicatorRow);
-    chatContainer.scrollTop = chatContainer.scrollHeight;
-
+    const typingRow = showTypingRow(targetSpeaker);
     try {
-        const response = await fetch('/continue', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                session_id: sessionId,
-                model: selectedModel,
-                use_imagen: useImagenMode,
-                speaker_id: targetSpeaker
-            }),
-            signal: chatAbortController ? chatAbortController.signal : undefined
-        });
-
-        if (chatContainer.contains(typingIndicatorRow)) {
-            chatContainer.removeChild(typingIndicatorRow);
-        }
-
-        const data = await response.json();
-        if (!data.cancelled && data.response !== undefined) {
-            appendMessage('program', data.response, null, data.tool_calls, true, data.timestamp, data.duration, false, data.program_msg_id, data.sender_id, data.sender_name);
-            if (data.state) {
-                updateHeartState(data.state, data.inversion_active, data.inversion_state, data.program_msg_id, true);
-            }
-            if (data.inversion_active && !inversionActive) {
-                triggerHeartBurst();
-            }
-            inversionActive = data.inversion_active || "";
-            handleSuccessReload(data);
-
-            if (data.chain_continue && data.next_speaker && !(chatAbortController && chatAbortController.signal.aborted)) {
-                await executeGroupChainTurn(data.next_speaker);
-            }
-        }
+        const data = await postTurn('/continue', {
+            session_id: sessionId,
+            model: selectedModel,
+            speaker_id: targetSpeaker
+        }, typingRow);
+        await renderTurnResult(data);
     } catch (err) {
-        if (chatContainer.contains(typingIndicatorRow)) {
-            chatContainer.removeChild(typingIndicatorRow);
-        }
+        typingRow.remove();
         if (err.name !== 'AbortError') {
             console.error("Error executing chained turn:", err);
         }
@@ -6344,89 +5141,35 @@ async function executeGroupChainTurn(targetSpeaker) {
 async function continueMessage() {
     if (isGenerating) return;
     hideThoughtBubbleOverlay();
-    currentProactiveThoughtText = "";
-    lastUserMessageTime = Date.now();
     hasTriggeredInitialProactive = false;
     lastProactiveThoughtTime = 0;
-    
-    const messageRows = chatContainer.querySelectorAll('.message-row:not(#welcome-message):not(#onboarding-container)');
-    if (messageRows.length === 0) {
+
+    if (!chatContainer.querySelector(LIVE_ROW_SELECTOR)) {
         return;
     }
-    
-    hasApprovedToolThisTurn = false;
-    setGenerating(true);
-    userInput.disabled = true;
-    userInput.placeholder = "";
-    updateInputGlow();
-    
-    const heartElement = document.querySelector('.heart-pulse');
-    if (heartElement) {
-        heartElement.classList.add('jiggling');
-    }
-    
-    const targetSpeaker = (currentGroupMeta && currentGroupMeta.is_group) ? detectTargetGroupSpeaker(null) : null;
-    const typingIndicatorRow = createTypingIndicatorRow(targetSpeaker);
-    chatContainer.appendChild(typingIndicatorRow);
-    chatContainer.scrollTop = chatContainer.scrollHeight;
-    
-    chatAbortController = new AbortController();
-    try {
-        const response = await fetch('/continue', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                session_id: sessionId,
-                model: selectedModel,
-                use_imagen: useImagenMode,
-                speaker_id: targetSpeaker
-            }),
-            signal: chatAbortController.signal
-        });
-        
-        if (chatContainer.contains(typingIndicatorRow)) {
-            chatContainer.removeChild(typingIndicatorRow);
-        }
-        
-        const data = await response.json();
-        if (!data.cancelled && data.response !== undefined) {
-            if (currentGroupMeta && currentGroupMeta.is_group) {
-                appendMessage('program', data.response, null, data.tool_calls, true, data.timestamp, data.duration, false, data.program_msg_id, data.sender_id, data.sender_name);
-                if (data.state) {
-                    updateHeartState(data.state, data.inversion_active, data.inversion_state, data.program_msg_id, true);
-                }
-                if (data.inversion_active && !inversionActive) {
-                    triggerHeartBurst();
-                }
-                inversionActive = data.inversion_active || "";
-                handleSuccessReload(data);
 
-                if (data.chain_continue && data.next_speaker && !(chatAbortController && chatAbortController.signal.aborted)) {
-                    await executeGroupChainTurn(data.next_speaker);
+    const isGroup = !!(currentGroupMeta && currentGroupMeta.is_group);
+    const targetSpeaker = isGroup ? detectTargetGroupSpeaker(null) : null;
+
+    await runTurn({
+        url: '/continue',
+        body: { session_id: sessionId, model: selectedModel, speaker_id: targetSpeaker },
+        speaker: targetSpeaker,
+        onData: async (data) => {
+            if (!data.cancelled && data.response !== undefined) {
+                if (isGroup) {
+                    await renderTurnResult(data);
+                } else {
+                    // Solo continuation extends the last program message on the server,
+                    // so the merged row comes from history.
+                    await softReloadApp();
                 }
-            } else {
-                await softReloadApp();
+            } else if (data.error) {
+                showCustomAlert("Continue Failed", data.error);
             }
-        } else if (data.error) {
-            showCustomAlert("Continue Failed", data.error);
-        }
-    } catch (error) {
-        if (chatContainer.contains(typingIndicatorRow)) {
-            chatContainer.removeChild(typingIndicatorRow);
-        }
-        if (error.name !== 'AbortError') {
-            appendMessage('program', 'Error connecting to the Sanctuary.');
-        }
-    } finally {
-        setGenerating(false);
-        userInput.disabled = false;
-        restoreInputPlaceholder();
-        updateInputGlow();
-        if (heartElement) {
-            heartElement.classList.remove('jiggling');
-        }
-        await initializeModelSelect();
-    }
+        },
+        onConnectionError: () => appendNotice('Error connecting to the Sanctuary.')
+    });
 }
 
 // --- truncateChatAfter ---
@@ -6459,12 +5202,8 @@ function startEditMessage(button) {
     
     const rawText = bubble.dataset.rawText || '';
     
-    // Strip any image markdown: ![title](url)
-    const imgRegex = /!\[[^\]]*\]\([^)]+\)/g;
-    let strippedText = rawText.replace(imgRegex, '').trim();
-    
     textDiv.innerHTML = `
-        <textarea class="edit-textarea">${escapeHtml(strippedText)}</textarea>
+        <textarea class="edit-textarea">${escapeHtml(rawText)}</textarea>
         <div class="edit-btn-group">
             <button class="edit-btn edit-cancel-btn">Cancel</button>
             <button class="edit-btn edit-save-btn">Save</button>
@@ -6544,24 +5283,8 @@ async function saveMessageEdit(bubble, newText) {
     const originalRawText = bubble.dataset.rawText || '';
     const originalHTML = bubble.dataset.originalHTML || '';
     
-    // Extract the original image markdown links from the original raw text
-    const imgRegex = /(!\[[^\]]*\]\([^)]+\))/g;
-    let imageMarkdowns = [];
-    let match;
-    while ((match = imgRegex.exec(originalRawText)) !== null) {
-        imageMarkdowns.push(match[1]);
-    }
-    
-    // Append them back to the new text
-    let finalText = trimmedText;
-    if (imageMarkdowns.length > 0) {
-        if (finalText) {
-            finalText += "\n\n" + imageMarkdowns.join("\n");
-        } else {
-            finalText = imageMarkdowns.join("\n");
-        }
-    }
-    
+    const finalText = trimmedText;
+
     // Optimistic UI Update: Render changes instantly
     bubble.dataset.rawText = finalText;
     const row = bubble.closest('.message-row');
@@ -6685,88 +5408,30 @@ async function rerollMessage(trigger) {
         return;
     }
 
-    hasApprovedToolThisTurn = false;
-    const heartElement = document.querySelector('.heart-pulse');
-    if (heartElement) {
-        heartElement.classList.add('jiggling');
-    }
-
-    const typingIndicatorRow = createTypingIndicatorRow(editSpeaker);
-    chatContainer.appendChild(typingIndicatorRow);
-    chatContainer.scrollTop = chatContainer.scrollHeight;
-
-    userInput.disabled = true;
-    userInput.placeholder = "";
-
-    setGenerating(true);
-    startToolPolling();
-    if (chatAbortController) {
-        chatAbortController.abort();
-    }
-    chatAbortController = new AbortController();
-    try {
-        const response = await fetch('/edit', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                session_id: sessionId,
-                msg_id: msgId,
-                new_text: newText,
-                model: selectedModel,
-                force_offload: false,
-                use_imagen: useImagenMode,
-                speaker_id: editSpeaker
-            }),
-            signal: chatAbortController.signal
-        });
-
-        if (chatContainer.contains(typingIndicatorRow)) {
-            chatContainer.removeChild(typingIndicatorRow);
-        }
-
-        const data = await response.json();
-        if (data.error) {
-            let errMsg = data.error;
-            if (errMsg.includes("429") || errMsg.includes("RESOURCE_EXHAUSTED")) {
-                errMsg = "The Sanctuary is momentarily overwhelmed (Rate Limit 429: Resource Exhausted). Let us pause, take a slow breath, and try our chavruta again in 15 seconds.";
+    await runTurn({
+        url: '/edit',
+        body: {
+            session_id: sessionId,
+            msg_id: msgId,
+            new_text: newText,
+            model: selectedModel,
+            force_offload: false,
+            speaker_id: editSpeaker
+        },
+        speaker: editSpeaker,
+        onData: async (data) => {
+            if (data.error) {
+                showCustomAlert("Reroll Failed", friendlyTurnError(data.error));
+                await loadHistory();
+                return;
             }
-            showCustomAlert("Reroll Failed", errMsg);
-            await loadHistory();
-            return;
-        }
-        if (!data.cancelled && data.response !== undefined) {
-            appendMessage('program', data.response, null, data.tool_calls, true, data.timestamp, data.duration, false, data.program_msg_id, data.sender_id, data.sender_name);
-        }
-        if (data.state) {
-            updateHeartState(data.state, data.inversion_active, data.inversion_state, data.program_msg_id, true);
-        }
-        if (data.inversion_active && !inversionActive) {
-            triggerHeartBurst();
-        }
-        handleSuccessReload(data);
-
-        if (data.chain_continue && data.next_speaker && !(chatAbortController && chatAbortController.signal.aborted)) {
-            await executeGroupChainTurn(data.next_speaker);
-        }
-    } catch (error) {
-        if (chatContainer.contains(typingIndicatorRow)) {
-            chatContainer.removeChild(typingIndicatorRow);
-        }
-        if (error.name !== 'AbortError') {
+            await renderTurnResult(data);
+        },
+        onConnectionError: async () => {
             showCustomAlert("Reroll Failed", "Error connecting to the Sanctuary.");
             await loadHistory();
         }
-        handleToolReloadOrRecovery();
-    } finally {
-        stopToolPolling();
-        setGenerating(false);
-        userInput.disabled = false;
-        restoreInputPlaceholder();
-        if (heartElement) {
-            heartElement.classList.remove('jiggling');
-        }
-        await initializeModelSelect();
-    }
+    });
 }
 
 // --- deleteTurnFromMessage ---
@@ -6792,7 +5457,9 @@ async function deleteTurnFromMessage(button) {
             showCustomAlert("Error", "Could not find message ID.");
             return;
         }
-        
+        const row = (bubble || voiceCallRow).closest('.message-row') || voiceCallRow;
+        if (row) row.dataset.deleting = 'true';
+        let deleted = false;
         try {
             const response = await fetch('/delete', {
                 method: 'POST',
@@ -6804,14 +5471,16 @@ async function deleteTurnFromMessage(button) {
             });
             const data = await response.json();
             if (data.status === 'success') {
-                const row = (bubble || voiceCallRow).closest('.message-row') || voiceCallRow;
                 if (row) row.remove();
+                deleted = true;
             } else if (data.error) {
                 showCustomAlert("Delete Failed", data.error);
             }
         } catch (err) {
             console.error("Error deleting message:", err);
             showCustomAlert("Error", "Could not connect to the server to delete message.");
+        } finally {
+            if (row && !deleted) delete row.dataset.deleting;
         }
     });
 }
@@ -6820,105 +5489,15 @@ async function deleteTurnFromMessage(button) {
    XI. 10. TOOL INVOCATION & PORTRAITS
    ========================================================================== */
 
-// --- fetchComfyCheckpoints ---
-async function fetchComfyCheckpoints() {
-    try {
-        const select = document.getElementById('comfy-checkpoint-select');
-        if (!select) return;
-        
-        const res = await fetch('/api/comfy/checkpoints');
-        const data = await res.json();
-        
-        select.innerHTML = '';
-        const checkpoints = data.checkpoints || [];
-        if (checkpoints.length === 0) {
-            const opt = document.createElement('option');
-            opt.textContent = 'No checkpoints found on disk';
-            select.appendChild(opt);
-        } else {
-            checkpoints.forEach(ckpt => {
-                const opt = document.createElement('option');
-                opt.value = ckpt;
-                opt.textContent = ckpt;
-                select.appendChild(opt);
-            });
-        }
-        
-        if (data.active) {
-            select.value = data.active;
-        }
-    } catch (e) {
-        console.error("Error fetching comfy checkpoints:", e);
-    }
-}
-
-// --- changeComfyCheckpoint ---
-async function changeComfyCheckpoint() {
-    const select = document.getElementById('comfy-checkpoint-select');
-    if (!select) return;
-    
-    const ckpt = select.value;
-    try {
-        const res = await fetch('/api/comfy/checkpoints/select', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ checkpoint: ckpt })
-        });
-        const data = await res.json();
-        if (data.status === 'success') {
-            // Checkpoint set successfully
-        } else {
-            showCustomAlert("Error", data.error || "Failed to set checkpoint");
-        }
-    } catch (e) {
-        console.error("Error selecting comfy checkpoint:", e);
-    }
-}
-
-// --- searchComfyHFCheckpoints ---
-async function searchComfyHFCheckpoints() {
-    const input = document.getElementById('comfy-hf-search-input');
-    const resultsDiv = document.getElementById('comfy-hf-search-results');
-    if (!input || !resultsDiv) return;
-    
-    const query = input.value.trim();
-    if (!query) return;
-    
-    resultsDiv.innerHTML = '<div style="color: var(--text-muted); font-size: 0.72rem;">Searching Hugging Face...</div>';
-    try {
-        const res = await fetch(`/api/comfy/checkpoints/search?query=${encodeURIComponent(query)}`);
-        const data = await res.json();
-        const results = data.results || [];
-        
-        if (results.length === 0) {
-            resultsDiv.innerHTML = '<div style="color: var(--text-muted); font-size: 0.72rem;">No matching checkpoints found.</div>';
-            return;
-        }
-        
-        let html = '';
-        results.forEach(item => {
-            html += `
-                <div style="display: flex; align-items: center; justify-content: space-between; background: rgba(255,255,255,0.03); padding: 6px 8px; border-radius: 6px; border: 1px solid var(--border-color); gap: 10px;">
-                    <div style="flex: 1; min-width: 0;">
-                        <div style="font-weight: 500; font-size: 0.75rem; text-overflow: ellipsis; overflow: hidden; white-space: nowrap;" title="${item.filename}">${item.filename}</div>
-                        <div style="font-size: 0.65rem; color: var(--text-muted); text-overflow: ellipsis; overflow: hidden; white-space: nowrap;">${item.repo_id}</div>
-                    </div>
-                    <button onclick="downloadComfyCheckpoint('${item.download_url}', '${item.filename}', this)" class="onboarding-btn" style="margin: 0; padding: 4px 8px; font-size: 0.68rem; border-radius: 4px;">Download</button>
-                </div>
-            `;
-        });
-        resultsDiv.innerHTML = html;
-    } catch (e) {
-        resultsDiv.innerHTML = '<div style="color: #fca5a5; font-size: 0.72rem;">Error searching Hugging Face.</div>';
-        console.error(e);
-    }
-}
-
 // --- loadServerImages ---
+let galleryLoadSequence = 0;
 async function loadServerImages() {
+    const requestSequence = ++galleryLoadSequence;
     try {
         const response = await fetch(`/list_images?t=${Date.now()}`);
+        if (!response.ok) throw new Error(`Image list request failed (${response.status})`);
         const data = await response.json();
+        if (requestSequence !== galleryLoadSequence) return;
         
         if (data.images) {
             serverImages = data.images;
@@ -6927,15 +5506,58 @@ async function loadServerImages() {
             serverImagesByProgram = data.images_by_program;
         }
         if (data.image_owners) {
-            Object.assign(imageOwners, data.image_owners);
+            imageOwners = { ...imageOwners, ...data.image_owners };
+        }
+
+        const modal = document.getElementById('image-modal');
+        if (modal && modal.style.display !== 'none') {
+            const current = galleryImages[currentGalleryIndex];
+            galleryImages = getGalleryImages(currentModalProgramId);
+            if (galleryImages.length) {
+                const index = galleryImages.indexOf(current);
+                currentGalleryIndex = index < 0 ? 0 : index;
+                updateModalImage();
+            } else {
+                closeModal();
+            }
         }
         
-        if (typeof pollQueueStatus === 'function') {
-            pollQueueStatus();
-        }
+        pollQueueStatus();
     } catch (e) {
         console.error("Error loading server images:", e);
     }
+}
+
+function registerClientMedia(url, programId = null) {
+    if (!url) return;
+    const rel = getRelativePath(url);
+    if (!rel || isProfileImage(rel)) return;
+    const owner = programId || activeProgramId;
+    if (owner) {
+        imageOwners[rel] = owner;
+        if (!Array.isArray(serverImagesByProgram[owner])) {
+            serverImagesByProgram[owner] = [];
+        }
+        if (!serverImagesByProgram[owner].some(u => getRelativePath(u) === rel)) {
+            serverImagesByProgram[owner].unshift(rel);
+        }
+    }
+    if ((!owner || owner === activeProgramId) && !serverImages.some(u => getRelativePath(u) === rel)) {
+        serverImages.unshift(rel);
+    }
+}
+
+function unregisterClientMedia(url) {
+    const rel = getRelativePath(url);
+    if (!rel) return;
+    serverImages = serverImages.filter(u => getRelativePath(u) !== rel);
+    galleryImages = galleryImages.filter(u => getRelativePath(u) !== rel);
+    for (const progId of Object.keys(serverImagesByProgram)) {
+        if (Array.isArray(serverImagesByProgram[progId])) {
+            serverImagesByProgram[progId] = serverImagesByProgram[progId].filter(u => getRelativePath(u) !== rel);
+        }
+    }
+    delete imageOwners[rel];
 }
 
 // Helper to resolve the owner program ID for an image
@@ -6943,33 +5565,15 @@ function resolveImageOwner(src, fallbackProgramId = null) {
     if (!src) return fallbackProgramId || activeProgramId;
     const rel = getRelativePath(src);
 
-    // Direct owner map check
     if (imageOwners[rel]) {
         return imageOwners[rel];
     }
 
-    // Check profile picture path pattern: /programs/<id>/profile.png
     const progProfileMatch = rel.match(/^\/?programs\/([^/]+)\/profile\.(png|svg)/i);
     if (progProfileMatch) {
         return progProfileMatch[1];
     }
 
-    // Check DOM elements showing this image
-    const imgs = document.querySelectorAll('.message-image-container img, .portrait-grid img');
-    for (const img of imgs) {
-        if (getRelativePath(img.src) === rel) {
-            const container = img.closest('.message-image-container');
-            if (container && container.dataset.speakerId) {
-                return container.dataset.speakerId;
-            }
-            const row = img.closest('.message-row');
-            if (row && row.dataset.senderId) {
-                return row.dataset.senderId;
-            }
-        }
-    }
-
-    // Check serverImagesByProgram
     for (const [progId, progImgs] of Object.entries(serverImagesByProgram)) {
         if (Array.isArray(progImgs) && progImgs.some(p => getRelativePath(p) === rel)) {
             return progId;
@@ -6990,52 +5594,14 @@ function isProfileImage(path) {
 // --- getGalleryImages ---
 function getGalleryImages(targetProgramId = null) {
     const imgs = [];
-    
-    // When targetProgramId is specified, restrict to that program's images
-    if (targetProgramId && serverImagesByProgram[targetProgramId]) {
-        serverImagesByProgram[targetProgramId].forEach(img => {
-            const rel = getRelativePath(img);
-            if (!isProfileImage(rel) && !imgs.includes(rel)) {
-                imgs.push(rel);
-            }
-        });
-    } else if (!targetProgramId && Array.isArray(serverImages)) {
-        serverImages.forEach(img => {
-            const rel = getRelativePath(img);
-            if (!isProfileImage(rel) && !imgs.includes(rel)) {
-                imgs.push(rel);
-            }
-        });
-    }
-    
-    // Collect any additional message images and videos currently in the DOM
-    const rows = document.querySelectorAll('.message-row');
-    rows.forEach(row => {
-        if (targetProgramId && row.dataset.senderId && row.dataset.senderId !== targetProgramId) {
-            return;
-        }
-        const bubble = row.querySelector('.message');
-        if (bubble) {
-            const messageImgs = bubble.querySelectorAll('img');
-            messageImgs.forEach(img => {
-                if (img.src && !img.classList.contains('avatar')) {
-                    const src = img.getAttribute('src') || img.src;
-                    const rel = getRelativePath(src);
-                    if (!isProfileImage(rel) && !imgs.includes(rel)) {
-                        imgs.push(rel);
-                    }
-                }
-            });
-            const messageVideos = bubble.querySelectorAll('video');
-            messageVideos.forEach(vid => {
-                if (vid.src) {
-                    const src = vid.getAttribute('src') || vid.src;
-                    const rel = getRelativePath(src);
-                    if (!isProfileImage(rel) && !imgs.includes(rel)) {
-                        imgs.push(rel);
-                    }
-                }
-            });
+    const sourceList = (targetProgramId && serverImagesByProgram[targetProgramId])
+        ? serverImagesByProgram[targetProgramId]
+        : (!targetProgramId && Array.isArray(serverImages) ? serverImages : []);
+
+    sourceList.forEach(img => {
+        const rel = getRelativePath(img);
+        if (!isProfileImage(rel) && !imgs.includes(rel)) {
+            imgs.push(rel);
         }
     });
     return imgs;
@@ -7093,7 +5659,7 @@ function updateModalImage() {
             modalVideo.src = '';
         }
         if (modalImg) {
-            modalImg.src = currentSrc;
+            if (modalImg.getAttribute('src') !== currentSrc) modalImg.src = currentSrc;
             modalImg.style.display = 'block';
         }
     }
@@ -7297,6 +5863,8 @@ function createPortraitCardElement(imgUrl, prompt, msgId, role = 'program', spea
 
     if (imgUrl) {
         const img = document.createElement('img');
+        img.loading = 'lazy';
+        img.decoding = 'async';
         img.src = imgUrl;
         img.style.cursor = 'pointer';
         img.title = 'Click to expand';
@@ -7457,8 +6025,7 @@ async function deleteSinglePortraitSlot(container) {
 
         if (response.ok) {
             markSlotAsDeleted(container);
-            serverImages = serverImages.filter(u => getRelativePath(u) !== currentSrc);
-            galleryImages = galleryImages.filter(u => getRelativePath(u) !== currentSrc);
+            unregisterClientMedia(currentSrc);
         } else {
             let errMsg = "Unknown error";
             try {
@@ -7547,8 +6114,7 @@ async function deleteCurrentImage(event) {
                     }
                 });
                 
-                serverImages = serverImages.filter(img => getRelativePath(img) !== currentSrc);
-                galleryImages.splice(currentGalleryIndex, 1);
+                unregisterClientMedia(currentSrc);
                 if (galleryImages.length === 0) {
                     closeModal();
                 } else {
@@ -7721,15 +6287,6 @@ async function saveCroppedProfile(event) {
             const updatedProg = data.program_id || targetProg;
             profileCacheBuster = Date.now();
             updateProfileImages(updatedProg);
-            document.querySelectorAll('.program-list-avatar').forEach(img => {
-                const progId = img.getAttribute('data-id');
-                if (progId && progId !== updatedProg) return;
-                const originalSrc = img.tagName === 'DIV' ? img.getAttribute('src') : img.src;
-                if (originalSrc) {
-                    const newSrc = originalSrc.split('?')[0] + `?t=${profileCacheBuster}`;
-                    updateAvatarElement(img, newSrc);
-                }
-            });
         } else {
             const err = await response.json();
             showCustomAlert("Error", err.error || "Failed to save profile picture.");
@@ -7778,6 +6335,8 @@ async function generatePortraitPrompt() {
         chatAbortController.abort();
     }
     chatAbortController = new AbortController();
+    const controller = chatAbortController;
+    const portraitSessionId = sessionId;
     
     const btn = document.getElementById('generate-portrait-btn');
     if (btn) {
@@ -7789,7 +6348,7 @@ async function generatePortraitPrompt() {
     const customPrompt = userInput ? userInput.value.trim() : "";
 
     if (currentGroupMeta && currentGroupMeta.is_group) {
-        if (customPrompt && typeof detectTargetGroupSpeaker === 'function') {
+        if (customPrompt) {
             const detected = detectTargetGroupSpeaker(customPrompt);
             if (detected) {
                 targetSpeaker = detected;
@@ -7808,6 +6367,19 @@ async function generatePortraitPrompt() {
     }
 
     const typingIndicatorRow = createTypingIndicatorRow(targetSpeaker);
+    const bubble = typingIndicatorRow.querySelector('.message.program');
+    const bubblesContainer = document.createElement('div');
+    bubblesContainer.className = 'message-bubbles-container';
+    bubble.replaceWith(bubblesContainer);
+    bubblesContainer.appendChild(bubble);
+    bubble.classList.add('image-message');
+    bubble.innerHTML = '';
+    const grid = document.createElement('div');
+    grid.className = 'portrait-grid';
+    const firstSlot = createPortraitCardElement('', '', null, 'program', targetSpeaker);
+    grid.appendChild(firstSlot);
+    bubble.appendChild(grid);
+    showPortraitLoadingOverlay(firstSlot);
     chatContainer.appendChild(typingIndicatorRow);
     chatContainer.scrollTop = chatContainer.scrollHeight;
 
@@ -7816,23 +6388,46 @@ async function generatePortraitPrompt() {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-                session_id: sessionId,
+                session_id: portraitSessionId,
                 prompt: customPrompt,
-                speaker_id: targetSpeaker
+                speaker_id: targetSpeaker,
+                count: 1
             }),
-            signal: chatAbortController.signal
+            signal: controller.signal
         });
 
         const data = await response.json();
-        if (data.error) {
-            showCustomAlert("Portrait Generation Failed", data.error);
+        if (controller.signal.aborted || sessionId !== portraitSessionId) return;
+        if (!response.ok || data.error) {
+            showCustomAlert("Portrait Generation Failed", data.error || 'The server could not generate the portrait.');
         } else {
             if (userInput) {
                 userInput.value = "";
                 userInput.style.height = 'auto';
             }
-            await loadHistory();
-            chatContainer.scrollTop = chatContainer.scrollHeight;
+            typingIndicatorRow.remove();
+            const row = data.message ? renderMessage(data.message) : null;
+            const portraitGrid = row && row.querySelector('.portrait-grid');
+            if (!portraitGrid) throw new Error('Generated portrait message could not be displayed.');
+            portraitGrid.dataset.prompt = data.prompt || '';
+            const firstCard = portraitGrid.querySelector('.message-image-container');
+            if (firstCard) firstCard.dataset.prompt = data.prompt || '';
+
+            for (let i = 1; i < 3; i++) {
+                if (controller.signal.aborted || sessionId !== portraitSessionId || !document.body.contains(portraitGrid)) break;
+                const slot = createPortraitCardElement('', data.prompt, data.program_msg_id, 'program', targetSpeaker);
+                slot.classList.add('is-deleted-slot');
+                portraitGrid.appendChild(slot);
+                const ok = await regenerateImage(slot, '', data.prompt, {
+                    controller: controller,
+                    sessionId: portraitSessionId
+                });
+                if (!ok) {
+                    if (slot.classList.contains('is-deleted-slot') && !slot.querySelector('img')) slot.remove();
+                    break;
+                }
+            }
+            updatePortraitGridToolbar(portraitGrid);
         }
     } catch (err) {
         if (err.name !== 'AbortError') {
@@ -7843,7 +6438,10 @@ async function generatePortraitPrompt() {
         if (chatContainer.contains(typingIndicatorRow)) {
             chatContainer.removeChild(typingIndicatorRow);
         }
-        setGenerating(false);
+        if (chatAbortController === controller) {
+            setGenerating(false);
+            chatAbortController = null;
+        }
         if (btn) {
             btn.disabled = false;
             btn.style.opacity = '1';
@@ -7908,20 +6506,40 @@ async function autoGenerateUserMessage() {
 }
 
 // --- regenerateImage ---
-async function regenerateImage(buttonElement, oldImageUrl, prompt) {
-    if (isGenerating) return false;
-    setGenerating(true);
-    if (chatAbortController) {
-        chatAbortController.abort();
+function showPortraitLoadingOverlay(container) {
+    let overlay = container.querySelector('.image-loading-overlay');
+    if (!overlay) {
+        overlay = document.createElement('div');
+        overlay.className = 'image-loading-overlay';
+        overlay.innerHTML = `
+            <div class="typing-indicator" style="gap: 6px;">
+                <div class="typing-dot" style="background-color: var(--primary-accent);"></div>
+                <div class="typing-dot" style="background-color: var(--primary-accent); animation-delay: -0.16s;"></div>
+                <div class="typing-dot" style="background-color: var(--primary-accent); animation-delay: -0.32s;"></div>
+            </div>
+        `;
+        container.appendChild(overlay);
     }
-    chatAbortController = new AbortController();
+}
+
+async function regenerateImage(buttonElement, oldImageUrl, prompt, batch = null) {
+    if (!batch) {
+        if (isGenerating) return false;
+        setGenerating(true);
+        if (chatAbortController) {
+            chatAbortController.abort();
+        }
+        chatAbortController = new AbortController();
+    }
+    const controller = batch ? batch.controller : chatAbortController;
+    const generationSessionId = batch ? batch.sessionId : sessionId;
 
     const container = (buttonElement && buttonElement.classList && buttonElement.classList.contains('message-image-container'))
         ? buttonElement
         : (buttonElement ? buttonElement.closest('.message-image-container') : null);
 
     if (!container) {
-        setGenerating(false);
+        if (!batch) setGenerating(false);
         showCustomAlert("Reroll Failed", "Reroll failed: message-image-container parent not found!");
         return false;
     }
@@ -7930,6 +6548,7 @@ async function regenerateImage(buttonElement, oldImageUrl, prompt) {
     try {
         const bubble = container.closest('.message.program') || container.closest('.message');
         const row = container.closest('.message-row.program-row');
+        if (row && row.dataset.deleting === 'true') return false;
         const speakerId = row ? (row.dataset.senderId || null) : null;
         const msgId = container.dataset.msgId || (bubble ? bubble.dataset.msgId : null);
         const grid = container.closest('.portrait-grid');
@@ -7944,45 +6563,31 @@ async function regenerateImage(buttonElement, oldImageUrl, prompt) {
             }
         }
 
-        // Create loading overlay
-        let overlay = container.querySelector('.image-loading-overlay');
-        if (!overlay) {
-            overlay = document.createElement('div');
-            overlay.className = 'image-loading-overlay';
-            overlay.innerHTML = `
-                <div class="typing-indicator" style="gap: 6px;">
-                    <div class="typing-dot" style="background-color: var(--primary-accent);"></div>
-                    <div class="typing-dot" style="background-color: var(--primary-accent); animation-delay: -0.16s;"></div>
-                    <div class="typing-dot" style="background-color: var(--primary-accent); animation-delay: -0.32s;"></div>
-                </div>
-            `;
-            container.appendChild(overlay);
-        }
+        showPortraitLoadingOverlay(container);
         if (buttonElement && buttonElement !== container) {
             buttonElement.style.pointerEvents = 'none';
             buttonElement.style.opacity = '0.5';
         }
 
-        startToolPolling();
+        if (!batch) startToolPolling();
         
         const response = await fetch('/regenerate_image', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-                session_id: sessionId,
+                session_id: generationSessionId,
                 old_image_url: oldImageUrl ? getRelativePath(oldImageUrl) : '',
                 prompt: prompt || container.dataset.prompt || '',
                 msg_id: msgId,
                 slot_index: slotIndex,
-                use_imagen: useImagenMode,
                 speaker_id: speakerId
             }),
-            signal: chatAbortController.signal
+            signal: controller.signal
         });
         
         const data = await response.json();
+        if (controller.signal.aborted || sessionId !== generationSessionId) return false;
         if (data.status === 'success') {
-            succeeded = true;
             const wasDeletedSlot = container.classList.contains('is-deleted-slot');
             container.dataset.imageUrl = data.new_image_url;
             delete container.dataset.deletedImageUrl;
@@ -8047,6 +6652,7 @@ async function regenerateImage(buttonElement, oldImageUrl, prompt) {
                 const totalDur = rerollCalls.reduce((sum, tc) => sum + (tc.duration || 0), 0);
                 renderCompletedLogs(bubble, formattedToolCalls, totalDur ? Math.round(totalDur * 10) / 10 : null);
             }
+            succeeded = true;
         } else {
             let errorMsg = data.error || 'Unknown error';
             if (typeof marked !== 'undefined' && marked.parse) {
@@ -8072,9 +6678,9 @@ async function regenerateImage(buttonElement, oldImageUrl, prompt) {
             buttonElement.style.pointerEvents = 'auto';
             buttonElement.style.opacity = '';
         }
-        setGenerating(false);
-        stopToolPolling();
-        await initializeModelSelect();
+        if (!batch && chatAbortController === controller) setGenerating(false);
+        if (!batch) stopToolPolling();
+        if (!batch) await initializeModelSelect();
     }
     return succeeded;
 }
@@ -8326,6 +6932,7 @@ async function animateImage(buttonElement, oldImageUrl, motionPrompt) {
             body: JSON.stringify({
                 session_id: sessionId,
                 image_url: getRelativePath(oldImageUrl),
+                msg_id: container.dataset.msgId || container.closest('.message')?.dataset.msgId || null,
                 prompt: motionPrompt
             })
         });
@@ -8445,68 +7052,16 @@ function startToolPolling() {
 
 function updateLiveLogs(bubble, toolCalls) {
     if (!toolCalls || toolCalls.length === 0) return;
-    
-    let logsContainer = bubble.querySelector('.antigravity-logs-container');
-    if (!logsContainer) {
-        logsContainer = document.createElement('div');
-        logsContainer.className = 'antigravity-logs-container';
-        bubble.appendChild(logsContainer);
-    }
-    
-    let logsCard = logsContainer.querySelector('.antigravity-logs-card');
-    if (!logsCard) {
-        logsCard = document.createElement('div');
-        logsCard.className = 'antigravity-logs-card';
-        logsContainer.appendChild(logsCard);
-    }
-    
-    let header = logsCard.querySelector('.antigravity-logs-header');
-    if (!header) {
-        header = document.createElement('div');
-        header.className = 'antigravity-logs-header';
-        header.innerHTML = `
-            <span class="ag-timer-icon">${getLogIconSvg('timer')}</span>
-            <span class="ag-timer-text">Working...</span>
-            <span class="ag-header-chevron">▼</span>
-        `;
-        logsCard.appendChild(header);
-        
-        header.onclick = (e) => {
-            e.stopPropagation();
-            const body = logsCard.querySelector('.antigravity-logs-body');
-            if (body) {
-                const isExpanded = body.style.display === 'flex' || body.style.display === 'block';
-                body.style.display = isExpanded ? 'none' : 'flex';
-                header.querySelector('.ag-header-chevron').classList.toggle('expanded', !isExpanded);
-            }
-        };
-    }
-    
-    let body = logsCard.querySelector('.antigravity-logs-body');
-    if (!body) {
-        body = document.createElement('div');
-        body.className = 'antigravity-logs-body';
-        body.style.display = 'none'; // Collapsed by default during live generation
-        logsCard.appendChild(body);
-    }
-    
+
+    const { label, body } = ensureLogsCard(bubble);
+    label.textContent = 'Working...';
     body.innerHTML = '';
-    
+
     toolCalls.forEach(tc => {
-        const itemEl = document.createElement('div');
-        itemEl.className = 'antigravity-log-item';
-        
-        let icon = getLogIconSvg('gear');
-        let action = 'Running';
-        let target = tc.name;
-        
-        if (tc.status === 'completed') {
-            action = 'Completed';
-        } else if (tc.status === 'failed') {
-            action = 'Failed';
-        }
-        
         const name = tc.name;
+        let icon = getLogIconSvg('gear');
+        let action = tc.status === 'completed' ? 'Completed' : (tc.status === 'failed' ? 'Failed' : 'Running');
+
         if (name.includes('search')) {
             icon = getLogIconSvg('search');
             action = tc.status === 'running' ? 'Searching' : (tc.status === 'completed' ? 'Searched' : 'Search failed');
@@ -8520,37 +7075,21 @@ function updateLiveLogs(bubble, toolCalls) {
             icon = getLogIconSvg('command');
             action = tc.status === 'running' ? 'Running' : (tc.status === 'completed' ? 'Ran' : 'Execution failed');
         }
-        
-        target = tc.args || '';
-        if (target.length > 50) {
-            target = target.substring(0, 47) + '...';
+
+        let args = tc.args || '';
+        if (args.length > 50) {
+            args = args.substring(0, 47) + '...';
         }
-        
-        let durText = tc.duration ? ` (${tc.duration}s)` : '';
-        itemEl.innerHTML = `
-            <span class="ag-log-icon">${icon}</span>
-            <span class="ag-log-action" style="font-weight: 500;">${action}</span>
-            <span class="ag-log-target" style="font-family: monospace; font-size: 0.75rem; color: var(--text-muted); opacity: 0.85; margin-left: 4px;">${tc.name}(${target})</span>
-            <span class="ag-log-suffix" style="margin-left: auto; font-size: 0.7rem; color: var(--text-muted);">${durText}</span>
-        `;
-        
-        const detailEl = document.createElement('div');
-        detailEl.className = 'antigravity-log-detail';
-        detailEl.style.display = 'none';
-        
-        const responseText = tc.response || 'Running...';
-        detailEl.innerHTML = `
-            <pre><code>${responseText}</code></pre>
-        `;
-        
-        itemEl.onclick = (e) => {
-            e.stopPropagation();
-            const isExpanded = detailEl.style.display === 'block';
-            detailEl.style.display = isExpanded ? 'none' : 'block';
-        };
-        
-        body.appendChild(itemEl);
-        body.appendChild(detailEl);
+
+        const row = createLogItem({
+            icon,
+            action,
+            target: `${name}(${args})`,
+            suffix: tc.duration ? ` (${tc.duration}s)` : '',
+            detail: tc.response || 'Running...'
+        });
+        body.appendChild(row.item);
+        body.appendChild(row.detail);
     });
 }
 
@@ -8562,9 +7101,7 @@ function stopToolPolling() {
     }
     // Hide modal if open when request terminates
     document.getElementById('tool-confirm-modal').style.display = 'none';
-    if (typeof loadServerImages === 'function') {
-        loadServerImages();
-    }
+    loadServerImages();
 }
 
 // --- showToolConfirmModal ---
@@ -8814,16 +7351,6 @@ async function completeQuest(questId) {
         const data = await response.json();
         if (data.error) throw new Error(data.error);
         
-        const title = data.title || "Quest";
-        const objectives = data.objectives || [];
-        const objText = objectives.length > 0 ? ` with objectives: ${objectives.join(', ')}` : "";
-        const systemMessage = `[SYSTEM: User has completed the quest: "${title}"${objText}]`;
-        const questMsgId = 'quest_' + Math.random().toString(36).substr(2, 9) + Date.now().toString(36);
-        
-        // Append message locally (invisible/hidden user message)
-        appendMessage('user', systemMessage, null, null, false, Date.now() / 1000, null, false, questMsgId);
-        
-        // Reload quest list UI
         await loadQuests();
         
     } catch (error) {
@@ -9579,13 +8106,11 @@ async function cancelGeneration() {
         chatAbortController.abort();
         chatAbortController = null;
     }
-    if (typeof proactiveAbortController !== 'undefined' && proactiveAbortController) {
+    if (proactiveAbortController) {
         proactiveAbortController.abort();
         proactiveAbortController = null;
     }
-    if (typeof isProactiveRunning !== 'undefined') {
-        isProactiveRunning = false;
-    }
+    isProactiveRunning = false;
     setGenerating(false);
     userInput.disabled = false;
     restoreInputPlaceholder();
@@ -9596,13 +8121,18 @@ async function cancelGeneration() {
         heartElement.classList.remove('jiggling');
     }
     try {
-        await fetch('/api/cancel_chat', {
+        const response = await fetch('/api/cancel_chat', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ session_id: sessionId })
         });
+        if (!response.ok) {
+            const data = await response.json();
+            showCustomAlert("Cancellation Failed", data.error || "Could not stop image generation.");
+        }
     } catch (e) {
         console.error("Error cancelling chat:", e);
+        showCustomAlert("Cancellation Failed", "Could not contact the server to stop generation.");
     }
 }
 
@@ -9631,7 +8161,6 @@ const previewArea = document.getElementById('preview-area');
 const previewImg = document.getElementById('preview-img');
 const previewFilename = document.getElementById('preview-filename');
 
-let attachedBase64 = null;
 let attachedMime = null;
 let attachedMediaPath = null;
 let inversionActive = "";
@@ -9656,36 +8185,14 @@ if (sessionId) {
     safeLocalStorage.setItem('program_session_id', sessionId);
 }
 
-// Display session ID signature in header for easy verification
-const sessionDisplay = document.getElementById('session-id-display');
-if (sessionDisplay && sessionId) {
-    sessionDisplay.textContent = `• ID: ${sessionId.slice(-4)}`;
-    sessionDisplay.title = `Full Session ID: ${sessionId}`;
-}
-
 // Retrieve selected model from localStorage or use default
 let selectedModel = safeLocalStorage.getItem('program_selected_model') || 'local-llm';
-let lastInteractionTime = Date.now();
 let proactiveAbortController = null;
 let activeProgramName = "";
 let activeProgramId = "";
 let availableModels = [];
 let connectionStatus = { remote_configured: false, local_online: false };
 let modelInitPromise = null;
-
-let comfyStatus = { installed: false, running: false, resolution_status: { status: "idle", progress: "", errors: [] } };
-
-// Concurrency guards for ComfyUI operations
-let _comfyUpdateRunning = false;
-let _comfyUpdateTimer = null;
-let _comfyStarting = false;
-let _comfyStopping = false;
-let _localStarting = false;
-let _localStopping = false;
-let _comfyResolving = false;
-let _comfyCheckpointsInitialized = false;
-
-let comfyDownloadTimer = null;
 
 let userProfiles = [];
 let activeUserProfile = "";
@@ -9701,11 +8208,33 @@ function startSSE() {
     if (sseStarted) return;
     sseStarted = true;
 
+    let reconnectTimer = null;
+    let refreshInFlight = false;
+
     function connect() {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = null;
         if (evtSource) {
             evtSource.close();
         }
         evtSource = new EventSource('/api/events/status');
+        evtSource.onopen = () => {
+            profileCacheBuster = Date.now();
+            updateProfileImages();
+            loadServerImages();
+        };
+        evtSource.addEventListener('media_changed', (e) => {
+            try {
+                const change = JSON.parse(e.data);
+                if (change.profile) {
+                    profileCacheBuster = Date.now();
+                    updateProfileImages(change.program_id || null);
+                }
+                loadServerImages();
+            } catch (err) {
+                console.error('Media update error:', err);
+            }
+        });
         evtSource.addEventListener('connection_status', (e) => {
             try {
                 const payload = JSON.parse(e.data);
@@ -9715,38 +8244,26 @@ function startSSE() {
                     remote_model: status.remote_model,
                     remote_url: status.remote_url,
                     local_online: status.local_online,
-                    local_installed: status.local_installed,
                     temperature: status.temperature !== undefined ? status.temperature : connectionStatus.temperature,
                     env_path: status.env_path
                 });
-                // Update ComfyUI status from SSE payload directly
-                comfyStatus.installed = status.comfy_installed;
-                comfyStatus.running = status.comfy_running;
-                // Refresh modal UI if the settings modal is open, using SSE data directly (skipFetch)
                 const modal = document.getElementById('connection-modal');
                 if (modal && modal.style.display !== 'none') {
                     updateConnectionModalStatus();
-                    updateComfyModalStatus(true);
                 }
                 // Refresh model dropdown to reflect online/offline changes
                 initializeModelSelect();
 
                 // Cross-device sync: If active program was deleted or removed from server, switch to active_program / Sebile
                 if (Array.isArray(status.programs) && activeProgramId && !status.programs.includes(activeProgramId)) {
-                    const fallback = status.active_program || 'sebile';
-                    if (typeof selectAssistant === 'function') {
-                        selectAssistant(fallback);
-                    }
+                    selectAssistant(status.active_program || 'sebile');
                 }
 
                 // If assistant modal is open, refresh if listed programs don't match
                 const assistantModal = document.getElementById('assistant-modal');
                 if (assistantModal && assistantModal.style.display !== 'none' && Array.isArray(status.programs)) {
-                    if (typeof currentLoadedAssistants !== 'undefined' && Array.isArray(currentLoadedAssistants)) {
-                        const hasDeleted = currentLoadedAssistants.some(p => !status.programs.includes(p.id));
-                        if (hasDeleted && typeof openAssistantModal === 'function') {
-                            openAssistantModal();
-                        }
+                    if (currentLoadedAssistants.some(p => !status.programs.includes(p.id))) {
+                        openAssistantModal();
                     }
                 }
             } catch (err) {
@@ -9758,19 +8275,24 @@ function startSSE() {
                 evtSource.close();
             }
             // Reconnect after 3 seconds
-            setTimeout(connect, 3000);
+            clearTimeout(reconnectTimer);
+            reconnectTimer = setTimeout(connect, 3000);
         };
     }
     connect();
 
     async function refreshAllStatuses() {
+        if (refreshInFlight) return;
+        refreshInFlight = true;
         try {
+            profileCacheBuster = Date.now();
+            updateProfileImages();
+            await loadServerImages();
             await initializeModelSelect();
-            if (typeof updateComfyModalStatus === 'function') {
-                await updateComfyModalStatus(false);
-            }
         } catch (e) {
             console.error("Error refreshing statuses on focus:", e);
+        } finally {
+            refreshInFlight = false;
         }
     }
 
@@ -9893,11 +8415,6 @@ function initModalListeners() {
         modal.addEventListener('touchstart', handleTouchStart, { passive: true });
         modal.addEventListener('touchend', handleTouchEnd, { passive: true });
     }
-    // Init TTS toggle button state
-    const ttsBtn = document.getElementById('tts-toggle-btn');
-    if (ttsBtn && ttsAutoSpeak) {
-        ttsBtn.classList.add('active');
-    }
 }
 if (document.readyState === 'loading') {
     window.addEventListener('DOMContentLoaded', initModalListeners);
@@ -9910,11 +8427,9 @@ if (document.readyState === 'loading') {
 const PROACTIVE_INITIAL_DELAY_MS = 300000; // 5 minutes of inactivity before first thought
 const PROACTIVE_UPDATE_INTERVAL_MS = 14400000; // 4 hours of continued inactivity between updates
 
-let lastUserMessageTime = Date.now();
 let lastUserActivityTime = Date.now();
 let hasTriggeredInitialProactive = false;
 let lastProactiveThoughtTime = 0;
-let currentProactiveThoughtText = "";
 let isProactiveRunning = false;
 
 function recordUserActivity() {
@@ -9951,7 +8466,6 @@ async function triggerProactiveAction() {
         const data = await response.json();
         if (signal.aborted || sessionId !== targetSession || activeProgramName !== targetProgram) return;
         if (data.status === 'success' && data.type === 'thought' && data.content) {
-            currentProactiveThoughtText = data.content;
             lastProactiveThoughtTime = Date.now();
             hasTriggeredInitialProactive = true;
             showThoughtBubbleOverlay(data.content);
@@ -9967,7 +8481,6 @@ async function triggerProactiveAction() {
 
 function showThoughtBubbleOverlay(text) {
     hideThoughtBubbleOverlay();
-    currentProactiveThoughtText = text;
     
     const row = document.createElement('div');
     row.className = 'message-row program-row thought-row';
@@ -9976,7 +8489,6 @@ function showThoughtBubbleOverlay(text) {
     row.title = 'Click to dismiss';
     row.onclick = () => {
         hideThoughtBubbleOverlay();
-        currentProactiveThoughtText = "";
     };
     
     const profileUrl = getProfileUrl();
@@ -10047,10 +8559,19 @@ if (document.readyState === 'loading') {
     initMainApp();
 }
 
-// Global error listener to catch image load failures and switch to dynamic colored circles
+// Image load failures (error does not bubble, so capture on window):
+// broken avatars become colored circles; missing portraits become deleted slots.
 window.addEventListener('error', function (e) {
-    if (e.target && e.target.tagName === 'IMG' && (e.target.classList.contains('program-avatar') || e.target.classList.contains('program-list-avatar') || e.target.classList.contains('voice-call-avatar') || e.target.classList.contains('voice-call-program-avatar'))) {
-        switchToCircleAvatar(e.target);
+    const img = e.target;
+    if (!img || img.tagName !== 'IMG') return;
+    if (img.classList.contains('program-avatar') || img.classList.contains('program-list-avatar') || img.classList.contains('voice-call-avatar') || img.classList.contains('voice-call-program-avatar')) {
+        switchToCircleAvatar(img);
+    }
+    if (img.src && img.src.includes('/images/portraits/')) {
+        const parent = img.parentElement;
+        if (parent && parent.classList.contains('message-image-container')) {
+            markSlotAsDeleted(parent);
+        }
     }
 }, true);
 
@@ -10076,12 +8597,6 @@ function switchToCircleAvatar(img) {
         }
         if (!name) {
             name = img.getAttribute('data-name') || activeProgramName || '';
-        }
-        if (!name) {
-            const input = document.getElementById('user-input');
-            if (input && input.placeholder && input.placeholder.startsWith('Ask ')) {
-                name = input.placeholder.replace('Ask ', '');
-            }
         }
         if (!color) {
             color = getComputedStyle(document.documentElement).getPropertyValue('--primary-accent').trim() || '#38bdf8';
@@ -10168,22 +8683,9 @@ let currentPendingCallId = null;
 
 // --- PROGRAM ASSISTANT SELECTION FUNCTIONS ---
 
-let selectedTavernCardFile = null;
-
-
-
-// Periodically verify all selects matching .glass-select are set up
-setInterval(() => {
-    document.querySelectorAll("select.glass-select").forEach(select => {
-        if (!select.dataset.customDropdownSetup) {
-            setupCustomDropdown(select);
-        }
-    });
-}, 250);
 
 // --- Voice Call Orchestrator ---
 let isVoiceCallActive = false;
-let voiceCallRecognition = null;
 let voiceCallStartTime = 0;
 let voiceCallTranscript = [];
 let voiceCallMuted = false;
@@ -10197,55 +8699,45 @@ let voiceCallActiveAudio = null;
 let voiceCallVisualizerAnimation = null;
 let isProgramSpeaking = false;
 let isProgramThinking = false;
-let consecutiveShortSessions = 0;
-let lastRecognitionStartTime = 0;
-let visualizerTime = 0;
-let silenceTimer = null;
-let currentSpeechText = "";
 let lastUserSpeechTime = 0;
 let voiceCallMediaRecorder = null;
 let voiceCallAudioChunks = [];
 let isNativeRecording = false;
 let nativeSilenceTimer = null;
 
-function playCallStartSound() {
+// One AudioContext serves every call cue; browsers cap the number of live contexts.
+let cueAudioContext = null;
+
+function playCueSweep(fromHz, toHz, startGain, seconds) {
     try {
-        const AudioContextClass = window.AudioContext || window.webkitAudioContext;
-        const ctx = new AudioContextClass();
+        if (!cueAudioContext || cueAudioContext.state === 'closed') {
+            const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+            cueAudioContext = new AudioContextClass();
+        }
+        const ctx = cueAudioContext;
+        if (ctx.state === 'suspended') ctx.resume();
         const osc = ctx.createOscillator();
         const gain = ctx.createGain();
         osc.type = 'sine';
-        osc.frequency.setValueAtTime(260, ctx.currentTime);
-        osc.frequency.exponentialRampToValueAtTime(520, ctx.currentTime + 0.3);
-        gain.gain.setValueAtTime(0.12, ctx.currentTime);
-        gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.3);
+        osc.frequency.setValueAtTime(fromHz, ctx.currentTime);
+        osc.frequency.exponentialRampToValueAtTime(toHz, ctx.currentTime + seconds);
+        gain.gain.setValueAtTime(startGain, ctx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + seconds);
         osc.connect(gain);
         gain.connect(ctx.destination);
         osc.start();
-        osc.stop(ctx.currentTime + 0.3);
-    } catch(e) {
-        console.error("Failed to play call start sound:", e);
+        osc.stop(ctx.currentTime + seconds);
+    } catch (e) {
+        console.error("Failed to play call cue:", e);
     }
 }
 
+function playCallStartSound() {
+    playCueSweep(260, 520, 0.12, 0.3);
+}
+
 function playHangupSound() {
-    try {
-        const AudioContextClass = window.AudioContext || window.webkitAudioContext;
-        const ctx = new AudioContextClass();
-        const osc = ctx.createOscillator();
-        const gain = ctx.createGain();
-        osc.type = 'sine';
-        osc.frequency.setValueAtTime(400, ctx.currentTime);
-        osc.frequency.exponentialRampToValueAtTime(150, ctx.currentTime + 0.25);
-        gain.gain.setValueAtTime(0.15, ctx.currentTime);
-        gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.25);
-        osc.connect(gain);
-        gain.connect(ctx.destination);
-        osc.start();
-        osc.stop(ctx.currentTime + 0.25);
-    } catch(e) {
-        console.error("Failed to play hangup sound:", e);
-    }
+    playCueSweep(400, 150, 0.15, 0.25);
 }
 
 function startVoiceCall() {
@@ -10286,14 +8778,7 @@ function startVoiceCall() {
     voiceCallSpeakerMuted = false;
     isProgramSpeaking = false;
     isProgramThinking = false;
-    consecutiveShortSessions = 0;
-    visualizerTime = 0;
-    currentSpeechText = "";
     lastUserSpeechTime = 0;
-    if (silenceTimer) {
-        clearTimeout(silenceTimer);
-        silenceTimer = null;
-    }
     
     function initNativeVoiceRecorder(stream) {
         try {
@@ -10321,14 +8806,14 @@ function startVoiceCall() {
 
             voiceCallMediaRecorder.onstop = async () => {
                 isNativeRecording = false;
-                if (voiceCallAudioChunks.length === 0 || !isVoiceCallActive || isProgramSpeaking || isProgramThinking) {
+                if (voiceCallAudioChunks.length === 0 || !isVoiceCallActive || isProgramSpeaking || isProgramThinking || voiceCallMuted) {
                     voiceCallAudioChunks = [];
                     return;
                 }
                 const audioBlob = new Blob(voiceCallAudioChunks, { type: mimeType });
                 voiceCallAudioChunks = [];
 
-                if (audioBlob.size > 1500 && !currentSpeechText) {
+                if (audioBlob.size > 1500) {
                     updateVoiceCallStatus("Transcribing...");
                     const formData = new FormData();
                     formData.append('audio', audioBlob, 'voice_input.webm');
@@ -10363,8 +8848,11 @@ function startVoiceCall() {
             voiceCallMicStream = stream;
             try {
                 const AudioContextClass = window.AudioContext || window.webkitAudioContext;
-                if (!voiceCallAudioContext) {
+                if (!voiceCallAudioContext || voiceCallAudioContext.state === 'closed') {
                     voiceCallAudioContext = new AudioContextClass();
+                }
+                if (voiceCallAudioContext.state === 'suspended') {
+                    voiceCallAudioContext.resume();
                 }
                 if (!voiceCallUserAnalyser) {
                     voiceCallUserAnalyser = voiceCallAudioContext.createAnalyser();
@@ -10396,68 +8884,6 @@ function startVoiceCall() {
     document.getElementById('voice-call-speaker-btn').title = "Mute Speaker";
     
     drawVisualizer();
-
-    // Setup browser SpeechRecognition if available (as optional fast-path)
-    const SpeechRecClass = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (SpeechRecClass) {
-        try {
-            voiceCallRecognition = new SpeechRecClass();
-            voiceCallRecognition.continuous = true;
-            voiceCallRecognition.interimResults = true;
-            voiceCallRecognition.lang = 'en-US';
-
-            voiceCallRecognition.onstart = () => {
-                updateVoiceCallStatus("Listening...");
-                lastRecognitionStartTime = Date.now();
-                currentSpeechText = "";
-            };
-
-            voiceCallRecognition.onresult = (event) => {
-                if (!isVoiceCallActive || isProgramSpeaking || isProgramThinking || voiceCallMuted) return;
-                let interimTranscript = "";
-                let finalTranscript = "";
-
-                for (let i = 0; i < event.results.length; ++i) {
-                    if (event.results[i].isFinal) {
-                        finalTranscript += event.results[i][0].transcript + " ";
-                    } else {
-                        interimTranscript += event.results[i][0].transcript;
-                    }
-                }
-
-                const text = (finalTranscript + interimTranscript).trim();
-                if (text) {
-                    currentSpeechText = text;
-                    updateVoiceCallStatus("Listening...");
-                    lastUserSpeechTime = Date.now();
-
-                    if (silenceTimer) clearTimeout(silenceTimer);
-                    silenceTimer = setTimeout(() => {
-                        if (currentSpeechText && isVoiceCallActive && !isProgramSpeaking && !isProgramThinking) {
-                            const speechToProcess = currentSpeechText;
-                            currentSpeechText = "";
-                            processUserSpeech(speechToProcess);
-                        }
-                    }, 1300);
-                }
-            };
-
-            voiceCallRecognition.onerror = (event) => {
-                console.warn("[VoiceCall] Browser SpeechRecognition notice:", event.error);
-                // In embedded WebView2/offline, browser SpeechRecognition fails — native MediaRecorder + faster-whisper handles transcription
-            };
-
-            voiceCallRecognition.onend = () => {
-                if (isVoiceCallActive && !isProgramSpeaking && !isProgramThinking && !voiceCallMuted) {
-                    try { voiceCallRecognition.start(); } catch(e) {}
-                }
-            };
-
-            voiceCallRecognition.start();
-        } catch(e) {
-            console.warn("[VoiceCall] Browser SpeechRecognition unavailable, using native STT:", e);
-        }
-    }
 }
 
 function updateVoiceCallStatus(text) {
@@ -10497,23 +8923,12 @@ function addVoiceCallTurn(speaker, text) {
 async function processUserSpeech(text) {
     if (!isVoiceCallActive) return;
     
-    if (silenceTimer) {
-        clearTimeout(silenceTimer);
-        silenceTimer = null;
-    }
-    currentSpeechText = "";
-    
     addVoiceCallTurn('user', text);
     
     isProgramThinking = true;
     updateVoiceCallStatus(`${activeProgramName || 'Program'} is thinking...`);
     
-    let shouldResume = false;
     try {
-        if (voiceCallRecognition) {
-            voiceCallRecognition.stop();
-        }
-        
         let voiceModel = selectedModel;
         if (connectionStatus && (connectionStatus.remote_configured ) && connectionStatus.remote_model) {
             voiceModel = connectionStatus.remote_model;
@@ -10544,24 +8959,18 @@ async function processUserSpeech(text) {
             await playProgramSpeech(replyText);
         } else {
             updateVoiceCallStatus("Listening...");
-            shouldResume = true;
         }
     } catch(e) {
         console.error("Error in voice call turn processing:", e);
         updateVoiceCallStatus("Error. Listening...");
-        shouldResume = true;
     } finally {
         isProgramThinking = false;
-        if (shouldResume) {
-            resumeVoiceRecognition();
-        }
     }
 }
 
 async function playProgramSpeech(text) {
     if (voiceCallSpeakerMuted) {
         updateVoiceCallStatus("Listening...");
-        resumeVoiceRecognition();
         return;
     }
     
@@ -10590,16 +8999,19 @@ async function playProgramSpeech(text) {
         
         try {
             const AudioContextClass = window.AudioContext || window.webkitAudioContext;
-            if (!voiceCallAudioContext) {
+            if (!voiceCallAudioContext || voiceCallAudioContext.state === 'closed') {
                 voiceCallAudioContext = new AudioContextClass();
+            }
+            if (voiceCallAudioContext.state === 'suspended') {
+                voiceCallAudioContext.resume();
             }
             if (!voiceCallAnalyser) {
                 voiceCallAnalyser = voiceCallAudioContext.createAnalyser();
                 voiceCallAnalyser.fftSize = 64;
+                voiceCallAnalyser.connect(voiceCallAudioContext.destination);
             }
             const source = voiceCallAudioContext.createMediaElementSource(voiceCallActiveAudio);
             source.connect(voiceCallAnalyser);
-            voiceCallAnalyser.connect(voiceCallAudioContext.destination);
         } catch(ae) {
             console.warn("Could not setup program audio visualizer node:", ae);
         }
@@ -10607,14 +9019,12 @@ async function playProgramSpeech(text) {
         voiceCallActiveAudio.onended = () => {
             isProgramSpeaking = false;
             updateVoiceCallStatus("Listening...");
-            resumeVoiceRecognition();
         };
         
         voiceCallActiveAudio.onerror = () => {
             console.error("Audio playback error");
             isProgramSpeaking = false;
             updateVoiceCallStatus("Listening...");
-            resumeVoiceRecognition();
         };
         
         await voiceCallActiveAudio.play();
@@ -10622,17 +9032,7 @@ async function playProgramSpeech(text) {
         console.error("TTS generation or playback error:", err);
         isProgramSpeaking = false;
         updateVoiceCallStatus("Listening...");
-        resumeVoiceRecognition();
     }
-}
-
-function resumeVoiceRecognition() {
-    if (!isVoiceCallActive || isProgramSpeaking || isProgramThinking || voiceCallMuted) return;
-    try {
-        if (voiceCallRecognition) {
-            voiceCallRecognition.start();
-        }
-    } catch(e) {}
 }
 
 function toggleManualVoiceRecording() {
@@ -10673,14 +9073,19 @@ function toggleCallMute() {
         btn.classList.add('disabled');
         btn.title = "Unmute Microphone";
         updateVoiceCallStatus("Muted");
-        if (voiceCallRecognition) {
-            try { voiceCallRecognition.stop(); } catch(e) {}
+        if (nativeSilenceTimer) {
+            clearTimeout(nativeSilenceTimer);
+            nativeSilenceTimer = null;
+        }
+        if (voiceCallMediaRecorder && voiceCallMediaRecorder.state === 'recording') {
+            voiceCallAudioChunks = [];
+            isNativeRecording = false;
+            try { voiceCallMediaRecorder.stop(); } catch(e) {}
         }
     } else {
         btn.classList.remove('disabled');
         btn.title = "Mute Microphone";
         updateVoiceCallStatus("Listening...");
-        resumeVoiceRecognition();
     }
 }
 
@@ -10705,12 +9110,6 @@ function toggleCallSpeaker() {
 function endVoiceCall() {
     isVoiceCallActive = false;
     playHangupSound(); // Play telephone-like disconnect tone
-    
-    if (silenceTimer) {
-        clearTimeout(silenceTimer);
-        silenceTimer = null;
-    }
-    currentSpeechText = "";
     
     if (voiceCallVisualizerAnimation) {
         cancelAnimationFrame(voiceCallVisualizerAnimation);
@@ -10738,10 +9137,6 @@ function endVoiceCall() {
     }
     voiceCallAnalyser = null;
     
-    if (voiceCallRecognition) {
-        try { voiceCallRecognition.stop(); } catch(e) {}
-        voiceCallRecognition = null;
-    }
     if (voiceCallMediaRecorder) {
         try { voiceCallMediaRecorder.stop(); } catch(e) {}
         voiceCallMediaRecorder = null;
@@ -10783,7 +9178,7 @@ function endVoiceCall() {
             })
         }).then(res => res.json()).then(data => {
             if (data.success) {
-                appendMessage('voice-call', JSON.stringify(payload), null, null, true, Date.now() / 1000);
+                appendLocalMessage('voice-call', JSON.stringify(payload), { isLive: true, timestamp: Date.now() / 1000 });
             }
         }).catch(err => {
             console.error("Error saving voice call transcript:", err);
@@ -10952,19 +9347,6 @@ function drawVisualizer() {
     }
 }
 
-// Global error handler to replace missing/deleted portraits with a clean placeholder
-document.addEventListener('error', function (event) {
-    if (event.target.tagName && event.target.tagName.toLowerCase() === 'img') {
-        const src = event.target.src;
-        if (src && src.includes('/images/portraits/')) {
-            const parent = event.target.parentElement;
-            if (parent && parent.classList.contains('message-image-container')) {
-                markSlotAsDeleted(parent);
-            }
-        }
-    }
-}, true);
-
 // --- Native Model Management Helpers ---
 async function openNativeModelsFolder(folderType = 'root') {
     try {
@@ -11054,10 +9436,23 @@ async function fetchNativeModelsSummary() {
             }
         }
 
+        const wfSelect = document.getElementById('native-workflow-select');
+        const workflows = data.workflows || [];
+        if (wfSelect) {
+            if (workflows.length > 0) {
+                wfSelect.innerHTML = workflows.map(w => 
+                    `<option value="${w.filename}" ${(data.active_workflow === w.filename || data.active_workflow === w.name) ? 'selected' : ''}>${w.name} (${w.size_kb} KB)</option>`
+                ).join('');
+            } else {
+                wfSelect.innerHTML = `<option value="ImageWorkflow.json">ImageWorkflow.json (Default)</option>`;
+            }
+        }
+
         if (diffSummary) {
             diffSummary.innerHTML = `
                 <div>• <strong>${ckpts.length}</strong> checkpoint(s) in <code>models/checkpoints/</code></div>
                 <div>• <strong>${loras.length}</strong> LoRA(s) detected in <code>models/loras/</code></div>
+                <div>• <strong>${workflows.length}</strong> workflow(s) in <code>models/workflows/</code></div>
             `;
         }
     } catch (e) {
@@ -11099,10 +9494,24 @@ async function onSelectNativeCheckpoint(ckptName) {
     }
 }
 
+async function onSelectNativeWorkflow(workflowName) {
+    if (!workflowName) return;
+    try {
+        const res = await fetch('/api/models/native/select_workflow', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ workflow_name: workflowName })
+        });
+        const data = await res.json();
+        if (data.success) {
+            showCustomAlert("Workflow Active", `Selected workflow '${data.active_workflow}' for image generation.`);
+        }
+    } catch (e) {
+        console.error("onSelectNativeWorkflow error:", e);
+    }
+}
+
 // Automatically populate native models when settings opens
 document.addEventListener('DOMContentLoaded', () => {
     fetchNativeModelsSummary();
 });
-
-
-

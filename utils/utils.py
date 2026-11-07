@@ -14,14 +14,23 @@ from runners.program import get_active_program
 VECTOR_QUERY_MESSAGES = 3
 VECTOR_TOP_K = 4
 VECTOR_SCORE_THRESHOLD = 0.25
-VECTOR_TOKEN_BUDGET = 2048
+VECTOR_TOKEN_BUDGET = 768
+
+
+def _get_vector_budget() -> tuple[int, int]:
+    """Scales vector retrieval token budget and top_k proportionally to LOCAL_CHAT_BUDGET."""
+    raw = os.getenv("LOCAL_CHAT_BUDGET", "4096")
+    chat_budget = int(raw) if (raw and raw.isdigit()) else 4096
+    token_budget = max(512, min(1536, int(chat_budget * 0.18)))
+    top_k = max(3, min(8, token_budget // 180))
+    return token_budget, top_k
 
 TOOL_ALIASES = {
     "generate_program_portrait": "generate_local_image",
+    "generate_general_image": "generate_local_image",
     "dalle.text2im": "generate_local_image",
     "dalle:text2im": "generate_local_image",
     "text2im": "generate_local_image",
-    "generate_general_image": "generate_imagen",
     "view_file": "read_file",
     "write_to_file": "write_file",
     "run_command": "run_shell_command",
@@ -32,25 +41,18 @@ TOOL_ALIASES = {
 
 _MAIN_DIRECTIVE_PROMPT = (
     "\n\n# TOOL PROTOCOL\n"
-    'Tools are emulated by exact `[tool_name(key="value")]` tags. Use a tool only when it materially advances the current task; otherwise answer directly.\n'
-    "The TOOLBELT above is the capability index. When a capability is relevant, use the matching retrieved skill instructions as the detailed procedure.\n"
-    "Available tools: google_search, web_search, read_webpage, read_file, write_file, replace_in_file, replace_file_content, multi_replace_file_content, "
-    "run_shell_command, run_command_async, manage_task, wait_task, get_workspace_structure, find_files, search_codebase, generate_local_image, generate_imagen, "
-    "apply_comfy_workflow, add_quest, add_journal_entry, search_music, outline_file, read_symbol, find_references, review_code.\n"
-        "LARGE CODE: never read whole big files. To audit or review a whole file or folder, call `review_code(path=...)` once, then `review_code()` again until it reports REVIEW COMPLETE: the system chunks the code, checks every claim, and tracks progress for you. Answer only from its digest. "
-        "To inspect or change specific code, use `outline_file` and `read_symbol` (one function at a time) or `read_file` with a line range; reads of Python code include tool-verified lint and caller facts, which outrank your own guesses. "
-        "Before claiming something depends on code you cannot see (a global, an import, a caller's contract), check it with `find_references`.\n"
-    "Use argument names shown by a retrieved skill or the tool's established signature. Do not invent tool results. After a tool result, continue the task concisely; do not repeat the tag.\n"
-    "When URLs or web links are provided in the message, call `[read_webpage(url=\"...\")]` to fetch and read the page content. Ground all claims in real retrieved text rather than assuming or fabricating what a link contains.\n"
-    "For research, search first and read the most relevant pages; use distinct queries or URLs when continuing.\n"
-    "Use image tools sparingly. Image prompts are short comma-separated tags, and image generation must be the only content in that model response.\n"
-    "Treat retrieved knowledge-base context as authoritative for the user's uploaded material.\n"
+    'Tools are emulated by exact `[tool_name(key="value")]` tags from `# TOOLBELT`. Use a tool only when it materially advances the current task; otherwise answer directly.\n'
+    "Use argument names shown in `# TOOLBELT` or a retrieved skill block. Do not invent tool results. After a tool result, continue the task concisely; do not repeat the tag.\n"
+    "Call `[add_journal_entry(keyphrases=\"...\", content=\"...\")]` only when a permanent biographical fact or major milestone is revealed (never for routine chat or temporary moods).\n"
+    "When URLs are provided in the message, call `[read_webpage(url=\"...\")]` to fetch the page content.\n"
+    "Use image tools sparingly; image prompts are short comma-separated tags and must be the only content in that model response.\n"
+    "Treat `<knowledge_base>` and `<recalled_journals>` blocks as integrated memory.\n"
 )
 
 _STORY_MODE_DIRECTIVE_PROMPT = (
     "\n\n# STORY TOOL PROTOCOL\n"
     'Use exact `[tool_name(key="value")]` tags only when needed. The TOOLBELT and retrieved skill block define the available procedure.\n'
-    "Story tools: generate_local_image, generate_imagen, apply_comfy_workflow. Use exactly one tool tag per turn, then respond naturally after its result.\n"
+    "Story tools: generate_local_image, apply_comfy_workflow. Use exactly one tool tag per turn, then respond naturally after its result.\n"
     "Image prompts must be short comma-separated tags; image generation must be the only content in that model response.\n"
     "Treat retrieved knowledge-base context as authoritative for the user's uploaded material.\n"
 )
@@ -244,7 +246,7 @@ def _build_vector_query(history: list[dict], max_messages: int = VECTOR_QUERY_ME
     for msg in reversed(history):
         if msg.get("role") not in valid_roles:
             continue
-        text = msg.get("text", "").strip()
+        text = re.sub(r"!\[[^\]]*\]\([^)]+\)", "", msg.get("text", "")).strip()
         if not text or text.startswith("[Tool Response") or text.lower().startswith("[system:"):
             continue
         messages.append(text)
@@ -266,12 +268,13 @@ def _get_databank_contexts(query_text: str) -> tuple[str, object]:
             return "", None
 
         query_vector = get_embedding_model().encode(query_text)
+        vec_budget, vec_top_k = _get_vector_budget()
         rag_context = db.query(
             query_text,
-            top_k=VECTOR_TOP_K,
+            top_k=vec_top_k,
             score_threshold=VECTOR_SCORE_THRESHOLD,
             exclude_source_type="chat_history",
-            token_budget=VECTOR_TOKEN_BUDGET,
+            token_budget=vec_budget,
             query_vector=query_vector,
         )
         return rag_context, query_vector
@@ -408,9 +411,6 @@ def _execute_emulated_tool(tool_name: str, args_str: str) -> tuple[dict, str]:
     normalized_name = _normalize_tool_name(tool_name)
     parsed_args = _parse_emulated_tool_call(normalized_name, args_str)
 
-    if normalized_name == "generate_imagen" and not tools.current_use_imagen.get():
-        return parsed_args, "Error: Imagen rendering is disabled in settings."
-
     func = getattr(tools, normalized_name, None)
     if not func:
         return parsed_args, f"Error: Tool '{normalized_name}' not found."
@@ -487,7 +487,7 @@ def is_real_user_msg(msg: dict) -> bool:
         if any(msg_id.startswith(p) for p in ('usr_', 'img_')):
             return True
 
-    invalid_triggers = ('[Tool Response', '[SYSTEM:', 'Generate a portrait of yourself', '[GENERATE_IMAGE:', '[GENERATE_IMAGEN:', 'generate_program_portrait')
+    invalid_triggers = ('[Tool Response', '[SYSTEM:', 'Generate a portrait of yourself', '[GENERATE_IMAGE:', 'generate_program_portrait')
     return not any(text.startswith(t) or t in text for t in invalid_triggers)
 
 

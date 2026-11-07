@@ -11,6 +11,7 @@ _local_models_cache = None
 _last_fetch_time = 0.0
 CACHE_TTL = 5.0  # 5 seconds cache
 
+
 def fetch_local_models(force_refresh=False) -> list:
     """Queries Local LLM server for loaded models. Returns empty list if offline (cached)."""
     global _local_models_cache, _last_fetch_time
@@ -18,27 +19,6 @@ def fetch_local_models(force_refresh=False) -> list:
     if not force_refresh and _local_models_cache is not None and (now - _last_fetch_time < CACHE_TTL):
         return _local_models_cache
 
-    # Try using native REST API GET /api/v1/models to see which ones are loaded
-    try:
-        response = requests.get("http://127.0.0.1:1234/api/v1/models", timeout=0.2)
-        if response.status_code == 200:
-            local_models = []
-            for m in response.json().get("models", []):
-                # Only include loaded chat/LLM models, filter out embeddings
-                if m.get("type") == "llm" and len(m.get("loaded_instances", [])) > 0:
-                    model_id = m.get("key")
-                    disp = m.get("display_name") or model_id.split("/")[-1]
-                    local_models.append({"value": model_id, "label": f"{disp} (Local)"})
-            _local_models_cache = local_models
-            _last_fetch_time = now
-            return local_models
-    except Exception as e:
-        if isinstance(e, (requests.exceptions.ConnectionError, requests.exceptions.Timeout)):
-            print("[Local LLM] Native models listing offline (Server is not running or unreachable)")
-        else:
-            print(f"[Local LLM] Native models listing offline: {e}")
-
-    # Backup to standard OpenAI compatibility endpoint /v1/models
     try:
         response = requests.get(LOCAL_MODELS_URL, timeout=0.2)
         response.raise_for_status()
@@ -58,7 +38,6 @@ def fetch_local_models(force_refresh=False) -> list:
         _last_fetch_time = now
         return local_models
     except Exception as e:
-        # Gracefully handle offline Local LLM server
         if isinstance(e, (requests.exceptions.ConnectionError, requests.exceptions.Timeout)):
             print(f"[Local LLM] Offline or unreachable at {LOCAL_MODELS_URL} (Server is not running or unreachable)")
         else:

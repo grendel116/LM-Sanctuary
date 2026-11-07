@@ -60,9 +60,9 @@ models/*
 !models/models.py
 !models/**/
 !models/**/.gitkeep
-# Personal workflows (models/workflows/ImageWorkflow.json) stay private; the starter templates ship
+# Bundled default image workflow included in git; other custom workflows stay untracked
 models/workflows/*
-!models/workflows/*.default.json
+!models/workflows/ImageWorkflow.json
 
 # TTS Speech Model weights and synthesized audio cache
 core/skills/speech_generation/speech_model/*.onnx

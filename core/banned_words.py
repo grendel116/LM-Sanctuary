@@ -200,32 +200,7 @@ def resolve_tokens_from_gguf(gguf_path: str, variants: set[str]) -> set[int]:
     if not gguf_path or not os.path.isfile(gguf_path) or not variants:
         return set()
 
-    # Priority 1: In-process via llama_cpp (fast, vocab_only=True without VRAM allocation)
-    try:
-        import llama_cpp
-        params = llama_cpp.llama_model_default_params()
-        params.vocab_only = True
-        model = llama_cpp.llama_model_load_from_file(gguf_path.encode("utf-8"), params)
-        if model:
-            try:
-                vocab = llama_cpp.llama_model_get_vocab(model)
-                single_ids = set()
-                for v in variants:
-                    vb = v.encode("utf-8")
-                    n_max = len(vb) + 2
-                    tokens = (llama_cpp.llama_token * n_max)()
-                    n = llama_cpp.llama_tokenize(vocab, vb, len(vb), tokens, n_max, False, False)
-                    if n == 1:
-                        single_ids.add(int(tokens[0]))
-                return single_ids
-            finally:
-                llama_cpp.llama_model_free(model)
-    except ImportError:
-        pass
-    except Exception as e:
-        print(f"[BANNED WORDS] llama_cpp vocab tokenization note: {e}", flush=True)
-
-    # Priority 2: Standalone llama-tokenize binary (line-by-line verification)
+    # Standalone llama-tokenize binary (line-by-line verification)
     try:
         import subprocess
         base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

@@ -33,7 +33,6 @@ if not env_path.exists():
 load_dotenv(dotenv_path=env_path, override=True)
 
 # 2. Application imports
-from adapters import comfy_manager
 from runners.runner import cancelled_sessions, voice_call_sessions, OpenSourceRunner
 from runners.program import get_active_program, set_active_program, get_active_user, get_active_session, set_active_session
 from variables.settings import LOCAL_SERVER_URL, get_local_server_headers, VARIABLES_DIR, PROGRAMS_DIR
@@ -90,15 +89,10 @@ def run_async(coroutine):
 
 
 # Pre-compiled regular expressions
+from utils.utils import THINK_TAG_PATTERN as THINKING_STRIP_RE
 PROGRAM_ID_RE = re.compile(r'^[a-zA-Z0-9_\-]+$')
 SAFE_NAME_RE = re.compile(r'[^a-zA-Z0-9_]')
 USER_PROFILE_NAME_RE = re.compile(r'[^a-zA-Z0-9_\-]')
-THINKING_STRIP_RE = re.compile(
-    r'(?:<think>|\[think\]|<thought>|\[thought\]|<\|thought\|>|<\|channel\|>thought|<channel\|>thought)'
-    r'[\s\S]*?'
-    r'(?:</think>|\[/think\]|</thought>|\[/thought\]|<\|/thought\|>|<\|channel\|>|<channel\|>|<\/\s*think>|\[\s*/\s*think\s*\]|$)',
-    re.IGNORECASE
-)
 
 _cached_active_program = None
 _cached_active_user = None
@@ -179,9 +173,10 @@ def check_program_change():
 
 @app.after_request
 def add_cache_control_headers(response):
-    response.headers['Cache-Control'] = 'no-cache, must-revalidate, max-age=0'
-    response.headers['Pragma'] = 'no-cache'
-    response.headers['Expires'] = '0'
+    if not response.cache_control.private:
+        response.headers['Cache-Control'] = 'no-cache, must-revalidate, max-age=0'
+        response.headers['Pragma'] = 'no-cache'
+        response.headers['Expires'] = '0'
     return response
 
 # Initialize active program and active user cache
@@ -199,9 +194,9 @@ def prewarm_caches():
     auto_start = os.getenv("AUTO_START_LOCAL_LLM", "true").lower() in ("true", "1", "yes")
     if auto_start:
         try:
-            from adapters import local_llm_manager
+            from runners import local_server
             print(">>> Auto-starting high-speed local LLM server...")
-            local_llm_manager.start_server()
+            local_server.start_local_server()
         except Exception as e:
             print(f"Error auto-starting local LLM server: {e}")
 
@@ -308,11 +303,10 @@ def extract_mood(chat_history):
     return analyze_emotional_state("", program_id=get_active_program())
 
 
-def prepare_generation_request(session_id, use_imagen=False, is_voice_call=False):
+def prepare_generation_request(session_id, is_voice_call=False):
     """Reset per-session tool state before a generation request."""
     import tools.tools as tools
     tools.current_session_id.set(session_id)
-    tools.current_use_imagen.set(use_imagen)
     with tools.session_tool_calls_lock:
         tools.session_tool_calls[session_id] = []
 
@@ -434,14 +428,22 @@ def build_generation_response(response_text, tool_calls, session_id, user_msg_id
                         chain_continue = False
                         next_speaker_id = None
 
+    duration = round(time.time() - started_at, 1)
+    run_async(runner.set_message_duration(session_id, program_msg_id, duration))
+    program_message = next((m for m in chat_history if program_msg_id and m.get('id') == program_msg_id), None)
+    if program_message:
+        program_message = dict(program_message, duration=duration)
+
     return jsonify({
         'response': response_text,
+        # The stored program turn in the exact wire form /history serves it.
+        'message': program_message,
         'tool_calls': tool_calls,
         'state': extract_mood(chat_history),
         'inversion_active': inversion_mode,
         'inversion_state': runner.get_inversion_state(session_id),
         'timestamp': program_timestamp or time.time(),
-        'duration': round(time.time() - started_at, 1),
+        'duration': duration,
         'user_msg_id': user_msg_id,
         'program_msg_id': program_msg_id,
         'sender_id': program_sender_id,
@@ -572,7 +574,6 @@ def crop_profile_picture():
         from runners.program import get_active_program
         from PIL import Image
         from urllib.parse import unquote
-        import mimetypes
         
         data = request.get_json(silent=True) or {}
         source_image = data.get('source_image', '')
@@ -662,6 +663,7 @@ def crop_profile_picture():
         os.makedirs(portraits_dir, exist_ok=True)
         dest_path = os.path.join(portraits_dir, 'profile.png')
         cropped.save(dest_path, 'PNG')
+        broadcast_media_change(program_id, profile=True)
         
         print(f"[PROFILE CROP] program={program_id}, source={source_path}, crop=({x},{y},{w},{h}), dest={dest_path}")
         return jsonify({
@@ -682,7 +684,6 @@ def serve_sparkle_mp3():
 @app.route('/images/<path:filename>')
 @requires_auth
 def serve_image(filename):
-    import io
     import mimetypes
     from runners.program import get_active_program
     active_program = get_active_program() or os.getenv("ACTIVE_PROGRAM", "sebile")
@@ -707,9 +708,10 @@ def serve_image(filename):
         return "Image not found", 404
 
     mime_type, _ = mimetypes.guess_type(target_path)
-    with open(target_path, 'rb') as f:
-        buf = io.BytesIO(f.read())
-    return send_file(buf, mimetype=mime_type or 'application/octet-stream', download_name=os.path.basename(target_path))
+    response = send_file(target_path, mimetype=mime_type or 'application/octet-stream',
+                         download_name=os.path.basename(target_path), conditional=True)
+    response.headers['Cache-Control'] = 'private, no-cache'
+    return response
 
 @app.route('/api/get_image_prompt', methods=['GET'])
 @requires_auth
@@ -1067,7 +1069,6 @@ def chat():
 
     prepare_generation_request(
         session_id,
-        use_imagen=request.json.get('use_imagen', False),
         is_voice_call=is_voice_call
     )
     start_time = time.time()
@@ -1121,10 +1122,7 @@ def edit():
     selected_model = request.json.get('model')
     force_offload = request.json.get('force_offload', False)
 
-    prepare_generation_request(
-        session_id,
-        use_imagen=request.json.get('use_imagen', False)
-    )
+    prepare_generation_request(session_id)
     start_time = time.time()
 
     try:
@@ -1258,6 +1256,7 @@ def delete_message():
         return jsonify({'error': 'msg_id is required'}), 400
 
     try:
+        cancel_message_image_work(session_id, msg_id)
         success = run_async(runner.delete_message_at(session_id, msg_id))
         if success:
             return jsonify({'status': 'success'})
@@ -1273,7 +1272,7 @@ def continue_generation():
     session_id = request.json.get('session_id', 'default')
     model = request.json.get('model')
 
-    prepare_generation_request(session_id, use_imagen=request.json.get('use_imagen', False))
+    prepare_generation_request(session_id)
     start_time = time.time()
     
     try:
@@ -1413,6 +1412,7 @@ def continue_generation():
 def reset():
     session_id = request.json.get('session_id', 'default')
     try:
+        cancel_session_image_work(session_id)
         run_async(runner.reset_session(session_id))
         return jsonify({'status': 'success'})
     except Exception as e:
@@ -1440,6 +1440,7 @@ def delete_image():
         # Detach from session log - delete the image and remove it from history
         success = run_async(runner.delete_image_from_session(session_id, image_url, keep_message=keep_message))
         if success:
+            broadcast_media_change()
             return jsonify({'status': 'success'})
         else:
             return jsonify({'error': 'Image file not found in session or disk'}), 404
@@ -1451,12 +1452,33 @@ def delete_image():
 @app.route('/regenerate_image', methods=['POST'])
 @requires_auth
 def regenerate_image():
+    from utils import image_cancellation
+    session_id = request.json.get('session_id', 'default')
+    msg_id = request.json.get('msg_id')
+    if not msg_id and request.json.get('old_image_url'):
+        msg_id = find_image_message_id(session_id, request.json['old_image_url'])
+    with image_cancellation.message_operation(session_id, msg_id, request.json.get('speaker_id')):
+        return _regenerate_image(msg_id)
+
+
+def find_image_message_id(session_id, image_url):
+    from urllib.parse import urlparse
+    image_path = urlparse(image_url).path
+    history = run_async(runner.get_history(session_id))
+    return next(
+        (msg.get('id') for msg in history
+         if any(urlparse(item.get('url', '')).path == image_path for item in msg.get('media', []))),
+        None,
+    )
+
+
+def _regenerate_image(resolved_msg_id):
     session_id = request.json.get('session_id', 'default')
     cancelled_sessions.discard(session_id)
     
     old_image_url = request.json.get('old_image_url') or ''
     prompt = request.json.get('prompt')
-    msg_id = request.json.get('msg_id')
+    msg_id = resolved_msg_id
     slot_index = request.json.get('slot_index')
     if slot_index is not None:
         try:
@@ -1475,12 +1497,23 @@ def regenerate_image():
     with _active_regen_lock:
         _active_image_regenerations[session_id] = _active_image_regenerations.get(session_id, 0) + 1
 
-    if not _image_mutex.acquire(blocking=True, timeout=300.0):
+    from utils.image_cancellation import current_event
+    deadline = time.monotonic() + 300.0
+    acquired = False
+    while time.monotonic() < deadline and not current_event().is_set():
+        if _image_mutex.acquire(timeout=min(0.25, max(0, deadline - time.monotonic()))):
+            acquired = True
+            break
+    if not acquired:
         with _active_regen_lock:
             _active_image_regenerations[session_id] = max(0, _active_image_regenerations.get(session_id, 1) - 1)
+        if current_event().is_set():
+            return jsonify({'error': 'Image regeneration cancelled by user.'}), 400
         return jsonify({'error': 'Image generation engine is currently busy. Please retry in a moment.'}), 429
 
     try:
+        if current_event().is_set():
+            return jsonify({'error': 'Image regeneration cancelled by user.'}), 400
         target_prog = request.json.get('speaker_id')
         filename = os.path.basename(old_image_url) if old_image_url else ''
         chat_history = []
@@ -1562,7 +1595,7 @@ def regenerate_image():
             if not prompt:
                 return jsonify({'error': 'Original prompt not found. Unable to regenerate image.'}), 400
 
-        if session_id in cancelled_sessions:
+        if session_id in cancelled_sessions or current_event().is_set():
             return jsonify({'error': 'Image regeneration cancelled by user.'}), 400
 
         import tools.tools as tools
@@ -1570,12 +1603,10 @@ def regenerate_image():
         tools.current_speaker_id.set(target_prog)
         with tools.session_tool_calls_lock:
             tools.session_tool_calls[session_id] = []
-        use_imagen = request.json.get('use_imagen', False)
         # Generate 1 replacement portrait for the target slot
-        if use_imagen:
-            new_markdown = tools.generate_imagen(prompt)
-        else:
-            new_markdown = tools.generate_local_image(prompt, count=1, program_id=target_prog)
+        new_markdown = tools.generate_local_image(prompt, count=1, program_id=target_prog)
+        if session_id in cancelled_sessions or current_event().is_set():
+            return jsonify({'error': 'Image regeneration cancelled by user.'}), 400
         if new_markdown.startswith("Error"):
             return jsonify({'error': new_markdown}), 500
             
@@ -1600,6 +1631,7 @@ def regenerate_image():
             )
         )
         if success:
+            broadcast_media_change(target_prog)
             return jsonify({
                 'status': 'success',
                 'new_image_url': new_image_url,
@@ -1671,7 +1703,7 @@ def extract_portrait_tags_from_context(session_id: str, custom_prompt: str = "",
 
     from adapters.vram_orchestrator import get_current_mode, start_llm
     from core.program_config import _load_card_data, replace_placeholders
-    from runners.program import get_active_program, get_active_user
+    from runners.program import get_active_user
 
     chat_history = []
     try:
@@ -1751,8 +1783,7 @@ def extract_portrait_tags_from_context(session_id: str, custom_prompt: str = "",
         start_llm()
         tags = run_async(runner.generate_impersonation(prompt, system_instruction, temperature=0.3))
         if tags:
-            import re
-            tags = re.sub(r'<think>.*?</think>', '', tags, flags=re.DOTALL).strip()
+            tags = THINKING_STRIP_RE.sub('', tags).strip()
             tags = tags.strip('`"\'').strip()
             if tags:
                 _cached_portrait_tags[cache_key] = tags
@@ -1806,30 +1837,40 @@ def api_generate_portrait():
         # Extract image URLs
         import re
         image_urls = re.findall(r'!\[[^\]]*\]\(([^)]+)\)', new_markdown)
-        new_image_url = image_urls[0] if image_urls else None
+        if not image_urls:
+            return jsonify({'error': 'Portrait generation did not return an image.'}), 500
+        new_image_url = image_urls[0]
 
         from core.program_config import _load_card_data
         card = _load_card_data(target_prog)
         prog_name = card.get("name") or target_prog.title()
 
         # Append directly to session history as an image message preserving character identity and prompt
-        run_async(
+        portrait_msg_id = f"prgm_{uuid.uuid4().hex}"
+        saved = run_async(
             runner.append_message_to_session(
                 session_id,
                 "program",
                 new_markdown,
+                msg_id=portrait_msg_id,
                 sender_id=target_prog,
                 sender_name=prog_name,
                 prompt=extracted_tags,
             )
         )
+        if not saved:
+            return jsonify({'error': 'Could not save the portrait message.'}), 500
+        broadcast_media_change(target_prog)
 
+        portrait_history = run_async(runner.get_history(session_id))
         return jsonify({
             'status': 'success',
-            'markdown': new_markdown,
+            'message': next((m for m in portrait_history if m.get('id') == portrait_msg_id), None),
             'image_url': new_image_url,
             'image_urls': image_urls,
             'prompt': extracted_tags,
+            'program_msg_id': portrait_msg_id,
+            'sender_name': prog_name,
         })
     except Exception as e:
         print(f"Error generating direct portrait: {e}")
@@ -1844,9 +1885,20 @@ import threading
 active_generations = {}
 active_generations_lock = threading.Lock()
 
-def run_background_video_gen(task_id, session_id, image_url, local_path, prompt):
+def run_background_video_gen(task_id, session_id, image_url, local_path, prompt, operation):
+    from utils.image_cancellation import use_message_operation
+    with use_message_operation(operation):
+        _run_background_video_gen(task_id, session_id, image_url, local_path, prompt)
+
+
+def _run_background_video_gen(task_id, session_id, image_url, local_path, prompt):
     import tools.tools as tools
-    import asyncio
+    from utils.image_cancellation import current_event
+    tools.current_session_id.set(session_id)
+    relative_image = os.path.relpath(os.path.abspath(local_path), os.path.join(base_dir, "core", "programs"))
+    owner_parts = Path(relative_image).parts
+    if len(owner_parts) >= 3 and owner_parts[0] != os.pardir:
+        tools.current_speaker_id.set(owner_parts[0])
     
     with active_generations_lock:
         if task_id in active_generations:
@@ -1854,11 +1906,17 @@ def run_background_video_gen(task_id, session_id, image_url, local_path, prompt)
             active_generations[task_id]['progress'] = 20
             
     try:
+        if current_event().is_set():
+            raise RuntimeError("Video generation cancelled by user.")
         # Call video generation
         new_video_url = tools.generate_video_from_image(local_path, prompt)
+        if session_id in cancelled_sessions or current_event().is_set():
+            raise RuntimeError("Video generation cancelled by user.")
         
         # Replace the image in session history
         success = run_async(runner.replace_image_with_video_in_session(session_id, image_url, new_video_url))
+        if success:
+            broadcast_media_change()
         
         with active_generations_lock:
             if task_id in active_generations:
@@ -1914,13 +1972,23 @@ def animate_image():
                 'error': None
             }
             
-        # Spawn background thread
+        # Register before spawning so a deletion can cancel even a queued task.
+        from utils.image_cancellation import begin_message_operation, use_message_operation
+        message_id = request.json.get('msg_id') or find_image_message_id(session_id, image_url)
+        relative_image = os.path.relpath(os.path.abspath(local_path), os.path.join(base_dir, "core", "programs"))
+        owner_parts = Path(relative_image).parts
+        owner = owner_parts[0] if len(owner_parts) >= 3 and owner_parts[0] != os.pardir else None
+        operation = begin_message_operation(session_id, message_id, owner)
         t = threading.Thread(
             target=run_background_video_gen,
-            args=(task_id, session_id, image_url, local_path, prompt),
+            args=(task_id, session_id, image_url, local_path, prompt, operation),
             daemon=True
         )
-        t.start()
+        try:
+            t.start()
+        except Exception:
+            with use_message_operation(operation):
+                raise
         
         return jsonify({
             'status': 'queued',
@@ -2024,23 +2092,29 @@ def get_pending_tool_call():
         'tool_calls': session_calls,
     })
 
+def cancel_session_image_work(session_id):
+    from utils import image_cancellation
+    cancelled_sessions.add(session_id)
+    return image_cancellation.cancel(session_ids={session_id})
+
+
+def cancel_message_image_work(session_id, message_id):
+    from utils import image_cancellation
+    return image_cancellation.cancel_message(session_id, message_id)
+
+
 @app.route('/api/cancel_chat', methods=['POST'])
 @requires_auth
 def cancel_chat():
     session_id = request.json.get('session_id', 'default')
-    cancelled_sessions.add(session_id)
+    print(f"[CANCEL] Session cancellation requested: {session_id}", flush=True)
+    try:
+        cancel_session_image_work(session_id)
+    except Exception as exc:
+        print(f"[CANCEL] Failed to stop image generation: {exc}", flush=True)
+        return jsonify({'error': f'Failed to stop image generation: {exc}'}), 500
     if hasattr(runner, 'generating_sessions'):
         runner.generating_sessions.discard(session_id)
-    print(f"[CANCEL] Session cancellation requested: {session_id}", flush=True)
-    
-    # Immediately interrupt active ComfyUI rendering job if running
-    try:
-        from variables.settings import COMFYUI_SERVER_URL
-        import requests
-        requests.post(f"{COMFYUI_SERVER_URL}/interrupt", timeout=1.0)
-    except Exception:
-        pass
-        
     return jsonify({'status': 'success'})
 
 @app.route('/approve_tool', methods=['POST'])
@@ -2066,8 +2140,8 @@ def get_models():
     # Check if Remote API key and Cloud URL are validly configured
     is_remote_configured, _, remote_cloud_url = remote_configuration()
     
-    from adapters.local_llm_manager import check_status, check_installed
-    is_local_online = check_status()
+    from runners.local_server import check_local_server_status
+    is_local_online = check_local_server_status()
     
     # 1. Fetch dynamic local models (only actively loaded models in Local LLM server)
     models = fetch_local_models()
@@ -2087,7 +2161,6 @@ def get_models():
             "remote_model": os.getenv("REMOTE_MODEL", ""),
             "remote_url": remote_cloud_url,
             "local_online": is_local_online,
-            "local_installed": check_installed(),
             "temperature": temperature
         }
     })
@@ -2292,76 +2365,6 @@ def save_generation_params():
     except Exception as e:
         print(f"Error saving generation params: {e}")
         return jsonify({"error": str(e)}), 500
-
-@app.route('/api/save_config', methods=['POST'])
-@requires_auth
-def save_config():
-    try:
-        data = request.get_json() or {}
-        remote_api_key = (data.get('remote_api_key') or data.get('api_key') or '').strip()
-        remote_cloud_url = (data.get('remote_cloud_url') or data.get('project_id') or '').strip()
-        remote_model = (data.get('remote_model') or data.get('model') or '').strip()
-        
-        existing_key = os.getenv("REMOTE_API_KEY")
-        
-        target_key = remote_api_key or existing_key
-        
-        if not target_key:
-            return jsonify({'error': 'Remote API Key must be provided.'}), 400
-            
-        env_path = os.path.join(base_dir, '.env')
-        
-        # Read env lines
-        if os.path.exists(env_path):
-            with open(env_path, 'r', encoding='utf-8') as f:
-                lines = f.readlines()
-        else:
-            lines = []
-            
-        updated_key = False
-        updated_url = False
-        updated_model = False
-        
-        for i, line in enumerate(lines):
-            stripped = line.strip()
-            if stripped.startswith('REMOTE_API_KEY=') and remote_api_key:
-                lines[i] = f"REMOTE_API_KEY={remote_api_key}\n"
-                updated_key = True
-            elif stripped.startswith('REMOTE_CLOUD_URL=') and remote_cloud_url:
-                lines[i] = f"REMOTE_CLOUD_URL={remote_cloud_url}\n"
-                updated_url = True
-            elif stripped.startswith('REMOTE_MODEL=') and remote_model:
-                lines[i] = f"REMOTE_MODEL={remote_model}\n"
-                updated_model = True
-                
-        if remote_api_key:
-            if not updated_key:
-                lines.append(f"REMOTE_API_KEY={remote_api_key}\n")
-            os.environ["REMOTE_API_KEY"] = remote_api_key
-        if remote_cloud_url:
-            if not updated_url:
-                lines.append(f"REMOTE_CLOUD_URL={remote_cloud_url}\n")
-            os.environ["REMOTE_CLOUD_URL"] = remote_cloud_url
-        if remote_model:
-            if not updated_model:
-                lines.append(f"REMOTE_MODEL={remote_model}\n")
-            os.environ["REMOTE_MODEL"] = remote_model
-            
-        # Reload configuration and runner state together.
-        reload_program_state()
-                
-        # Clean up legacy GCP/Project ID lines to avoid bloat
-        lines = [l for l in lines if not l.strip().startswith('PROJECT_ID=')]
-        
-        with open(env_path, 'w', encoding='utf-8') as f:
-            f.writelines(lines)
-            
-        print(">>> Dynamic setup complete: Saved configuration credentials successfully!")
-        return jsonify({'status': 'success', 'message': 'Configuration credentials saved successfully!'})
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        return jsonify({'error': str(e)}), 500
 
 @app.route('/speech_cache/<path:filename>')
 @requires_auth
@@ -3292,6 +3295,9 @@ def delete_program():
             
         if program_id == 'sebile':
             return jsonify({'error': 'Cannot delete default program Sebile'}), 400
+
+        from utils import image_cancellation
+        image_cancellation.cancel(program_id=program_id)
             
         program_path = os.path.join(base_dir, 'core', 'programs', program_id)
         to_remove = set()
@@ -3320,8 +3326,10 @@ def delete_program():
                             gm = sdata.get('group_meta', {})
                             if gm.get('host_id') == program_id or not gm.get('host_id'):
                                 to_remove.add(sid)
+                                cancel_session_image_work(sid)
                                 os.remove(fpath)
                             elif program_id in gm.get('guest_ids', []):
+                                cancel_session_image_work(sid)
                                 gm['guest_ids'] = [g for g in gm['guest_ids'] if g != program_id]
                                 if not gm['guest_ids']:
                                     to_remove.add(sid)
@@ -3330,10 +3338,23 @@ def delete_program():
                                     sdata['group_meta'] = gm
                                     with open(fpath, 'w', encoding='utf-8') as sf:
                                         json.dump(sdata, sf, indent=2, ensure_ascii=False)
+                        except RuntimeError:
+                            raise
                         except Exception as ex:
                             print(f"Error inspecting/cleaning group session {fname}: {ex}")
 
-        # 3. Clean up in-memory runner states
+        # 3. Stop image work for affected sessions before removing their state.
+        with runner._lock:
+            for sid, prog in list(getattr(runner, 'sessions_program', {}).items()):
+                if prog == program_id:
+                    to_remove.add(sid)
+            for sid, gmeta in list(getattr(runner, 'sessions_group_meta', {}).items()):
+                if gmeta.get('host_id') == program_id or program_id in gmeta.get('guest_ids', []):
+                    to_remove.add(sid)
+        for sid in to_remove:
+            cancel_session_image_work(sid)
+
+        # 4. Clean up in-memory runner states
         with runner._lock:
             if hasattr(runner, 'sessions_program'):
                 for sid, prog in list(runner.sessions_program.items()):
@@ -3362,7 +3383,6 @@ def delete_program():
                     runner._session_locks.pop(sid, None)
                 if hasattr(runner, 'generating_sessions'):
                     runner.generating_sessions.discard(sid)
-                cancelled_sessions.discard(sid)
                 voice_call_sessions.discard(sid)
 
         # 4. If active session belongs to deleted program or was a deleted group session, reset to default
@@ -3734,19 +3754,6 @@ def get_program_journals():
             if session_id not in runner.sessions_history:
                 runner._load_session_from_disk(session_id)
             memory_meta = runner._get_memory_meta(session_id)
-
-        hidden_prefixes = ("tool_", "port_", "quest_", "sys_", "itm_")
-        history = runner.sessions_history.get(session_id, [])
-        dialogue = [
-            m for m in history 
-            if m.get("role") in ("user", "assistant", "program")
-            and not m.get("id", "").startswith(hidden_prefixes)
-            and not (m.get("text") or "").startswith(("[SYSTEM:", "[Tool Response from"))
-        ]
-        turns_count = len(dialogue) // 2
-        last_turn = memory_meta.get("last_summarized_turn", 0)
-        if turns_count - last_turn >= 12:
-            runner.trigger_memory_pipeline(session_id)
 
         recent_chapters = memory_meta.get('recent_chapters', [])
         if len(recent_chapters) > 2:
@@ -4595,7 +4602,7 @@ _last_broadcast_state = {}
 
 def _get_current_status():
     """Build the combined connection status payload."""
-    from adapters import local_llm_manager
+    from runners import local_server
     is_remote_configured, _, remote_cloud_url = remote_configuration()
     
     # Load temperature dynamically
@@ -4609,10 +4616,6 @@ def _get_current_status():
                 temperature = settings.get("temperature", 0.95)
     except Exception:
         pass
-        
-    comfy_running_state = comfy_manager.check_comfy_running(force_refresh=True)
-    if not comfy_running_state and getattr(comfy_manager, '_starting', False):
-        comfy_running_state = "starting"
 
     valid_programs = []
     if os.path.exists(PROGRAMS_DIR):
@@ -4626,10 +4629,7 @@ def _get_current_status():
         "remote_configured": is_remote_configured,
         "remote_model": os.getenv("REMOTE_MODEL", ""),
         "remote_url": remote_cloud_url,
-        "local_online": local_llm_manager.check_status(),
-        "local_installed": local_llm_manager.check_installed(),
-        "comfy_installed": comfy_manager.check_comfy_installed(),
-        "comfy_running": comfy_running_state,
+        "local_online": local_server.check_local_server_status(),
         "temperature": temperature,
         "active_program": get_active_program(),
         "programs": valid_programs,
@@ -4655,6 +4655,20 @@ def broadcast_status():
                 dead.append(q)
         for q in dead:
             _sse_clients.remove(q)
+
+def broadcast_media_change(program_id=None, profile=False):
+    """Notify connected clients that a gallery or profile picture changed."""
+    data = json.dumps({"program_id": program_id, "profile": profile})
+    msg = f"event: media_changed\ndata: {data}\n\n"
+    with _sse_clients_lock:
+        for q in list(_sse_clients):
+            try:
+                q.put_nowait(msg)
+            except _queue.Full:
+                _sse_clients.remove(q)
+
+from utils import media_events
+media_events.set_listener(broadcast_media_change)
 
 def _status_monitor():
     """Background thread that detects external state changes (crashes, manual stops)."""
@@ -4703,131 +4717,8 @@ def sse_status_stream():
     })
 
 
-# --- Headless Local LLM & Hugging Face Integration API ---
-from adapters import local_llm_manager
-
-# Wire SSE broadcast callbacks into both managers
 from runners import local_server
 local_server._on_status_change = broadcast_status
-comfy_manager._on_status_change = broadcast_status
-
-@app.route('/api/local_llm/status', methods=['GET'])
-@requires_auth
-def local_llm_status():
-    installed = local_llm_manager.check_installed()
-    online = local_llm_manager.check_status()
-    loaded_models = []
-    if online is True:
-        from models.models import fetch_local_models
-        loaded_models = [m["value"] for m in fetch_local_models()]
-    
-    downloaded_models = local_llm_manager.list_local_models()
-    local_llm_manager.update_download_statuses()
-    
-    return jsonify({
-        "installed": installed,
-        "online": online,
-        "loaded_models": loaded_models,
-        "downloaded_models": downloaded_models,
-        "download_status": local_llm_manager.download_status
-    })
-
-@app.route('/api/local_llm/install', methods=['POST'])
-@requires_auth
-def local_llm_install():
-    success, message = local_llm_manager.install_server()
-    return jsonify({"success": success, "message": message})
-
-@app.route('/api/local_llm/search', methods=['GET'])
-@requires_auth
-def local_llm_search():
-    query = request.args.get('query', '').strip()
-    if not query:
-        return jsonify({"results": []})
-    results = local_llm_manager.search_huggingface_repos(query)
-    return jsonify({"results": results})
-
-@app.route('/api/local_llm/huggingface/files', methods=['GET'])
-@requires_auth
-def local_llm_hf_files():
-    repo_id = request.args.get('repo_id', '').strip()
-    if not repo_id:
-        return jsonify({"error": "Missing repo_id"}), 400
-    files = local_llm_manager.get_huggingface_repo_files(repo_id)
-    return jsonify({"files": files})
-
-@app.route('/api/local_llm/download', methods=['POST'])
-@requires_auth
-def local_llm_download():
-    model_name = request.json.get('model_name')
-    quantization = request.json.get('quantization')
-    if not model_name:
-        return jsonify({"error": "Missing model_name"}), 400
-    success, message = local_llm_manager.trigger_download(model_name, quantization)
-    return jsonify({"success": success, "message": message})
-
-@app.route('/api/local_llm/load', methods=['POST'])
-@requires_auth
-def local_llm_load():
-    model_name = request.json.get('model_name')
-    if not model_name:
-        return jsonify({"error": "Missing model_name"}), 400
-    success, message = local_llm_manager.load_local_model(model_name)
-    return jsonify({"success": success, "message": message})
-
-@app.route('/api/local_llm/unload', methods=['POST'])
-@requires_auth
-def local_llm_unload():
-    model_name = request.json.get('model_name')
-    success, message = local_llm_manager.unload_local_model(model_name)
-    return jsonify({"success": success, "message": message})
-
-@app.route('/api/local_llm/delete', methods=['POST'])
-@requires_auth
-def local_llm_delete():
-    model_name = request.json.get('model_name')
-    if not model_name:
-        return jsonify({"error": "Missing model_name"}), 400
-    success, message = local_llm_manager.delete_local_model(model_name)
-    return jsonify({"success": success, "message": message})
-
-@app.route('/api/local_llm/start', methods=['POST'])
-@requires_auth
-def local_llm_start():
-    success, message = local_llm_manager.start_server()
-    broadcast_status()
-    return jsonify({"success": success, "message": message})
-
-@app.route('/api/local_llm/stop', methods=['POST'])
-@requires_auth
-def local_llm_stop():
-    success, message = local_llm_manager.stop_server()
-    broadcast_status()
-    return jsonify({"success": success, "message": message})
-
-
-# --- Headless ComfyUI & Dependency Resolver API ---
-
-@app.route('/api/comfy/install', methods=['POST'])
-@requires_auth
-def comfy_install():
-    success, message = comfy_manager.trigger_install_comfy()
-    return jsonify({"success": success, "message": message})
-
-@app.route('/api/comfy/start', methods=['POST'])
-@requires_auth
-def comfy_start():
-    success, message = comfy_manager.start_comfy_server()
-    broadcast_status()
-    return jsonify({"success": success, "message": message})
-
-@app.route('/api/comfy/stop', methods=['POST'])
-@requires_auth
-def comfy_stop():
-    success, message = comfy_manager.stop_comfy_server()
-    broadcast_status()
-    return jsonify({"success": success, "message": message})
-
 
 # --- Native In-Process Models Management API ---
 
@@ -4836,14 +4727,15 @@ def comfy_stop():
 def list_native_models():
     """Lists all user-placed GGUF models, Diffusion Checkpoints, LoRAs, and VAEs."""
     try:
-        from runners import engine_llm
+        from runners import local_server
         from core import engine_diffusion
-        from variables.settings import MODELS_DIR, LLM_MODELS_DIR, CHECKPOINTS_DIR, LORAS_DIR, VAE_DIR
+        from variables.settings import MODELS_DIR, LLM_MODELS_DIR, CHECKPOINTS_DIR, LORAS_DIR, VAE_DIR, WORKFLOWS_DIR
 
-        ggufs = engine_llm.list_gguf_models()
+        ggufs = local_server.list_gguf_models()
         checkpoints = engine_diffusion.list_checkpoints()
         loras = engine_diffusion.list_loras()
         vaes = engine_diffusion.list_vaes()
+        workflows = engine_diffusion.list_workflows()
 
         return jsonify({
             "models_dir": MODELS_DIR,
@@ -4851,13 +4743,16 @@ def list_native_models():
             "checkpoints_dir": CHECKPOINTS_DIR,
             "loras_dir": LORAS_DIR,
             "vae_dir": VAE_DIR,
+            "workflows_dir": WORKFLOWS_DIR,
             "gguf_models": ggufs,
             "checkpoints": checkpoints,
             "loras": loras,
             "vaes": vaes,
-            "active_llm": engine_llm.get_loaded_model_name(),
-            "llm_loaded": engine_llm.is_loaded(),
-            "active_checkpoint": engine_diffusion.get_active_checkpoint()
+            "workflows": workflows,
+            "active_llm": local_server.get_loaded_model_name(),
+            "llm_loaded": local_server.check_local_server_status() is True,
+            "active_checkpoint": engine_diffusion.get_active_checkpoint(),
+            "active_workflow": engine_diffusion.get_active_workflow()
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -4866,15 +4761,17 @@ def list_native_models():
 @app.route('/api/models/native/load_llm', methods=['POST'])
 @requires_auth
 def load_native_llm():
-    """Loads a GGUF model into in-process memory."""
+    """Loads a GGUF model into the local LLM server."""
     try:
-        from runners import engine_llm
+        from runners import local_server
         data = request.get_json() or {}
         model_name = data.get("model_name", "")
-        n_ctx = int(data.get("n_ctx")) if data.get("n_ctx") else None
-        n_gpu_layers = int(data.get("n_gpu_layers")) if data.get("n_gpu_layers") is not None else None
-        success, message = engine_llm.load_model(model_name, n_ctx=n_ctx, n_gpu_layers=n_gpu_layers)
-        return jsonify({"success": success, "message": message, "active_model": engine_llm.get_loaded_model_name()})
+        if data.get("n_ctx"):
+            os.environ["LOCAL_CONTEXT"] = str(int(data.get("n_ctx")))
+        if data.get("n_gpu_layers") is not None:
+            os.environ["LOCAL_GPU_LAYERS"] = str(int(data.get("n_gpu_layers")))
+        success, message = local_server.start_local_server(model_name)
+        return jsonify({"success": success, "message": message, "active_model": local_server.get_loaded_model_name()})
     except Exception as e:
         return jsonify({"success": False, "message": str(e)}), 500
 
@@ -4896,13 +4793,30 @@ def select_native_checkpoint():
         return jsonify({"success": False, "message": str(e)}), 500
 
 
+@app.route('/api/models/native/select_workflow', methods=['POST'])
+@requires_auth
+def select_native_workflow():
+    """Sets the active image workflow."""
+    try:
+        from core import engine_diffusion
+        data = request.get_json() or {}
+        workflow_name = data.get("workflow_name", "")
+        success = engine_diffusion.set_active_workflow(workflow_name)
+        active_wf = engine_diffusion.get_active_workflow()
+        if active_wf:
+            os.environ["COMFYUI_IMAGE_WORKFLOW"] = active_wf
+        return jsonify({"success": success, "active_workflow": active_wf})
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)}), 500
+
+
 @app.route('/api/models/native/open_folder', methods=['POST'])
 @requires_auth
 def open_models_folder():
     """Opens the requested models folder in the native OS file explorer."""
     try:
         import subprocess, sys
-        from variables.settings import MODELS_DIR, LLM_MODELS_DIR, CHECKPOINTS_DIR, LORAS_DIR, VAE_DIR
+        from variables.settings import MODELS_DIR, LLM_MODELS_DIR, CHECKPOINTS_DIR, LORAS_DIR, VAE_DIR, WORKFLOWS_DIR
 
         data = request.get_json(silent=True) or {}
         folder_type = data.get("folder", "root")
@@ -4912,7 +4826,8 @@ def open_models_folder():
             "llm": LLM_MODELS_DIR,
             "checkpoints": CHECKPOINTS_DIR,
             "loras": LORAS_DIR,
-            "vae": VAE_DIR
+            "vae": VAE_DIR,
+            "workflows": WORKFLOWS_DIR
         }
         target_dir = target_map.get(folder_type, MODELS_DIR)
         os.makedirs(target_dir, exist_ok=True)
@@ -4927,116 +4842,6 @@ def open_models_folder():
         return jsonify({"success": True, "path": target_dir})
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
-
-
-@app.route('/api/comfy/resolve_workflow', methods=['POST'])
-@requires_auth
-def comfy_resolve_workflow():
-    workflow_json = request.json.get("workflow_json")
-    if not workflow_json:
-        try:
-            from variables.settings import COMFYUI_CHECKPOINT, get_workflow_path
-
-            combined_workflow = {}
-            resolved_checkpoint = os.getenv("COMFYUI_CHECKPOINT", COMFYUI_CHECKPOINT)
-
-            for kind in ("Image", "Video"):
-                wf_path = get_workflow_path(kind)
-                if not os.path.exists(wf_path):
-                    continue
-                try:
-                    with open(wf_path, "r", encoding="utf-8") as f:
-                        wf_str = f.read().replace("%model%", resolved_checkpoint)
-                    for k, v in json.loads(wf_str).items():
-                        combined_workflow[f"{kind.lower()}_{k}"] = v
-                except Exception as je:
-                    print(f"Error parsing {wf_path} for resolution: {je}")
-
-            if combined_workflow:
-                workflow_json = json.dumps(combined_workflow)
-        except Exception as e:
-            return jsonify({"error": f"Failed to read workflows: {e}"}), 500
-            
-    if not workflow_json:
-        return jsonify({"error": "No workflow configuration found to resolve."}), 400
-        
-    success, message = comfy_manager.trigger_dependency_resolution(workflow_json)
-    return jsonify({"success": success, "message": message})
-
-
-# --- Headless ComfyUI Checkpoint Management APIs ---
-
-@app.route('/api/comfy/checkpoints', methods=['GET'])
-@requires_auth
-def comfy_checkpoints():
-    try:
-        from adapters.comfy_manager import list_local_checkpoints
-        checkpoints = list_local_checkpoints()
-        active = os.getenv("COMFYUI_CHECKPOINT", "sd_xl_base_1.0.safetensors")
-        return jsonify({
-            "checkpoints": checkpoints,
-            "active": active
-        })
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-@app.route('/api/comfy/checkpoints/select', methods=['POST'])
-@requires_auth
-def comfy_select_checkpoint():
-    try:
-        checkpoint = request.json.get("checkpoint")
-        if not checkpoint:
-            return jsonify({"error": "Missing checkpoint parameter"}), 400
-            
-        os.environ["COMFYUI_CHECKPOINT"] = checkpoint
-        
-        # Persist to .env
-        env_path = os.path.join(base_dir, '.env')
-        if os.path.exists(env_path):
-            with open(env_path, 'r', encoding='utf-8') as f:
-                lines = f.readlines()
-            updated = False
-            for i, line in enumerate(lines):
-                if line.strip().startswith('COMFYUI_CHECKPOINT='):
-                    lines[i] = f"COMFYUI_CHECKPOINT={checkpoint}\n"
-                    updated = True
-                    break
-            if not updated:
-                lines.append(f"\nCOMFYUI_CHECKPOINT={checkpoint}\n")
-            with open(env_path, 'w', encoding='utf-8') as f:
-                f.writelines(lines)
-                
-        return jsonify({"status": "success", "active": checkpoint})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-@app.route('/api/comfy/checkpoints/search', methods=['GET'])
-@requires_auth
-def comfy_search_checkpoints():
-    query = request.args.get('query', '').strip()
-    if not query:
-        return jsonify({"results": []})
-    from adapters.comfy_manager import search_huggingface_checkpoints
-    results = search_huggingface_checkpoints(query)
-    return jsonify({"results": results})
-
-@app.route('/api/comfy/checkpoints/download', methods=['POST'])
-@requires_auth
-def comfy_download_checkpoint():
-    url = request.json.get("url")
-    filename = request.json.get("filename")
-    if not url or not filename:
-        return jsonify({"error": "Missing url or filename"}), 400
-        
-    from adapters.comfy_manager import trigger_checkpoint_download
-    success, message = trigger_checkpoint_download(url, filename)
-    return jsonify({"success": success, "message": message})
-
-@app.route('/api/comfy/checkpoints/download_status', methods=['GET'])
-@requires_auth
-def comfy_checkpoint_download_status():
-    from adapters.comfy_manager import checkpoint_download_status
-    return jsonify(checkpoint_download_status)
 
 
 # Prewarming is now handled on the first request inside start_prewarm_on_first_request()
@@ -5058,7 +4863,7 @@ if __name__ == '__main__':
         print(f"[*] Starting server with SSL certificate: {ssl_cert}")
     elif use_https:
         try:
-            import OpenSSL
+            import OpenSSL  # noqa: F401
             ssl_context = 'adhoc'
             print("[*] Starting server with ad-hoc SSL certificate")
         except ImportError:

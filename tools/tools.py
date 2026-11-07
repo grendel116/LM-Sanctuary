@@ -10,8 +10,9 @@ import concurrent.futures
 
 import requests
 
-from variables.settings import COMFYUI_SERVER_URL
 from utils import lifecycle
+from adapters.vram_orchestrator import serialized_gpu_operation
+from utils.image_cancellation import register_image_operation, activate_image_operation, current_event
 
 _search_executor = concurrent.futures.ThreadPoolExecutor(max_workers=10)
 
@@ -19,7 +20,6 @@ active_running_tools = {}
 _active_tools_lock = threading.Lock()
 
 current_session_id = contextvars.ContextVar('current_session_id', default='default')
-current_use_imagen = contextvars.ContextVar('current_use_imagen', default=False)
 current_speaker_id = contextvars.ContextVar('current_speaker_id', default=None)
 session_tool_calls = {}
 background_tasks = {}
@@ -1300,6 +1300,9 @@ def format_comfy_validation_error(error_json: dict) -> str:
 
 
 @track_tool_activity
+@register_image_operation
+@serialized_gpu_operation
+@activate_image_operation
 def apply_comfy_workflow(workflow_path: str, parameters: dict, save_path: str, session_id: str = None) -> str:
     """Executes a specified ComfyUI workflow JSON template with custom parameter mappings and saves the output.
 
@@ -1313,138 +1316,48 @@ def apply_comfy_workflow(workflow_path: str, parameters: dict, save_path: str, s
         The filesystem path of the saved image, or an error message.
     """
     import os
-    import json
-    import time
 
     if not os.path.exists(workflow_path):
         return f"Error: Workflow template not found at '{workflow_path}'"
 
-    try:
-        with open(workflow_path, "r", encoding="utf-8") as f:
-            workflow = json.load(f)
-    except Exception as e:
-        return f"Error reading workflow template: {e}"
-
-    # Recursive replacement helper
-    def replace_placeholders(obj):
-        if isinstance(obj, dict):
-            res_dict = {}
-            for k, v in obj.items():
-                if k == "appearance":
-                    continue
-                res_dict[k] = replace_placeholders(v)
-            return res_dict
-        elif isinstance(obj, list):
-            return [replace_placeholders(x) for x in obj]
-        elif isinstance(obj, str):
-            for placeholder, val in parameters.items():
-                if placeholder in obj:
-                    if obj == placeholder:
-                        return val
-                    obj = obj.replace(placeholder, str(val))
-            return obj
-        return obj
-
-    populated_workflow = replace_placeholders(workflow)
-    comfy_url = COMFYUI_SERVER_URL
-
-    # Ensure LLM is offloaded and ComfyUI is running before submitting workflow
+    cancel_event = current_event()
     try:
         from adapters.vram_orchestrator import start_img
-        start_img()
-    except Exception as e:
-        print(f"[apply_comfy_workflow] VRAM orchestration note: {e}", flush=True)
-
-    from adapters.comfy_manager import check_comfy_running, start_comfy_server
-    if not check_comfy_running(force_refresh=True):
-        print("[apply_comfy_workflow] ComfyUI offline. Starting server...", flush=True)
-        start_comfy_server()
-        import time as _time
-        for _ in range(30):
-            _time.sleep(2.0)
-            if check_comfy_running(force_refresh=True):
-                break
-        else:
-            return "Error: ComfyUI server failed to start within 60 seconds."
-
-    def _cancel_comfy_job(pid: str):
-        """Tell ComfyUI to interrupt the running job and remove it from the queue."""
-        try:
-            requests.post(f"{comfy_url}/interrupt", timeout=3)
-        except Exception:
-            pass
-        try:
-            requests.post(f"{comfy_url}/queue", json={"delete": [pid]}, timeout=3)
-        except Exception:
-            pass
-
-    try:
-        res = requests.post(f"{comfy_url}/prompt", json={"prompt": populated_workflow}, timeout=5.0)
-        if res.status_code != 200:
-            try:
-                err_data = res.json()
-                formatted_err = format_comfy_validation_error(err_data)
-                if formatted_err:
-                    raise Exception(formatted_err)
-            except Exception as e_inner:
-                if "Missing" in str(e_inner):
-                    raise e_inner
-            raise Exception(f"ComfyUI server returned status code {res.status_code}")
-        
-        prompt_id = res.json().get("prompt_id")
-        if not prompt_id:
-            raise Exception("Did not receive a prompt ID from ComfyUI")
-
-        # Poll history endpoint for output
+        from core.engine_diffusion import generate_portrait_image
         from runners.runner import cancelled_sessions
-        for _ in range(300):
-            # Honour session cancellation — stop polling and kill the ComfyUI job
-            if session_id and session_id in cancelled_sessions:
-                _cancel_comfy_job(prompt_id)
-                return "Error: Image generation cancelled by user."
 
-            history_res = requests.get(f"{comfy_url}/history/{prompt_id}", timeout=10)
-            if history_res.status_code == 200:
-                history_data = history_res.json()
-                if prompt_id in history_data:
-                    outputs = history_data[prompt_id].get("outputs", {})
-                    for node_id, node_output in outputs.items():
-                        if "images" in node_output:
-                            for img in node_output["images"]:
-                                filename = img["filename"]
-                                view_res = requests.get(f"{comfy_url}/view", params={
-                                    "filename": filename,
-                                    "subfolder": img.get("subfolder", ""),
-                                    "type": img.get("type", "temp")
-                                }, timeout=15)
-                                
-                                if view_res.status_code == 200:
-                                    parent_dir = os.path.dirname(save_path)
-                                    if parent_dir:
-                                        os.makedirs(parent_dir, exist_ok=True)
-                                    with open(save_path, "wb") as img_file:
-                                        img_file.write(view_res.content)
-                                    
-                                    # Clean up temporary output from ComfyUI server folder
-                                    try:
-                                        from adapters.comfy_manager import COMFYUI_DIR
-                                        img_type = img.get("type", "temp")
-                                        comfy_file = os.path.normpath(os.path.join(COMFYUI_DIR, img_type, img.get("subfolder", ""), filename))
-                                        if os.path.exists(comfy_file):
-                                            os.remove(comfy_file)
-                                            print(f"[COMFY IMAGE] Cleaned up {img_type} output image: {comfy_file}")
-                                    except Exception as e_clean:
-                                        print(f"[COMFY IMAGE] Warning: Failed to clean up file: {e_clean}")
-                                        
-                                    return save_path
-                                else:
-                                    raise Exception(f"Error downloading image: status {view_res.status_code}")
-            time.sleep(1)
-        raise Exception("Image generation timed out on ComfyUI server after 300 seconds.")
+        start_img(cancel_event=cancel_event)
+        sess_id = session_id or current_session_id.get()
+        if (cancel_event and cancel_event.is_set()) or (sess_id and sess_id in cancelled_sessions):
+            return "Error: Image generation cancelled by user."
+
+        out_path = generate_portrait_image(
+            prompt=str((parameters or {}).get("%prompt%", "")),
+            negative_prompt=str((parameters or {}).get("%negative_prompt%", "worst quality, low quality, deformed, mutated, extra limbs, watermark, text")),
+            workflow_path=workflow_path,
+            save_path=save_path,
+            replacements=parameters or {},
+            cancel_event=cancel_event,
+        )
+        if cancel_event and cancel_event.is_set():
+            if save_path and os.path.exists(save_path):
+                os.remove(save_path)
+            return "Error: Image generation cancelled by user."
+
+        from utils import media_events
+        media_events.notify()
+        return out_path or save_path
     except Exception as e:
-        return f"Error executing ComfyUI workflow: {e}"
+        if cancel_event and cancel_event.is_set():
+            if save_path and os.path.exists(save_path):
+                os.remove(save_path)
+            return "Error: Image generation cancelled by user."
+        return f"Error executing workflow: {e}"
 
 @track_tool_activity
+@register_image_operation
+@serialized_gpu_operation
+@activate_image_operation
 def generate_local_image(prompt: str, count: int = 3, program_id: str = None) -> str:
     """Generates local portrait image(s) using ComfyUI with program-specific workflow configurations.
     
@@ -1504,20 +1417,27 @@ def generate_local_image(prompt: str, count: int = 3, program_id: str = None) ->
     os.makedirs(portraits_dir, exist_ok=True)
     num_images = max(1, int(count or 3))
 
+    local_paths = []
+    def remove_cancelled_portraits():
+        for path in local_paths:
+            for candidate in (path, os.path.splitext(path)[0] + ".json"):
+                if os.path.exists(candidate):
+                    os.remove(candidate)
+
     # Execute pure in-process DirectML GPU diffusion engine
     try:
         from adapters.vram_orchestrator import start_img
         from core.engine_diffusion import generate_portrait_image
         from runners.runner import cancelled_sessions
 
-        start_img()
+        cancel_event = current_event()
+        start_img(cancel_event=cancel_event)
         sess_id = current_session_id.get()
-        if sess_id in cancelled_sessions:
+        if (cancel_event and cancel_event.is_set()) or sess_id in cancelled_sessions:
             return "Error: Portrait generation cancelled by user."
 
         stems = []
         local_filenames = []
-        local_paths = []
         for idx in range(num_images):
             suffix = f"_{idx + 1}" if num_images > 1 else ""
             stem = f"portrait_{base_timestamp}{suffix}"
@@ -1530,15 +1450,20 @@ def generate_local_image(prompt: str, count: int = 3, program_id: str = None) ->
             generate_portrait_image(
                 prompt=final_prompt,
                 negative_prompt=final_negative,
-                save_path=local_paths[0]
+                save_path=local_paths[0],
+                cancel_event=cancel_event,
             )
         else:
             generate_portrait_image(
                 prompt=final_prompt,
                 negative_prompt=final_negative,
                 save_paths=local_paths,
+                cancel_event=cancel_event,
             )
 
+        if cancel_event and cancel_event.is_set():
+            remove_cancelled_portraits()
+            return "Error: Portrait generation cancelled by user."
         markdown_links = []
         for stem, local_filename in zip(stems, local_filenames):
             json_path = os.path.join(portraits_dir, f"{stem}.json")
@@ -1559,12 +1484,23 @@ def generate_local_image(prompt: str, count: int = 3, program_id: str = None) ->
                 pass
             markdown_links.append(f"![Portrait](/images/portraits/{local_filename})")
 
+        if cancel_event and cancel_event.is_set():
+            remove_cancelled_portraits()
+            return "Error: Portrait generation cancelled by user."
+        from utils import media_events
+        media_events.notify(active_program)
         return "\n".join(markdown_links)
     except Exception as e:
+        if current_event() and current_event().is_set():
+            remove_cancelled_portraits()
+            return "Error: Portrait generation cancelled by user."
         print(f"[engine_diffusion] Error generating portrait: {e}")
         return f"Error generating portrait: {e}"
 
 @track_tool_activity
+@register_image_operation
+@serialized_gpu_operation
+@activate_image_operation
 def generate_video_from_image(image_path: str, prompt: str) -> str:
     """Animates a local image using ComfyUI with a custom video-specific workflow template.
     
@@ -1581,8 +1517,7 @@ def generate_video_from_image(image_path: str, prompt: str) -> str:
     import random
     from PIL import Image
     
-    from variables.settings import COMFYUI_SERVER_URL, get_workflow_path
-    from adapters.comfy_manager import COMFYUI_DIR, check_comfy_running, _resolver_worker, resolution_status
+    from variables.settings import COMFYUI_DIR, COMFYUI_SERVER_URL, get_workflow_path
 
     workflow_path = get_workflow_path("Video")
     
@@ -1601,6 +1536,8 @@ def generate_video_from_image(image_path: str, prompt: str) -> str:
     timestamp = int(time.time())
     unique_input_filename = f"anim_in_{timestamp}_{source_filename}"
     comfy_input_path = os.path.join(comfy_input_dir, unique_input_filename)
+    from utils.image_cancellation import cleanup_on_completion
+    cleanup_on_completion(comfy_input_path)
     
     # Determine dimensions maintaining aspect ratio, maximum 768, rounded to multiples of 32
     with Image.open(image_path) as img:
@@ -1659,30 +1596,17 @@ def generate_video_from_image(image_path: str, prompt: str) -> str:
         return obj
 
     populated_workflow = replace_val(workflow_data)
-    
-    # Ensure ComfyUI server is running
-    if not check_comfy_running(force_refresh=True):
-        raise Exception("ComfyUI server is offline. Please start the ComfyUI engine manually from the settings panel.")
-            
-    # Run dependency resolution inline to ensure missing custom nodes or models are downloaded/installed
-    print("[COMFY VIDEO] Checking and resolving workflow dependencies inline...")
-    _resolver_worker(json.dumps(populated_workflow))
-    if resolution_status.get("status") == "failed":
-        print(f"[COMFY VIDEO] Dependency resolution failed: {resolution_status.get('progress')}")
-        raise Exception(f"Failed to resolve workflow dependencies: {resolution_status.get('progress')}")
-    print("[COMFY VIDEO] Dependency resolution completed successfully.")
-    
-    # Wait for ComfyUI to come back online if it was restarted
-    print("[COMFY VIDEO] Waiting for ComfyUI server to be responsive...")
-    for _ in range(60):  # up to 60 seconds
-        if check_comfy_running(force_refresh=True):
-            break
-        time.sleep(1)
-        
+    comfy_url = COMFYUI_SERVER_URL.rstrip("/")
+
+    try:
+        requests.get(f"{comfy_url}/system_stats", timeout=2.0).raise_for_status()
+    except Exception:
+        raise Exception("ComfyUI video server is offline.")
+
     print(f"[COMFY VIDEO] Populated workflow JSON:\n{json.dumps(populated_workflow, indent=2)}")
-    
-    comfy_url = COMFYUI_SERVER_URL
     print(f"[COMFY VIDEO] Submitting workflow to ComfyUI server: {comfy_url}")
+    if current_event() and current_event().is_set():
+        raise RuntimeError("Video generation cancelled by user.")
     
     res = requests.post(f"{comfy_url}/prompt", json={"prompt": populated_workflow}, timeout=10.0)
     if res.status_code != 200:
@@ -1718,6 +1642,10 @@ def generate_video_from_image(image_path: str, prompt: str) -> str:
     try:
         # Give it up to 1800 seconds (30 minutes) for slow/high-res generations
         for _ in range(900):
+            if current_event() and current_event().is_set():
+                requests.post(f"{comfy_url}/interrupt", timeout=3).raise_for_status()
+                requests.post(f"{comfy_url}/queue", json={"delete": [prompt_id]}, timeout=3).raise_for_status()
+                raise RuntimeError("Video generation cancelled by user.")
             history_res = requests.get(f"{comfy_url}/history/{prompt_id}", timeout=10)
             if history_res.status_code == 200:
                 history_data = history_res.json()
@@ -1770,6 +1698,8 @@ def generate_video_from_image(image_path: str, prompt: str) -> str:
             
         if not completed_filename:
             raise Exception("Video generation timed out on ComfyUI server.")
+        if current_event() and current_event().is_set():
+            raise RuntimeError("Video generation cancelled by user.")
             
         # Download the generated media file
         print(f"[COMFY VIDEO] Downloading generated file: {completed_filename} (type: {output_key})")
@@ -1781,6 +1711,8 @@ def generate_video_from_image(image_path: str, prompt: str) -> str:
         
         if view_res.status_code != 200:
             raise Exception(f"Failed to download generated file from ComfyUI: HTTP {view_res.status_code}")
+        if current_event() and current_event().is_set():
+            raise RuntimeError("Video generation cancelled by user.")
             
         # Determine correct file extension
         _, ext = os.path.splitext(completed_filename)
@@ -1796,6 +1728,9 @@ def generate_video_from_image(image_path: str, prompt: str) -> str:
         print(f"[COMFY VIDEO] Saving output video/animated media to {save_path}")
         with open(save_path, "wb") as out_file:
             out_file.write(view_res.content)
+        if current_event() and current_event().is_set():
+            os.remove(save_path)
+            raise RuntimeError("Video generation cancelled by user.")
             
         # Delete temp file from ComfyUI server folder to avoid accumulation
         try:
@@ -1818,6 +1753,8 @@ def generate_video_from_image(image_path: str, prompt: str) -> str:
         except ValueError:
             url_path = f"/images/portraits/{output_filename}"
             
+        from utils import media_events
+        media_events.notify()
         return url_path
         
     finally:
