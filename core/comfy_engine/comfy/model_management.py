@@ -471,8 +471,14 @@ except AttributeError:
 def is_oom(e):
     if isinstance(e, OOM_EXCEPTION):
         return True
-    if isinstance(e, ACCELERATOR_ERROR) and (getattr(e, 'error_code', None) == 2 or "out of memory" in str(e).lower()):
-        discard_cuda_async_error()
+    msg = str(e).lower()
+    if any(k in msg for k in ("out of memory", "not enough gpu video memory", "could not allocate tensor", "0x8007000e", "e_outofmemory")):
+        if torch.cuda.is_available():
+            discard_cuda_async_error()
+        return True
+    if isinstance(e, ACCELERATOR_ERROR) and getattr(e, 'error_code', None) == 2:
+        if torch.cuda.is_available():
+            discard_cuda_async_error()
         return True
     return False
 
@@ -1054,10 +1060,17 @@ def load_models_gpu(models, memory_required=0, force_patch_weights=False, minimu
 
     for device in total_memory_required:
         if device != torch.device("cpu"):
-            free_memory(total_memory_required[device] * 1.1 + extra_mem,
-                        device,
-                        for_dynamic=free_for_dynamic,
-                        pins_required=total_pins_required.get(device, 0))
+            if directml_enabled:
+                free_memory(1e30,
+                            device,
+                            keep_loaded=models_to_load,
+                            for_dynamic=free_for_dynamic,
+                            pins_required=total_pins_required.get(device, 0))
+            else:
+                free_memory(total_memory_required[device] * 1.1 + extra_mem,
+                            device,
+                            for_dynamic=free_for_dynamic,
+                            pins_required=total_pins_required.get(device, 0))
 
     for device in total_memory_required:
         if device != torch.device("cpu"):
@@ -1802,8 +1815,8 @@ def pytorch_attention_enabled():
     return ENABLE_PYTORCH_ATTENTION
 
 def pytorch_attention_enabled_vae():
-    if is_amd():
-        return False  # enabling pytorch attention on AMD currently causes crash when doing high res
+    if is_amd() or directml_enabled:
+        return False  # enabling pytorch attention on AMD/DirectML causes high-res OOM/crash
     return pytorch_attention_enabled()
 
 def pytorch_attention_flash_attention():
@@ -2144,7 +2157,9 @@ def soft_empty_cache(force=False):
     if cpu_mode():
         return
     global cpu_state
-    if cpu_state == CPUState.MPS:
+    if directml_enabled:
+        gc.collect()
+    elif cpu_state == CPUState.MPS:
         torch.mps.empty_cache()
     elif is_intel_xpu():
         torch.xpu.synchronize()

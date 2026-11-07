@@ -457,20 +457,39 @@ def unload_diffusion_models():
     """Unloads the diffusion server worker, releasing 100% of GPU VRAM back to the OS."""
     global _server_proc, _COMFY_NODE_CACHE, _active_checkpoint
     with _server_lock:
-        if _server_proc is None:
-            if check_server_status():
-                raise RuntimeError("Cannot stop an unmanaged diffusion worker.")
-        elif _server_proc.poll() is None:
+        if check_server_status():
             try:
-                _server_proc.terminate()
-                _server_proc.wait(timeout=2.0)
-            except (OSError, subprocess.TimeoutExpired):
+                import urllib.request
+                req = urllib.request.Request(f"{DIFFUSION_SERVER_URL}/shutdown", method="POST")
+                with urllib.request.urlopen(req, timeout=1.5):
+                    pass
+            except Exception:
+                pass
+
+        if _server_proc is not None:
+            if _server_proc.poll() is None:
                 try:
-                    _server_proc.kill()
-                    _server_proc.wait(timeout=1.0)
-                except (OSError, subprocess.TimeoutExpired) as exc:
-                    raise RuntimeError("Failed to stop the diffusion worker.") from exc
-        _server_proc = None
+                    import psutil
+                    parent = psutil.Process(_server_proc.pid)
+                    for child in parent.children(recursive=True):
+                        try:
+                            child.kill()
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+                try:
+                    _server_proc.terminate()
+                    _server_proc.wait(timeout=2.0)
+                except (OSError, subprocess.TimeoutExpired):
+                    try:
+                        _server_proc.kill()
+                        _server_proc.wait(timeout=1.0)
+                    except (OSError, subprocess.TimeoutExpired):
+                        pass
+            _server_proc = None
+
+        _cleanup_stale_port_process(DIFFUSION_SERVER_PORT)
 
         _COMFY_NODE_CACHE.clear()
         _active_checkpoint = None
@@ -655,70 +674,66 @@ def execute_workflow_graph(
         return outs
 
     final_images = None
-    with torch.inference_mode():
-        # Priority search for terminal output node (PreviewImage / SaveImage -> FaceDetailer -> VAEDecode)
-        target_nid = None
-        for ptype in ("PreviewImage", "SaveImage", "FaceDetailer", "VAEDecode"):
-            for nid, nd in graph.items():
-                if nd.get("class_type") == ptype:
-                    target_nid = nid
-                    break
-            if target_nid:
-                break
-
-        if target_nid:
-            res = execute_node(target_nid)
-            if res is not None:
-                if isinstance(res, (list, tuple)) and len(res) > 0 and hasattr(res[0], "shape"):
-                    final_images = res[0]
-                elif isinstance(res, dict) and "images" in res:
-                    final_images = res["images"]
-
-        # Search executed outputs for any rendered image tensor if final_images wasn't directly returned by target_nid
-        if final_images is None:
-            for nid in reversed(list(executed_outputs.keys())):
-                out = executed_outputs[nid]
-                if isinstance(out, (list, tuple)) and len(out) > 0 and hasattr(out[0], "shape") and len(out[0].shape) == 4:
-                    final_images = out[0]
-                    break
-
-    from PIL import Image
-    import numpy as np
-
     result_image = None
     saved_paths: List[str] = []
-    if final_images is not None:
-        target_paths = list(save_paths) if save_paths else ([save_path] if save_path else [])
-        num_out = final_images.shape[0]
-        for idx in range(num_out):
-            img_array = (final_images[idx].detach().cpu().numpy() * 255).astype(np.uint8)
-            pil_img = Image.fromarray(img_array)
-            if idx == 0:
-                result_image = pil_img
-            if idx < len(target_paths) and target_paths[idx]:
-                out_p = target_paths[idx]
-                os.makedirs(os.path.dirname(out_p), exist_ok=True)
-                pil_img.save(out_p)
-                saved_paths.append(out_p)
-                print(f"[engine_diffusion] Image saved dynamically to {out_p}")
-            del img_array
+    try:
+        with torch.inference_mode():
+            # Priority search for terminal output node (PreviewImage / SaveImage -> FaceDetailer -> VAEDecode)
+            target_nid = None
+            for ptype in ("PreviewImage", "SaveImage", "FaceDetailer", "VAEDecode"):
+                for nid, nd in graph.items():
+                    if nd.get("class_type") == ptype:
+                        target_nid = nid
+                        break
+                if target_nid:
+                    break
 
-    # Explicitly release intermediate tensor references
-    executed_outputs.clear()
-    del final_images
-    if empty_cache_after:
-        gc.collect()
-        try:
-            import comfy.model_management as mm
-            mm.soft_empty_cache()
-        except Exception:
-            pass
-        try:
-            import torch_directml
-            if hasattr(torch_directml, "empty_cache"):
-                torch_directml.empty_cache()
-        except Exception:
-            pass
+            if target_nid:
+                res = execute_node(target_nid)
+                if res is not None:
+                    if isinstance(res, (list, tuple)) and len(res) > 0 and hasattr(res[0], "shape"):
+                        final_images = res[0]
+                    elif isinstance(res, dict) and "images" in res:
+                        final_images = res["images"]
+
+            # Search executed outputs for any rendered image tensor if final_images wasn't directly returned by target_nid
+            if final_images is None:
+                for nid in reversed(list(executed_outputs.keys())):
+                    out = executed_outputs[nid]
+                    if isinstance(out, (list, tuple)) and len(out) > 0 and hasattr(out[0], "shape") and len(out[0].shape) == 4:
+                        final_images = out[0]
+                        break
+
+        from PIL import Image
+        import numpy as np
+
+        if final_images is not None:
+            target_paths = list(save_paths) if save_paths else ([save_path] if save_path else [])
+            num_out = final_images.shape[0]
+            for idx in range(num_out):
+                img_array = (final_images[idx].detach().cpu().numpy() * 255).astype(np.uint8)
+                pil_img = Image.fromarray(img_array)
+                if idx == 0:
+                    result_image = pil_img
+                if idx < len(target_paths) and target_paths[idx]:
+                    out_p = target_paths[idx]
+                    os.makedirs(os.path.dirname(out_p), exist_ok=True)
+                    pil_img.save(out_p)
+                    saved_paths.append(out_p)
+                    print(f"[engine_diffusion] Image saved dynamically to {out_p}")
+                del img_array
+    finally:
+        # Explicitly release intermediate tensor references and detach GPU models
+        executed_outputs.clear()
+        final_images = None
+        if empty_cache_after:
+            try:
+                import comfy.model_management as mm
+                mm.unload_all_models()
+                mm.soft_empty_cache()
+            except Exception:
+                pass
+            gc.collect()
 
     if save_paths is not None:
         return result_image, saved_paths
@@ -773,7 +788,7 @@ def _generate_portrait_image_inprocess(
                 wf_template,
                 replacements=item_replacements,
                 save_path=target_p,
-                empty_cache_after=(idx == len(save_paths) - 1),
+                empty_cache_after=True,
             )
             if out_p and os.path.exists(out_p):
                 saved_out.append(out_p)
@@ -859,10 +874,22 @@ def generate_portrait_image(
             except Exception:
                 detail = str(http_err)
 
-            # If DirectML GPU device was suspended/removed by OS during LLM usage, restart worker and retry once
-            is_device_err = any(k in detail.lower() for k in ("suspended", "deviceremoved", "device removed", "dxgi_error", "reset"))
+            # If DirectML GPU device was suspended/removed by OS or hit D3D12 heap fragmentation, restart worker and retry once
+            is_device_err = any(
+                k in detail.lower()
+                for k in (
+                    "suspended",
+                    "deviceremoved",
+                    "device removed",
+                    "dxgi_error",
+                    "reset",
+                    "not enough gpu video memory",
+                    "could not allocate tensor",
+                    "out of memory",
+                )
+            )
             if attempt == 0 and is_device_err:
-                print(f"[engine_diffusion] GPU device was suspended ({detail}). Restarting worker for clean GPU context...", flush=True)
+                print(f"[engine_diffusion] GPU memory/device error ({detail}). Restarting worker for clean GPU context...", flush=True)
                 unload_diffusion_models()
                 if ensure_server_running(cancel_event=cancel_event):
                     continue
@@ -924,10 +951,13 @@ if __name__ == "__main__":
                             else:
                                 self.wfile.write(json.dumps({"status": "ok", "path": out_res}).encode("utf-8"))
                         except Exception as ex:
+                            err_msg = str(ex)
+                            ex.__traceback__ = None
+                            gc.collect()
                             self.send_response(500)
                             self.send_header("Content-Type", "application/json")
                             self.end_headers()
-                            self.wfile.write(json.dumps({"status": "error", "error": str(ex)}).encode("utf-8"))
+                            self.wfile.write(json.dumps({"status": "error", "error": err_msg}).encode("utf-8"))
                         finally:
                             _worker_is_generating = False
                 elif self.path == "/shutdown":

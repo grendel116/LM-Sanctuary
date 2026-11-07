@@ -238,6 +238,8 @@ def slice_attention(q, k, v):
     scale = (int(q.shape[-1])**(-0.5))
 
     mem_free_total = model_management.get_free_memory(q.device)
+    if model_management.directml_enabled:
+        mem_free_total = min(mem_free_total, 256 * 1024 * 1024)
 
     tensor_size = q.shape[0] * q.shape[1] * k.shape[2] * q.element_size()
     modifier = 3 if q.element_size() == 2 else 2.5
