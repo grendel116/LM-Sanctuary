@@ -1719,9 +1719,15 @@ class OpenSourceRunner(BaseProgramRunner):
                         session_id, history[anchor]["id"], None, model, force_offload, speaker
                     )
 
+                original_history = list(history)
                 self.sessions_history[session_id] = history[:anchor + 1]
-                self._save_session_to_disk(session_id)
-                return await self.continue_as_speaker(session_id, speaker, model)
+                try:
+                    res = await self.continue_as_speaker(session_id, speaker, model)
+                except BaseException:
+                    self.sessions_history[session_id] = original_history
+                    self._save_session_to_disk(session_id)
+                    raise
+                return res
 
             img_data, img_mime, media_path = None, None, None
             if url_str := orig_msg.get("image_url"):
@@ -1732,20 +1738,27 @@ class OpenSourceRunner(BaseProgramRunner):
                 else:
                     media_path = url_str
 
+            # The truncation is only committed once generation succeeds; on any
+            # failure or cancellation the original history is restored intact.
+            original_history = list(history)
             self.sessions_history[session_id] = history[:target_idx]
-            self._save_session_to_disk(session_id)
 
             new_input = new_text if new_text is not None else orig_msg.get("text", "")
-            res = await self.run_async(
-                session_id,
-                new_input,
-                image_data=img_data,
-                image_mime=img_mime,
-                model=model,
-                media_path=media_path,
-                msg_id=msg_id,
-                speaker_id=speaker_id,
-            )
+            try:
+                res = await self.run_async(
+                    session_id,
+                    new_input,
+                    image_data=img_data,
+                    image_mime=img_mime,
+                    model=model,
+                    media_path=media_path,
+                    msg_id=msg_id,
+                    speaker_id=speaker_id,
+                )
+            except BaseException:
+                self.sessions_history[session_id] = original_history
+                self._save_session_to_disk(session_id)
+                raise
 
             self._save_session_to_disk(session_id)
             return res
