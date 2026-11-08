@@ -32,11 +32,16 @@ def start_img(cancel_event: Optional[threading.Event] = None) -> bool:
         from runners import local_server
         from core import engine_diffusion
 
+        llm_process_running = local_server._proc is not None and local_server._proc.poll() is None
+        worker = engine_diffusion._server_proc
+        worker_running = worker is not None and worker.poll() is None
+
+        # Already in image mode: both processes are ours, so their handles answer without HTTP probes.
+        if _current_mode == "IMG" and worker_running and not llm_process_running:
+            return True
+
         llm_online = local_server.check_local_server_status()
         server_online = engine_diffusion.check_server_status()
-
-        # If already in image mode with LLM stopped and diffusion worker running, nothing to do
-        llm_process_running = local_server._proc is not None and local_server._proc.poll() is None
         if _current_mode == "IMG" and not llm_online and not llm_process_running and server_online:
             return True
 

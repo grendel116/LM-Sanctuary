@@ -4699,12 +4699,12 @@ function buildMessageRow(msg, isLive = false) {
 // --- appendLocalMessage ---
 // Shows a row the server did not produce: the user's just-sent turn, a transient notice,
 // or a voice-call record. Every stored turn arrives as a server message and goes to renderMessage.
-function appendLocalMessage(role, text, { imageUrl = null, timestamp = null, isTransient = false, isLive = false } = {}) {
+function appendLocalMessage(role, text, { imageUrl = null, timestamp = null, isTransient = false, isLive = false, id = null } = {}) {
     const media = imageUrl
         ? [{ url: imageUrl, type: imageUrl.toLowerCase().endsWith('.mp4') ? 'video' : 'image' }]
         : [];
     return renderMessage({
-        id: localMessageId(),
+        id: id || localMessageId(),
         role: role,
         text: text || '',
         media: media,
@@ -5073,11 +5073,15 @@ async function sendMessage() {
         return;
     }
 
-    appendLocalMessage('user', text, { imageUrl: attachedMediaPath, timestamp: Date.now() / 1000 });
+    // The client names the message; the server stores it under this same id, so the
+    // row is editable at once, even while the reply is still generating.
+    const userMsgId = (attachedMediaPath && !text ? 'img_' : 'usr_') + localMessageId().slice('local_'.length);
+    appendLocalMessage('user', text, { imageUrl: attachedMediaPath, timestamp: Date.now() / 1000, id: userMsgId });
 
     const targetSpeaker = (currentGroupMeta && currentGroupMeta.is_group) ? detectTargetGroupSpeaker(text) : null;
 
     const payload = {
+        msg_id: userMsgId,
         message: text || "",
         image_mime: attachedMime,
         media_path: attachedMediaPath,
@@ -8146,6 +8150,39 @@ userInput.addEventListener('input', function() {
 
 userInput.addEventListener('focus', updateInputGlow);
 userInput.addEventListener('blur', updateInputGlow);
+
+// Lock #app-container and body to the smallest available viewport height so the input bar
+// never sits behind the on-screen keyboard or Gboard suggestion strip.
+if (window.visualViewport) {
+    const appContainerEl = document.getElementById('app-container');
+    const syncVisualViewport = () => {
+        const wasAtBottom = chatContainer.scrollHeight - chatContainer.scrollTop - chatContainer.clientHeight < 120;
+        const vv = window.visualViewport;
+        const h = Math.min(window.innerHeight, document.documentElement.clientHeight, vv.height);
+        document.body.style.top = '0px';
+        document.body.style.bottom = 'auto';
+        document.body.style.height = h + 'px';
+        if (appContainerEl) {
+            appContainerEl.style.height = h + 'px';
+        }
+        window.scrollTo(0, 0);
+        if (wasAtBottom) {
+            chatContainer.scrollTop = chatContainer.scrollHeight;
+        }
+    };
+    window.visualViewport.addEventListener('resize', syncVisualViewport);
+    window.visualViewport.addEventListener('scroll', syncVisualViewport);
+    window.addEventListener('resize', syncVisualViewport);
+    userInput.addEventListener('focus', () => {
+        setTimeout(syncVisualViewport, 100);
+        setTimeout(syncVisualViewport, 300);
+    });
+    userInput.addEventListener('blur', () => {
+        setTimeout(syncVisualViewport, 100);
+        setTimeout(syncVisualViewport, 300);
+    });
+    syncVisualViewport();
+}
 
 userInput.addEventListener('keydown', function(event) {
     // User requested Enter to always send only on desktop, while mobile requires pressing the send button

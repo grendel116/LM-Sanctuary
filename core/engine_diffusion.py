@@ -503,7 +503,7 @@ def execute_workflow_graph(
     save_path: Optional[str] = None,
     save_paths: Optional[List[str]] = None,
     batch_size: int = 1,
-    empty_cache_after: bool = True
+    empty_cache_after: bool = False
 ) -> Tuple[Optional[Any], Any]:
     """Dynamically executes any ComfyUI node graph JSON in-process with AMD DirectML GPU acceleration."""
     comfy_dir = os.path.normpath(os.path.join(root_dir, "core", "comfy_engine"))
@@ -726,14 +726,15 @@ def execute_workflow_graph(
         # Explicitly release intermediate tensor references and detach GPU models
         executed_outputs.clear()
         final_images = None
-        if empty_cache_after:
-            try:
-                import comfy.model_management as mm
+        # The worker keeps the checkpoint resident between images; unloading is for callers that ask.
+        try:
+            import comfy.model_management as mm
+            if empty_cache_after:
                 mm.unload_all_models()
-                mm.soft_empty_cache()
-            except Exception:
-                pass
-            gc.collect()
+            mm.soft_empty_cache()
+        except Exception:
+            pass
+        gc.collect()
 
     if save_paths is not None:
         return result_image, saved_paths
@@ -788,7 +789,6 @@ def _generate_portrait_image_inprocess(
                 wf_template,
                 replacements=item_replacements,
                 save_path=target_p,
-                empty_cache_after=True,
             )
             if out_p and os.path.exists(out_p):
                 saved_out.append(out_p)
