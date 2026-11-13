@@ -11,6 +11,7 @@ _embedding_model = None
 def get_embedding_model():
     global _embedding_model
     if _embedding_model is None:
+        os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
         from sentence_transformers import SentenceTransformer
         try:
             _embedding_model = SentenceTransformer('all-MiniLM-L6-v2', device="cpu", local_files_only=True)

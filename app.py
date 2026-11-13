@@ -1,4 +1,5 @@
 import os
+os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 import time
 import shutil
 import json
@@ -264,15 +265,21 @@ def remote_configuration():
     return configured, api_key, cloud_url
 
 
-def find_image_sidecar_json(image_filename, active_program):
-    """Locate the sidecar .json for an image, scanning active then all programs."""
-    for folder in ('portraits', 'media'):
-        png_path = os.path.normpath(
-            os.path.join(base_dir, 'core', 'programs', active_program, folder, image_filename)
-        )
-        json_path = png_path.rsplit('.', 1)[0] + '.json'
-        if os.path.exists(json_path):
-            return json_path
+def find_image_sidecar_json(image_filename, active_program, program_id=None):
+    """Locate the sidecar .json for an image, scanning preferred/active then all programs."""
+    preferred_progs = []
+    for p in (program_id, active_program):
+        if p and p not in preferred_progs:
+            preferred_progs.append(p)
+
+    for prog in preferred_progs:
+        for folder in ('portraits', 'media'):
+            png_path = os.path.normpath(
+                os.path.join(base_dir, 'core', 'programs', prog, folder, image_filename)
+            )
+            json_path = os.path.splitext(png_path)[0] + '.json'
+            if os.path.exists(json_path):
+                return json_path
     from variables.settings import PROGRAMS_DIR
     if os.path.exists(PROGRAMS_DIR):
         for prog in os.listdir(PROGRAMS_DIR):
@@ -280,7 +287,7 @@ def find_image_sidecar_json(image_filename, active_program):
                 candidate = os.path.normpath(
                     os.path.join(PROGRAMS_DIR, prog, folder, image_filename)
                 )
-                candidate_json = candidate.rsplit('.', 1)[0] + '.json'
+                candidate_json = os.path.splitext(candidate)[0] + '.json'
                 if os.path.exists(candidate_json):
                     return candidate_json
     return None
@@ -686,30 +693,55 @@ def serve_sparkle_mp3():
 def serve_image(filename):
     import mimetypes
     from runners.program import get_active_program
+    requested_program = (request.args.get('program_id') or '').strip()
+    if requested_program and not PROGRAM_ID_RE.match(requested_program):
+        requested_program = ''
     active_program = get_active_program() or os.getenv("ACTIVE_PROGRAM", "sebile")
     programs_root = os.path.join(base_dir, 'core', 'programs')
-    program_dir = os.path.join(programs_root, active_program)
 
-    target_path = None
-    cand_path = os.path.normpath(os.path.join(program_dir, filename))
-    if os.path.commonpath([os.path.abspath(cand_path), os.path.abspath(program_dir)]) == os.path.abspath(program_dir) and os.path.isfile(cand_path):
-        target_path = cand_path
-    elif os.path.isdir(programs_root):
+    def _resolve_in_program(prog_name):
+        if not prog_name:
+            return None
+        prog_dir = os.path.join(programs_root, prog_name)
+        if not os.path.isdir(prog_dir):
+            return None
+        cand = os.path.normpath(os.path.join(prog_dir, filename))
+        if os.path.commonpath([os.path.abspath(cand), os.path.abspath(prog_dir)]) == os.path.abspath(prog_dir) and os.path.isfile(cand):
+            return cand
+        return None
+
+    target_path = _resolve_in_program(requested_program) or _resolve_in_program(active_program)
+    if not target_path and os.path.isdir(programs_root):
         for prog in os.listdir(programs_root):
-            alt_dir = os.path.join(programs_root, prog)
-            if not os.path.isdir(alt_dir):
-                continue
-            alt_path = os.path.normpath(os.path.join(alt_dir, filename))
-            if os.path.commonpath([os.path.abspath(alt_path), os.path.abspath(alt_dir)]) == os.path.abspath(alt_dir) and os.path.isfile(alt_path):
-                target_path = alt_path
+            found = _resolve_in_program(prog)
+            if found:
+                target_path = found
                 break
 
     if not target_path:
         return "Image not found", 404
 
+    import io
     mime_type, _ = mimetypes.guess_type(target_path)
-    response = send_file(target_path, mimetype=mime_type or 'application/octet-stream',
-                         download_name=os.path.basename(target_path), conditional=True)
+    mtime = os.path.getmtime(target_path)
+    file_size = os.path.getsize(target_path)
+    if file_size <= 64 * 1024 * 1024:
+        with open(target_path, 'rb') as f:
+            payload = io.BytesIO(f.read())
+        response = send_file(
+            payload,
+            mimetype=mime_type or 'application/octet-stream',
+            download_name=os.path.basename(target_path),
+            conditional=True,
+            last_modified=mtime,
+        )
+    else:
+        response = send_file(
+            target_path,
+            mimetype=mime_type or 'application/octet-stream',
+            download_name=os.path.basename(target_path),
+            conditional=True,
+        )
     response.headers['Cache-Control'] = 'private, no-cache'
     return response
 
@@ -717,12 +749,20 @@ def serve_image(filename):
 @requires_auth
 def get_image_prompt():
     image_url = request.args.get('image_url')
+    requested_program = (request.args.get('program_id') or '').strip()
+    if requested_program and not PROGRAM_ID_RE.match(requested_program):
+        requested_program = ''
     if not image_url:
         return jsonify({'error': 'Missing image_url'}), 400
         
-    if "://" in image_url:
-        from urllib.parse import urlparse
-        image_url = urlparse(image_url).path
+    if "://" in image_url or "?" in image_url:
+        from urllib.parse import urlparse, parse_qs
+        parsed = urlparse(image_url)
+        if not requested_program and parsed.query:
+            q_prog = (parse_qs(parsed.query).get('program_id') or [''])[0].strip()
+            if q_prog and PROGRAM_ID_RE.match(q_prog):
+                requested_program = q_prog
+        image_url = parsed.path
         
     try:
         import json
@@ -736,7 +776,7 @@ def get_image_prompt():
             
         # Security: keep filename only to prevent directory traversal
         img_subpath = os.path.basename(img_subpath)
-        json_path = find_image_sidecar_json(img_subpath, active_program)
+        json_path = find_image_sidecar_json(img_subpath, active_program, program_id=requested_program or None)
 
         if json_path and os.path.exists(json_path):
             with open(json_path, 'r', encoding='utf-8') as f:
@@ -1427,20 +1467,24 @@ _active_image_regenerations: dict[str, int] = {}
 @app.route('/delete_image', methods=['POST'])
 @requires_auth
 def delete_image():
-    session_id = request.json.get('session_id', 'default')
-    image_url = request.json.get('image_url')
+    data = request.get_json(silent=True) or {}
+    session_id = data.get('session_id', 'default')
+    image_url = data.get('image_url')
+    program_id = (data.get('program_id') or '').strip()
+    if program_id and not PROGRAM_ID_RE.match(program_id):
+        program_id = ''
     if not image_url:
         return jsonify({'error': 'Missing image_url'}), 400
 
     with _active_regen_lock:
         regen_in_progress = _active_image_regenerations.get(session_id, 0) > 0
-    keep_message = bool(request.json.get('keep_message')) or regen_in_progress
+    keep_message = bool(data.get('keep_message')) or regen_in_progress
         
     try:
         # Detach from session log - delete the image and remove it from history
-        success = run_async(runner.delete_image_from_session(session_id, image_url, keep_message=keep_message))
+        success = run_async(runner.delete_image_from_session(session_id, image_url, keep_message=keep_message, program_id=program_id or None))
         if success:
-            broadcast_media_change()
+            broadcast_media_change(program_id or None)
             return jsonify({'status': 'success'})
         else:
             return jsonify({'error': 'Image file not found in session or disk'}), 404
@@ -1527,6 +1571,11 @@ def _regenerate_image(resolved_msg_id):
                 if msg.get('id') == msg_id and msg.get('sender_id'):
                     target_prog = msg['sender_id']
                     break
+
+        if not old_image_url and msg_id and chat_history:
+            existing_msg = next((m for m in chat_history if m.get('id') == msg_id), None)
+            if existing_msg and len(existing_msg.get('media') or []) >= 3:
+                return jsonify({'error': 'Each image message row can hold at most 3 images.'}), 400
 
         if filename:
             try:
@@ -1798,80 +1847,222 @@ def extract_portrait_tags_from_context(session_id: str, custom_prompt: str = "",
 @app.route('/api/portrait/generate', methods=['POST'])
 @requires_auth
 def api_generate_portrait():
-    session_id = request.json.get('session_id', 'default')
-    custom_prompt = request.json.get('prompt', '')
-    requested_speaker = request.json.get('speaker_id')
+    import queue
+    from utils import image_cancellation
+    from core.program_config import _load_card_data
+
+    req_body = request.json or {}
+    session_id = req_body.get('session_id', 'default')
+    custom_prompt = req_body.get('prompt', '')
+    requested_speaker = req_body.get('speaker_id')
+    count = max(1, min(3, int(req_body.get('count', 3))))
+    stream = bool(req_body.get('stream', False))
     cancelled_sessions.discard(session_id)
 
-    if not _image_mutex.acquire(blocking=True, timeout=300.0):
+    deadline = time.monotonic() + 300.0
+    acquired = False
+    while time.monotonic() < deadline and session_id not in cancelled_sessions:
+        if _image_mutex.acquire(timeout=min(0.25, max(0.0, deadline - time.monotonic()))):
+            acquired = True
+            break
+    if not acquired:
+        if session_id in cancelled_sessions:
+            return jsonify({'error': 'Portrait generation cancelled by user.'}), 400
         return jsonify({'error': 'Image generation engine is currently busy. Please retry in a moment.'}), 429
 
+    portrait_msg_id = f"prgm_{uuid.uuid4().hex}"
+    target_prog = resolve_portrait_speaker_id(session_id, requested_speaker_id=requested_speaker, custom_prompt=custom_prompt)
+    card = _load_card_data(target_prog)
+    prog_name = card.get("name") or target_prog.title()
+
+    if stream:
+        operation = image_cancellation.begin_message_operation(session_id, portrait_msg_id, target_prog)
+        event_q: "queue.Queue[dict | None]" = queue.Queue()
+
+        def _worker():
+            emitted_urls: list[str] = []
+            extracted_tags = ""
+            message_created = False
+            try:
+                with image_cancellation.use_message_operation(operation):
+                    if session_id in cancelled_sessions or operation.cancelled.is_set():
+                        event_q.put({'type': 'cancelled', 'error': 'Portrait generation cancelled by user.'})
+                        return
+
+                    import tools.tools as tools
+                    tools.current_session_id.set(session_id)
+                    tools.current_speaker_id.set(target_prog)
+                    with tools.session_tool_calls_lock:
+                        tools.session_tool_calls[session_id] = []
+
+                    extracted_tags = extract_portrait_tags_from_context(session_id, custom_prompt, program_id=target_prog)
+                    if session_id in cancelled_sessions or operation.cancelled.is_set():
+                        event_q.put({'type': 'cancelled', 'error': 'Portrait generation cancelled by user.'})
+                        return
+
+                    def _on_slot_ready(slot_idx: int, slot_url: str):
+                        nonlocal message_created
+                        if slot_idx >= 3 or len(emitted_urls) >= 3:
+                            return
+                        emitted_urls.append(slot_url)
+                        msg_payload = None
+                        if not message_created:
+                            saved = run_async(
+                                runner.append_message_to_session(
+                                    session_id,
+                                    "program",
+                                    f"![Portrait]({slot_url})",
+                                    msg_id=portrait_msg_id,
+                                    sender_id=target_prog,
+                                    sender_name=prog_name,
+                                    prompt=extracted_tags,
+                                )
+                            )
+                            if saved:
+                                message_created = True
+                                hist = run_async(runner.get_history(session_id))
+                                msg_payload = next((m for m in hist if m.get('id') == portrait_msg_id), None)
+                        else:
+                            run_async(
+                                runner.replace_image_in_session(
+                                    session_id,
+                                    "",
+                                    slot_url,
+                                    new_prompt=extracted_tags,
+                                    msg_id=portrait_msg_id,
+                                    slot_index=slot_idx,
+                                    speaker_id=target_prog,
+                                )
+                            )
+                        broadcast_media_change(target_prog)
+                        event_q.put({
+                            'type': 'slot',
+                            'index': slot_idx,
+                            'image_url': slot_url,
+                            'prompt': extracted_tags,
+                            'program_msg_id': portrait_msg_id,
+                            'sender_id': target_prog,
+                            'sender_name': prog_name,
+                            'message': msg_payload,
+                        })
+
+                    cb_token = tools.current_portrait_slot_callback.set(_on_slot_ready)
+                    try:
+                        new_markdown = tools.generate_local_image(extracted_tags, count=count, program_id=target_prog)
+                    finally:
+                        tools.current_portrait_slot_callback.reset(cb_token)
+
+                    if emitted_urls:
+                        hist = run_async(runner.get_history(session_id))
+                        final_msg = next((m for m in hist if m.get('id') == portrait_msg_id), None)
+                        event_q.put({
+                            'type': 'done',
+                            'status': 'success',
+                            'message': final_msg,
+                            'image_url': emitted_urls[0],
+                            'image_urls': emitted_urls,
+                            'prompt': extracted_tags,
+                            'program_msg_id': portrait_msg_id,
+                            'sender_name': prog_name,
+                        })
+                    elif session_id in cancelled_sessions or operation.cancelled.is_set() or "cancelled" in new_markdown.lower():
+                        event_q.put({'type': 'cancelled', 'error': 'Portrait generation cancelled by user.'})
+                    else:
+                        event_q.put({'type': 'error', 'error': new_markdown or 'Portrait generation failed.'})
+            except Exception as exc:
+                if emitted_urls:
+                    hist = run_async(runner.get_history(session_id))
+                    final_msg = next((m for m in hist if m.get('id') == portrait_msg_id), None)
+                    event_q.put({
+                        'type': 'done',
+                        'status': 'success',
+                        'message': final_msg,
+                        'image_url': emitted_urls[0],
+                        'image_urls': emitted_urls,
+                        'prompt': extracted_tags,
+                        'program_msg_id': portrait_msg_id,
+                        'sender_name': prog_name,
+                    })
+                else:
+                    event_q.put({'type': 'error', 'error': str(exc)})
+            finally:
+                event_q.put(None)
+
+        worker_thread = threading.Thread(target=_worker, daemon=True)
+        worker_thread.start()
+
+        def _stream_ndjson():
+            try:
+                while True:
+                    item = event_q.get()
+                    if item is None:
+                        break
+                    yield json.dumps(item) + "\n"
+            finally:
+                if worker_thread.is_alive():
+                    operation.cancelled.set()
+                    from core.engine_diffusion import interrupt_diffusion_generation
+                    interrupt_diffusion_generation()
+                    worker_thread.join(timeout=10.0)
+                finish_generation_request(session_id)
+                _image_mutex.release()
+
+        return Response(_stream_ndjson(), mimetype='application/x-ndjson', headers={'Cache-Control': 'no-cache'})
+
     try:
-        if session_id in cancelled_sessions:
-            return jsonify({'error': 'Portrait generation cancelled by user.'}), 400
+        with image_cancellation.message_operation(session_id, portrait_msg_id, target_prog) as cancel_ev:
+            if session_id in cancelled_sessions or cancel_ev.is_set():
+                return jsonify({'error': 'Portrait generation cancelled by user.'}), 400
 
-        target_prog = resolve_portrait_speaker_id(session_id, requested_speaker_id=requested_speaker, custom_prompt=custom_prompt)
+            import tools.tools as tools
+            tools.current_session_id.set(session_id)
+            tools.current_speaker_id.set(target_prog)
+            with tools.session_tool_calls_lock:
+                tools.session_tool_calls[session_id] = []
 
-        import tools.tools as tools
-        tools.current_session_id.set(session_id)
-        tools.current_speaker_id.set(target_prog)
-        with tools.session_tool_calls_lock:
-            tools.session_tool_calls[session_id] = []
+            extracted_tags = extract_portrait_tags_from_context(session_id, custom_prompt, program_id=target_prog)
 
-        # 1. Decoupled tag extraction via LLM (auto-starts LLM if paused)
-        extracted_tags = extract_portrait_tags_from_context(session_id, custom_prompt, program_id=target_prog)
+            if session_id in cancelled_sessions or cancel_ev.is_set():
+                return jsonify({'error': 'Portrait generation cancelled by user.'}), 400
 
-        if session_id in cancelled_sessions:
-            return jsonify({'error': 'Portrait generation cancelled by user.'}), 400
+            new_markdown = tools.generate_local_image(extracted_tags, count=count, program_id=target_prog)
 
-        # 2. Local GPU image generation (unloads LLM before running diffusion engine)
-        count = int(request.json.get('count', 3))
-        new_markdown = tools.generate_local_image(extracted_tags, count=count, program_id=target_prog)
+            if session_id in cancelled_sessions or cancel_ev.is_set():
+                return jsonify({'error': 'Portrait generation cancelled by user.'}), 400
 
-        if session_id in cancelled_sessions:
-            return jsonify({'error': 'Portrait generation cancelled by user.'}), 400
+            if new_markdown.startswith("Error"):
+                return jsonify({'error': new_markdown}), 500
 
-        if new_markdown.startswith("Error"):
-            return jsonify({'error': new_markdown}), 500
+            image_urls = re.findall(r'!\[[^\]]*\]\(([^)]+)\)', new_markdown)
+            if not image_urls:
+                return jsonify({'error': 'Portrait generation did not return an image.'}), 500
+            new_image_url = image_urls[0]
 
-        # Extract image URLs
-        import re
-        image_urls = re.findall(r'!\[[^\]]*\]\(([^)]+)\)', new_markdown)
-        if not image_urls:
-            return jsonify({'error': 'Portrait generation did not return an image.'}), 500
-        new_image_url = image_urls[0]
-
-        from core.program_config import _load_card_data
-        card = _load_card_data(target_prog)
-        prog_name = card.get("name") or target_prog.title()
-
-        # Append directly to session history as an image message preserving character identity and prompt
-        portrait_msg_id = f"prgm_{uuid.uuid4().hex}"
-        saved = run_async(
-            runner.append_message_to_session(
-                session_id,
-                "program",
-                new_markdown,
-                msg_id=portrait_msg_id,
-                sender_id=target_prog,
-                sender_name=prog_name,
-                prompt=extracted_tags,
+            saved = run_async(
+                runner.append_message_to_session(
+                    session_id,
+                    "program",
+                    new_markdown,
+                    msg_id=portrait_msg_id,
+                    sender_id=target_prog,
+                    sender_name=prog_name,
+                    prompt=extracted_tags,
+                )
             )
-        )
-        if not saved:
-            return jsonify({'error': 'Could not save the portrait message.'}), 500
-        broadcast_media_change(target_prog)
+            if not saved:
+                return jsonify({'error': 'Could not save the portrait message.'}), 500
+            broadcast_media_change(target_prog)
 
-        portrait_history = run_async(runner.get_history(session_id))
-        return jsonify({
-            'status': 'success',
-            'message': next((m for m in portrait_history if m.get('id') == portrait_msg_id), None),
-            'image_url': new_image_url,
-            'image_urls': image_urls,
-            'prompt': extracted_tags,
-            'program_msg_id': portrait_msg_id,
-            'sender_name': prog_name,
-        })
+            portrait_history = run_async(runner.get_history(session_id))
+            return jsonify({
+                'status': 'success',
+                'message': next((m for m in portrait_history if m.get('id') == portrait_msg_id), None),
+                'image_url': new_image_url,
+                'image_urls': image_urls,
+                'prompt': extracted_tags,
+                'program_msg_id': portrait_msg_id,
+                'sender_name': prog_name,
+            })
     except Exception as e:
         print(f"Error generating direct portrait: {e}")
         return jsonify({'error': str(e)}), 500
@@ -2017,18 +2208,19 @@ def list_images():
         from runners.program import get_active_program
         requested_program = request.args.get('program_id')
         active_program = requested_program or get_active_program() or os.getenv("ACTIVE_PROGRAM", "sebile")
-        programs_root = os.path.join('core', 'programs')
-        valid_exts = ('.png', '.jpg', '.jpeg', '.gif', '.mp4', '.webm')
+        programs_root = os.path.join(base_dir, 'core', 'programs')
+        valid_exts = ('.png', '.jpg', '.jpeg', '.webp', '.gif', '.mp4', '.webm')
 
-        images_by_program = {}
+        items_by_owner = {}
         image_owners = {}
+        upload_items = []
 
         if os.path.isdir(programs_root):
             for prog in os.listdir(programs_root):
                 prog_dir = os.path.join(programs_root, prog)
                 if not os.path.isdir(prog_dir):
                     continue
-                prog_items = []
+                items_by_owner.setdefault(prog, [])
                 for folder in ('portraits', 'media'):
                     target_dir = os.path.join(prog_dir, folder)
                     if os.path.exists(target_dir):
@@ -2047,20 +2239,49 @@ def list_images():
                                                 owner = sdata['program_id']
                                         except Exception:
                                             pass
-                                    prog_items.append({
+                                    items_by_owner.setdefault(owner, []).append({
                                         'url': url,
                                         'mtime': os.path.getmtime(full_path),
-                                        'owner': owner
                                     })
-                                    image_owners[url] = owner
-                prog_items.sort(key=lambda x: x['mtime'], reverse=True)
-                images_by_program[prog] = [x['url'] for x in prog_items]
+                                    if url not in image_owners or prog == owner:
+                                        image_owners[url] = owner
+
+                uploads_dir = os.path.join(prog_dir, 'uploads')
+                if os.path.exists(uploads_dir):
+                    for f in os.listdir(uploads_dir):
+                        if f.lower().endswith(valid_exts):
+                            full_path = os.path.join(uploads_dir, f)
+                            if os.path.isfile(full_path):
+                                upload_items.append({
+                                    'url': f"/images/uploads/{f}",
+                                    'mtime': os.path.getmtime(full_path),
+                                })
+
+        images_by_program = {}
+        for owner, items in items_by_owner.items():
+            items.sort(key=lambda x: x['mtime'], reverse=True)
+            seen = set()
+            deduped = []
+            for item in items:
+                if item['url'] not in seen:
+                    seen.add(item['url'])
+                    deduped.append(item['url'])
+            images_by_program[owner] = deduped
+
+        upload_items.sort(key=lambda x: x['mtime'], reverse=True)
+        seen_uploads = set()
+        uploads = []
+        for item in upload_items:
+            if item['url'] not in seen_uploads:
+                seen_uploads.add(item['url'])
+                uploads.append(item['url'])
 
         image_urls = images_by_program.get(active_program, [])
         return jsonify({
             'images': image_urls,
             'images_by_program': images_by_program,
-            'image_owners': image_owners
+            'image_owners': image_owners,
+            'uploads': uploads
         })
     except Exception as e:
         print(f"Error listing images: {e}")
@@ -2318,7 +2539,8 @@ def browse_folder():
             "    print(folder)\n"
         )
         try:
-            res = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True)
+            flags = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
+            res = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, creationflags=flags)
             if res.returncode == 0 and res.stdout.strip():
                 selected_folder = res.stdout.strip()
         except Exception as e:
@@ -3472,10 +3694,136 @@ def delete_program():
         return jsonify({'error': str(e)}), 500
 
 
+def _update_program_references(old_id: str, new_id: str, new_name: str = None):
+    """Synchronize session group_meta, message sender metadata, image sidecars, and caches after a program edit or rename."""
+    from variables.settings import PROGRAMS_DIR
+
+    id_changed = bool(old_id and new_id and old_id != new_id)
+    clean_name = new_name.strip() if isinstance(new_name, str) and new_name.strip() else None
+
+    if id_changed and old_id in _theme_cache:
+        _theme_cache[new_id] = _theme_cache.pop(old_id)
+
+    if os.path.isdir(PROGRAMS_DIR):
+        for prog_folder in os.listdir(PROGRAMS_DIR):
+            prog_dir = os.path.join(PROGRAMS_DIR, prog_folder)
+            if not os.path.isdir(prog_dir):
+                continue
+
+            sessions_dir = os.path.join(prog_dir, "sessions")
+            if os.path.isdir(sessions_dir):
+                for fname in os.listdir(sessions_dir):
+                    if not fname.endswith(".json"):
+                        continue
+                    fpath = os.path.join(sessions_dir, fname)
+                    if not os.path.isfile(fpath):
+                        continue
+                    try:
+                        with open(fpath, "r", encoding="utf-8") as sf:
+                            sdata = json.load(sf)
+                        modified = False
+
+                        if isinstance(sdata, dict):
+                            gm = sdata.get("group_meta")
+                            if isinstance(gm, dict) and gm.get("is_group"):
+                                if id_changed and gm.get("host_id") == old_id:
+                                    gm["host_id"] = new_id
+                                    modified = True
+                                guest_ids = gm.get("guest_ids")
+                                if id_changed and isinstance(guest_ids, list) and old_id in guest_ids:
+                                    updated_guests = []
+                                    host_val = gm.get("host_id")
+                                    for gid in guest_ids:
+                                        mapped = new_id if gid == old_id else gid
+                                        if mapped != host_val and mapped not in updated_guests:
+                                            updated_guests.append(mapped)
+                                    gm["guest_ids"] = updated_guests
+                                    modified = True
+                            messages = sdata.get("messages")
+                        elif isinstance(sdata, list):
+                            messages = sdata
+                        else:
+                            messages = None
+
+                        if isinstance(messages, list):
+                            for msg in messages:
+                                if not isinstance(msg, dict):
+                                    continue
+                                sid = msg.get("sender_id")
+                                if sid == old_id or (new_id and sid == new_id):
+                                    if id_changed and sid == old_id:
+                                        msg["sender_id"] = new_id
+                                        modified = True
+                                    if clean_name and msg.get("sender_name") != clean_name:
+                                        msg["sender_name"] = clean_name
+                                        modified = True
+
+                        if modified:
+                            with open(fpath, "w", encoding="utf-8") as sf:
+                                json.dump(sdata, sf, indent=2, ensure_ascii=False)
+                    except Exception as ex:
+                        print(f"[rename/edit] Failed updating session file {fpath}: {ex}")
+
+            if id_changed:
+                for media_folder in ("portraits", "media"):
+                    mdir = os.path.join(prog_dir, media_folder)
+                    if not os.path.isdir(mdir):
+                        continue
+                    for fname in os.listdir(mdir):
+                        if not fname.endswith(".json"):
+                            continue
+                        jpath = os.path.join(mdir, fname)
+                        if not os.path.isfile(jpath):
+                            continue
+                        try:
+                            with open(jpath, "r", encoding="utf-8") as jf:
+                                mdata = json.load(jf)
+                            if isinstance(mdata, dict) and mdata.get("program_id") == old_id:
+                                mdata["program_id"] = new_id
+                                with open(jpath, "w", encoding="utf-8") as jf:
+                                    json.dump(mdata, jf, indent=4, ensure_ascii=False)
+                        except Exception:
+                            pass
+
+    if runner is not None:
+        with runner._lock:
+            if hasattr(runner, "sessions_program") and id_changed:
+                for sid, prog in list(runner.sessions_program.items()):
+                    if prog == old_id:
+                        runner.sessions_program[sid] = new_id
+            if hasattr(runner, "sessions_group_meta") and id_changed:
+                for sid, gm in list(runner.sessions_group_meta.items()):
+                    if isinstance(gm, dict):
+                        if gm.get("host_id") == old_id:
+                            gm["host_id"] = new_id
+                        if isinstance(gm.get("guest_ids"), list) and old_id in gm["guest_ids"]:
+                            host_val = gm.get("host_id")
+                            deduped = []
+                            for gid in gm["guest_ids"]:
+                                mapped = new_id if gid == old_id else gid
+                                if mapped != host_val and mapped not in deduped:
+                                    deduped.append(mapped)
+                            gm["guest_ids"] = deduped
+            if hasattr(runner, "sessions_history"):
+                for sid, msgs in runner.sessions_history.items():
+                    if not isinstance(msgs, list):
+                        continue
+                    for msg in msgs:
+                        if not isinstance(msg, dict):
+                            continue
+                        msid = msg.get("sender_id")
+                        if msid == old_id or (new_id and msid == new_id):
+                            if id_changed and msid == old_id:
+                                msg["sender_id"] = new_id
+                            if clean_name:
+                                msg["sender_name"] = clean_name
+
+
 @app.route('/api/programs/rename', methods=['POST'])
 @requires_auth
 def rename_program():
     try:
+        global _cached_active_program
         data = request.get_json(silent=True) or {}
         program_id = data.get('program_id')
         new_name = data.get('new_name', '').strip()
@@ -3491,6 +3839,7 @@ def rename_program():
             return jsonify({'error': 'Invalid new name (must contain letters, numbers, or underscores)'}), 400
             
         from variables.settings import PROGRAMS_DIR
+        from runners.program import get_active_program
         old_path = os.path.normpath(os.path.join(PROGRAMS_DIR, program_id))
         new_path = os.path.normpath(os.path.join(PROGRAMS_DIR, new_id))
         
@@ -3515,10 +3864,8 @@ def rename_program():
                 except Exception as e:
                     print(f"Error updating Sebile JSON: {e}")
             
-            # Reload configuration
-            reload_program_state()
-            
-            active_program = os.getenv("ACTIVE_PROGRAM", "sebile")
+            _update_program_references('sebile', 'sebile', new_name)
+            active_program = get_active_program() or os.getenv("ACTIVE_PROGRAM", "sebile")
             return jsonify({
                 'status': 'success',
                 'new_id': 'sebile',
@@ -3529,9 +3876,21 @@ def rename_program():
         if new_id != program_id:
             if os.path.exists(new_path):
                 return jsonify({'error': f"A program folder named '{new_id}' already exists"}), 400
+
+            # Capture active status BEFORE moving old_path, otherwise get_active_program()
+            # sees old_path missing and resets project_settings.json to 'sebile'.
+            active_program = get_active_program() or os.getenv("ACTIVE_PROGRAM", "sebile")
+            was_active = (program_id == active_program)
                 
-            # Perform directory rename
-            shutil.move(old_path, new_path)
+            # Perform directory rename (release any lingering file handles on Windows first)
+            import gc
+            gc.collect()
+            try:
+                os.replace(old_path, new_path)
+            except PermissionError:
+                time.sleep(0.05)
+                gc.collect()
+                shutil.move(old_path, new_path)
             
             # Inside the new directory, rename the json file: old_id.json -> new_id.json
             old_json = os.path.join(new_path, f"{program_id}.json")
@@ -3556,29 +3915,37 @@ def rename_program():
                 except Exception as e:
                     print(f"Error updating JSON after rename: {e}")
                     
-            # Check if active program
-            active_program = os.getenv("ACTIVE_PROGRAM", "sebile")
-            was_active = (program_id == active_program)
-            
             # Update settings (active_program, folders, program_voices)
             from runners.program import _load_settings, _save_settings
             settings = _load_settings()
             
+            current_folders = settings.get("folders", [])
+            norm_old = os.path.normpath(old_path)
+            norm_new = os.path.normpath(new_path)
+            mapped_folders = []
+            for f in current_folders:
+                target_f = new_path if os.path.normpath(f) == norm_old else f
+                if all(os.path.normpath(existing) != os.path.normpath(target_f) for existing in mapped_folders):
+                    mapped_folders.append(target_f)
+
             if was_active:
                 os.environ["ACTIVE_PROGRAM"] = new_id
+                _cached_active_program = new_id
                 settings["active_program"] = new_id
-                current_folders = settings.get("folders", [])
-                extra_folders = [f for f in current_folders[1:] if os.path.normpath(f) != os.path.normpath(new_path)]
+                extra_folders = [f for f in mapped_folders if os.path.normpath(f) != norm_new]
                 settings["folders"] = [new_path] + extra_folders
+            elif mapped_folders != current_folders:
+                settings["folders"] = mapped_folders
                 
             if "program_voices" in settings:
                 if program_id in settings["program_voices"]:
                     settings["program_voices"][new_id] = settings["program_voices"].pop(program_id)
                     
             _save_settings(settings)
+            _update_program_references(program_id, new_id, new_name)
             
-            # Reload configuration
-            reload_program_state()
+            if was_active and runner is not None:
+                runner.program_id = new_id
             broadcast_status()
             
             return jsonify({
@@ -3602,7 +3969,8 @@ def rename_program():
                 except Exception as e:
                     print(f"Error updating JSON name: {e}")
                     
-            active_program = os.getenv("ACTIVE_PROGRAM", "sebile")
+            _update_program_references(program_id, program_id, new_name)
+            active_program = get_active_program() or os.getenv("ACTIVE_PROGRAM", "sebile")
             return jsonify({
                 'status': 'success',
                 'new_id': program_id,
@@ -3719,7 +4087,22 @@ def save_program_profile():
         with open(json_path, 'w', encoding='utf-8') as f:
             json.dump(card_to_write, f, indent=2, ensure_ascii=False)
 
-        return jsonify({'status': 'success'})
+        updated_name = (card_to_write['data'].get('name') or '').strip()
+        if updated_name:
+            _update_program_references(program_id, program_id, updated_name)
+
+        from core.mood_inversion import get_program_mood_metadata
+        theme = load_theme(program_id)
+        mood_meta = get_program_mood_metadata(program_id)
+        broadcast_status()
+
+        return jsonify({
+            'status': 'success',
+            'program_id': program_id,
+            'character_name': updated_name or program_id.title(),
+            'theme': theme,
+            'mood_meta': mood_meta,
+        })
     except Exception as e:
         traceback.print_exc()
         return jsonify({'error': str(e)}), 500

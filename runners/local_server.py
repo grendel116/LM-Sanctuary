@@ -374,20 +374,35 @@ def _get_http_session() -> requests.Session:
     return _http_session
 
 def _has_windows_rocm_sdk() -> bool:
-    """Checks whether the full AMD ROCm/HIP BLAS runtime (hipblas.dll) is loadable on Windows.
-    Standard AMD Adrenalin display drivers install amdhip64_*.dll into System32,
-    but llama.cpp's win-rocm backend (ggml-hip.dll) also requires hipblas.dll and rocblas.dll
-    from the external AMD ROCm SDK. Without hipblas.dll, ggml-hip.dll fails LoadLibrary and
-    llama-server runs on CPU with 0 GPU devices.
+    """Checks whether an external system-wide AMD HIP SDK (hipblas.dll + rocblas.dll) is on disk for llama-server.exe.
+    Note: Do NOT use ctypes.WinDLL('hipblas.dll') here, because PyTorch's in-process _rocm_sdk_core wheel preloads
+    hipblas.dll into Python's own address space even when standalone llama-server.exe has no system HIP SDK on PATH.
     """
     if os.name != "nt":
         return False
-    try:
-        import ctypes
-        ctypes.WinDLL("hipblas.dll")
-        return True
-    except Exception:
-        return False
+    import sys
+    venv_prefix = os.path.normcase(os.path.abspath(sys.prefix))
+    candidate_dirs = []
+    hip_path = os.environ.get("HIP_PATH", "").strip()
+    if hip_path:
+        candidate_dirs.append(os.path.join(hip_path, "bin"))
+    for p in os.environ.get("PATH", "").split(os.pathsep):
+        p = p.strip().strip('"')
+        if p:
+            candidate_dirs.append(p)
+    found_hipblas = False
+    found_rocblas = False
+    for d in candidate_dirs:
+        norm_d = os.path.normcase(os.path.abspath(d))
+        if norm_d.startswith(venv_prefix) or "site-packages" in norm_d:
+            continue
+        if os.path.isfile(os.path.join(d, "hipblas.dll")):
+            found_hipblas = True
+        if os.path.isfile(os.path.join(d, "rocblas.dll")):
+            found_rocblas = True
+        if found_hipblas and found_rocblas:
+            return True
+    return False
 
 
 def has_gpu_devices() -> bool:
@@ -760,15 +775,27 @@ def start_local_server(model_key=None):
         if not stopped:
             return False, message
     elif not has_gpu_devices():
-        print(f"[llama-runner] Installed llama-server ({installed_type}) detected 0 GPU devices; reinstalling...", flush=True)
+        if os.name == "nt" and gpu_type != "vulkan":
+            print(f"[llama-runner] Installed llama-server ({installed_type}) detected 0 GPU devices; switching to Vulkan backend...", flush=True)
+            gpu_type = "vulkan"
+            global _cached_gpu_type
+            _cached_gpu_type = "vulkan"
+        else:
+            print(f"[llama-runner] Installed llama-server ({installed_type}) detected 0 GPU devices; reinstalling...", flush=True)
         reinstall = True
         stopped, message = stop_local_server()
         if not stopped:
             return False, message
             
     if reinstall:
-        if not download_llama_server():
+        if not download_llama_server(override_gpu_type=gpu_type):
             return False, "Failed download"
+        if os.name == "nt" and gpu_type != "vulkan" and not has_gpu_devices():
+            print(f"[llama-runner] Downloaded '{gpu_type}' build detected 0 GPU devices; switching to Vulkan backend...", flush=True)
+            gpu_type = "vulkan"
+            _cached_gpu_type = "vulkan"
+            if not download_llama_server(override_gpu_type="vulkan"):
+                return False, "Failed Vulkan download"
         try:
             with open(gpu_type_file, "w") as f:
                 f.write(gpu_type)

@@ -17,6 +17,7 @@ def get_whisper_model():
         with _model_lock:
             if _model is None:
                 try:
+                    os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
                     from faster_whisper import WhisperModel
                     model_size = os.getenv("LOCAL_STT_MODEL", "tiny.en")
                     cpu_threads = max(2, min(8, (os.cpu_count() or 4) // 2))

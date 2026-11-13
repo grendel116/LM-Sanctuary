@@ -1327,10 +1327,12 @@ header {
     cursor: pointer;
 }
 .modal-content {
-    margin: auto;
+    margin: 0 auto;
     display: block;
     max-width: 90%;
-    max-height: 80vh;
+    max-height: 74vh;
+    min-height: 0;
+    flex-shrink: 1;
     border-radius: 16px;
     border: 1px solid var(--border-color);
     box-shadow: 0 10px 40px rgba(0, 0, 0, 0.6);
@@ -1343,13 +1345,16 @@ header {
 }
 .close-modal {
     position: absolute;
-    top: 30px;
-    right: 35px;
+    top: 24px;
+    right: 32px;
+    z-index: 10005;
+    line-height: 1;
     color: #f1f1f1;
     font-size: 40px;
     font-weight: bold;
     transition: 0.3s;
     cursor: pointer;
+    user-select: none;
 }
 .close-modal:hover,
 .close-modal:focus {
@@ -1367,6 +1372,7 @@ header {
     align-items: center;
     justify-content: center;
     pointer-events: auto;
+    cursor: default;
 }
 .gallery-nav-bar {
     display: flex;
@@ -1608,7 +1614,8 @@ header {
     }
 }
 
-.message-image-container {
+.message-image-container,
+.message-video-container {
     position: relative;
     display: inline-block;
     max-width: 100%;
@@ -1616,9 +1623,14 @@ header {
     overflow: hidden;
     margin: 8px 0 2px 0;
 }
-.message-image-container img {
+.message-image-container img,
+.message-video-container video {
     display: block;
     margin: 0;
+}
+.message-video-container .image-actions-overlay {
+    top: 8px;
+    bottom: auto;
 }
 .image-actions-overlay {
     position: absolute;
@@ -1635,7 +1647,8 @@ header {
 .message-image-container:has(.image-loading-overlay) .image-actions-overlay {
     display: none;
 }
-.message-image-container:has(img):not(.is-deleted-slot):hover .image-actions-overlay {
+.message-image-container:has(img):not(.is-deleted-slot):hover .image-actions-overlay,
+.message-video-container:has(video):hover .image-actions-overlay {
     opacity: 1;
 }
 .image-action-btn {

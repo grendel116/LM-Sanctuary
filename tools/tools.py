@@ -19,8 +19,12 @@ _search_executor = concurrent.futures.ThreadPoolExecutor(max_workers=10)
 active_running_tools = {}
 _active_tools_lock = threading.Lock()
 
+MAX_IMAGES_PER_ROW = 3
+
 current_session_id = contextvars.ContextVar('current_session_id', default='default')
 current_speaker_id = contextvars.ContextVar('current_speaker_id', default=None)
+current_portrait_slot_callback = contextvars.ContextVar('current_portrait_slot_callback', default=None)
+current_turn_image_budget = contextvars.ContextVar('current_turn_image_budget', default=None)
 session_tool_calls = {}
 background_tasks = {}
 session_tool_calls_lock = threading.Lock()
@@ -1320,6 +1324,12 @@ def apply_comfy_workflow(workflow_path: str, parameters: dict, save_path: str, s
     if not os.path.exists(workflow_path):
         return f"Error: Workflow template not found at '{workflow_path}'"
 
+    budget_ref = current_turn_image_budget.get()
+    if isinstance(budget_ref, list) and budget_ref:
+        if budget_ref[0] <= 0:
+            return f"Error: Maximum of {MAX_IMAGES_PER_ROW} images per message row reached."
+        budget_ref[0] -= 1
+
     cancel_event = current_event()
     try:
         from adapters.vram_orchestrator import start_img
@@ -1363,7 +1373,7 @@ def generate_local_image(prompt: str, count: int = 3, program_id: str = None) ->
     
     Args:
         prompt: A prompt describing what you are doing or the scene/expression.
-        count: Number of images to generate (defaults to 3 for initial portrait generation, 1 for single slot reroll).
+        count: Number of images to generate, from 1 to 3 (defaults to 3 for initial portrait generation, 1 for single slot reroll).
         program_id: Optional program ID whose positive/negative image details and portraits folder should be used.
         
     Returns:
@@ -1415,20 +1425,30 @@ def generate_local_image(prompt: str, count: int = 3, program_id: str = None) ->
     base_timestamp = int(time.time() * 1000)
     portraits_dir = os.path.normpath(os.path.join(root_dir, "core", "programs", active_program, "portraits"))
     os.makedirs(portraits_dir, exist_ok=True)
-    num_images = max(1, int(count or 3))
+    num_images = max(1, min(MAX_IMAGES_PER_ROW, int(count or MAX_IMAGES_PER_ROW)))
+    budget_ref = current_turn_image_budget.get()
+    if isinstance(budget_ref, list) and budget_ref:
+        if budget_ref[0] <= 0:
+            return f"Error: Maximum of {MAX_IMAGES_PER_ROW} images per message row reached."
+        num_images = min(num_images, budget_ref[0])
+        budget_ref[0] -= num_images
 
     local_paths = []
+    emitted_indices = set()
+
     def remove_cancelled_portraits():
-        for path in local_paths:
+        for idx, path in enumerate(local_paths):
+            if idx in emitted_indices:
+                continue
             for candidate in (path, os.path.splitext(path)[0] + ".json"):
                 if os.path.exists(candidate):
                     os.remove(candidate)
 
-    # Execute pure in-process DirectML GPU diffusion engine
     try:
         from adapters.vram_orchestrator import start_img
         from core.engine_diffusion import generate_portrait_image
         from runners.runner import cancelled_sessions
+        from utils import media_events
 
         cancel_event = current_event()
         start_img(cancel_event=cancel_event)
@@ -1446,27 +1466,10 @@ def generate_local_image(prompt: str, count: int = 3, program_id: str = None) ->
             local_filenames.append(local_filename)
             local_paths.append(os.path.join(portraits_dir, local_filename))
 
-        if num_images == 1:
-            generate_portrait_image(
-                prompt=final_prompt,
-                negative_prompt=final_negative,
-                save_path=local_paths[0],
-                cancel_event=cancel_event,
-            )
-        else:
-            generate_portrait_image(
-                prompt=final_prompt,
-                negative_prompt=final_negative,
-                save_paths=local_paths,
-                cancel_event=cancel_event,
-            )
-
-        if cancel_event and cancel_event.is_set():
-            remove_cancelled_portraits()
-            return "Error: Portrait generation cancelled by user."
-        markdown_links = []
-        for stem, local_filename in zip(stems, local_filenames):
-            json_path = os.path.join(portraits_dir, f"{stem}.json")
+        def _write_sidecar(idx: int) -> None:
+            if idx < 0 or idx >= len(stems):
+                return
+            json_path = os.path.join(portraits_dir, f"{stems[idx]}.json")
             try:
                 with open(json_path, "w", encoding="utf-8") as jf:
                     json.dump(
@@ -1482,12 +1485,53 @@ def generate_local_image(prompt: str, count: int = 3, program_id: str = None) ->
                     )
             except Exception:
                 pass
+
+        slot_cb = current_portrait_slot_callback.get()
+        on_ready_hook = None
+        if slot_cb is not None:
+            def _handle_slot_ready(idx: int, saved_path: str) -> None:
+                if idx < 0 or idx >= len(local_filenames):
+                    return
+                if not saved_path or not os.path.exists(saved_path):
+                    return
+                _write_sidecar(idx)
+                emitted_indices.add(idx)
+                media_events.notify(active_program)
+                slot_cb(idx, f"/images/portraits/{local_filenames[idx]}")
+            on_ready_hook = _handle_slot_ready
+
+        if num_images == 1:
+            generate_portrait_image(
+                prompt=final_prompt,
+                negative_prompt=final_negative,
+                save_path=local_paths[0],
+                cancel_event=cancel_event,
+                on_image_ready=on_ready_hook,
+            )
+        else:
+            generate_portrait_image(
+                prompt=final_prompt,
+                negative_prompt=final_negative,
+                save_paths=local_paths,
+                cancel_event=cancel_event,
+                on_image_ready=on_ready_hook,
+            )
+
+        if cancel_event and cancel_event.is_set():
+            remove_cancelled_portraits()
+            return "Error: Portrait generation cancelled by user."
+
+        markdown_links = []
+        for idx, local_filename in enumerate(local_filenames):
+            if not os.path.exists(local_paths[idx]):
+                continue
+            if idx not in emitted_indices:
+                _write_sidecar(idx)
             markdown_links.append(f"![Portrait](/images/portraits/{local_filename})")
 
         if cancel_event and cancel_event.is_set():
             remove_cancelled_portraits()
             return "Error: Portrait generation cancelled by user."
-        from utils import media_events
         media_events.notify(active_program)
         return "\n".join(markdown_links)
     except Exception as e:

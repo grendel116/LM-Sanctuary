@@ -128,9 +128,11 @@ def _cancel_matching(matches, timeout):
         for operation in operations:
             operation.cancelled.set()
         active_kinds = {operation.kind for operation in operations if operation.active}
-    if active_kinds.intersection({"generate_local_image", "apply_comfy_workflow"}):
-        from core.engine_diffusion import unload_diffusion_models
-        unload_diffusion_models()
+    has_local_diffusion = bool(active_kinds.intersection({"generate_local_image", "apply_comfy_workflow"}))
+    if has_local_diffusion:
+        from core.engine_diffusion import interrupt_diffusion_generation, unload_diffusion_models
+        if not interrupt_diffusion_generation():
+            unload_diffusion_models(kill_worker=True)
     interrupt_error = None
     if "generate_video_from_image" in active_kinds:
         from variables.settings import COMFYUI_SERVER_URL
@@ -141,7 +143,13 @@ def _cancel_matching(matches, timeout):
             print(f"[CANCEL] ComfyUI interrupt unavailable: {exc}", flush=True)
             interrupt_error = exc
     for operation in operations:
-        if not operation.finished.wait(timeout):
+        if has_local_diffusion:
+            if not operation.finished.wait(min(5.0, timeout)):
+                from core.engine_diffusion import unload_diffusion_models
+                unload_diffusion_models(kill_worker=True)
+                if not operation.finished.wait(max(1.0, timeout - 5.0)):
+                    raise RuntimeError("Image generation did not stop in time.")
+        elif not operation.finished.wait(timeout):
             raise RuntimeError("Image generation did not stop in time.")
     if interrupt_error:
         raise RuntimeError(f"Failed to interrupt ComfyUI: {interrupt_error}") from interrupt_error

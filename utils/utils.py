@@ -423,21 +423,33 @@ def _execute_emulated_tool(tool_name: str, args_str: str) -> tuple[dict, str]:
     return parsed_args, str(output)
 
 
-def _get_safe_local_path(image_url: str) -> str | None:
+def _get_safe_local_path(image_url: str, program_id: str = None) -> str | None:
     """Converts an image URL into a safe relative local path for active workspace."""
-    if "/images/" not in image_url:
+    if not image_url or "/images/" not in image_url:
         return None
 
-    raw_path = image_url.split("/images/")[-1].replace("\\", "/")
+    clean_url, _, query = image_url.partition("?")
+    if not program_id and query:
+        from urllib.parse import parse_qs
+        q_prog = (parse_qs(query).get("program_id") or [None])[0]
+        if q_prog:
+            program_id = "".join(c for c in q_prog if c.isalnum() or c in "_-")
+
+    raw_path = clean_url.split("/images/")[-1].replace("\\", "/")
     safe_parts = [
         "".join(c for c in part if c.isalnum() or c in "._-")
         for part in raw_path.split("/")
-        if part
+        if part and part not in (".", "..")
     ]
-    
-    cleaned_parts = [p for p in safe_parts if p]
+
+    cleaned_parts = [p for p in safe_parts if p and p not in (".", "..")]
     if not cleaned_parts:
         return None
+
+    if program_id:
+        explicit = Path("core", "programs", program_id, *cleaned_parts)
+        if explicit.exists():
+            return str(explicit)
 
     active_program = get_active_program()
     primary = Path("core", "programs", active_program, *cleaned_parts)
@@ -452,7 +464,7 @@ def _get_safe_local_path(image_url: str) -> str | None:
                 if cand.exists():
                     return str(cand)
 
-    return str(primary)
+    return str(Path("core", "programs", program_id or active_program, *cleaned_parts))
 
 
 def strip_story(text: str) -> str:

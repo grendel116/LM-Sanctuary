@@ -46,10 +46,26 @@ load_dotenv()
 LOCAL_SERVER_URL = os.environ.get("LOCAL_SERVER_URL")
 
 # --- PRE-COMPILED REGULAR EXPRESSIONS ---
-IMAGE_EMBED_RE = re.compile(r"(?<!\!)(\[[^\]]*\]\(/images/(?:portraits|media)/[^)]+\))")
+MAX_IMAGES_PER_ROW = 3
+MARKDOWN_MEDIA_RE = re.compile(r"!\[[^\]]*\]\([^)]+\)")
+IMAGE_EMBED_RE = re.compile(r"(?<!\!)(\[[^\]]*\]\(/images/(?:portraits|media|uploads)/[^)]+\))")
 RAW_IMAGE_PATH_RE = re.compile(
-    r"(?<![\([/])(/images/(?:portraits|media)/[a-zA-Z0-9_\-\.]+\.(?:png|jpg|jpeg|webp|gif|mp4))"
+    r"(?<![\([/])(/images/(?:portraits|media|uploads)/[a-zA-Z0-9_\-\.]+\.(?:png|jpg|jpeg|webp|gif|mp4|webm))"
 )
+
+
+def _clamp_markdown_images(text: str, max_images: int = MAX_IMAGES_PER_ROW) -> str:
+    if not text:
+        return text
+    seen = 0
+
+    def _keep_up_to_limit(match: re.Match) -> str:
+        nonlocal seen
+        seen += 1
+        return match.group(0) if seen <= max_images else ""
+
+    clamped = MARKDOWN_MEDIA_RE.sub(_keep_up_to_limit, text)
+    return re.sub(r"\n{3,}", "\n\n", clamped).strip() if seen > max_images else text
 
 
 def _media_url_pattern(path: str) -> str:
@@ -513,6 +529,7 @@ class BaseProgramRunner:
         best_pending, best_iter, nudges_since_progress = None, 0, 0
         MAX_PLAN_ITERATIONS = 300
         all_tool_calls = []
+        turn_image_budget = [MAX_IMAGES_PER_ROW]
         final_response_text = ""
         completed_final_turn = False
         target_model = model if (model and model != "local-llm") else os.getenv("LOCAL_MODEL_NAME")
@@ -593,18 +610,22 @@ class BaseProgramRunner:
                 clean_text = _strip_tool_calls(bot_response_text, matches)
 
                 tools.current_speaker_id.set(speaker_id)
+                budget_token = tools.current_turn_image_budget.set(turn_image_budget)
                 loop = asyncio.get_running_loop()
-                tasks = [
-                    loop.run_in_executor(
-                        None,
-                        contextvars.copy_context().run,
-                        _execute_emulated_tool,
-                        m.group(1),
-                        m.group(2),
-                    )
-                    for m in matches
-                ]
-                raw_results = await asyncio.gather(*tasks)
+                try:
+                    tasks = [
+                        loop.run_in_executor(
+                            None,
+                            contextvars.copy_context().run,
+                            _execute_emulated_tool,
+                            m.group(1),
+                            m.group(2),
+                        )
+                        for m in matches
+                    ]
+                    raw_results = await asyncio.gather(*tasks)
+                finally:
+                    tools.current_turn_image_budget.reset(budget_token)
 
                 results = [
                     (_normalize_tool_name(m.group(1)), parsed_args["kwargs"], output)
@@ -696,7 +717,7 @@ class BaseProgramRunner:
                             "messages": [{"role": "user", "content": prompt}],
                             "temperature": temperature,
                             "max_tokens": kwargs.get("max_tokens", 128),
-                            "cache_prompt": True,
+                            "cache_prompt": False,
                         }
                         if isinstance(DISABLED_THINKING, dict):
                             rw_payload.update(DISABLED_THINKING)
@@ -846,6 +867,7 @@ class BaseProgramRunner:
             card = _load_card_data(active_prog)
             prog_name = card.get("name") or active_prog.title()
 
+            text = _clamp_markdown_images(text)
             msg = {
                 "id": msg_id,
                 "role": role,
@@ -1000,8 +1022,8 @@ class BaseProgramRunner:
         winning_mode = await self._get_inversion_mode(session_id)
         return get_directive(PROGRAMS_DIR, get_active_program(), winning_mode) if winning_mode else ""
 
-    def _delete_local_image(self, image_url: str) -> bool:
-        local_path = _get_safe_local_path(image_url) if image_url else None
+    def _delete_local_image(self, image_url: str, program_id: str = None) -> bool:
+        local_path = _get_safe_local_path(image_url, program_id=program_id) if image_url else None
         if not local_path or not os.path.exists(local_path):
             return False
 
@@ -1370,19 +1392,24 @@ class OpenSourceRunner(BaseProgramRunner):
 
             return [p for p in pairs.values() if p.get("name")]
 
-        def _extract_media_items(self, text: str, img_url: str, tool_calls: list) -> list:
+        def _extract_media_items(self, text: str, img_url: str, tool_calls: list, video_url: str = None) -> list:
             media = []
             seen_urls = set()
 
             def _add_media(url: str):
+                if len(media) >= MAX_IMAGES_PER_ROW:
+                    return
                 if url and url not in seen_urls and not url.startswith("data:"):
                     seen_urls.add(url)
-                    media.append({"url": url, "type": "video" if url.lower().endswith(".mp4") else "image"})
+                    clean_ext = url.split("?", 1)[0].lower()
+                    is_video = clean_ext.endswith((".mp4", ".webm"))
+                    media.append({"url": url, "type": "video" if is_video else "image"})
 
             for match in re.finditer(r"!\[([^\]]*)\]\(([^)]+)\)", text):
                 _add_media(match.group(2))
 
             _add_media(img_url)
+            _add_media(video_url)
 
             for tc in tool_calls or []:
                 if tc.get("type") == "response" and (resp := tc.get("response")):
@@ -1395,7 +1422,7 @@ class OpenSourceRunner(BaseProgramRunner):
             text = msg.get("text", "") or ""
             tool_calls = msg.get("tool_calls", [])
 
-            media = self._extract_media_items(text, msg.get("image_url"), tool_calls)
+            media = self._extract_media_items(text, msg.get("image_url"), tool_calls, msg.get("video_url"))
             clean_text = re.sub(r"!\[[^\]]*\]\([^)]+\)", "", text).strip()
             for marker in ("*(Generation cancelled)*", "*(Generation stopped)*", "(Generation cancelled)", "(Generation stopped)"):
                 clean_text = clean_text.replace(marker, "")
@@ -1420,11 +1447,13 @@ class OpenSourceRunner(BaseProgramRunner):
                 if image_prompt:
                     m.setdefault("prompt", image_prompt)
                 if m.get("url"):
-                    local_img = _get_safe_local_path(m["url"])
+                    clean_url_path = m["url"].split("?", 1)[0]
+                    is_user_upload = clean_url_path.startswith("/images/uploads/")
+                    local_img = _get_safe_local_path(m["url"], program_id=sender_id if role == "program" else None)
                     if local_img:
-                        norm_local = os.path.normpath(local_img)
-                        progs_norm = os.path.normpath(str(PROGRAMS_DIR)) + os.sep
-                        if norm_local.startswith(progs_norm):
+                        norm_local = os.path.abspath(local_img)
+                        progs_norm = os.path.abspath(str(PROGRAMS_DIR)) + os.sep
+                        if not is_user_upload and role == "program" and norm_local.startswith(progs_norm):
                             rel_prog = norm_local[len(progs_norm):].split(os.sep, 1)[0]
                             if rel_prog:
                                 m.setdefault("program_id", rel_prog)
@@ -1444,13 +1473,14 @@ class OpenSourceRunner(BaseProgramRunner):
 
             if not sender_id and role == "program":
                 sender_id = next((m.get("program_id") for m in media if m.get("program_id")), None) or get_active_program()
-            if role == "program" and sender_id and not sender_name:
+            if role == "program" and sender_id:
                 try:
                     from core.program_config import _load_card_data
                     s_card = _load_card_data(sender_id)
-                    sender_name = (s_card.get("name") if s_card else None) or sender_id.title()
+                    card_name = (s_card.get("name") if s_card else None)
+                    sender_name = (card_name.strip() if card_name and card_name.strip() else None) or sender_name or sender_id.title()
                 except Exception:
-                    sender_name = sender_id.title()
+                    sender_name = sender_name or sender_id.title()
 
             return {
                 "id": msg.get("id", ""),
@@ -1826,21 +1856,22 @@ class OpenSourceRunner(BaseProgramRunner):
                         return True
                 return False
 
-        async def delete_image_from_session(self, session_id: str, image_url: str, keep_message: bool = False) -> bool:
+        async def delete_image_from_session(self, session_id: str, image_url: str, keep_message: bool = False, program_id: str = None) -> bool:
             with self._lock:
                 if session_id not in self.sessions_history:
                     self._load_session_from_disk(session_id)
 
                 history = self.sessions_history.get(session_id)
                 if history is None:
-                    return self._delete_local_image(image_url)
+                    return self._delete_local_image(image_url, program_id=program_id)
 
+                clean_path = (image_url or "").split("?", 1)[0]
                 modified = False
                 indices_to_delete = set()
                 pattern = r"!\[[^\]]*\]\(" + _media_url_pattern(image_url) + r"\)"
 
                 for i, msg in enumerate(history):
-                    if msg.get("text") and image_url in msg["text"]:
+                    if clean_path and msg.get("text") and clean_path in msg["text"]:
                         remaining_text = re.sub(r"\n{2,}", "\n", re.sub(pattern, "", msg["text"])).strip()
                         if not keep_message and not re.sub(r"^[:\s\-\*]+|[:\s\-\*]+$", "", remaining_text):
                             indices_to_delete.add(i)
@@ -1848,16 +1879,22 @@ class OpenSourceRunner(BaseProgramRunner):
                             msg["text"] = remaining_text
                         modified = True
 
-                    if msg.get("image_url") == image_url:
+                    if clean_path and msg.get("image_url") and msg["image_url"].split("?", 1)[0] == clean_path:
                         msg["image_url"] = None
-                        if not keep_message and not (msg.get("text") or "").strip():
+                        if not keep_message and not (msg.get("text") or "").strip() and not msg.get("video_url"):
                             indices_to_delete.add(i)
                         modified = True
 
-                    if tool_calls := msg.get("tool_calls"):
+                    if clean_path and msg.get("video_url") and msg["video_url"].split("?", 1)[0] == clean_path:
+                        msg["video_url"] = None
+                        if not keep_message and not (msg.get("text") or "").strip() and not msg.get("image_url"):
+                            indices_to_delete.add(i)
+                        modified = True
+
+                    if clean_path and (tool_calls := msg.get("tool_calls")):
                         cleared_call_ids = set()
                         for tc in tool_calls:
-                            if tc.get("type") == "response" and tc.get("response") and image_url in tc["response"]:
+                            if tc.get("type") == "response" and tc.get("response") and clean_path in tc["response"]:
                                 tc["response"] = re.sub(r"\n{2,}", "\n", re.sub(pattern, "", tc["response"])).strip()
                                 if not keep_message and not tc["response"]:
                                     cleared_call_ids.add(tc.get("id"))
@@ -1891,7 +1928,7 @@ class OpenSourceRunner(BaseProgramRunner):
                         del history[idx]
                         modified = True
 
-                file_deleted = self._delete_local_image(image_url)
+                file_deleted = self._delete_local_image(image_url, program_id=program_id)
                 if modified:
                     self._save_session_to_disk(session_id)
 
@@ -1907,10 +1944,16 @@ class OpenSourceRunner(BaseProgramRunner):
             slot_index: int = None,
             speaker_id: str = None,
         ) -> bool:
-            def _insert_at_slot(text_str: str, new_md: str, idx: int = None) -> str:
-                img_matches = list(re.finditer(r"!\[[^\]]*\]\([^)]+\)", text_str or ""))
+            def _insert_at_slot(text_str: str, new_md: str, idx: int = None, replace_when_full: bool = False) -> str:
+                img_matches = list(MARKDOWN_MEDIA_RE.finditer(text_str or ""))
                 if not img_matches:
                     return f"{text_str.strip()}\n{new_md}".strip() if (text_str or "").strip() else new_md
+                if len(img_matches) >= MAX_IMAGES_PER_ROW:
+                    if not replace_when_full:
+                        return text_str
+                    rep_idx = idx if (idx is not None and 0 <= idx < len(img_matches)) else len(img_matches) - 1
+                    target_match = img_matches[rep_idx]
+                    return text_str[:target_match.start()] + new_md + text_str[target_match.end():]
                 pos_idx = idx if (idx is not None and 0 <= idx <= len(img_matches)) else len(img_matches)
                 if pos_idx == len(img_matches):
                     insert_pos = img_matches[-1].end()
@@ -1974,6 +2017,17 @@ class OpenSourceRunner(BaseProgramRunner):
                         target_msg = next((m for m in history if m.get("id") == msg_id), None)
 
                     if target_msg is not None:
+                        existing_media = self._extract_media_items(
+                            target_msg.get("text", ""),
+                            target_msg.get("image_url"),
+                            target_msg.get("tool_calls", []),
+                            target_msg.get("video_url"),
+                        )
+                        if len(existing_media) >= MAX_IMAGES_PER_ROW and not old_path:
+                            if new_image_url:
+                                self._delete_local_image(new_image_url, program_id=speaker_id)
+                            return False
+                        replace_when_full = bool(old_path)
                         inserted_in_tc = False
                         if tool_calls := target_msg.get("tool_calls"):
                             for tc in tool_calls:
@@ -1981,7 +2035,9 @@ class OpenSourceRunner(BaseProgramRunner):
                                     "generate_local_image",
                                     "generate_program_portrait",
                                 ):
-                                    tc["response"] = _insert_at_slot(tc.get("response", ""), new_md, slot_index)
+                                    tc["response"] = _insert_at_slot(
+                                        tc.get("response", ""), new_md, slot_index, replace_when_full=replace_when_full
+                                    )
                                     inserted_in_tc = True
                                     break
                             if new_prompt:
@@ -1989,7 +2045,9 @@ class OpenSourceRunner(BaseProgramRunner):
                                     if tc.get("type") == "call" and isinstance(tc.get("args"), dict) and "prompt" in tc["args"]:
                                         tc["args"]["prompt"] = new_prompt
                         if not inserted_in_tc or target_msg.get("text"):
-                            target_msg["text"] = _insert_at_slot(target_msg.get("text", ""), new_md, slot_index)
+                            target_msg["text"] = _insert_at_slot(
+                                target_msg.get("text", ""), new_md, slot_index, replace_when_full=replace_when_full
+                            )
                         if new_prompt:
                             target_msg["prompt"] = new_prompt
                         modified = True

@@ -73,28 +73,63 @@ REQUIRED_IMPORT_SPECS = (
 )
 
 
+ROCM_WIN_RELEASE = "rocm-rel-7.2.1"
+ROCM_WIN_BASE_URL = f"https://repo.radeon.com/rocm/windows/{ROCM_WIN_RELEASE}"
+ROCM_WIN_PY312_WHEELS = (
+    f"{ROCM_WIN_BASE_URL}/rocm_sdk_core-7.2.1-py3-none-win_amd64.whl",
+    f"{ROCM_WIN_BASE_URL}/rocm_sdk_devel-7.2.1-py3-none-win_amd64.whl",
+    f"{ROCM_WIN_BASE_URL}/rocm_sdk_libraries_custom-7.2.1-py3-none-win_amd64.whl",
+    f"{ROCM_WIN_BASE_URL}/rocm-7.2.1.tar.gz",
+    f"{ROCM_WIN_BASE_URL}/torch-2.9.1%2Brocm7.2.1-cp312-cp312-win_amd64.whl",
+    f"{ROCM_WIN_BASE_URL}/torchvision-0.24.1%2Brocm7.2.1-cp312-cp312-win_amd64.whl",
+    f"{ROCM_WIN_BASE_URL}/torchaudio-2.9.1%2Brocm7.2.1-cp312-cp312-win_amd64.whl",
+)
+
+
+def _detect_windows_gpu_names() -> str:
+    if os.name != "nt":
+        return ""
+    try:
+        return subprocess.check_output(
+            'powershell -NoProfile -Command "Get-CimInstance Win32_VideoController | Select-Object -ExpandProperty Name"',
+            shell=True,
+            text=True,
+            stderr=subprocess.DEVNULL,
+            timeout=5.0,
+        ).lower()
+    except Exception:
+        return ""
+
+
+def _supports_windows_amd_rocm(gpu_names: str) -> bool:
+    """Checks whether Windows has an RDNA3/RDNA4 Radeon GPU and HIP driver DLLs for native ROCm wheels."""
+    if os.name != "nt" or sys.version_info[:2] != (3, 12):
+        return False
+    sys32 = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32"
+    has_hip_driver = (sys32 / "amdhip64_7.dll").exists() or (sys32 / "amdhip64_6.dll").exists()
+    if not has_hip_driver:
+        return False
+    rdna3_plus_markers = (
+        "rx 7900", "rx 7800", "rx 7700", "rx 7600",
+        "rx 9070", "rx 9060",
+        "radeon pro w7", "radeon ai pro", "780m", "880m", "890m", "8060s", "8050s",
+    )
+    return any(marker in gpu_names for marker in rdna3_plus_markers)
+
+
 def detect_gpu_vendor() -> str:
-    """Detects GPU vendor ('nvidia', 'amd', 'intel', 'apple', or 'cpu')."""
+    """Detects GPU backend target ('nvidia', 'amd-rocm', 'amd', 'intel', 'apple', or 'cpu')."""
     if sys.platform == "darwin":
         return "apple"
 
     if os.name == "nt":
-        try:
-            out = subprocess.check_output(
-                'powershell -NoProfile -Command "Get-CimInstance Win32_VideoController | Select-Object -ExpandProperty Name"',
-                shell=True,
-                text=True,
-                stderr=subprocess.DEVNULL,
-                timeout=5.0,
-            ).lower()
-            if "nvidia" in out:
-                return "nvidia"
-            if "amd" in out or "radeon" in out:
-                return "amd"
-            if "intel" in out or "arc" in out:
-                return "intel"
-        except Exception:
-            pass
+        out = _detect_windows_gpu_names()
+        if "nvidia" in out:
+            return "nvidia"
+        if "amd" in out or "radeon" in out:
+            return "amd-rocm" if _supports_windows_amd_rocm(out) else "amd"
+        if "intel" in out or "arc" in out:
+            return "intel"
 
     try:
         subprocess.check_output(["nvidia-smi"], stderr=subprocess.DEVNULL, timeout=3.0)
@@ -174,44 +209,45 @@ def install_dependencies(force: bool = False) -> None:
     print(f"[Setup] Configuring Python {sys.version_info.major}.{sys.version_info.minor} environment for GPU: {gpu_vendor.upper()}...")
     subprocess.check_call([sys.executable, "-m", "pip", "install", "--upgrade", "pip"])
 
+    base_req_lines = [
+        line for line in REQUIREMENTS_FILE.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.strip().startswith("#")
+        and line.strip() not in ("torch", "torchvision", "torchaudio")
+        and not line.strip().startswith(("torch==", "torchvision==", "torchaudio==", "torch-directml"))
+    ]
+
     if gpu_vendor == "nvidia":
         print("[Setup] Installing CUDA-accelerated PyTorch for NVIDIA GPU...")
         try:
             subprocess.check_call([
                 sys.executable, "-m", "pip", "install",
-                "torch==2.4.1", "torchvision==0.19.1", "torchaudio==2.4.1",
+                "torch", "torchvision", "torchaudio",
                 "--index-url", "https://download.pytorch.org/whl/cu124",
             ])
         except subprocess.CalledProcessError:
             print("[Setup] Note: cu124 wheel unavailable for this Python version; installing default PyTorch...")
             subprocess.check_call([sys.executable, "-m", "pip", "install", "torch", "torchvision", "torchaudio"])
-
-        # Filter out torch-directml on NVIDIA systems so DirectML doesn't intercept CUDA
-        req_lines = [
-            line for line in REQUIREMENTS_FILE.read_text(encoding="utf-8").splitlines()
-            if line.strip() and not line.strip().startswith("#")
-            and not line.strip().startswith(("torch==", "torchvision==", "torchaudio==", "torch-directml"))
-        ]
-        subprocess.check_call([sys.executable, "-m", "pip", "install", *req_lines])
+        subprocess.check_call([sys.executable, "-m", "pip", "install", *base_req_lines])
+    elif os.name == "nt" and gpu_vendor == "amd-rocm":
+        print("[Setup] Installing native ROCm-accelerated PyTorch for Windows AMD Radeon GPU...")
+        subprocess.check_call([
+            sys.executable, "-m", "pip", "install", "--no-cache-dir",
+            *ROCM_WIN_PY312_WHEELS,
+        ])
+        subprocess.check_call([sys.executable, "-m", "pip", "install", *base_req_lines])
     elif os.name == "nt" and gpu_vendor in ("amd", "intel"):
         print(f"[Setup] Installing DirectML-accelerated PyTorch for Windows {gpu_vendor.upper()} GPU...")
         if sys.version_info[:2] <= (3, 12):
-            subprocess.check_call([sys.executable, "-m", "pip", "install", "-r", str(REQUIREMENTS_FILE)])
+            subprocess.check_call([
+                sys.executable, "-m", "pip", "install",
+                "torch==2.4.1", "torchvision==0.19.1", "torchaudio==2.4.1", "torch-directml",
+                *base_req_lines,
+            ])
         else:
             print("[Setup] Note: torch-directml requires Python <= 3.12; installing standard PyTorch packages...")
-            req_lines = [
-                line for line in REQUIREMENTS_FILE.read_text(encoding="utf-8").splitlines()
-                if line.strip() and not line.strip().startswith("#")
-                and not line.strip().startswith(("torch==", "torchvision==", "torchaudio==", "torch-directml"))
-            ]
-            subprocess.check_call([sys.executable, "-m", "pip", "install", "torch", "torchvision", "torchaudio", *req_lines])
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "torch", "torchvision", "torchaudio", *base_req_lines])
     else:
-        req_lines = [
-            line for line in REQUIREMENTS_FILE.read_text(encoding="utf-8").splitlines()
-            if line.strip() and not line.strip().startswith("#")
-            and not line.strip().startswith("torch-directml")
-        ]
-        subprocess.check_call([sys.executable, "-m", "pip", "install", *req_lines])
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "torch", "torchvision", "torchaudio", *base_req_lines])
 
     try:
         STAMP_FILE.write_text(expected_stamp, encoding="utf-8")

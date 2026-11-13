@@ -204,6 +204,7 @@ function applyHistoryState(data) {
 }
 
 const LIVE_ROW_SELECTOR = '.message-row:not(#welcome-message)';
+const MAX_IMAGES_PER_ROW = 3;
 
 // Drop every row, welcome included. The bottom sentinel is not a row and stays.
 function clearChatRows() {
@@ -242,8 +243,9 @@ function reconcileChat(history) {
 
     for (const msg of messages) {
         let row = msg.id ? rowsById.get(msg.id) : null;
+        const isRowGeneratingMedia = !!(row && row.querySelector('.image-loading-overlay'));
 
-        if (row && row.dataset.contentHash !== computeContentHash(msg)) {
+        if (row && !isRowGeneratingMedia && row.dataset.contentHash !== computeContentHash(msg)) {
             const fresh = buildMessageRow(msg);
             if (fresh) {
                 chatContainer.replaceChild(fresh, row);
@@ -1961,6 +1963,11 @@ function deleteSelectedChatSession() {
 
 // --- openAssistantModal ---
 async function openAssistantModal(defaultTab = 'program') {
+    if (currentGroupMeta && currentGroupMeta.is_group) {
+        selectedGroupProgramIds = [currentGroupMeta.host_id, ...(currentGroupMeta.guest_ids || [])].filter(Boolean);
+    } else if (activeProgramId) {
+        selectedGroupProgramIds = [activeProgramId];
+    }
     document.getElementById('assistant-modal').style.display = 'flex';
     switchAssistantModalTab(defaultTab);
     try {
@@ -1971,7 +1978,7 @@ async function openAssistantModal(defaultTab = 'program') {
                 if (p.id && p.theme) cacheProgramTheme(p.id, p.theme);
             });
             if (currentGroupMeta && currentGroupMeta.is_group) {
-                selectedGroupProgramIds = [currentGroupMeta.host_id, ...(currentGroupMeta.guest_ids || [])];
+                selectedGroupProgramIds = [currentGroupMeta.host_id, ...(currentGroupMeta.guest_ids || [])].filter(Boolean);
             } else {
                 selectedGroupProgramIds = [data.active];
             }
@@ -1990,7 +1997,7 @@ let isApplyingModalSelection = false;
 function closeAssistantModal(applySelection = true) {
     const modal = document.getElementById('assistant-modal');
     if (!modal) return;
-    const wasVisible = modal.style.display !== 'none';
+    const wasVisible = modal.style.display === 'flex';
     modal.style.display = 'none';
 
     if (!wasVisible || !applySelection || isApplyingModalSelection) return;
@@ -2902,6 +2909,25 @@ async function saveProgramPalette() {
         
         const data = await response.json();
         if (response.ok && data.status === 'success') {
+            if (data.theme) {
+                cacheProgramTheme(paletteTargetProgramId, data.theme);
+                if (currentGroupMeta && Array.isArray(currentGroupMeta.members)) {
+                    const member = currentGroupMeta.members.find(m => m && m.id === paletteTargetProgramId);
+                    if (member) member.theme = data.theme;
+                }
+                document.querySelectorAll('.message-row.program-row').forEach(row => {
+                    if ((row.dataset.senderId || activeProgramId) === paletteTargetProgramId) {
+                        row.querySelectorAll('.message.program').forEach(bubble => {
+                            applyThemeToBubble(bubble, data.theme);
+                        });
+                        const circle = row.querySelector('.avatar-circle.program-avatar');
+                        if (circle && data.theme.primary_accent) {
+                            circle.style.background = data.theme.primary_accent;
+                        }
+                    }
+                });
+            }
+
             const isMatch = !activeProgramId || 
                 paletteTargetProgramId === activeProgramId || 
                 (activeProgramName && activeProgramName.toLowerCase().replace(/[^a-z0-9]/g, '') === paletteTargetProgramId.toLowerCase().replace(/[^a-z0-9]/g, ''));
@@ -3090,11 +3116,94 @@ async function saveProgramProfile() {
         
         currentEditingProgramId = targetProgramId;
         currentEditingProgramOriginalName = newName;
+
+        if (originalProgramId !== targetProgramId) {
+            if (programThemesCache[originalProgramId]) {
+                programThemesCache[targetProgramId] = programThemesCache[originalProgramId];
+                delete programThemesCache[originalProgramId];
+            }
+            if (serverImagesByProgram[originalProgramId]) {
+                serverImagesByProgram[targetProgramId] = serverImagesByProgram[originalProgramId];
+                delete serverImagesByProgram[originalProgramId];
+            }
+            for (const [imgPath, owner] of Object.entries(imageOwners)) {
+                if (owner === originalProgramId) {
+                    imageOwners[imgPath] = targetProgramId;
+                }
+            }
+            if (currentGroupMeta && currentGroupMeta.is_group) {
+                if (currentGroupMeta.host_id === originalProgramId) {
+                    currentGroupMeta.host_id = targetProgramId;
+                }
+                if (Array.isArray(currentGroupMeta.guest_ids)) {
+                    currentGroupMeta.guest_ids = currentGroupMeta.guest_ids
+                        .map(id => id === originalProgramId ? targetProgramId : id)
+                        .filter((id, i, arr) => id && id !== currentGroupMeta.host_id && arr.indexOf(id) === i);
+                }
+                if (Array.isArray(currentGroupMeta.members)) {
+                    currentGroupMeta.members.forEach(m => {
+                        if (m && m.id === originalProgramId) {
+                            m.id = targetProgramId;
+                            m.name = newName;
+                        }
+                    });
+                }
+            }
+            if (Array.isArray(selectedGroupProgramIds)) {
+                selectedGroupProgramIds = selectedGroupProgramIds.map(id => id === originalProgramId ? targetProgramId : id);
+            }
+            document.querySelectorAll('.message-row.program-row').forEach(row => {
+                if (row.dataset.senderId === originalProgramId) {
+                    row.dataset.senderId = targetProgramId;
+                }
+            });
+            document.querySelectorAll('[data-sender-id]').forEach(el => {
+                if (el.getAttribute('data-sender-id') === originalProgramId) {
+                    el.setAttribute('data-sender-id', targetProgramId);
+                }
+            });
+            document.querySelectorAll('[data-speaker-id]').forEach(el => {
+                if (el.getAttribute('data-speaker-id') === originalProgramId) {
+                    el.setAttribute('data-speaker-id', targetProgramId);
+                }
+            });
+        } else if (currentGroupMeta && Array.isArray(currentGroupMeta.members)) {
+            const member = currentGroupMeta.members.find(m => m && m.id === targetProgramId);
+            if (member) member.name = newName;
+        }
+
+        if (data.theme) {
+            cacheProgramTheme(targetProgramId, data.theme);
+        }
         
         document.getElementById('program-profile-modal').style.display = 'none';
         
-        if (wasActive || activeProgramId === originalProgramId || activeProgramId === targetProgramId) {
-            await selectAssistant(targetProgramId);
+        const isGroupSession = !!(currentGroupMeta && currentGroupMeta.is_group);
+        const isGroupMember = isGroupSession && (
+            currentGroupMeta.host_id === targetProgramId ||
+            (currentGroupMeta.guest_ids || []).includes(targetProgramId)
+        );
+        const isActiveProgram = wasActive || activeProgramId === originalProgramId || activeProgramId === targetProgramId;
+
+        if (isGroupSession) {
+            if (isActiveProgram) {
+                activeProgramId = targetProgramId;
+                activeProgramName = data.character_name || newName;
+                if (data.theme) applyTheme(targetProgramId, data.theme);
+                if (data.mood_meta) applyProgramMoodMetadata(data.mood_meta);
+            }
+            if (isGroupMember || isActiveProgram) {
+                profileCacheBuster = Date.now();
+                await softReloadApp();
+            }
+            openAssistantModal();
+        } else if (isActiveProgram) {
+            activeProgramId = targetProgramId;
+            activeProgramName = data.character_name || newName;
+            if (data.theme) applyTheme(targetProgramId, data.theme);
+            if (data.mood_meta) applyProgramMoodMetadata(data.mood_meta);
+            profileCacheBuster = Date.now();
+            await softReloadApp();
         } else {
             openAssistantModal();
         }
@@ -4453,7 +4562,7 @@ function buildMessageRow(msg, isLive = false) {
 
     bubblesToCreate.forEach((item, idx) => {
         const isMediaItem = item.type === 'media';
-        const mediaList = isMediaItem ? (Array.isArray(item.content) ? item.content : [item.content]) : [];
+        const mediaList = isMediaItem ? (Array.isArray(item.content) ? item.content : [item.content]).slice(0, MAX_IMAGES_PER_ROW) : [];
         const isVideo = isMediaItem && mediaList.length === 1 && mediaList[0] && mediaList[0].type === 'video';
         const bubble = document.createElement('div');
         bubble.className = `message ${role}` + (isMediaItem ? ' image-message' : '');
@@ -4641,7 +4750,7 @@ function buildMessageRow(msg, isLive = false) {
             }
 
         } else if (item.type === 'media') {
-            const mediaList = Array.isArray(item.content) ? item.content : [item.content];
+            const mediaList = (Array.isArray(item.content) ? item.content : [item.content]).slice(0, MAX_IMAGES_PER_ROW);
             const portraitGrid = document.createElement('div');
             portraitGrid.className = 'portrait-grid';
             portraitGrid.dataset.msgId = msgId;
@@ -4651,8 +4760,8 @@ function buildMessageRow(msg, isLive = false) {
             }
 
             const isProgramPortraitRow = role === 'program' && mediaList.some(m => (m.url || '').includes('/images/portraits/'));
-            if (isProgramPortraitRow && mediaList.length > 0 && mediaList.length < 3) {
-                portraitGrid.dataset.deletedCount = String(3 - mediaList.length);
+            if (isProgramPortraitRow && mediaList.length > 0 && mediaList.length < MAX_IMAGES_PER_ROW) {
+                portraitGrid.dataset.deletedCount = String(MAX_IMAGES_PER_ROW - mediaList.length);
             }
 
             mediaList.forEach((mediaItem) => {
@@ -4662,17 +4771,7 @@ function buildMessageRow(msg, isLive = false) {
                 registerClientMedia(imgUrl, itemProgramId);
 
                 if (isVideoItem) {
-                    const videoContainer = document.createElement('div');
-                    videoContainer.className = 'message-video-container';
-                    
-                    const video = document.createElement('video');
-                    video.src = imgUrl;
-                    video.controls = true;
-                    video.style.maxWidth = '100%';
-                    video.style.maxHeight = '300px';
-                    video.style.borderRadius = '12px';
-                    
-                    videoContainer.appendChild(video);
+                    const videoContainer = createVideoCardElement(imgUrl, msgId, role, itemProgramId);
                     portraitGrid.appendChild(videoContainer);
                 } else {
                     const itemPrompt = mediaItem.prompt || sharedPrompt;
@@ -4700,8 +4799,9 @@ function buildMessageRow(msg, isLive = false) {
 // Shows a row the server did not produce: the user's just-sent turn, a transient notice,
 // or a voice-call record. Every stored turn arrives as a server message and goes to renderMessage.
 function appendLocalMessage(role, text, { imageUrl = null, timestamp = null, isTransient = false, isLive = false, id = null } = {}) {
+    const cleanMediaUrl = imageUrl ? imageUrl.split('?')[0].toLowerCase() : '';
     const media = imageUrl
-        ? [{ url: imageUrl, type: imageUrl.toLowerCase().endsWith('.mp4') ? 'video' : 'image' }]
+        ? [{ url: imageUrl, type: (cleanMediaUrl.endsWith('.mp4') || cleanMediaUrl.endsWith('.webm')) ? 'video' : 'image' }]
         : [];
     return renderMessage({
         id: id || localMessageId(),
@@ -5512,11 +5612,22 @@ async function loadServerImages() {
         if (data.image_owners) {
             imageOwners = { ...imageOwners, ...data.image_owners };
         }
+        if (data.uploads) {
+            serverUploads = data.uploads;
+        }
 
         const modal = document.getElementById('image-modal');
-        if (modal && modal.style.display !== 'none') {
+        if (modal && modal.style.display === 'flex') {
             const current = galleryImages[currentGalleryIndex];
-            galleryImages = getGalleryImages(currentModalProgramId);
+            const isUploadView = !currentModalProgramId && current && current.startsWith('/images/uploads/');
+            galleryImages = isUploadView ? getUploadGalleryImages() : getGalleryImages(currentModalProgramId);
+            if (current && !isProfileImage(current) && !galleryImages.includes(current)) {
+                const existsInDom = Array.from(document.querySelectorAll('.message-image-container img, .message-video-container video'))
+                    .some(el => getRelativePath(el.src) === current);
+                if (existsInDom) {
+                    galleryImages.unshift(current);
+                }
+            }
             if (galleryImages.length) {
                 const index = galleryImages.indexOf(current);
                 currentGalleryIndex = index < 0 ? 0 : index;
@@ -5536,6 +5647,12 @@ function registerClientMedia(url, programId = null) {
     if (!url) return;
     const rel = getRelativePath(url);
     if (!rel || isProfileImage(rel)) return;
+    if (rel.startsWith('/images/uploads/') && !programId) {
+        if (!serverUploads.some(u => getRelativePath(u) === rel)) {
+            serverUploads.unshift(rel);
+        }
+        return;
+    }
     const owner = programId || activeProgramId;
     if (owner) {
         imageOwners[rel] = owner;
@@ -5555,6 +5672,7 @@ function unregisterClientMedia(url) {
     const rel = getRelativePath(url);
     if (!rel) return;
     serverImages = serverImages.filter(u => getRelativePath(u) !== rel);
+    serverUploads = serverUploads.filter(u => getRelativePath(u) !== rel);
     galleryImages = galleryImages.filter(u => getRelativePath(u) !== rel);
     for (const progId of Object.keys(serverImagesByProgram)) {
         if (Array.isArray(serverImagesByProgram[progId])) {
@@ -5566,8 +5684,11 @@ function unregisterClientMedia(url) {
 
 // Helper to resolve the owner program ID for an image
 function resolveImageOwner(src, fallbackProgramId = null) {
-    if (!src) return fallbackProgramId || activeProgramId;
+    if (!src) return fallbackProgramId;
     const rel = getRelativePath(src);
+    if (rel.startsWith('/images/uploads/') && !fallbackProgramId) {
+        return null;
+    }
 
     if (imageOwners[rel]) {
         return imageOwners[rel];
@@ -5587,6 +5708,15 @@ function resolveImageOwner(src, fallbackProgramId = null) {
     return fallbackProgramId || activeProgramId;
 }
 
+function buildProgramMediaUrl(src, programId = null) {
+    if (!src) return '';
+    const rel = getRelativePath(src);
+    if (!programId || !rel.startsWith('/images/') || rel.startsWith('/images/uploads/')) {
+        return rel || src;
+    }
+    return `${rel}?program_id=${encodeURIComponent(programId)}`;
+}
+
 // Helper to check if a path refers to a profile picture
 function isProfileImage(path) {
     if (!path) return false;
@@ -5598,13 +5728,30 @@ function isProfileImage(path) {
 // --- getGalleryImages ---
 function getGalleryImages(targetProgramId = null) {
     const imgs = [];
-    const sourceList = (targetProgramId && serverImagesByProgram[targetProgramId])
+    const sourceList = (targetProgramId && Array.isArray(serverImagesByProgram[targetProgramId]))
         ? serverImagesByProgram[targetProgramId]
         : (!targetProgramId && Array.isArray(serverImages) ? serverImages : []);
 
     sourceList.forEach(img => {
         const rel = getRelativePath(img);
-        if (!isProfileImage(rel) && !imgs.includes(rel)) {
+        if (rel && !isProfileImage(rel) && !imgs.includes(rel)) {
+            imgs.push(rel);
+        }
+    });
+    return imgs;
+}
+
+function getUploadGalleryImages() {
+    const imgs = [];
+    (Array.isArray(serverUploads) ? serverUploads : []).forEach(img => {
+        const rel = getRelativePath(img);
+        if (rel && !isProfileImage(rel) && !imgs.includes(rel)) {
+            imgs.push(rel);
+        }
+    });
+    document.querySelectorAll('.message-row.user-row .message-image-container img, .message-row.user-row .message-video-container video').forEach(el => {
+        const rel = getRelativePath(el.src);
+        if (rel && !isProfileImage(rel) && !imgs.includes(rel)) {
             imgs.push(rel);
         }
     });
@@ -5612,28 +5759,49 @@ function getGalleryImages(targetProgramId = null) {
 }
 
 // --- expandImage ---
-function expandImage(src, speakerId = null) {
-    currentModalProgramId = speakerId || resolveImageOwner(src, (currentGroupMeta && currentGroupMeta.is_group) ? null : activeProgramId);
-    galleryImages = getGalleryImages(currentModalProgramId);
-    
-    if (galleryImages.length === 0) {
-        showCustomAlert("No Media", "No portraits or generated images exist for this character yet.");
-        return;
+async function expandImage(src, speakerId = null) {
+    const rawPath = src ? getRelativePath(src) : '';
+    const isProfile = isProfileImage(rawPath);
+    const isUpload = rawPath.startsWith('/images/uploads/');
+
+    if (isUpload && !speakerId) {
+        currentModalProgramId = null;
+        galleryImages = getUploadGalleryImages();
+    } else {
+        const fallbackOwner = (currentGroupMeta && currentGroupMeta.is_group) ? null : activeProgramId;
+        currentModalProgramId = speakerId || resolveImageOwner(src, fallbackOwner);
+        galleryImages = getGalleryImages(currentModalProgramId);
     }
 
-    let pathOnly = src ? getRelativePath(src) : '';
-    if (isProfileImage(pathOnly)) {
-        pathOnly = '';
-    }
-
-    if (pathOnly) {
-        currentGalleryIndex = galleryImages.indexOf(pathOnly);
-        if (currentGalleryIndex === -1) {
-            galleryImages.unshift(pathOnly);
+    if (isProfile) {
+        if (galleryImages.length === 0) {
+            await loadServerImages();
+            galleryImages = getGalleryImages(currentModalProgramId);
+        }
+        if (galleryImages.length === 0) {
+            showCustomAlert("No Media", "No portraits or generated images exist for this character yet.");
+            return;
+        }
+        currentGalleryIndex = 0;
+    } else {
+        if (rawPath) {
+            currentGalleryIndex = galleryImages.indexOf(rawPath);
+            if (currentGalleryIndex === -1) {
+                galleryImages.unshift(rawPath);
+                currentGalleryIndex = 0;
+            }
+        } else {
             currentGalleryIndex = 0;
         }
-    } else {
-        currentGalleryIndex = 0;
+
+        if (galleryImages.length === 0) {
+            showCustomAlert("No Media", "No portraits or generated images exist for this character yet.");
+            return;
+        }
+
+        if (!isUpload && currentModalProgramId && (!serverImagesByProgram[currentModalProgramId] || serverImagesByProgram[currentModalProgramId].length === 0)) {
+            loadServerImages();
+        }
     }
 
     document.body.style.overflow = "hidden";
@@ -5645,25 +5813,39 @@ function expandImage(src, speakerId = null) {
 
 // --- updateModalImage ---
 function updateModalImage() {
+    if (!Array.isArray(galleryImages) || galleryImages.length === 0) {
+        closeModal();
+        return;
+    }
+    if (currentGalleryIndex < 0 || currentGalleryIndex >= galleryImages.length) {
+        currentGalleryIndex = 0;
+    }
+
     const modalImg = document.getElementById('modal-img');
     const modalVideo = document.getElementById('modal-video');
     const currentSrc = galleryImages[currentGalleryIndex];
+    const cleanLower = currentSrc.split('?')[0].toLowerCase();
+    const isVideo = cleanLower.endsWith('.mp4') || cleanLower.endsWith('.webm');
+    const isUpload = cleanLower.startsWith('/images/uploads/');
+    const ownerId = isUpload ? null : resolveImageOwner(currentSrc, currentModalProgramId);
+    const displaySrc = buildProgramMediaUrl(currentSrc, ownerId);
     
-    const isVideo = currentSrc.toLowerCase().endsWith('.mp4') || currentSrc.toLowerCase().endsWith('.webm');
     if (isVideo) {
         if (modalImg) modalImg.style.display = 'none';
         if (modalVideo) {
-            modalVideo.src = currentSrc;
+            if (modalVideo.getAttribute('src') !== displaySrc) {
+                modalVideo.src = displaySrc;
+            }
             modalVideo.style.display = 'block';
         }
     } else {
         if (modalVideo) {
             modalVideo.pause();
             modalVideo.style.display = 'none';
-            modalVideo.src = '';
+            modalVideo.removeAttribute('src');
         }
         if (modalImg) {
-            if (modalImg.getAttribute('src') !== currentSrc) modalImg.src = currentSrc;
+            if (modalImg.getAttribute('src') !== displaySrc) modalImg.src = displaySrc;
             modalImg.style.display = 'block';
         }
     }
@@ -5693,7 +5875,7 @@ function updateModalImage() {
     
     const setProfileBtn = document.getElementById('set-profile-btn');
     if (setProfileBtn) {
-        if (isProfileImage(currentSrc) || isVideo) {
+        if (isProfileImage(currentSrc) || isVideo || (isUpload && !currentModalProgramId)) {
             setProfileBtn.style.display = 'none';
         } else {
             setProfileBtn.style.display = 'flex';
@@ -5765,7 +5947,11 @@ function createPortraitCardElement(imgUrl, prompt, msgId, role = 'program', spea
             let activePrompt = (grid && grid.dataset.prompt) || imgContainer.dataset.prompt || '';
             if (!activePrompt && curUrl) {
                 try {
-                    const response = await fetch(`/api/get_image_prompt?image_url=${encodeURIComponent(curUrl)}`);
+                    const ownerParam = speakerId || imgContainer.dataset.speakerId || imgContainer.closest('.message-row')?.dataset?.senderId || '';
+                    const promptQuery = ownerParam
+                        ? `/api/get_image_prompt?image_url=${encodeURIComponent(curUrl)}&program_id=${encodeURIComponent(ownerParam)}`
+                        : `/api/get_image_prompt?image_url=${encodeURIComponent(curUrl)}`;
+                    const response = await fetch(promptQuery);
                     const data = await response.json();
                     if (data.status === 'success' && data.prompt) {
                         activePrompt = data.prompt;
@@ -5879,10 +6065,96 @@ function createPortraitCardElement(imgUrl, prompt, msgId, role = 'program', spea
     return imgContainer;
 }
 
+// --- createVideoCardElement ---
+function createVideoCardElement(videoUrl, msgId, role = 'program', speakerId = null, { autoplay = false, loop = false, muted = false } = {}) {
+    const videoContainer = document.createElement('div');
+    videoContainer.className = 'message-video-container';
+    if (videoUrl) {
+        videoContainer.dataset.imageUrl = videoUrl;
+    }
+    if (msgId) {
+        videoContainer.dataset.msgId = msgId;
+    }
+    if (speakerId) {
+        videoContainer.dataset.speakerId = speakerId;
+    }
+
+    const overlay = document.createElement('div');
+    overlay.className = 'image-actions-overlay';
+
+    const expandBtn = document.createElement('button');
+    expandBtn.className = 'image-action-btn';
+    expandBtn.title = 'Expand in gallery';
+    expandBtn.innerHTML = `
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="15 3 21 3 21 9"></polyline>
+            <polyline points="9 21 3 21 3 15"></polyline>
+            <line x1="21" y1="3" x2="14" y2="10"></line>
+            <line x1="3" y1="21" x2="10" y2="14"></line>
+        </svg>
+    `;
+    expandBtn.onclick = (e) => {
+        e.stopPropagation();
+        const vid = videoContainer.querySelector('video');
+        const targetUrl = videoContainer.dataset.imageUrl || (vid ? vid.src : '');
+        const resolvedSpeaker = speakerId || videoContainer.dataset.speakerId || videoContainer.closest('.message-row')?.dataset?.senderId || null;
+        expandImage(targetUrl, resolvedSpeaker);
+    };
+    overlay.appendChild(expandBtn);
+
+    const deleteBtn = document.createElement('button');
+    deleteBtn.className = 'image-action-btn delete-image-btn';
+    deleteBtn.title = 'Delete this video';
+    deleteBtn.innerHTML = `
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="3 6 5 6 21 6"></polyline>
+            <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+            <line x1="10" y1="11" x2="10" y2="17"></line>
+            <line x1="14" y1="11" x2="14" y2="17"></line>
+        </svg>
+    `;
+    deleteBtn.onclick = (e) => {
+        e.stopPropagation();
+        deleteSinglePortraitSlot(videoContainer);
+    };
+    overlay.appendChild(deleteBtn);
+    videoContainer.appendChild(overlay);
+
+    const video = document.createElement('video');
+    const displayUrl = (role === 'program' && speakerId) ? buildProgramMediaUrl(videoUrl, speakerId) : videoUrl;
+    video.src = displayUrl;
+    video.controls = true;
+    if (autoplay) video.autoplay = true;
+    if (loop) video.loop = true;
+    if (muted) video.muted = true;
+    video.style.maxWidth = '100%';
+    video.style.maxHeight = '300px';
+    video.style.borderRadius = '12px';
+
+    videoContainer.appendChild(video);
+    return videoContainer;
+}
+
+function getPortraitGridSlotCount(grid) {
+    if (!grid) return 0;
+    let count = 0;
+    grid.querySelectorAll('.message-image-container, .message-video-container').forEach(card => {
+        const hasLoading = !!card.querySelector('.image-loading-overlay');
+        const hasActiveImg = !card.classList.contains('is-deleted-slot') && !!card.querySelector('img');
+        const hasVideo = !!card.querySelector('video');
+        if (hasLoading || hasActiveImg || hasVideo) {
+            count += 1;
+        }
+    });
+    return count;
+}
+
 // --- getDeletedSlotCount ---
 function getDeletedSlotCount(grid) {
     if (!grid) return 0;
-    return Math.max(0, parseInt(grid.dataset.deletedCount || '0', 10) || 0);
+    const raw = Math.max(0, parseInt(grid.dataset.deletedCount || '0', 10) || 0);
+    const remainingCapacity = Math.max(0, MAX_IMAGES_PER_ROW - getPortraitGridSlotCount(grid));
+    return Math.min(raw, remainingCapacity);
 }
 
 // --- removeMediaBubbleOrRowIfEmpty ---
@@ -5919,14 +6191,17 @@ function markSlotAsDeleted(container) {
     if (!container) return;
     const grid = container.closest('.portrait-grid');
     const bubble = container.closest('.message');
-    if (grid) {
-        if (!grid.dataset.prompt && container.dataset.prompt) {
-            grid.dataset.prompt = container.dataset.prompt;
-        }
-        grid.dataset.deletedCount = String(getDeletedSlotCount(grid) + 1);
+    const prevDeleted = grid ? getDeletedSlotCount(grid) : 0;
+    if (grid && !grid.dataset.prompt && container.dataset.prompt) {
+        grid.dataset.prompt = container.dataset.prompt;
     }
 
     container.remove();
+
+    if (grid) {
+        const remainingCapacity = Math.max(0, MAX_IMAGES_PER_ROW - getPortraitGridSlotCount(grid));
+        grid.dataset.deletedCount = String(Math.min(remainingCapacity, prevDeleted + 1));
+    }
 
     if (removeMediaBubbleOrRowIfEmpty(grid || bubble)) {
         return;
@@ -5980,36 +6255,73 @@ function updatePortraitGridToolbar(grid) {
 async function rerollDeletedSlotsInGrid(grid, overridePrompt) {
     if (!grid || isGenerating) return;
     const count = getDeletedSlotCount(grid);
-    if (count <= 0) return;
+    if (count <= 0) {
+        updatePortraitGridToolbar(grid);
+        return;
+    }
 
     const activePrompt = overridePrompt || grid.dataset.prompt || (grid.querySelector('.message-image-container')?.dataset.prompt) || '';
     const msgId = grid.dataset.msgId || '';
+    const row = grid.closest('.message-row.program-row');
+    const speakerId = row ? (row.dataset.senderId || null) : null;
 
+    setGenerating(true);
+    if (chatAbortController) {
+        chatAbortController.abort();
+    }
+    const controller = new AbortController();
+    chatAbortController = controller;
+    const batch = { controller, sessionId };
+    startToolPolling();
+
+    const slots = [];
     for (let i = 0; i < count; i++) {
-        if (!document.body.contains(grid)) break;
-        const slot = createPortraitCardElement('', activePrompt, msgId, 'program');
+        if (grid.querySelectorAll('.message-image-container, .message-video-container').length >= MAX_IMAGES_PER_ROW) break;
+        const slot = createPortraitCardElement('', activePrompt, msgId, 'program', speakerId);
         slot.classList.add('is-deleted-slot');
+        showPortraitLoadingOverlay(slot);
         grid.appendChild(slot);
+        slots.push(slot);
+    }
+    updatePortraitGridToolbar(grid);
 
-        const ok = await regenerateImage(slot, '', activePrompt);
-        if (!ok || (chatAbortController && chatAbortController.signal.aborted)) {
+    try {
+        for (const slot of slots) {
+            if (!document.body.contains(grid) || controller.signal.aborted || sessionId !== batch.sessionId) break;
+            const ok = await regenerateImage(slot, '', activePrompt, batch);
+            if (!ok || controller.signal.aborted) {
+                break;
+            }
+        }
+    } finally {
+        slots.forEach(slot => {
             if (slot.classList.contains('is-deleted-slot') && !slot.querySelector('img')) {
                 slot.remove();
             }
-            break;
+        });
+        if (document.body.contains(grid)) {
+            const occupiedNow = getPortraitGridSlotCount(grid);
+            if (occupiedNow > 0 && occupiedNow < MAX_IMAGES_PER_ROW) {
+                grid.dataset.deletedCount = String(MAX_IMAGES_PER_ROW - occupiedNow);
+            } else {
+                delete grid.dataset.deletedCount;
+            }
+            updatePortraitGridToolbar(grid);
         }
+        if (chatAbortController === controller) setGenerating(false);
+        stopToolPolling();
+        await initializeModelSelect();
     }
-
-    updatePortraitGridToolbar(grid);
 }
 
 // --- deleteSinglePortraitSlot ---
 async function deleteSinglePortraitSlot(container) {
     if (!container) return;
-    const img = container.querySelector('img');
-    const rawUrl = (img && img.src) ? img.src : (container.dataset.imageUrl || '');
+    const mediaEl = container.querySelector('img, video');
+    const rawUrl = (mediaEl && mediaEl.src) ? mediaEl.src : (container.dataset.imageUrl || '');
     const currentSrc = getRelativePath(rawUrl);
     if (!currentSrc) return;
+    const ownerId = container.dataset.speakerId || container.closest('.message-row')?.dataset?.senderId || resolveImageOwner(currentSrc, null);
 
     const scope = container.closest('.portrait-grid') || container.closest('.message');
     const keepMessage = scope ? Array.from(
@@ -6023,7 +6335,8 @@ async function deleteSinglePortraitSlot(container) {
             body: JSON.stringify({
                 session_id: sessionId,
                 image_url: currentSrc,
-                keep_message: keepMessage
+                keep_message: keepMessage,
+                program_id: ownerId
             })
         });
 
@@ -6066,13 +6379,15 @@ async function deleteCurrentImage(event) {
                 }
             });
 
+            const ownerId = resolveImageOwner(currentSrc, currentModalProgramId);
             const response = await fetch('/delete_image', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     session_id: sessionId,
                     image_url: currentSrc,
-                    keep_message: keepMessage
+                    keep_message: keepMessage,
+                    program_id: ownerId
                 })
             });
             
@@ -6234,7 +6549,7 @@ function setCurrentImageAsProfile(event) {
         cropImg.onload = () => {
             initCropper();
         };
-        cropImg.src = currentSrc;
+        cropImg.src = buildProgramMediaUrl(currentSrc, cropTargetProgramId);
 
         if (cropImg.complete && cropImg.naturalWidth !== 0) {
             initCropper();
@@ -6370,6 +6685,7 @@ async function generatePortraitPrompt() {
         }
     }
 
+    const targetCount = MAX_IMAGES_PER_ROW;
     const typingIndicatorRow = createTypingIndicatorRow(targetSpeaker);
     const bubble = typingIndicatorRow.querySelector('.message.program');
     const bubblesContainer = document.createElement('div');
@@ -6380,12 +6696,17 @@ async function generatePortraitPrompt() {
     bubble.innerHTML = '';
     const grid = document.createElement('div');
     grid.className = 'portrait-grid';
-    const firstSlot = createPortraitCardElement('', '', null, 'program', targetSpeaker);
-    grid.appendChild(firstSlot);
+    for (let i = 0; i < targetCount; i++) {
+        const loadingSlot = createPortraitCardElement('', '', null, 'program', targetSpeaker);
+        grid.appendChild(loadingSlot);
+        showPortraitLoadingOverlay(loadingSlot);
+    }
     bubble.appendChild(grid);
-    showPortraitLoadingOverlay(firstSlot);
     chatContainer.appendChild(typingIndicatorRow);
     chatContainer.scrollTop = chatContainer.scrollHeight;
+
+    let portraitGrid = null;
+    const pendingSlots = {};
 
     try {
         const response = await fetch('/api/portrait/generate', {
@@ -6395,43 +6716,115 @@ async function generatePortraitPrompt() {
                 session_id: portraitSessionId,
                 prompt: customPrompt,
                 speaker_id: targetSpeaker,
-                count: 1
+                count: targetCount,
+                stream: true
             }),
             signal: controller.signal
         });
 
-        const data = await response.json();
-        if (controller.signal.aborted || sessionId !== portraitSessionId) return;
-        if (!response.ok || data.error) {
-            showCustomAlert("Portrait Generation Failed", data.error || 'The server could not generate the portrait.');
-        } else {
-            if (userInput) {
-                userInput.value = "";
-                userInput.style.height = 'auto';
+        if (!response.ok) {
+            let errText = 'The server could not generate the portrait.';
+            try {
+                const errData = await response.json();
+                if (errData && errData.error) errText = errData.error;
+            } catch (_) {}
+            if (!controller.signal.aborted && sessionId === portraitSessionId) {
+                showCustomAlert("Portrait Generation Failed", errText);
             }
-            typingIndicatorRow.remove();
-            const row = data.message ? renderMessage(data.message) : null;
-            const portraitGrid = row && row.querySelector('.portrait-grid');
-            if (!portraitGrid) throw new Error('Generated portrait message could not be displayed.');
-            portraitGrid.dataset.prompt = data.prompt || '';
-            const firstCard = portraitGrid.querySelector('.message-image-container');
-            if (firstCard) firstCard.dataset.prompt = data.prompt || '';
+            return;
+        }
 
-            for (let i = 1; i < 3; i++) {
-                if (controller.signal.aborted || sessionId !== portraitSessionId || !document.body.contains(portraitGrid)) break;
-                const slot = createPortraitCardElement('', data.prompt, data.program_msg_id, 'program', targetSpeaker);
-                slot.classList.add('is-deleted-slot');
-                portraitGrid.appendChild(slot);
-                const ok = await regenerateImage(slot, '', data.prompt, {
-                    controller: controller,
-                    sessionId: portraitSessionId
-                });
-                if (!ok) {
-                    if (slot.classList.contains('is-deleted-slot') && !slot.querySelector('img')) slot.remove();
-                    break;
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+
+        const handleEvent = (evt) => {
+            if (controller.signal.aborted || sessionId !== portraitSessionId) return;
+            if (evt.type === 'slot') {
+                if (evt.index === 0 || !portraitGrid) {
+                    if (userInput) {
+                        userInput.value = "";
+                        userInput.style.height = 'auto';
+                    }
+                    if (chatContainer.contains(typingIndicatorRow)) {
+                        typingIndicatorRow.remove();
+                    }
+                    const row = evt.message ? renderMessage(evt.message) : null;
+                    portraitGrid = row && row.querySelector('.portrait-grid');
+                    if (!portraitGrid) {
+                        throw new Error('Generated portrait message could not be displayed.');
+                    }
+                    portraitGrid.dataset.prompt = evt.prompt || '';
+                    delete portraitGrid.dataset.deletedCount;
+                    const firstCard = portraitGrid.querySelector('.message-image-container');
+                    if (firstCard) firstCard.dataset.prompt = evt.prompt || '';
+                    registerClientMedia(evt.image_url, evt.sender_id || targetSpeaker);
+
+                    const existingCount = portraitGrid.querySelectorAll('.message-image-container, .message-video-container').length;
+                    for (let k = existingCount; k < targetCount; k++) {
+                        const slot = createPortraitCardElement('', evt.prompt, evt.program_msg_id, 'program', evt.sender_id || targetSpeaker);
+                        showPortraitLoadingOverlay(slot);
+                        portraitGrid.appendChild(slot);
+                        pendingSlots[k] = slot;
+                    }
+                    updatePortraitGridToolbar(portraitGrid);
+                    chatContainer.scrollTop = chatContainer.scrollHeight;
+                } else if (portraitGrid && document.body.contains(portraitGrid)) {
+                    const relIncoming = getRelativePath(evt.image_url);
+                    const alreadyRendered = Array.from(portraitGrid.querySelectorAll('.message-image-container img'))
+                        .some(img => getRelativePath(img.src) === relIncoming);
+                    const placeholderSlot = pendingSlots[evt.index];
+                    if (alreadyRendered) {
+                        if (placeholderSlot && placeholderSlot.parentNode === portraitGrid) {
+                            placeholderSlot.remove();
+                        }
+                    } else {
+                        const readyCard = createPortraitCardElement(
+                            evt.image_url,
+                            evt.prompt,
+                            evt.program_msg_id,
+                            'program',
+                            evt.sender_id || targetSpeaker
+                        );
+                        if (placeholderSlot && placeholderSlot.parentNode === portraitGrid) {
+                            portraitGrid.replaceChild(readyCard, placeholderSlot);
+                        } else if (portraitGrid.querySelectorAll('.message-image-container, .message-video-container').length < MAX_IMAGES_PER_ROW) {
+                            portraitGrid.appendChild(readyCard);
+                        }
+                    }
+                    delete pendingSlots[evt.index];
+                    registerClientMedia(evt.image_url, evt.sender_id || targetSpeaker);
+                    updatePortraitGridToolbar(portraitGrid);
+                }
+            } else if (evt.type === 'error') {
+                showCustomAlert("Portrait Generation Failed", evt.error || 'The server could not generate the portrait.');
+            }
+        };
+
+        while (true) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+            let newlineIdx;
+            while ((newlineIdx = buffer.indexOf('\n')) !== -1) {
+                const line = buffer.slice(0, newlineIdx).trim();
+                buffer = buffer.slice(newlineIdx + 1);
+                if (line) {
+                    handleEvent(JSON.parse(line));
                 }
             }
+        }
+        buffer += decoder.decode();
+        if (buffer.trim()) {
+            handleEvent(JSON.parse(buffer.trim()));
+        }
+
+        if (portraitGrid && document.body.contains(portraitGrid)) {
+            Object.values(pendingSlots).forEach(s => {
+                if (s && !s.querySelector('img') && s.parentNode) s.remove();
+            });
             updatePortraitGridToolbar(portraitGrid);
+            await loadServerImages();
         }
     } catch (err) {
         if (err.name !== 'AbortError') {
@@ -6439,6 +6832,18 @@ async function generatePortraitPrompt() {
             showCustomAlert("Portrait Error", "Could not generate portrait: " + err.message);
         }
     } finally {
+        Object.values(pendingSlots).forEach(s => {
+            if (s && !s.querySelector('img') && s.parentNode) s.remove();
+        });
+        if (portraitGrid && document.body.contains(portraitGrid)) {
+            const occupiedNow = getPortraitGridSlotCount(portraitGrid);
+            if (occupiedNow > 0 && occupiedNow < MAX_IMAGES_PER_ROW) {
+                portraitGrid.dataset.deletedCount = String(MAX_IMAGES_PER_ROW - occupiedNow);
+            } else {
+                delete portraitGrid.dataset.deletedCount;
+            }
+            updatePortraitGridToolbar(portraitGrid);
+        }
         if (chatContainer.contains(typingIndicatorRow)) {
             chatContainer.removeChild(typingIndicatorRow);
         }
@@ -6604,7 +7009,8 @@ async function regenerateImage(buttonElement, oldImageUrl, prompt, batch = null)
             container.classList.remove('is-deleted-slot');
 
             if (grid && wasDeletedSlot) {
-                grid.dataset.deletedCount = String(Math.max(0, getDeletedSlotCount(grid) - 1));
+                const rawPrev = Math.max(0, parseInt(grid.dataset.deletedCount || '0', 10) || 0);
+                grid.dataset.deletedCount = String(Math.max(0, rawPrev - 1));
             }
 
             const animateBtn = container.querySelector('.animate-action-btn');
@@ -6778,20 +7184,20 @@ function showImageErrorOverlay(container, error) {
 function swapImageWithVideo(container, videoUrl) {
     const bubble = container.closest('.message.program');
     if (bubble) {
-        const videoContainer = document.createElement('div');
-        videoContainer.className = 'message-video-container';
-        
-        const video = document.createElement('video');
-        video.src = videoUrl;
-        video.controls = true;
-        video.autoplay = true;
-        video.loop = true;
-        video.muted = true;
-        video.style.maxWidth = '100%';
-        video.style.maxHeight = '300px';
-        video.style.borderRadius = '12px';
-        
-        videoContainer.appendChild(video);
+        const oldImg = container.querySelector('img');
+        const oldUrl = container.dataset.imageUrl || (oldImg ? oldImg.src : '');
+        const speakerId = container.dataset.speakerId || container.closest('.message-row')?.dataset?.senderId || activeProgramId;
+        const msgId = container.dataset.msgId || bubble.dataset.msgId || '';
+        if (oldUrl) {
+            unregisterClientMedia(oldUrl);
+        }
+        registerClientMedia(videoUrl, speakerId);
+
+        const videoContainer = createVideoCardElement(videoUrl, msgId, 'program', speakerId, {
+            autoplay: true,
+            loop: true,
+            muted: true
+        });
         
         if (container.parentElement && container.parentElement.classList.contains('portrait-grid')) {
             container.replaceWith(videoContainer);
@@ -8360,6 +8766,7 @@ function startSSE() {
 
 let serverImages = [];
 let serverImagesByProgram = {};
+let serverUploads = [];
 let imageOwners = {};
 let currentModalProgramId = null;
 let cropTargetProgramId = null;
@@ -8382,6 +8789,9 @@ document.addEventListener('keydown', (event) => {
             return;
         }
     }
+
+    const dialogModal = document.getElementById('custom-dialog-modal');
+    if (dialogModal && dialogModal.style.display === 'flex') return;
 
     const modal = document.getElementById('image-modal');
     if (modal && modal.style.display === 'flex') {
@@ -8601,6 +9011,21 @@ if (document.readyState === 'loading') {
 window.addEventListener('error', function (e) {
     const img = e.target;
     if (!img || img.tagName !== 'IMG') return;
+    if (img.id === 'modal-img') {
+        const modal = document.getElementById('image-modal');
+        if (modal && modal.style.display === 'flex' && img.src) {
+            unregisterClientMedia(img.src);
+            if (galleryImages.length === 0) {
+                closeModal();
+            } else {
+                if (currentGalleryIndex >= galleryImages.length) {
+                    currentGalleryIndex = galleryImages.length - 1;
+                }
+                updateModalImage();
+            }
+        }
+        return;
+    }
     if (img.classList.contains('program-avatar') || img.classList.contains('program-list-avatar') || img.classList.contains('voice-call-avatar') || img.classList.contains('voice-call-program-avatar')) {
         switchToCircleAvatar(img);
     }

@@ -12,6 +12,8 @@ import socket
 import subprocess
 import urllib.request
 
+os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+
 from utils import lifecycle
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -95,7 +97,7 @@ def start_server_process(port: int, use_ssl: bool) -> subprocess.Popen:
         cwd=BASE_DIR,
         stdout=log_file,
         stderr=subprocess.STDOUT,
-        env={**os.environ, "PYTHONUNBUFFERED": "1"},
+        env={**os.environ, "PYTHONUNBUFFERED": "1", "KMP_DUPLICATE_LIB_OK": "TRUE"},
         creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
     )
     return lifecycle.track(proc)

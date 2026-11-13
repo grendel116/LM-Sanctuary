@@ -21,10 +21,9 @@ ddgs
 musicbrainzngs
 pywebview
 faster-whisper
-torch==2.4.1
-torchvision==0.19.1
-torchaudio==2.4.1
-torch-directml; sys_platform == 'win32'
+torch
+torchvision
+torchaudio
 transformers<5.0.0
 diffusers
 safetensors

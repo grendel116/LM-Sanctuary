@@ -317,17 +317,49 @@ def generate_llama_cli_args(gguf_path: str = None, bias_weight: float = None) ->
     bias_str = ",".join(f"{t_id}{sign_str}{bias_weight}" for t_id in sorted(token_ids))
     return ["--logit-bias", bias_str]
 
-_SENTENCE_SPLIT_RE = re.compile(r'(\n+|(?<=[.!?])\s+|(?<=[.!?][*"\u201d\u2019)\]])\s+)')
-_MOOD_TAG_RE = re.compile(r'(\s*(?:`?\s*<mood\b[^>]*?(?:/>|>.*?</mood>|>)\s*`?|`?\s*\[mood[:\s][^\]]*\]\s*`?)\s*)$', re.IGNORECASE | re.DOTALL)
+_PARAGRAPH_SPLIT_RE = re.compile(r'(\n+)')
+_NARRATION_OR_CODE_RE = re.compile(
+    r'`[^`\n]+`|'
+    r'(?<![*\w\\])\*(?=[A-Za-z0-9"\'\u201c\u2018])'
+    r'((?:`[^`\n]+`|\*\*[^*\n]+\*\*|[^*`\n])+?)'
+    r'(?<![*\s\\])\*(?![*\w])'
+)
+_SENTENCE_END_RE = re.compile(r'[.!?\u2026\u2014]["\'\u201d\u2019)\]]?$')
+_SENTENCE_SPLIT_RE = re.compile(
+    r'((?<=[.!?\u2026])\s+|(?<=[.!?\u2026][*"\'\u201d\u2019)\]])\s+|(?<=[.!?\u2026]\*\*)\s+)'
+)
+_LIST_PREFIX_RE = re.compile(r'^(\s*(?:(?:[-*+]|\d+\.)\s+)?)')
+_MOOD_TAG_RE = re.compile(
+    r'(\s*(?:`?\s*<mood\b[^>]*?(?:/>|>.*?</mood>|>)\s*`?|`?\s*\[mood[:\s][^\]]*\]\s*`?)\s*)$',
+    re.IGNORECASE | re.DOTALL,
+)
 
-async def _rewrite_single_sentence(sentence: str, llm_call_func, target_model: str, banned_regex) -> str:
-    """Evaluates and rewrites individual sentences while retaining Markdown formatting."""
-    stripped = sentence.strip()
-    if not stripped or "```" in stripped or stripped.startswith(("![", "<mood", "[mood:")):
+async def _rewrite_single_sentence(
+    sentence: str,
+    llm_call_func,
+    target_model: str,
+    banned_regex,
+    *,
+    is_narration: bool = False,
+    paragraph_context: str = "",
+) -> str:
+    """Evaluates and rewrites an individual sentence within its narration or dialogue formatting domain."""
+    prefix_match = _LIST_PREFIX_RE.match(sentence)
+    lead_prefix = prefix_match.group(1) if prefix_match else ""
+    body = sentence[len(lead_prefix):]
+    trail_ws = body[len(body.rstrip()):]
+    stripped = body[:len(body) - len(trail_ws)]
+
+    if (
+        not stripped
+        or "```" in stripped
+        or stripped.startswith(("![", "<mood", "[mood:", "#"))
+        or (stripped.startswith("`") and stripped.endswith("`") and stripped.count("`") == 2)
+    ):
         return sentence
 
-    found_banned = set(banned_regex.findall(sentence)) if banned_regex else set()
-    has_antithesis = bool(ANTITHESIS_PATTERN.search(sentence))
+    found_banned = set(banned_regex.findall(stripped)) if banned_regex else set()
+    has_antithesis = bool(ANTITHESIS_PATTERN.search(stripped))
 
     if not found_banned and not has_antithesis:
         return sentence
@@ -342,32 +374,51 @@ async def _rewrite_single_sentence(sentence: str, llm_call_func, target_model: s
             "- State what is directly and affirmatively. Convert any binary contrast (such as 'not X, it is Y', 'X, not Y', or 'stop X and start Y') into a single clear, direct assertion."
         )
 
+    if is_narration:
+        fmt_rule = "- Write plain present-tense prose without asterisks or quotation marks."
+    elif "**" in stripped:
+        fmt_rule = "- Write plain spoken dialogue without quotation marks or single-asterisk *italics*. Keep **bold** emphasis only."
+    else:
+        fmt_rule = "- Write plain spoken dialogue without asterisks or quotation marks."
+
+    if "`" in stripped:
+        fmt_rule += " Preserve inline `code` literals verbatim."
+    instructions.append(fmt_rule)
+
     rules_text = "\n".join(instructions)
+    ctx_clean = paragraph_context.strip()
+    context_block = (
+        f'Context paragraph (for reference only; rewrite only the target sentence):\n"{ctx_clean}"\n\n'
+        if ctx_clean and ctx_clean != stripped
+        else ""
+    )
     prompt = (
-        "Rewrite this single sentence adhering strictly to these directives:\n\n"
+        "Rewrite the target sentence adhering strictly to these directives:\n\n"
         f"{rules_text}\n\n"
-        "Preserve all Markdown syntax, including italics (*action*) and bold (**emphasis**). "
-        "Output only the rewritten sentence.\n\n"
-        f'Sentence: "{sentence}"'
+        f"{context_block}"
+        f'Target sentence: "{stripped}"\n\n'
+        "Output only the rewritten target sentence."
     )
 
     try:
-        max_tokens = max(64, int(len(sentence.split()) * 2))
+        max_tokens = max(64, int(len(stripped.split()) * 2))
         rewritten = await llm_call_func(
             prompt=prompt,
             model=target_model,
             temperature=0.4,
-            max_tokens=max_tokens
+            max_tokens=max_tokens,
         )
-        if rewritten and len(rewritten.strip()) > 0:
-            return rewritten.strip().strip('"')
+        if rewritten and rewritten.strip():
+            cleaned = rewritten.strip().strip('"')
+            if cleaned:
+                return f"{lead_prefix}{cleaned}{trail_ws}"
     except Exception as e:
         print(f"[REWRITE ERROR] {e}", flush=True)
 
     return sentence
 
 async def replace_banned_words_async(text: str, llm_call_func, target_model: str) -> str:
-    """Splits text into sentences while preserving whitespace/paragraph structure and runs concurrent rewrites."""
+    """Segments paragraphs and narration spans, rewriting violating sentences concurrently."""
     if not text or "```" in text:
         return text
 
@@ -381,16 +432,69 @@ async def replace_banned_words_async(text: str, llm_call_func, target_model: str
         mood_suffix = mood_match.group(1)
         text = text[:mood_match.start()]
 
-    parts = _SENTENCE_SPLIT_RE.split(text)
+    para_parts = _PARAGRAPH_SPLIT_RE.split(text)
+    structured_paras: list[list[tuple[bool, list[str]]] | str] = []
+    tasks = []
+    task_targets: list[tuple[list[str], int]] = []
 
-    sentence_indices = [i for i in range(0, len(parts), 2) if parts[i].strip()]
-    if not sentence_indices:
-        return text + mood_suffix
+    for p_idx, part in enumerate(para_parts):
+        if p_idx % 2 == 1 or not part.strip() or part.lstrip().startswith(("![", "<mood", "[mood:", ">", "#")):
+            structured_paras.append(part)
+            continue
 
-    rewritten_sentences = await asyncio.gather(
-        *[_rewrite_single_sentence(parts[i], llm_call_func, target_model, banned_regex) for i in sentence_indices]
-    )
-    for idx, rewritten in zip(sentence_indices, rewritten_sentences):
-        parts[idx] = rewritten
+        segments: list[tuple[bool, str]] = []
+        cursor = 0
+        for m in _NARRATION_OR_CODE_RE.finditer(part):
+            inner = m.group(1)
+            if inner is None:
+                continue
+            before = part[:m.start()].rstrip()
+            after = part[m.end():].lstrip()
+            is_sent_start = not before or before[-1] in '.!?\u2026*"\'\u201d\u2019)]'
+            has_end_punct = bool(_SENTENCE_END_RE.search(inner.strip()))
+            if not ((not before and not after) or (is_sent_start and has_end_punct)):
+                continue
+            if m.start() > cursor:
+                segments.append((False, part[cursor:m.start()]))
+            segments.append((True, inner))
+            cursor = m.end()
+        if cursor < len(part):
+            segments.append((False, part[cursor:]))
 
-    return "".join(parts) + mood_suffix
+        plain_para = "".join(seg_text for _, seg_text in segments)
+        seg_entries: list[tuple[bool, list[str]]] = []
+        for is_narration, seg_text in segments:
+            s_parts = _SENTENCE_SPLIT_RE.split(seg_text)
+            for s_idx in range(0, len(s_parts), 2):
+                if s_parts[s_idx].strip():
+                    tasks.append(
+                        _rewrite_single_sentence(
+                            s_parts[s_idx],
+                            llm_call_func,
+                            target_model,
+                            banned_regex,
+                            is_narration=is_narration,
+                            paragraph_context=plain_para,
+                        )
+                    )
+                    task_targets.append((s_parts, s_idx))
+            seg_entries.append((is_narration, s_parts))
+        structured_paras.append(seg_entries)
+
+    if tasks:
+        results = await asyncio.gather(*tasks)
+        for (s_parts, s_idx), rewritten in zip(task_targets, results):
+            s_parts[s_idx] = rewritten
+
+    out_parts: list[str] = []
+    for entry in structured_paras:
+        if isinstance(entry, str):
+            out_parts.append(entry)
+        else:
+            rebuilt_segs = [
+                f"*{''.join(s_parts)}*" if is_narr else "".join(s_parts)
+                for is_narr, s_parts in entry
+            ]
+            out_parts.append("".join(rebuilt_segs))
+
+    return "".join(out_parts) + mood_suffix
