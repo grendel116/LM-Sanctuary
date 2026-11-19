@@ -4,49 +4,71 @@ ComfyUI/
 ComfyUI_windows_portable*/
 __pycache__/
 *.pyc
+.ruff_cache/
+.pytest_cache/
+
+# Node / Android build artifacts
+node_modules/
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/.idea/
+android/app/src/main/assets/public/
+android/capacitor-cordova-android-plugins/
 
 # Local Config (contains credentials and settings)
 .env
-variables/project_settings.json
+sanctuary/.env
+sanctuary/variables/project_settings.json
 
 # Temporary files
 backups/
 scratch/
-data/
+sanctuary/data/
+social/data/
 reports/
-certs/
+sanctuary/certs/
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+*.tmp
+.DS_Store
+Thumbs.db
 
 # Ignore all runtime and user variables except code dependencies, template examples, and default builder profile
-variables/*
-!variables/settings.py
-!variables/__init__.py
-!variables/user.md.example
-!variables/user_profiles/
-!variables/banned_words.json
-variables/user_profiles/*
-!variables/user_profiles/builder.md
+sanctuary/variables/*
+!sanctuary/variables/settings.py
+!sanctuary/variables/__init__.py
+!sanctuary/variables/user.md.example
+!sanctuary/variables/user_profiles/
+!sanctuary/variables/banned_words.json
+sanctuary/variables/user_profiles/*
+!sanctuary/variables/user_profiles/builder.md
 
-# Ignore all program profiles under core/programs except the default Sebile program template
-core/programs/*
-!core/programs/sebile/
-!core/programs/sparkle.mp3
+# Ignore all program profiles under sanctuary/core/programs except the default Sebile program template
+sanctuary/core/programs/*
+!sanctuary/core/programs/sebile/
+!sanctuary/core/programs/sparkle.mp3
 
 # Ignore user-generated dynamic program sessions, databases, custom generated portraits, and memories
-core/programs/*/sessions/
-core/programs/*/portraits/*
-!core/programs/sebile/portraits/profile.png
-core/programs/*/media/
-core/programs/*/uploads/
-core/programs/*/databank.db
-core/programs/*/databank.json
-core/programs/*/journals.json
-core/programs/*/quest_log.json
-core/programs/*/lorebooks/
-!core/programs/sebile/lorebooks/
-!core/programs/sebile/lorebooks/marxist_theory.json
-!core/programs/sebile/lorebooks/twelve_steps.json
-core/embeddings.pkl
-temp_uploads/
+sanctuary/core/programs/*/sessions/
+sanctuary/core/programs/*/portraits/*
+!sanctuary/core/programs/sebile/portraits/profile.png
+sanctuary/core/programs/*/media/
+sanctuary/core/programs/*/uploads/
+sanctuary/core/programs/*/databank.db
+sanctuary/core/programs/*/databank.json
+sanctuary/core/programs/*/journals.json
+sanctuary/core/programs/*/quest_log.json
+sanctuary/core/programs/*/lorebooks/
+!sanctuary/core/programs/sebile/lorebooks/
+!sanctuary/core/programs/sebile/lorebooks/marxist_theory.json
+!sanctuary/core/programs/sebile/lorebooks/twelve_steps.json
+sanctuary/core/embeddings.pkl
+sanctuary/temp_uploads/
 
 # Local model weights and binary checkpoints
 *.safetensors
@@ -55,38 +77,38 @@ temp_uploads/
 *.pth
 *.ckpt
 *.onnx
-models/*
-!models/__init__.py
-!models/models.py
-!models/**/
-!models/**/.gitkeep
+sanctuary/models/*
+!sanctuary/models/__init__.py
+!sanctuary/models/models.py
+!sanctuary/models/**/
+!sanctuary/models/**/.gitkeep
 # Bundled default image workflow included in git; other custom workflows stay untracked
-models/workflows/*
-!models/workflows/ImageWorkflow.json
+sanctuary/models/workflows/*
+!sanctuary/models/workflows/ImageWorkflow.json
 
 # TTS Speech Model weights and synthesized audio cache
-core/skills/speech_generation/speech_model/*.onnx
-core/skills/speech_generation/speech_model/*.bin
-core/skills/speech_generation/speech_cache/
+sanctuary/core/skills/speech_generation/speech_model/*.onnx
+sanctuary/core/skills/speech_generation/speech_model/*.bin
+sanctuary/core/skills/speech_generation/speech_cache/
 
 # Runtime logs
-logs/
+sanctuary/logs/
 *.log
 comfy_server.log
 
 # Local Binaries
-utils/llama-bin/
+sanctuary/utils/llama-bin/
 
 # Comfy Engine runtime temp, IO, and custom nodes
 temp/
 **/temp/
-core/comfy_engine/temp/
-core/comfy_engine/output/
-core/comfy_engine/input/
-core/comfy_engine/custom_nodes/
-core/comfy_engine/**/*.png
-core/comfy_engine/**/*.jpg
-core/comfy_engine/**/*.jpeg
-core/comfy_engine/**/*.webp
-core/comfy_engine/**/*.gif
-core/comfy_engine/**/*.bmp
+sanctuary/core/comfy_engine/temp/
+sanctuary/core/comfy_engine/output/
+sanctuary/core/comfy_engine/input/
+sanctuary/core/comfy_engine/custom_nodes/
+sanctuary/core/comfy_engine/**/*.png
+sanctuary/core/comfy_engine/**/*.jpg
+sanctuary/core/comfy_engine/**/*.jpeg
+sanctuary/core/comfy_engine/**/*.webp
+sanctuary/core/comfy_engine/**/*.gif
+sanctuary/core/comfy_engine/**/*.bmp

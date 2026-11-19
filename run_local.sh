@@ -24,13 +24,13 @@ if [ ! -f ".venv/bin/python" ]; then
 fi
 
 # 3. Run Hardware-Aware Environment Setup (instant on subsequent runs)
-.venv/bin/python setup_env.py "$@"
+.venv/bin/python sanctuary/setup_env.py "$@"
 
 # 4. Start LM Sanctuary
 echo "--- Starting LM Sanctuary ---"
 if [ -n "$DISPLAY" ] || [ -n "$WAYLAND_DISPLAY" ] || [ "$(uname)" = "Darwin" ]; then
-    .venv/bin/python desktop.py
+    .venv/bin/python sanctuary/desktop.py
 else
     echo "No GUI display detected. Starting headless server on port 5000..."
-    .venv/bin/python app.py
+    .venv/bin/python sanctuary/app.py
 fi

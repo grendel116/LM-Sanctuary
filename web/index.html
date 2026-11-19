@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content">
+    <meta name="color-scheme" content="dark">
+    <base href="./">
+    <title>Sanctuary</title>
+    <link rel="manifest" href="./manifest.json">
+    <meta name="theme-color" content="#121214">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="Sanctuary">
+    <link rel="icon" type="image/x-icon" href="./assets/img/app_icon.ico">
+    <link rel="icon" type="image/png" href="./assets/img/app_icon.png">
+    <link rel="apple-touch-icon" href="./assets/img/app_icon.png">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="./assets/css/sanctuary.css?v=16">
+    <link rel="stylesheet" href="./assets/css/shell.css?v=26">
+    <link rel="stylesheet" href="./assets/css/github-dark.min.css">
+    <link rel="stylesheet" href="./assets/css/cropper.min.css">
+    <script defer src="./assets/vendor/marked.min.js"></script>
+    <script defer src="./assets/vendor/highlight.min.js"></script>
+    <script defer src="./assets/vendor/cropper.min.js"></script>
+    <style id="critical-splash-styles">
+        #chat-loading-overlay {
+            position: fixed;
+            inset: 0;
+            background: #121214;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            z-index: 999999;
+            transition: opacity 0.25s ease, visibility 0.25s;
+            opacity: 1;
+            visibility: visible;
+        }
+        #chat-loading-overlay.fade-out {
+            opacity: 0;
+            visibility: hidden;
+            pointer-events: none;
+        }
+        .splash-logo {
+            width: 64px;
+            height: 64px;
+            border-radius: 16px;
+            background: rgba(147, 112, 219, 0.14);
+            border: 1px solid rgba(147, 112, 219, 0.35);
+            box-shadow: 0 8px 32px rgba(147, 112, 219, 0.25);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+        .splash-logo svg {
+            width: 34px;
+            height: 34px;
+            color: #a855f7;
+        }
+    </style>
+</head>
+<body>
+    <a href="#main-content" class="skip-link visually-hidden">Skip to main content</a>
+    <div id="chat-loading-overlay" aria-hidden="true">
+        <div class="splash-logo">
+            <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                <path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/>
+            </svg>
+        </div>
+    </div>
+    <div id="app-shell"></div>
+    <script type="module" src="./app/_layout.js"></script>
+</body>
+</html>

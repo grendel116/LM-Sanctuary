@@ -33,7 +33,7 @@ if not exist ".venv\Scripts\python.exe" (
 )
 
 REM 3. Run Hardware-Aware Environment Setup (instant on subsequent runs)
-".venv\Scripts\python.exe" setup_env.py %*
+".venv\Scripts\python.exe" "sanctuary\setup_env.py" %*
 if %errorlevel% neq 0 (
     echo Error: Environment setup encountered an issue.
     pause
@@ -42,5 +42,5 @@ if %errorlevel% neq 0 (
 
 REM 4. Start LM Sanctuary Desktop
 echo --- Starting LM Sanctuary Desktop ---
-start "" ".venv\Scripts\pythonw.exe" desktop.py
+start "" ".venv\Scripts\pythonw.exe" "sanctuary\desktop.py"
 exit /b 0

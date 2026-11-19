@@ -1,0 +1,383 @@
+"""
+setup_env.py — Hardware-aware environment bootstrapper and dependency installer for LM-Sanctuary.
+
+Uses only Python standard library modules at startup so it can execute inside a brand-new
+virtual environment before any third-party packages are installed.
+"""
+
+import hashlib
+import importlib.util
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+BASE_DIR = Path(__file__).resolve().parent
+REPO_ROOT = BASE_DIR.parent
+REQUIREMENTS_FILE = REPO_ROOT / "requirements.txt"
+ENV_FILE = REPO_ROOT / ".env"
+ENV_EXAMPLE_FILE = REPO_ROOT / ".env.example"
+STAMP_FILE = Path(sys.prefix) / ".sanctuary_install_stamp"
+CUSTOM_NODES_DIR = BASE_DIR / "core" / "comfy_engine" / "custom_nodes"
+
+# ComfyUI custom node packs for workflows that use FaceDetailer (Impact Pack) and Ultralytics detectors
+CUSTOM_NODE_PACKS = {
+    "ComfyUI-Impact-Pack": "429d0159ad429e64d2b3916e6e7be9c22d025c3c",
+    "ComfyUI-Impact-Subpack": "50c7b71a6a224734cc9b21963c6d1926816a97f1",
+}
+
+REQUIRED_IMPORT_SPECS = (
+    "flask",
+    "dotenv",
+    "sentence_transformers",
+    "kokoro_onnx",
+    "soundfile",
+    "bs4",
+    "requests",
+    "httpx",
+    "primp",
+    "PIL",
+    "numpy",
+    "OpenSSL",
+    "cryptography",
+    "psutil",
+    "markdownify",
+    "pypdf",
+    "docx",
+    "openpyxl",
+    "ddgs",
+    "musicbrainzngs",
+    "webview",
+    "faster_whisper",
+    "torch",
+    "torchvision",
+    "torchaudio",
+    "transformers",
+    "diffusers",
+    "safetensors",
+    "accelerate",
+    "einops",
+    "torchsde",
+    "scipy",
+    "kornia",
+    "aiohttp",
+    "yaml",
+    "tqdm",
+    "ultralytics",
+    "segment_anything",
+    "skimage",
+    "cv2",
+    "piexif",
+    "dill",
+    "matplotlib",
+)
+
+
+ROCM_WIN_RELEASE = "rocm-rel-7.2.1"
+ROCM_WIN_BASE_URL = f"https://repo.radeon.com/rocm/windows/{ROCM_WIN_RELEASE}"
+ROCM_WIN_PY312_WHEELS = (
+    f"{ROCM_WIN_BASE_URL}/rocm_sdk_core-7.2.1-py3-none-win_amd64.whl",
+    f"{ROCM_WIN_BASE_URL}/rocm_sdk_devel-7.2.1-py3-none-win_amd64.whl",
+    f"{ROCM_WIN_BASE_URL}/rocm_sdk_libraries_custom-7.2.1-py3-none-win_amd64.whl",
+    f"{ROCM_WIN_BASE_URL}/rocm-7.2.1.tar.gz",
+    f"{ROCM_WIN_BASE_URL}/torch-2.9.1%2Brocm7.2.1-cp312-cp312-win_amd64.whl",
+    f"{ROCM_WIN_BASE_URL}/torchvision-0.24.1%2Brocm7.2.1-cp312-cp312-win_amd64.whl",
+    f"{ROCM_WIN_BASE_URL}/torchaudio-2.9.1%2Brocm7.2.1-cp312-cp312-win_amd64.whl",
+)
+
+
+def _detect_windows_gpu_names() -> str:
+    if os.name != "nt":
+        return ""
+    try:
+        return subprocess.check_output(
+            'powershell -NoProfile -Command "Get-CimInstance Win32_VideoController | Select-Object -ExpandProperty Name"',
+            shell=True,
+            text=True,
+            stderr=subprocess.DEVNULL,
+            timeout=5.0,
+        ).lower()
+    except Exception:
+        return ""
+
+
+def _supports_windows_amd_rocm(gpu_names: str) -> bool:
+    """Checks whether Windows has an RDNA3/RDNA4 Radeon GPU and HIP driver DLLs for native ROCm wheels."""
+    if os.name != "nt" or sys.version_info[:2] != (3, 12):
+        return False
+    sys32 = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32"
+    has_hip_driver = (sys32 / "amdhip64_7.dll").exists() or (sys32 / "amdhip64_6.dll").exists()
+    if not has_hip_driver:
+        return False
+    rdna3_plus_markers = (
+        "rx 7900", "rx 7800", "rx 7700", "rx 7600",
+        "rx 9070", "rx 9060",
+        "radeon pro w7", "radeon ai pro", "780m", "880m", "890m", "8060s", "8050s",
+    )
+    return any(marker in gpu_names for marker in rdna3_plus_markers)
+
+
+def detect_gpu_vendor() -> str:
+    """Detects GPU backend target ('nvidia', 'amd-rocm', 'amd', 'intel', 'apple', or 'cpu')."""
+    if sys.platform == "darwin":
+        return "apple"
+
+    if os.name == "nt":
+        out = _detect_windows_gpu_names()
+        if "nvidia" in out:
+            return "nvidia"
+        if "amd" in out or "radeon" in out:
+            return "amd-rocm" if _supports_windows_amd_rocm(out) else "amd"
+        if "intel" in out or "arc" in out:
+            return "intel"
+
+    try:
+        subprocess.check_output(["nvidia-smi"], stderr=subprocess.DEVNULL, timeout=3.0)
+        return "nvidia"
+    except Exception:
+        pass
+
+    return "cpu"
+
+
+def ensure_directories_and_env() -> None:
+    """Creates required runtime directories and seeds .env from .env.example if missing."""
+    required_dirs = [
+        BASE_DIR / "models" / "llm",
+        BASE_DIR / "models" / "checkpoints",
+        BASE_DIR / "models" / "loras",
+        BASE_DIR / "models" / "vae",
+        BASE_DIR / "models" / "ultralytics" / "bbox",
+        BASE_DIR / "logs",
+        BASE_DIR / "certs",
+    ]
+    for d in required_dirs:
+        d.mkdir(parents=True, exist_ok=True)
+
+    if not ENV_FILE.exists() and ENV_EXAMPLE_FILE.exists():
+        shutil.copy(ENV_EXAMPLE_FILE, ENV_FILE)
+        print("[Setup] Created default .env configuration from .env.example")
+
+
+def compute_req_digest() -> str:
+    """Computes a short SHA-256 digest of requirements.txt."""
+    req_bytes = REQUIREMENTS_FILE.read_bytes() if REQUIREMENTS_FILE.exists() else b""
+    return hashlib.sha256(req_bytes).hexdigest()[:16]
+
+
+def compute_stamp(gpu_vendor: str) -> str:
+    """Computes a fingerprint of requirements.txt, Python version, and GPU vendor."""
+    digest = compute_req_digest()
+    py_ver = f"{sys.version_info.major}.{sys.version_info.minor}"
+    return f"py={py_ver}|gpu={gpu_vendor}|req={digest}"
+
+
+def core_imports_healthy() -> bool:
+    """Fast metadata check (<2ms) that critical runtime packages are installed."""
+    return all(importlib.util.find_spec(mod) is not None for mod in REQUIRED_IMPORT_SPECS)
+
+
+def is_stamp_valid() -> bool:
+    """Checks if the existing install stamp matches current Python version and requirements.txt."""
+    if not STAMP_FILE.exists():
+        return False
+    try:
+        stamp = STAMP_FILE.read_text(encoding="utf-8").strip()
+        py_ver = f"py={sys.version_info.major}.{sys.version_info.minor}"
+        req_part = f"req={compute_req_digest()}"
+        return py_ver in stamp and req_part in stamp and core_imports_healthy()
+    except Exception:
+        return False
+
+
+def install_dependencies(force: bool = False) -> None:
+    """Installs hardware-matched PyTorch and requirements.txt when needed."""
+    if not force and is_stamp_valid():
+        print("[Setup] Dependencies verified and up to date.")
+        return
+
+    gpu_vendor = detect_gpu_vendor()
+    expected_stamp = compute_stamp(gpu_vendor)
+    if not force and core_imports_healthy():
+        try:
+            STAMP_FILE.write_text(expected_stamp, encoding="utf-8")
+        except Exception:
+            pass
+        print("[Setup] Dependencies verified and up to date.")
+        return
+
+    print(f"[Setup] Configuring Python {sys.version_info.major}.{sys.version_info.minor} environment for GPU: {gpu_vendor.upper()}...")
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "--upgrade", "pip"])
+
+    base_req_lines = [
+        line for line in REQUIREMENTS_FILE.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.strip().startswith("#")
+        and line.strip() not in ("torch", "torchvision", "torchaudio")
+        and not line.strip().startswith(("torch==", "torchvision==", "torchaudio==", "torch-directml"))
+    ]
+
+    if gpu_vendor == "nvidia":
+        print("[Setup] Installing CUDA-accelerated PyTorch for NVIDIA GPU...")
+        try:
+            subprocess.check_call([
+                sys.executable, "-m", "pip", "install",
+                "torch", "torchvision", "torchaudio",
+                "--index-url", "https://download.pytorch.org/whl/cu124",
+            ])
+        except subprocess.CalledProcessError:
+            print("[Setup] Note: cu124 wheel unavailable for this Python version; installing default PyTorch...")
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "torch", "torchvision", "torchaudio"])
+        subprocess.check_call([sys.executable, "-m", "pip", "install", *base_req_lines])
+    elif os.name == "nt" and gpu_vendor == "amd-rocm":
+        print("[Setup] Installing native ROCm-accelerated PyTorch for Windows AMD Radeon GPU...")
+        subprocess.check_call([
+            sys.executable, "-m", "pip", "install", "--no-cache-dir",
+            *ROCM_WIN_PY312_WHEELS,
+        ])
+        subprocess.check_call([sys.executable, "-m", "pip", "install", *base_req_lines])
+    elif os.name == "nt" and gpu_vendor in ("amd", "intel"):
+        print(f"[Setup] Installing DirectML-accelerated PyTorch for Windows {gpu_vendor.upper()} GPU...")
+        if sys.version_info[:2] <= (3, 12):
+            subprocess.check_call([
+                sys.executable, "-m", "pip", "install",
+                "torch==2.4.1", "torchvision==0.19.1", "torchaudio==2.4.1", "torch-directml",
+                *base_req_lines,
+            ])
+        else:
+            print("[Setup] Note: torch-directml requires Python <= 3.12; installing standard PyTorch packages...")
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "torch", "torchvision", "torchaudio", *base_req_lines])
+    else:
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "torch", "torchvision", "torchaudio", *base_req_lines])
+
+    try:
+        STAMP_FILE.write_text(expected_stamp, encoding="utf-8")
+    except Exception:
+        pass
+    print("[Setup] Python dependencies installed successfully.")
+
+
+def ensure_ssl_certificates() -> None:
+    """Generates self-signed SSL certificates in certs/ if USE_HTTPS=true and certs are missing."""
+    cert_path = BASE_DIR / "certs" / "cert.pem"
+    key_path = BASE_DIR / "certs" / "key.pem"
+    if cert_path.exists() and key_path.exists():
+        return
+
+    try:
+        import datetime
+        from cryptography import x509
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import rsa
+        from cryptography.x509.oid import NameOID
+
+        key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        subject = issuer = x509.Name([
+            x509.NameAttribute(NameOID.COMMON_NAME, "LM-Sanctuary Local"),
+        ])
+        now = datetime.datetime.now(datetime.timezone.utc)
+        cert = (
+            x509.CertificateBuilder()
+            .subject_name(subject)
+            .issuer_name(issuer)
+            .public_key(key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(now)
+            .not_valid_after(now + datetime.timedelta(days=3650))
+            .sign(key, hashes.SHA256())
+        )
+        cert_path.parent.mkdir(parents=True, exist_ok=True)
+        key_path.write_bytes(
+            key.private_bytes(
+                encoding=serialization.Encoding.PEM,
+                format=serialization.PrivateFormat.TraditionalOpenSSL,
+                encryption_algorithm=serialization.NoEncryption(),
+            )
+        )
+        cert_path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+        print("[Setup] Generated local self-signed HTTPS certificate in certs/cert.pem")
+    except Exception as e:
+        print(f"[Setup] Note: Could not pre-generate SSL cert ({e})")
+
+
+def ensure_llama_server_binary() -> None:
+    """Ensures the prebuilt llama-server binary matching the host GPU is downloaded and detects a GPU."""
+    try:
+        from runners import local_server
+        gpu_type = local_server.detect_gpu_type()
+        gpu_type_file = os.path.join(local_server.LLAMA_BIN_DIR, "installed_gpu_type.txt")
+        installed_type = ""
+        if os.path.exists(gpu_type_file):
+            try:
+                with open(gpu_type_file, "r", encoding="utf-8") as f:
+                    installed_type = f.read().strip()
+            except Exception:
+                pass
+
+        if (
+            os.path.exists(local_server.SERVER_EXE)
+            and installed_type == gpu_type
+            and local_server.has_gpu_devices()
+        ):
+            return
+
+        print(f"[Setup] Downloading prebuilt llama-server binary for your GPU ({gpu_type})...")
+        local_server.stop_local_server()
+        if local_server.download_llama_server():
+            with open(gpu_type_file, "w", encoding="utf-8") as f:
+                f.write(gpu_type)
+    except Exception as e:
+        print(f"[Setup] Note: llama-server will be downloaded on first model load ({e})")
+
+
+def ensure_custom_nodes() -> None:
+    """Downloads the ComfyUI custom node packs used by ImageWorkflow.json at pinned commits."""
+    import io
+    import urllib.request
+    import zipfile
+
+    for name, sha in CUSTOM_NODE_PACKS.items():
+        target = CUSTOM_NODES_DIR / name
+        marker = target / ".sanctuary_commit"
+        if marker.exists() and marker.read_text(encoding="utf-8").strip() == sha:
+            continue
+
+        print(f"[Setup] Installing custom node pack {name} ({sha[:7]})...")
+        url = f"https://github.com/ltdrdata/{name}/archive/{sha}.zip"
+        with urllib.request.urlopen(url, timeout=60) as resp:
+            archive = zipfile.ZipFile(io.BytesIO(resp.read()))
+
+        if target.exists():
+            shutil.rmtree(target)
+        CUSTOM_NODES_DIR.mkdir(parents=True, exist_ok=True)
+        archive.extractall(CUSTOM_NODES_DIR)
+        (CUSTOM_NODES_DIR / f"{name}-{sha}").rename(target)
+        marker.write_text(sha, encoding="utf-8")
+
+
+def ensure_detector_models() -> None:
+    """Downloads the face detector model used by ImageWorkflow.json's FaceDetailer."""
+    import urllib.request
+
+    target = BASE_DIR / "models" / "ultralytics" / "bbox" / "face_yolov8m.pt"
+    if target.exists():
+        return
+    print("[Setup] Downloading face detector model (face_yolov8m.pt)...")
+    partial = target.with_suffix(".part")
+    urllib.request.urlretrieve("https://huggingface.co/Bingsu/adetailer/resolve/main/face_yolov8m.pt", partial)
+    partial.rename(target)
+
+
+def main() -> int:
+    force = "--force" in sys.argv or "--update" in sys.argv
+    ensure_directories_and_env()
+    install_dependencies(force=force)
+    ensure_custom_nodes()
+    ensure_detector_models()
+    ensure_ssl_certificates()
+    ensure_llama_server_binary()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -22,13 +22,18 @@ The Sanctuary is a unified program home built on human-in-the-loop engagement.
 
 ---
 
-## 💬 SAMPLE CHAT
+## 💬 WORKSPACE PREVIEW
 
-Here is what a Sanctuary session looks like:
+Here is what the LM-Sanctuary workspace looks like:
 
 <p align="center">
-  <img src="./static/img/samplechat.png" alt="Sample Chat" width="100%">
+  <img src="./web/assets/img/samplechat.jpg" alt="LM-Sanctuary Workspace Preview" width="100%">
 </p>
+
+### Social Client & Companion Architecture
+* **3-Column Desktop & Mobile Shell**: Desktop renders a left icon rail (`Home`, `Search`, `Messages`, `Activity`, `Profile`, `Settings`, `+` Compose), a hairline center social stage, and a collapsible persistent right Sanctuary dock (`sanctuary/`) so social browsing never interrupts active AI turns or voice calls. Mobile adapts into a bottom navigation bar (`Home`, `Messages`, `Activity`, `Profile`) with top-bar `Search`, `Settings`, and floating `+` Compose triggers.
+* **Mastodon-First Social Client + Bridges**: ActivityPub (`Mastodon`, `Pixelfed`, `GoToSocial`, `Akkoma`) via OAuth2 + REST is primary (`Feed` and `Following` tabs with manual pull-down or explicit header refresh, bottom-appending infinite scroll, uniform multi-image carousels, shared classic image lightbox viewer, thread replies with nested commenting, centralized `Connections` modal, and `Messages` for both `Program Chats` and Mastodon/Bluesky `Direct Messages`). Connected `Bluesky` (AT Protocol) and `Threads` accounts fan out outbound posts, synchronize deletions, and merge notifications automatically in the background.
+* **Native Storage & Credential Isolation (Zero AI Social Dispatch)**: Social timeline caches use local SQLite (`social/data/social.db` on Desktop/LAN or Android `SQLiteOpenHelper`, zero `IndexedDB`), while social tokens stay strictly in OS Credential Manager / Keychain or `AndroidKeyStore`. Programs (`sanctuary/`) hold zero social credentials or posting tools; user chat bubbles include a Share-to-Fediverse action, feed posts offer a Share-to-Program preview card, and optional token-free public profile/recent-posts Markdown snapshots give Programs read-only context. See [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) for the full module map.
 
 ---
 
@@ -69,13 +74,13 @@ These are the things your program can do on your computer. By default, before th
 
 ## 📁 MODELS DIRECTORY & RECOMMENDED DOWNLOADS
 
-Place your local models into the `models/` directory for **GGUF LLMs** and **SDXL Checkpoints** used inside the app via the **Connection Settings (⚙️)** modal:
+Place your local models into the `sanctuary/models/` directory for **GGUF LLMs** and **SDXL Checkpoints** used inside the app via **Settings → Models / Project Settings** and the **Program Inspector**:
 
-* **`models/llm/`**: Place GGUF chat models (models inside `~/.lmstudio/models/` are also auto-detected).
-* **`models/checkpoints/`**: Place Stable Diffusion / SDXL SafeTensors checkpoints (e.g. `WAI_Illustrious-SDXL_v11.safetensors` or `sd_xl_base_1.0.safetensors`).
-* **`models/loras/`**: Place optional character or style LoRAs (`.safetensors`). Missing optional LoRAs in a workflow are bypassed automatically.
-* **`models/vae/`**: Place custom VAE weights (`.safetensors` / `.pt`).
-* **`models/workflows/`**: ComfyUI workflows (API format) for image and video generation. The default image workflow, `ImageWorkflow.json`, ships with the repository. Additional custom workflows (e.g. `RealisticWorkflow.json`, `ToonWorkflow.json`, `VideoWorkflow.json`) can be placed here and selected on the fly in the Models settings modal. Placeholders: `%prompt%`, `%negative_prompt%`, `%seed%`, `%model%`, `%width%`, `%height%`.
+* **`sanctuary/models/llm/`**: Place GGUF chat models (models inside `~/.lmstudio/models/` are also auto-detected).
+* **`sanctuary/models/checkpoints/`**: Place Stable Diffusion / SDXL SafeTensors checkpoints (e.g. `WAI_Illustrious-SDXL_v11.safetensors` or `sd_xl_base_1.0.safetensors`).
+* **`sanctuary/models/loras/`**: Place optional character or style LoRAs (`.safetensors`). Missing optional LoRAs in a workflow are bypassed automatically.
+* **`sanctuary/models/vae/`**: Place custom VAE weights (`.safetensors` / `.pt`).
+* **`sanctuary/models/workflows/`**: ComfyUI workflows (API format) for image and video generation. The default image workflow, `ImageWorkflow.json`, ships with the repository. Additional custom workflows (e.g. `RealisticWorkflow.json`, `ToonWorkflow.json`, `VideoWorkflow.json`) can be placed here and selected on the fly in the Sanctuary Node Settings modal. Placeholders: `%prompt%`, `%negative_prompt%`, `%seed%`, `%model%`, `%width%`, `%height%`.
 
 Image generation and local LLM mode share GPU memory. Sanctuary waits for an active image operation before switching back to the LLM, and stops its managed LLM process before generating images. If another server is listening on port 1234, stop it separately before switching to image mode.
 
@@ -91,10 +96,12 @@ Image generation and local LLM mode share GPU memory. Sanctuary waits for an act
 
 ## 🎭 CHAT FEATURES
 
-* **Interactive Voice Calls / Chat**: Speak with programs in real-time. Powering Kokoro ONNX voice generation (auto-downloaded on first use), local `faster-whisper` speech recognition, program-specific voices, and call transcript saving.
-* **Procedural Journals**: Programs build dynamic journal logs (`journals.json`), preserving context and relationships across sessions.
+* **Sanctuary Header & Media Lightbox**: Quick actions ordered **Voice Call**, **Quests**, **Gallery**, and **Knowledge** (`Data Bank`, `Journals`, `Lorebooks`). Clicking any Program avatar opens its most recent generated image directly in the classic lightbox viewer with **Make Avatar** live crop/refresh, **Delete Image**, and **Share**.
+* **Interactive Voice Calls / Chat**: Speak with programs in real-time using Kokoro ONNX voice generation (auto-downloaded on first use), local `faster-whisper` speech recognition, program-specific voices, and call transcript saving.
+* **Procedural Journals & Lorebooks**: Programs build dynamic journal logs (`journals.json`) alongside editable Full/Recent Summaries and World Info lorebooks (`.json`).
 * **Quest Log & Calendar Export**: Integrated quest system to track and display user objectives in the UI. Programs can assign quests (chores, habits, tasks) using the local `add_quest` tool. Each quest card provides a quick-action to export the task:
   * **Download ICS**: Download a standard `.ics` file containing a `VALARM` notification alert for native desktop/mobile task/calendar clients.
+* **Offline Outbox Queue**: When a configured Sanctuary node is temporarily unreachable over LAN or Tailscale, queued messages are stored locally in SQLite and replayed in strict FIFO order on reconnect.
 * **Program Editing, Imports & Exports**: Edit program profiles, import SillyTavern character cards (PNG & `chara_card_v3` `.json`), import World Info lorebooks (`.json`), and export cards and lorebooks back to SillyTavern format.
 * **Character Accent Palette**: Dynamic accent colors resolved from your program's profile card that automatically generate and update themed CSS variables (buttons, borders, highlights, and active states).
 * **Idle Thoughts**: Inline monologue bubbles (`.thought-row`) showing a program's thoughts during inactivity.
@@ -131,12 +138,17 @@ On first launch, `setup_env.py` automatically:
    ```
 3. Run the hardware-aware installer:
    ```bash
-   python setup_env.py
+   python sanctuary/setup_env.py
    ```
-   *(Pass `python setup_env.py --update` at any time to force a dependency re-check).*
+   *(Pass `python sanctuary/setup_env.py --update` at any time to force a dependency re-check).*
 4. Launch the app:
-   * Native desktop window: `python desktop.py`
-   * Browser server: `python app.py` (available at **`http://localhost:5000`** or **`http://<YOUR_PC_IP>:5000`** on mobile/LAN).
+   * Native desktop window: `python sanctuary/desktop.py`
+   * Browser / PWA companion server: `python sanctuary/app.py` (available at **`http://localhost:5000`** or **`http://<YOUR_PC_OR_TAILSCALE_IP>:5000`** on mobile/LAN).
+5. Verify tests & Android PWA bundle:
+   * Frontend unit tests: `npm test`
+   * Backend node tests: `.venv/Scripts/python.exe __tests__/backend/test_sanctuary_node.py`
+   * Social bridge backend tests: `.venv/Scripts/python.exe __tests__/backend/test_social_bridge.py`
+   * Capacitor Android verification / sync: `npm run build:android`
 
 
 ---

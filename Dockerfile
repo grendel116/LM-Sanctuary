@@ -8,11 +8,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libsndfile1 \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt setup_env.py ./
-RUN python setup_env.py
+COPY requirements.txt ./
+COPY sanctuary/setup_env.py ./sanctuary/setup_env.py
+RUN python sanctuary/setup_env.py
 
 COPY . .
 
 EXPOSE 5000
 
-CMD ["python", "app.py"]
+CMD ["python", "sanctuary/app.py"]

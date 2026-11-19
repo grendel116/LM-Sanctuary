@@ -1,0 +1,85 @@
+import os
+from dotenv import load_dotenv
+
+# Base directory of the Sanctuary node (sanctuary/) and repository root
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+REPO_ROOT = os.path.dirname(BASE_DIR)
+WEB_DIR = os.path.join(REPO_ROOT, "web")
+for _candidate_env in (os.path.join(REPO_ROOT, ".env"), os.path.join(BASE_DIR, ".env")):
+    if os.path.exists(_candidate_env):
+        load_dotenv(_candidate_env, override=True)
+
+# Variables directory path
+VARIABLES_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# Configuration and data file paths
+BANNED_WORDS_FILE = os.path.join(VARIABLES_DIR, "banned_words.json")
+USER_MD_FILE = os.path.join(VARIABLES_DIR, "user.md")
+USER_PROFILES_DIR = os.path.join(VARIABLES_DIR, "user_profiles")
+
+DISABLED_THINKING = {"thinking": {"type": "disabled"}}
+
+# Pull server endpoint configuration from environment with standard local defaults
+LOCAL_SERVER_URL = os.getenv("LOCAL_SERVER_URL", "http://localhost:8080")
+
+def get_local_server_headers():
+    headers = {"Content-Type": "application/json"}
+    api_key = os.getenv("LOCAL_SERVER_API_KEY")
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    return headers
+
+def is_thinking_enabled() -> bool:
+    env_val = os.getenv("THINKING_ENABLED")
+    if env_val is not None:
+        return env_val.lower() in ("true", "1", "yes")
+    return False
+
+# Dynamically derive models URL from LOCAL_SERVER_URL
+try:
+    from urllib.parse import urlparse
+    _parsed = urlparse(LOCAL_SERVER_URL)
+    if _parsed.path.endswith('/chat/completions'):
+        _base_path = _parsed.path.rsplit('/chat/completions', 1)[0]
+    else:
+        _base_path = '/v1'
+    LOCAL_MODELS_URL = f"{_parsed.scheme}://{_parsed.netloc}{_base_path}/models"
+except Exception:
+    LOCAL_MODELS_URL = "http://localhost:8080/v1/models"
+
+# ComfyUI Image Generation configurations
+COMFYUI_SERVER_URL = os.getenv("COMFYUI_SERVER_URL", "http://127.0.0.1:8188")
+_env_comfyui_dir = os.getenv("COMFYUI_DIR")
+COMFYUI_DIR = _env_comfyui_dir.strip() if (_env_comfyui_dir and _env_comfyui_dir.strip()) else os.path.normpath(os.path.join(REPO_ROOT, "..", "ComfyUI"))
+COMFYUI_CHECKPOINT = os.getenv("COMFYUI_CHECKPOINT", "sd_xl_base_1.0.safetensors")
+COMFYUI_VAE = os.getenv("COMFYUI_VAE", "sdxl_vae.safetensors")
+COMFYUI_IMAGE_WORKFLOW = os.getenv("COMFYUI_IMAGE_WORKFLOW", "ImageWorkflow.json")
+
+# Shared directory paths
+PROGRAMS_DIR = os.path.join(BASE_DIR, "core", "programs")
+LOGS_DIR = os.path.join(BASE_DIR, "logs")
+
+# Centralized Models directory hierarchy
+MODELS_DIR = os.path.join(BASE_DIR, "models")
+LLM_MODELS_DIR = os.path.join(MODELS_DIR, "llm")
+CHECKPOINTS_DIR = os.path.join(MODELS_DIR, "checkpoints")
+LORAS_DIR = os.path.join(MODELS_DIR, "loras")
+VAE_DIR = os.path.join(MODELS_DIR, "vae")
+WORKFLOWS_DIR = os.path.join(MODELS_DIR, "workflows")
+
+for _dir in (MODELS_DIR, LLM_MODELS_DIR, CHECKPOINTS_DIR, LORAS_DIR, VAE_DIR, WORKFLOWS_DIR, PROGRAMS_DIR, LOGS_DIR):
+    os.makedirs(_dir, exist_ok=True)
+
+
+def get_workflow_path(kind: str) -> str:
+    """Returns the ComfyUI workflow for `kind` ("Image" or "Video")."""
+    if str(kind).lower() == "image":
+        configured = os.getenv("COMFYUI_IMAGE_WORKFLOW")
+        if configured:
+            custom_path = os.path.join(WORKFLOWS_DIR, os.path.basename(configured))
+            if os.path.exists(custom_path):
+                return custom_path
+        return os.path.join(WORKFLOWS_DIR, "ImageWorkflow.json")
+    return os.path.join(WORKFLOWS_DIR, f"{kind}Workflow.json")
+
+

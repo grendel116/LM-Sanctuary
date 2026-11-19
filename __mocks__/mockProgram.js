@@ -1,0 +1,85 @@
+export const mockMobileHealthOnline = {
+  status: 'online',
+  gpu_mode: 'llm',
+  active_model: 'Qwen3-32B-Q4_K_M.gguf',
+  active_program: 'sebile',
+  generating_sessions: [],
+  programs: [
+    {
+      id: 'sebile',
+      name: 'Sebile',
+      avatar: '/programs/sebile/profile.png',
+      has_profile: true,
+      accent_color: '#38bdf8',
+      theme: {
+        primary_accent: '#38bdf8',
+        main_color: '#38bdf8',
+        primary_glow: 'rgba(56, 189, 248, 0.28)',
+      },
+      active: true,
+      generating: false,
+      idle_thought: 'Waiting on your next dispatch.',
+      last_active: 1763467200,
+      last_snippet: 'Ready to review the Fediverse client.',
+    },
+    {
+      id: 'rin',
+      name: 'Rin',
+      avatar: null,
+      has_profile: false,
+      accent_color: '#a855f7',
+      theme: {
+        primary_accent: '#a855f7',
+        main_color: '#a855f7',
+      },
+      active: false,
+      generating: false,
+      idle_thought: null,
+      last_active: 1763463600,
+      last_snippet: 'Morning notes cached.',
+    },
+  ],
+};
+
+export const mockRuntimeConfig = {
+  local_ip: '192.168.1.42',
+  tts_auto_speak: false,
+  tts_provider: 'local',
+  active_program: 'sebile',
+  active_session: 'default',
+  active_user: 'davy',
+  theme: { primary_accent: '#38bdf8' },
+  security_preset: 'ask_always',
+  review_policy: 'ask_always',
+  temperature: 0.7,
+};
+
+export const mockProgramHistoryPayload = {
+  active_program: 'sebile',
+  character_name: 'Sebile',
+  history: [
+    {
+      id: 'prgm_greet_1',
+      role: 'program',
+      text: 'Sanctuary online. What are we building?',
+      timestamp: 1763467100,
+      sender_id: 'sebile',
+      sender_name: 'Sebile',
+    },
+    {
+      id: 'usr_draft_1',
+      role: 'user',
+      text: 'Drafting a clean open-web update to share on Mastodon.',
+      image_url: '/images/portraits/portrait_01.png',
+      media: [{ url: '/images/portraits/portrait_01.png', type: 'image' }],
+      timestamp: 1763467150,
+    },
+  ],
+  state: { c: 0.2, m: 0.4, y: 0.1, k: 0.0 },
+  inversion_active: '',
+  inversion_state: {},
+  theme: { primary_accent: '#38bdf8' },
+  welcome_message: 'Sanctuary online.',
+  group_meta: null,
+  generating: false,
+};

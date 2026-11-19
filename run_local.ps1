@@ -35,7 +35,7 @@ if (!(Test-Path ".\.venv\Scripts\python.exe")) {
 }
 
 # 3. Run Hardware-Aware Environment Setup (instant on subsequent runs)
-& ".\.venv\Scripts\python.exe" setup_env.py @args
+& ".\.venv\Scripts\python.exe" "sanctuary\setup_env.py" @args
 if ($LASTEXITCODE -ne 0) {
     Write-Host "Error: Environment setup failed." -ForegroundColor Red
     exit 1
@@ -43,4 +43,4 @@ if ($LASTEXITCODE -ne 0) {
 
 # 4. Start LM Sanctuary Desktop
 Write-Host "--- Starting LM Sanctuary Desktop ---" -ForegroundColor Green
-Start-Process -FilePath ".\.venv\Scripts\pythonw.exe" -ArgumentList "desktop.py" -WindowStyle Hidden
+Start-Process -FilePath ".\.venv\Scripts\pythonw.exe" -ArgumentList "sanctuary\desktop.py" -WindowStyle Hidden

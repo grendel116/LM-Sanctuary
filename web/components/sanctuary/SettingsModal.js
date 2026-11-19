@@ -1,0 +1,852 @@
+import {
+  browseWorkspaceFolder,
+  fetchNativeModels,
+  fetchProjectSettings,
+  loadNativeLlm,
+  openModelsFolder,
+  saveGenerationParams,
+  saveProjectSettings,
+  selectNativeCheckpoint,
+  selectNativeWorkflow,
+} from '../../queries/sanctuary.js';
+import {
+  addKeywordFilter,
+  fetchKeywordFilters,
+  fetchModerationAccounts,
+  removeKeywordFilter,
+  toggleBlockAuthor,
+  toggleMuteAuthor,
+} from '../../queries/socialClient.js';
+import {
+  checkSanctuaryHealth,
+  connectionStore,
+  setSanctuaryBasicAuth,
+  setSanctuaryNodeUrl,
+} from '../../state/sanctuary/connection.js';
+import { flushOutbox, outboxStore } from '../../state/sanctuary/outboxModel.js';
+import { createClassicModalDialog, showAlert, showPrompt } from './SanctuaryDialog.js';
+
+const SETTINGS_SVG = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--primary-accent)" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="21" x2="4" y2="14"></line><line x1="4" y1="10" x2="4" y2="3"></line><line x1="12" y1="21" x2="12" y2="12"></line><line x1="12" y1="8" x2="12" y2="3"></line><line x1="20" y1="21" x2="20" y2="16"></line><line x1="20" y1="12" x2="20" y2="3"></line><line x1="1" y1="14" x2="7" y2="14"></line><line x1="9" y1="8" x2="15" y2="8"></line><line x1="17" y1="16" x2="23" y2="16"></line></svg>`;
+const FOLDER_SVG = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>`;
+
+const TAB_DESCRIPTORS = {
+  engine: 'Select your preferred model configuration for local in-process execution.',
+  project: 'Configure workspace folders, execution policies, search integration, and Sanctuary node connection.',
+  moderation: 'Manage Mastodon keyword filters, muted accounts, and blocked accounts.',
+};
+
+function normalizeSecurityPreset(raw) {
+  if (raw === 'turbo' || raw === 'auto_approve' || raw === 'auto') return 'auto';
+  return 'ask_always';
+}
+
+/**
+ * Left-Rail Connection & Project Settings modal (Models | Project Settings | Moderation).
+ */
+export function openSettingsModal({
+  initialTab = 'engine',
+  temperature = 0.95,
+  onSettingsChanged,
+} = {}) {
+  const doc = globalThis.document;
+  const resolvedInitial = initialTab === 'node' ? 'project' : initialTab;
+  let activeTab = TAB_DESCRIPTORS[resolvedInitial] ? resolvedInitial : 'engine';
+  let nodeStatusRefs = null;
+  let currentTemp = Number.isFinite(Number(temperature)) ? Number(temperature) : 0.95;
+  let nativeInfo = null;
+  let projectSettings = {
+    folders: [],
+    security_preset: 'ask_always',
+    artifact_review_policy: 'ask_always',
+    search_engine: 'web_crawling',
+    searxng_url: '',
+    tts_voice: 'af_heart',
+  };
+  let closed = false;
+
+  const modal = createClassicModalDialog({
+    id: 'connection-settings-dialog',
+    maxWidth: '560px',
+    onClose: () => {
+      closed = true;
+      unsubConn();
+      unsubOut();
+      modal.dialog.remove();
+    },
+  });
+
+  const heading = doc.createElement('h3');
+  heading.id = modal.titleId;
+  heading.className = 'classic-modal-title';
+  heading.innerHTML = `${SETTINGS_SVG}<span>Connection & Project Settings</span>`;
+
+  const tabBar = doc.createElement('div');
+  tabBar.className = 'classic-modal-tabs';
+  const engineBtn = doc.createElement('button');
+  engineBtn.type = 'button';
+  engineBtn.className = 'modal-tab-btn';
+  engineBtn.textContent = 'Models';
+  const projBtn = doc.createElement('button');
+  projBtn.type = 'button';
+  projBtn.className = 'modal-tab-btn';
+  projBtn.textContent = 'Project Settings';
+  const modBtn = doc.createElement('button');
+  modBtn.type = 'button';
+  modBtn.className = 'modal-tab-btn';
+  modBtn.textContent = 'Moderation';
+  tabBar.append(engineBtn, projBtn, modBtn);
+
+  const descriptorEl = doc.createElement('p');
+  descriptorEl.id = 'connection-descriptor';
+  descriptorEl.className = 'classic-modal-desc';
+
+  const bodyHost = doc.createElement('div');
+  bodyHost.className = 'classic-modal-scroll-body';
+
+  modal.card.append(heading, tabBar, descriptorEl, bodyHost);
+
+  function renderModelsTab() {
+    const wrap = doc.createElement('div');
+    wrap.className = 'classic-cards-stack';
+
+    // Temperature Slider Card
+    const tempBox = doc.createElement('div');
+    tempBox.className = 'onboarding-option-box';
+    const tempTop = doc.createElement('div');
+    tempTop.className = 'option-header';
+    const tempTitle = doc.createElement('span');
+    tempTitle.style.fontSize = '0.85rem';
+    tempTitle.style.fontWeight = '600';
+    const tempValSpan = doc.createElement('span');
+    tempValSpan.style.color = 'var(--primary-accent)';
+    tempValSpan.textContent = String(currentTemp);
+    tempTitle.append(doc.createTextNode('Temperature: '), tempValSpan);
+    const tempHint = doc.createElement('span');
+    tempHint.style.fontSize = '0.7rem';
+    tempHint.style.color = 'var(--text-muted)';
+    tempHint.textContent = 'Higher is creative, lower is stable';
+    tempTop.append(tempTitle, tempHint);
+
+    const slider = doc.createElement('input');
+    slider.type = 'range';
+    slider.id = 'dynamism-slider';
+    slider.className = 'sanctuary-range';
+    slider.min = '0.50';
+    slider.max = '1.80';
+    slider.step = '0.05';
+    slider.value = String(currentTemp);
+    slider.setAttribute('aria-label', 'Temperature');
+    slider.addEventListener('input', () => {
+      currentTemp = Number.parseFloat(slider.value);
+      tempValSpan.textContent = slider.value;
+    });
+    slider.addEventListener('change', async () => {
+      const val = Number.parseFloat(slider.value);
+      await saveGenerationParams(val);
+      await onSettingsChanged?.({ temperature: val });
+    });
+    tempBox.append(tempTop, slider);
+    wrap.appendChild(tempBox);
+
+    const ggufs = nativeInfo?.gguf_models || [];
+    const ckpts = nativeInfo?.checkpoints || [];
+    const loras = nativeInfo?.loras || [];
+    const workflows = nativeInfo?.workflows || [];
+
+    // Native LLM Panel
+    const llmBox = doc.createElement('div');
+    llmBox.className = 'onboarding-option-box';
+    const llmHead = doc.createElement('div');
+    llmHead.className = 'option-header';
+    const llmTitle = doc.createElement('h4');
+    llmTitle.style.margin = '0';
+    llmTitle.textContent = 'LLM Model';
+    const llmBadge = doc.createElement('span');
+    llmBadge.className = `status-badge ${ggufs.length > 0 ? 'status-online' : 'status-offline'}`;
+    llmBadge.textContent = ggufs.length > 0 ? 'Online' : 'No Models';
+    llmHead.append(llmTitle, llmBadge);
+
+    const llmDesc = doc.createElement('p');
+    llmDesc.className = 'option-desc';
+    llmDesc.textContent = 'Executes GGUF chat models in-process directly from sanctuary/models/llm/.';
+
+    const llmGrp = doc.createElement('div');
+    llmGrp.className = 'input-group';
+    const llmLbl = doc.createElement('label');
+    llmLbl.setAttribute('for', 'native-llm-select');
+    llmLbl.textContent = 'Active Chat Model';
+    const llmSelect = doc.createElement('select');
+    llmSelect.id = 'native-llm-select';
+    llmSelect.className = 'onboarding-input glass-select';
+
+    if (ggufs.length === 0) {
+      const opt = doc.createElement('option');
+      opt.value = '';
+      opt.textContent = 'No .gguf models found';
+      llmSelect.appendChild(opt);
+    } else {
+      for (const m of ggufs) {
+        const fname = typeof m === 'string' ? m : m.filename;
+        const mName = typeof m === 'string' ? m : (m.name || m.filename);
+        const sizeStr = typeof m === 'object' && m.size_gb !== undefined ? ` (${m.size_gb} GB)` : '';
+        const opt = doc.createElement('option');
+        opt.value = fname;
+        opt.textContent = `${mName}${sizeStr}`;
+        if (nativeInfo?.active_llm === fname || nativeInfo?.active_llm === mName) {
+          opt.selected = true;
+        }
+        llmSelect.appendChild(opt);
+      }
+    }
+    llmSelect.addEventListener('change', async () => {
+      if (!llmSelect.value) return;
+      const res = await loadNativeLlm({ model_name: llmSelect.value });
+      if (res?.success) {
+        showAlert('Model Active', `Loaded '${res.active_model}' for in-process chat.`);
+      }
+    });
+    llmGrp.append(llmLbl, llmSelect);
+
+    const openLlmBtn = doc.createElement('button');
+    openLlmBtn.type = 'button';
+    openLlmBtn.className = 'onboarding-btn';
+    openLlmBtn.style.cssText = 'width: 100%; display: inline-flex; align-items: center; justify-content: center; gap: 6px;';
+    openLlmBtn.innerHTML = `${FOLDER_SVG}<span>Open LLM Folder</span>`;
+    openLlmBtn.addEventListener('click', () => void openModelsFolder('llm'));
+
+    llmBox.append(llmHead, llmDesc, llmGrp, openLlmBtn);
+    wrap.appendChild(llmBox);
+
+    // Native Image Generation Panel
+    const diffBox = doc.createElement('div');
+    diffBox.className = 'onboarding-option-box';
+    const diffHead = doc.createElement('div');
+    diffHead.className = 'option-header';
+    const diffTitle = doc.createElement('h4');
+    diffTitle.style.margin = '0';
+    diffTitle.textContent = 'Image Generation';
+    const diffBadge = doc.createElement('span');
+    diffBadge.className = `status-badge ${ckpts.length > 0 ? 'status-online' : 'status-offline'}`;
+    diffBadge.textContent = ckpts.length > 0 ? 'Online' : 'No Checkpoints';
+    diffHead.append(diffTitle, diffBadge);
+
+    const diffDesc = doc.createElement('p');
+    diffDesc.className = 'option-desc';
+    diffDesc.textContent = 'Renders character portraits in-process from sanctuary/models/checkpoints/ and sanctuary/models/workflows/.';
+
+    const ckptGrp = doc.createElement('div');
+    ckptGrp.className = 'input-group';
+    const ckptLbl = doc.createElement('label');
+    ckptLbl.setAttribute('for', 'native-diffusion-select');
+    ckptLbl.textContent = 'Active Checkpoint Model';
+    const ckptSelect = doc.createElement('select');
+    ckptSelect.id = 'native-diffusion-select';
+    ckptSelect.className = 'onboarding-input glass-select';
+    if (ckpts.length === 0) {
+      const opt = doc.createElement('option');
+      opt.value = '';
+      opt.textContent = 'No SafeTensors checkpoints found';
+      ckptSelect.appendChild(opt);
+    } else {
+      for (const c of ckpts) {
+        const fname = typeof c === 'string' ? c : c.filename;
+        const cName = typeof c === 'string' ? c : (c.name || c.filename);
+        const sizeStr = typeof c === 'object' && c.size_gb !== undefined ? ` (${c.size_gb} GB)` : '';
+        const opt = doc.createElement('option');
+        opt.value = fname;
+        opt.textContent = `${cName}${sizeStr}`;
+        if (nativeInfo?.active_checkpoint === fname || nativeInfo?.active_checkpoint === cName) {
+          opt.selected = true;
+        }
+        ckptSelect.appendChild(opt);
+      }
+    }
+    ckptSelect.addEventListener('change', async () => {
+      if (!ckptSelect.value) return;
+      const res = await selectNativeCheckpoint(ckptSelect.value);
+      if (res?.success) {
+        showAlert('Checkpoint Active', `Selected checkpoint '${res.active_checkpoint}' for native portrait generation.`);
+      }
+    });
+    ckptGrp.append(ckptLbl, ckptSelect);
+
+    const wfGrp = doc.createElement('div');
+    wfGrp.className = 'input-group';
+    const wfLbl = doc.createElement('label');
+    wfLbl.setAttribute('for', 'native-workflow-select');
+    wfLbl.textContent = 'Active Image Workflow';
+    const wfSelect = doc.createElement('select');
+    wfSelect.id = 'native-workflow-select';
+    wfSelect.className = 'onboarding-input glass-select';
+    const wfPool = workflows.length > 0 ? workflows : [{ filename: 'ImageWorkflow.json', name: 'ImageWorkflow (Default)' }];
+    for (const w of wfPool) {
+      const fname = typeof w === 'string' ? w : w.filename;
+      const wName = typeof w === 'string' ? w : (w.name || w.filename);
+      const sizeStr = typeof w === 'object' && w.size_kb !== undefined ? ` (${w.size_kb} KB)` : '';
+      const opt = doc.createElement('option');
+      opt.value = fname;
+      opt.textContent = `${wName}${sizeStr}`;
+      if (nativeInfo?.active_workflow === fname || nativeInfo?.active_workflow === wName) {
+        opt.selected = true;
+      }
+      wfSelect.appendChild(opt);
+    }
+    wfSelect.addEventListener('change', async () => {
+      if (!wfSelect.value) return;
+      const res = await selectNativeWorkflow(wfSelect.value);
+      if (res?.success) {
+        showAlert('Workflow Active', `Selected workflow '${res.active_workflow}' for image generation.`);
+      }
+    });
+    wfGrp.append(wfLbl, wfSelect);
+
+    const summaryEl = doc.createElement('p');
+    summaryEl.className = 'option-desc';
+    summaryEl.textContent = `${ckpts.length} checkpoint(s) · ${loras.length} LoRA(s) · ${workflows.length} workflow(s)`;
+
+    const folderBtns = doc.createElement('div');
+    folderBtns.className = 'classic-modal-tabs';
+    for (const [key, lbl] of [['checkpoints', 'Checkpoints'], ['loras', 'LoRAs'], ['workflows', 'Workflows']]) {
+      const b = doc.createElement('button');
+      b.type = 'button';
+      b.className = 'onboarding-btn';
+      b.style.cssText = 'flex: 1; display: inline-flex; align-items: center; justify-content: center; gap: 6px;';
+      b.innerHTML = `${FOLDER_SVG}<span>${lbl}</span>`;
+      b.addEventListener('click', () => void openModelsFolder(key));
+      folderBtns.appendChild(b);
+    }
+
+    diffBox.append(diffHead, diffDesc, ckptGrp, wfGrp, summaryEl, folderBtns);
+    wrap.appendChild(diffBox);
+
+    bodyHost.replaceChildren(wrap);
+  }
+
+  function syncNodeSection() {
+    if (!nodeStatusRefs || activeTab !== 'project' || closed) return;
+    const conn = connectionStore.get();
+    const outbox = outboxStore.get();
+    nodeStatusRefs.badge.className = `status-badge ${conn.mode === 'online' ? 'status-online' : 'status-offline'}`;
+    nodeStatusRefs.badge.textContent = conn.mode === 'online' ? 'Online' : (conn.mode === 'offline' ? 'Offline' : 'Dormant');
+    nodeStatusRefs.statusLine.textContent = conn.mode === 'online'
+      ? `${conn.nodeUrl} (${conn.gpuMode}${conn.activeModel ? `, ${conn.activeModel}` : ''})`
+      : conn.mode === 'offline'
+        ? (conn.error || 'Node unreachable.')
+        : 'Dormant until configured or same-origin.';
+    if (outbox.items.length > 0) {
+      nodeStatusRefs.flushBtn.hidden = false;
+      nodeStatusRefs.flushBtn.textContent = `Flush Outbox (${outbox.items.length})`;
+    } else {
+      nodeStatusRefs.flushBtn.hidden = true;
+    }
+  }
+
+  function renderProjectTab() {
+    nodeStatusRefs = null;
+    const card = doc.createElement('div');
+    card.className = 'form-card-container';
+
+    // Folders
+    const foldersBlock = doc.createElement('div');
+    const fh = doc.createElement('h4');
+    fh.className = 'modal-sub-header';
+    fh.textContent = 'Folders';
+    const foldersList = doc.createElement('div');
+    foldersList.className = 'classic-cards-stack';
+
+    const saveCurrent = async () => {
+      const res = await saveProjectSettings(projectSettings);
+      if (res?.settings) projectSettings = res.settings;
+      await onSettingsChanged?.(projectSettings);
+      renderProjectTab();
+    };
+
+    (projectSettings.folders || []).forEach((folder, idx) => {
+      const row = doc.createElement('div');
+      row.className = 'list-entry-row row-layout';
+      row.style.fontFamily = 'monospace';
+      const pathSpan = doc.createElement('span');
+      pathSpan.textContent = folder;
+      pathSpan.style.overflow = 'hidden';
+      pathSpan.style.textOverflow = 'ellipsis';
+      row.appendChild(pathSpan);
+
+      if (idx === 0) {
+        const defBadge = doc.createElement('span');
+        defBadge.className = 'badge-default';
+        defBadge.textContent = 'Default';
+        row.appendChild(defBadge);
+      } else {
+        const rmBtn = doc.createElement('button');
+        rmBtn.type = 'button';
+        rmBtn.className = 'action-icon-btn';
+        rmBtn.setAttribute('aria-label', `Remove folder ${folder}`);
+        rmBtn.textContent = '×';
+        rmBtn.addEventListener('click', async () => {
+          projectSettings.folders = (projectSettings.folders || []).filter((f) => f !== folder);
+          await saveCurrent();
+        });
+        row.appendChild(rmBtn);
+      }
+      foldersList.appendChild(row);
+    });
+
+    const addFolderBtn = doc.createElement('button');
+    addFolderBtn.type = 'button';
+    addFolderBtn.className = 'dashed-action-btn';
+    addFolderBtn.textContent = '+ Add Folder';
+    addFolderBtn.addEventListener('click', async () => {
+      const appendFolder = async (folderPath) => {
+        const clean = String(folderPath || '').trim();
+        if (!clean) return;
+        const exists = (projectSettings.folders || []).some((f) => f.toLowerCase() === clean.toLowerCase());
+        if (exists) {
+          showAlert('Folder Exists', 'This folder is already in the workspace.');
+          return;
+        }
+        projectSettings.folders = [...(projectSettings.folders || []), clean];
+        await saveCurrent();
+      };
+
+      try {
+        const res = await browseWorkspaceFolder();
+        if (res?.folder) {
+          await appendFolder(res.folder);
+        }
+      } catch {
+        showPrompt('Add Workspace Folder', 'Enter full workspace folder path:', '', appendFolder);
+      }
+    });
+
+    foldersBlock.append(fh, foldersList, addFolderBtn);
+
+    // Program Settings
+    const progBlock = doc.createElement('div');
+    progBlock.className = 'classic-section-divider';
+    const ph = doc.createElement('h4');
+    ph.className = 'modal-sub-header';
+    ph.textContent = 'Program Settings';
+
+    const secRow = doc.createElement('div');
+    secRow.className = 'classic-setting-row';
+    const secInfo = doc.createElement('div');
+    const secLbl = doc.createElement('label');
+    secLbl.setAttribute('for', 'project-security-preset');
+    secLbl.textContent = 'Security Preset';
+    const secSub = doc.createElement('p');
+    secSub.className = 'classic-card-subtext';
+    secSub.textContent = 'Execution policy for shell commands and file operations.';
+    secInfo.append(secLbl, secSub);
+
+    const secSelect = doc.createElement('select');
+    secSelect.id = 'project-security-preset';
+    secSelect.className = 'onboarding-input glass-select';
+    secSelect.style.width = '180px';
+    const currentSec = normalizeSecurityPreset(projectSettings.security_preset);
+    for (const [val, text] of [['ask_always', 'Always Ask'], ['auto', 'Auto']]) {
+      const opt = doc.createElement('option');
+      opt.value = val;
+      opt.textContent = text;
+      if (currentSec === val) opt.selected = true;
+      secSelect.appendChild(opt);
+    }
+    secSelect.addEventListener('change', async () => {
+      projectSettings.security_preset = secSelect.value;
+      await saveProjectSettings(projectSettings);
+    });
+    secRow.append(secInfo, secSelect);
+
+    const revRow = doc.createElement('div');
+    revRow.className = 'classic-setting-row';
+    const revInfo = doc.createElement('div');
+    const revLbl = doc.createElement('label');
+    revLbl.setAttribute('for', 'project-review-policy');
+    revLbl.textContent = 'Review Policy';
+    const revSub = doc.createElement('p');
+    revSub.className = 'classic-card-subtext';
+    revSub.textContent = 'Specifies behavior when generating documentation and plans.';
+    revInfo.append(revLbl, revSub);
+
+    const revSelect = doc.createElement('select');
+    revSelect.id = 'project-review-policy';
+    revSelect.className = 'onboarding-input glass-select';
+    revSelect.style.width = '180px';
+    const currentRev = projectSettings.artifact_review_policy || 'ask_always';
+    for (const [val, text] of [['ask_always', 'Always Ask'], ['auto_approve', 'Auto']]) {
+      const opt = doc.createElement('option');
+      opt.value = val;
+      opt.textContent = text;
+      if (currentRev === val) opt.selected = true;
+      revSelect.appendChild(opt);
+    }
+    revSelect.addEventListener('change', async () => {
+      projectSettings.artifact_review_policy = revSelect.value;
+      await saveProjectSettings(projectSettings);
+    });
+    revRow.append(revInfo, revSelect);
+
+    progBlock.append(ph, secRow, revRow);
+
+    // Search Settings
+    const searchBlock = doc.createElement('div');
+    searchBlock.className = 'classic-section-divider';
+    const sh = doc.createElement('h4');
+    sh.className = 'modal-sub-header';
+    sh.textContent = 'Search Settings';
+
+    const modeRow = doc.createElement('div');
+    modeRow.className = 'classic-setting-row';
+    const modeLbl = doc.createElement('label');
+    modeLbl.setAttribute('for', 'project-search-engine');
+    modeLbl.textContent = 'Search Mode';
+    const modeSelect = doc.createElement('select');
+    modeSelect.id = 'project-search-engine';
+    modeSelect.className = 'onboarding-input glass-select';
+    modeSelect.style.width = '210px';
+    for (const [val, text] of [['web_crawling', 'Web Crawling (Unified)'], ['wikipedia', 'Wikipedia Only']]) {
+      const opt = doc.createElement('option');
+      opt.value = val;
+      opt.textContent = text;
+      if ((projectSettings.search_engine || 'web_crawling') === val) opt.selected = true;
+      modeSelect.appendChild(opt);
+    }
+    modeRow.append(modeLbl, modeSelect);
+
+    const searxRow = doc.createElement('div');
+    searxRow.className = 'classic-setting-row';
+    searxRow.hidden = modeSelect.value !== 'web_crawling';
+    const searxLbl = doc.createElement('label');
+    searxLbl.setAttribute('for', 'project-searxng-url');
+    searxLbl.textContent = 'SearXNG Custom URL';
+    const searxIn = doc.createElement('input');
+    searxIn.type = 'text';
+    searxIn.id = 'project-searxng-url';
+    searxIn.className = 'onboarding-input';
+    searxIn.style.width = '210px';
+    searxIn.placeholder = 'https://searx.be';
+    searxIn.value = projectSettings.searxng_url || '';
+    searxRow.append(searxLbl, searxIn);
+
+    modeSelect.addEventListener('change', async () => {
+      projectSettings.search_engine = modeSelect.value;
+      searxRow.hidden = modeSelect.value !== 'web_crawling';
+      await saveProjectSettings(projectSettings);
+    });
+    searxIn.addEventListener('change', async () => {
+      projectSettings.searxng_url = searxIn.value.trim();
+      await saveProjectSettings(projectSettings);
+    });
+
+    searchBlock.append(sh, modeRow, searxRow);
+
+    // Sanctuary Node Connection
+    const conn = connectionStore.get();
+    const outbox = outboxStore.get();
+    const nodeBlock = doc.createElement('div');
+    nodeBlock.className = 'classic-section-divider';
+
+    const nodeHead = doc.createElement('div');
+    nodeHead.className = 'option-header';
+    const nh = doc.createElement('h4');
+    nh.className = 'modal-sub-header';
+    nh.style.marginBlockEnd = '0';
+    nh.textContent = 'Sanctuary Node';
+    const badge = doc.createElement('span');
+    badge.className = `status-badge ${conn.mode === 'online' ? 'status-online' : 'status-offline'}`;
+    badge.textContent = conn.mode === 'online' ? 'Online' : (conn.mode === 'offline' ? 'Offline' : 'Dormant');
+    nodeHead.append(nh, badge);
+
+    const statusLine = doc.createElement('p');
+    statusLine.className = 'classic-card-subtext';
+
+    const urlGrp = doc.createElement('div');
+    urlGrp.className = 'input-group';
+    const urlLbl = doc.createElement('label');
+    urlLbl.setAttribute('for', 'node-url-input');
+    urlLbl.textContent = 'Node URL (LAN, Tailscale CGNAT, or HTTPS)';
+    const urlIn = doc.createElement('input');
+    urlIn.type = 'text';
+    urlIn.id = 'node-url-input';
+    urlIn.className = 'onboarding-input';
+    urlIn.value = conn.nodeUrl || '';
+    urlIn.placeholder = 'http://100.64.0.10:5000';
+    urlIn.setAttribute('autocorrect', 'off');
+    urlIn.setAttribute('autocapitalize', 'none');
+    urlIn.setAttribute('spellcheck', 'false');
+    urlGrp.append(urlLbl, urlIn);
+
+    const authGrid = doc.createElement('div');
+    authGrid.className = 'classic-two-col';
+    const userGrp = doc.createElement('div');
+    userGrp.className = 'input-group';
+    const uLbl = doc.createElement('label');
+    uLbl.setAttribute('for', 'node-auth-user');
+    uLbl.textContent = 'Basic Auth User';
+    const uIn = doc.createElement('input');
+    uIn.type = 'text';
+    uIn.id = 'node-auth-user';
+    uIn.className = 'onboarding-input';
+    uIn.setAttribute('autocorrect', 'off');
+    uIn.setAttribute('autocapitalize', 'none');
+    uIn.setAttribute('spellcheck', 'false');
+    userGrp.append(uLbl, uIn);
+
+    const passGrp = doc.createElement('div');
+    passGrp.className = 'input-group';
+    const pLbl = doc.createElement('label');
+    pLbl.setAttribute('for', 'node-auth-pass');
+    pLbl.textContent = 'Basic Auth Password';
+    const pIn = doc.createElement('input');
+    pIn.type = 'password';
+    pIn.id = 'node-auth-pass';
+    pIn.className = 'onboarding-input';
+    passGrp.append(pLbl, pIn);
+    authGrid.append(userGrp, passGrp);
+
+    const nodeActions = doc.createElement('div');
+    nodeActions.className = 'classic-card-actions';
+
+    const testBtn = doc.createElement('button');
+    testBtn.type = 'button';
+    testBtn.className = 'btn-sleek-pill';
+    testBtn.textContent = 'Connect & Test';
+    testBtn.addEventListener('click', async () => {
+      testBtn.disabled = true;
+      try {
+        if (uIn.value.trim() || pIn.value) {
+          await setSanctuaryBasicAuth(uIn.value.trim(), pIn.value);
+        }
+        await setSanctuaryNodeUrl(urlIn.value.trim());
+        await checkSanctuaryHealth();
+        await loadNodeData();
+        syncNodeSection();
+      } catch (err) {
+        showAlert('Node Error', err?.message || 'Invalid Sanctuary URL.');
+      } finally {
+        testBtn.disabled = false;
+      }
+    });
+
+    const discBtn = doc.createElement('button');
+    discBtn.type = 'button';
+    discBtn.className = 'edit-btn edit-cancel-btn';
+    discBtn.textContent = 'Disconnect';
+    discBtn.addEventListener('click', async () => {
+      await setSanctuaryNodeUrl('');
+      await setSanctuaryBasicAuth('', '');
+      urlIn.value = '';
+      syncNodeSection();
+    });
+
+    const flushBtn = doc.createElement('button');
+    flushBtn.type = 'button';
+    flushBtn.className = 'onboarding-btn';
+    flushBtn.hidden = outbox.items.length === 0;
+    flushBtn.addEventListener('click', async () => {
+      const res = await flushOutbox();
+      showAlert('Outbox', `Flushed ${res.flushedCount} turn(s), ${res.remainingCount} remaining.`);
+      syncNodeSection();
+    });
+
+    nodeActions.append(testBtn, discBtn, flushBtn);
+    nodeBlock.append(nodeHead, statusLine, urlGrp, authGrid, nodeActions);
+
+    card.append(foldersBlock, progBlock, searchBlock, nodeBlock);
+    nodeStatusRefs = { badge, statusLine, flushBtn };
+    syncNodeSection();
+    bodyHost.replaceChildren(card);
+  }
+
+  async function renderModerationTab() {
+    nodeStatusRefs = null;
+    const card = doc.createElement('div');
+    card.className = 'form-card-container';
+
+    const loading = doc.createElement('p');
+    loading.className = 'classic-card-subtext';
+    loading.textContent = 'Loading Moderation Rules...';
+    card.appendChild(loading);
+    bodyHost.replaceChildren(card);
+
+    const [filters, mutes, blocks] = await Promise.all([
+      fetchKeywordFilters().catch(() => []),
+      fetchModerationAccounts('mutes').catch(() => []),
+      fetchModerationAccounts('blocks').catch(() => []),
+    ]);
+    if (closed || activeTab !== 'moderation') return;
+
+    card.replaceChildren();
+
+    const filterBlock = doc.createElement('div');
+    const fh = doc.createElement('h4');
+    fh.className = 'modal-sub-header';
+    fh.textContent = 'Keyword Filters';
+    const fSub = doc.createElement('p');
+    fSub.className = 'classic-card-subtext';
+    fSub.textContent = 'Hide or wrap matching posts across timelines using Mastodon server filters or local SQLite rules.';
+
+    const addForm = doc.createElement('form');
+    addForm.className = 'list-create-row';
+    const phraseIn = doc.createElement('input');
+    phraseIn.type = 'text';
+    phraseIn.id = 'moderation-filter-phrase';
+    phraseIn.className = 'onboarding-input';
+    phraseIn.placeholder = 'Keyword or phrase...';
+    const actSelect = doc.createElement('select');
+    actSelect.id = 'moderation-filter-action';
+    actSelect.className = 'onboarding-input glass-select';
+    actSelect.style.width = '115px';
+    for (const [val, lbl] of [['hide', 'Hide'], ['warn', 'Warn']]) {
+      const opt = doc.createElement('option');
+      opt.value = val;
+      opt.textContent = lbl;
+      actSelect.appendChild(opt);
+    }
+    const addFilterBtn = doc.createElement('button');
+    addFilterBtn.type = 'submit';
+    addFilterBtn.className = 'btn-sleek-pill';
+    addFilterBtn.textContent = '+ Filter';
+    addForm.append(phraseIn, actSelect, addFilterBtn);
+    addForm.addEventListener('submit', async (ev) => {
+      ev.preventDefault();
+      const phrase = phraseIn.value.trim();
+      if (!phrase) return;
+      await addKeywordFilter({ title: phrase, phrase, filterAction: actSelect.value });
+      void renderModerationTab();
+    });
+
+    const filtersStack = doc.createElement('div');
+    filtersStack.className = 'classic-cards-stack';
+    if (filters.length === 0) {
+      const p = doc.createElement('p');
+      p.className = 'classic-card-subtext';
+      p.textContent = 'No keyword filters active.';
+      filtersStack.appendChild(p);
+    } else {
+      for (const f of filters) {
+        const row = doc.createElement('div');
+        row.className = 'list-entry-row row-layout';
+        const lbl = doc.createElement('span');
+        lbl.textContent = f.phrase || f.title;
+        const metaRight = doc.createElement('div');
+        metaRight.className = 'classic-card-actions';
+        const badgeEl = doc.createElement('span');
+        badgeEl.className = 'badge-default';
+        badgeEl.textContent = f.filter_action || 'hide';
+        const delBtn = doc.createElement('button');
+        delBtn.type = 'button';
+        delBtn.className = 'action-icon-btn';
+        delBtn.setAttribute('aria-label', `Remove filter ${f.phrase || f.title}`);
+        delBtn.textContent = '×';
+        delBtn.addEventListener('click', async () => {
+          await removeKeywordFilter(f.id);
+          void renderModerationTab();
+        });
+        metaRight.append(badgeEl, delBtn);
+        row.append(lbl, metaRight);
+        filtersStack.appendChild(row);
+      }
+    }
+    filterBlock.append(fh, fSub, addForm, filtersStack);
+
+    const buildModAccountSection = (title, emptyText, items, btnLabel, actionFn) => {
+      const section = doc.createElement('div');
+      section.className = 'classic-section-divider';
+      const h = doc.createElement('h4');
+      h.className = 'modal-sub-header';
+      h.textContent = title;
+      section.appendChild(h);
+      if (items.length === 0) {
+        const p = doc.createElement('p');
+        p.className = 'classic-card-subtext';
+        p.textContent = emptyText;
+        section.appendChild(p);
+        return section;
+      }
+      const stack = doc.createElement('div');
+      stack.className = 'classic-cards-stack';
+      for (const acc of items) {
+        const row = doc.createElement('div');
+        row.className = 'list-entry-row row-layout';
+        const lbl = doc.createElement('span');
+        lbl.textContent = `${acc.displayName || acc.username} (@${acc.acct})`;
+        const btn = doc.createElement('button');
+        btn.type = 'button';
+        btn.className = 'edit-btn';
+        btn.textContent = btnLabel;
+        btn.addEventListener('click', async () => {
+          await actionFn(acc.id);
+          void renderModerationTab();
+        });
+        row.append(lbl, btn);
+        stack.appendChild(row);
+      }
+      section.appendChild(stack);
+      return section;
+    };
+
+    card.append(
+      filterBlock,
+      buildModAccountSection('Muted Accounts', 'No muted accounts.', mutes, 'Unmute', (id) => toggleMuteAuthor(id, true)),
+      buildModAccountSection('Blocked Accounts', 'No blocked accounts.', blocks, 'Unblock', (id) => toggleBlockAuthor(id, true))
+    );
+  }
+
+  function renderBody() {
+    if (closed) return;
+    engineBtn.classList.toggle('active', activeTab === 'engine');
+    projBtn.classList.toggle('active', activeTab === 'project');
+    modBtn.classList.toggle('active', activeTab === 'moderation');
+    descriptorEl.textContent = TAB_DESCRIPTORS[activeTab] || '';
+
+    if (activeTab === 'engine') {
+      nodeStatusRefs = null;
+      renderModelsTab();
+    } else if (activeTab === 'project') {
+      renderProjectTab();
+    } else {
+      void renderModerationTab();
+    }
+  }
+
+  async function loadNodeData() {
+    if (connectionStore.get().mode !== 'online') return;
+    try {
+      const [nat, proj] = await Promise.all([
+        Promise.resolve().then(() => fetchNativeModels()).catch(() => null),
+        Promise.resolve().then(() => fetchProjectSettings()).catch(() => null),
+      ]);
+      if (closed) return;
+      if (nat) nativeInfo = nat;
+      if (proj && !proj.error) projectSettings = proj;
+      renderBody();
+    } catch {
+      // Non-fatal in offline/dormant state
+    }
+  }
+
+  engineBtn.addEventListener('click', () => {
+    activeTab = 'engine';
+    renderBody();
+  });
+  projBtn.addEventListener('click', () => {
+    activeTab = 'project';
+    renderBody();
+  });
+  modBtn.addEventListener('click', () => {
+    activeTab = 'moderation';
+    renderBody();
+  });
+
+  const unsubConn = connectionStore.subscribe(() => {
+    syncNodeSection();
+  });
+  const unsubOut = outboxStore.subscribe(() => {
+    syncNodeSection();
+  });
+
+  renderBody();
+  void loadNodeData();
+  modal.open();
+  return modal;
+}
