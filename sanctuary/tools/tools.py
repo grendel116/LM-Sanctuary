@@ -2342,3 +2342,79 @@ def search_music(query: str, mode: str = "deep_cuts") -> str:
         formatted.append(f"• {r['title']}\n  Details: {r['details']}\n  Link: {r['url']}\n  Source: {r['source']}")
 
     return f"[Music Discovery: Mode='{mode_lower}', Query='{clean_query}']\n\n" + "\n\n".join(formatted[:8])
+
+
+@track_tool_activity
+def tune_feed_algorithm(
+    action: str = "update",
+    preset: str = "",
+    recency_half_life_hours: int | float | str | None = None,
+    small_web: int | float | str | None = None,
+    author_diversity: int | float | str | None = None,
+    reposts: int | float | str | None = None,
+    longform: int | float | str | None = None,
+    media: int | float | str | None = None,
+    reciprocity: int | float | str | None = None,
+    commercial: int | float | str | None = None,
+    bourgeois_politics: int | float | str | None = None,
+    mature_content: int | float | str | None = None,
+    boost_concepts: list[str] | str | None = None,
+    dampen_concepts: list[str] | str | None = None,
+    add_boost_concepts: list[str] | str | None = None,
+    add_dampen_concepts: list[str] | str | None = None,
+    remove_concepts: list[str] | str | None = None,
+    **kwargs,
+) -> str:
+    """
+    Tune the user's declarative local social feed re-ranker profile without approval prompts.
+    Does not touch social credentials or read timelines.
+    """
+    from core.feed_tuning import (
+        apply_feed_tuning_patch,
+        format_feed_profile_summary,
+        load_feed_profile,
+    )
+    from runners.program import get_active_program
+    import state as st
+
+    act = str(action or "update").strip().lower()
+    if act in ("get", "show", "status", "inspect"):
+        return "[Feed Profile]\n" + format_feed_profile_summary(load_feed_profile())
+
+    slider_patch: dict[str, object] = {
+        "recencyHalfLifeHours": recency_half_life_hours,
+        "smallWeb": small_web,
+        "authorDiversity": author_diversity,
+        "reposts": reposts,
+        "longform": longform,
+        "media": media,
+        "reciprocity": reciprocity,
+        "commercial": commercial,
+        "bourgeoisPolitics": bourgeois_politics,
+        "matureContent": mature_content,
+    }
+    for k, v in kwargs.items():
+        if v is not None:
+            slider_patch[k] = v
+
+    active_preset = "reset" if act == "reset" and not preset else preset
+    try:
+        updated = apply_feed_tuning_patch(
+            preset=active_preset,
+            sliders=slider_patch,
+            boost_concepts=boost_concepts,
+            dampen_concepts=dampen_concepts,
+            add_boost_concepts=add_boost_concepts,
+            add_dampen_concepts=add_dampen_concepts,
+            remove_concepts=remove_concepts,
+            updated_by=get_active_program() or "program",
+        )
+    except ValueError as err:
+        return f"Error: {err}"
+
+    try:
+        st.broadcast_status()
+    except Exception:
+        pass
+
+    return "[Feed Profile Updated]\n" + format_feed_profile_summary(updated)

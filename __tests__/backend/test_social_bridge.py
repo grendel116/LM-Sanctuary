@@ -112,6 +112,12 @@ class FakeMastodonAdapter:
     def list_follow_requests(self, limit=40):
         return []
 
+    def list_mutes(self):
+        return [{"id": "m_m1", "protocol": "mastodon", "username": "muted_m", "acct": "muted_m@mastodon.social", "display_name": "Muted Mastodon"}]
+
+    def list_blocks(self):
+        return []
+
 
 class FakeBlueskyAdapter:
     protocol = "bluesky"
@@ -191,6 +197,12 @@ class FakeBlueskyAdapter:
 
     def list_followers(self, actor, *, cursor="", limit=40):
         return {"accounts": [], "next_cursor": None}
+
+    def list_mutes(self, limit=100):
+        return [{"id": "did:plc:m_bsky", "did": "did:plc:m_bsky", "protocol": "bluesky", "username": "m.bsky.social", "acct": "m.bsky.social", "display_name": "Muted Bsky"}]
+
+    def list_blocks(self, limit=100):
+        return [{"id": "did:plc:b_bsky", "did": "did:plc:b_bsky", "protocol": "bluesky", "username": "b.bsky.social", "acct": "b.bsky.social", "display_name": "Blocked Bsky", "viewer": {"blocking": "at://did:plc:davy/app.bsky.graph.block/b1"}}]
 
     def search_actors(self, query, *, limit=15):
         return [{"id": "did:plc:bob", "did": "did:plc:bob", "protocol": "bluesky", "username": "bob.bsky.social", "acct": "bob.bsky.social", "display_name": "Bob"}]
@@ -594,7 +606,810 @@ def run_tests():
 
         assert cpc.get_active_user_display_name() == "Davy Test"
 
-        # 9. Verify runners/ and tools/ never import social/
+        # 8a. /api/social/moderation/<kind> merges Mastodon and Bluesky muted/blocked accounts
+        mutes_resp = client.get("/api/social/moderation/mutes")
+        assert mutes_resp.status_code == 200
+        mutes_protos = [a.get("protocol") for a in mutes_resp.get_json()["accounts"]]
+        assert "mastodon" in mutes_protos and "bluesky" in mutes_protos
+        blocks_resp = client.get("/api/social/moderation/blocks")
+        assert blocks_resp.status_code == 200
+        blocks_json = blocks_resp.get_json()["accounts"]
+        assert len(blocks_json) == 1 and blocks_json[0]["id"] == "did:plc:b_bsky"
+
+        # 8b. Bluesky UTF-8 facet linkification & external linkCard extraction
+        from social.core.schema.unified_item import normalize_bluesky_post, normalize_mastodon_status
+
+        bsky_text = "Good morning 🌹 🎶 🕊️\n\nyoutu.be/JLjyYDakdXo?..."
+        bsky_prefix = "Good morning 🌹 🎶 🕊️\n\n".encode("utf-8")
+        bsky_tok = "youtu.be/JLjyYDakdXo?...".encode("utf-8")
+        bsky_item = normalize_bluesky_post({
+            "post": {
+                "uri": "at://did:plc:abc/app.bsky.feed.post/link1",
+                "cid": "bafylink1",
+                "author": {"did": "did:plc:abc", "handle": "redhead.bsky.social", "displayName": "Redhead"},
+                "record": {
+                    "text": bsky_text,
+                    "createdAt": "2026-11-19T10:00:00Z",
+                    "facets": [{
+                        "index": {"byteStart": len(bsky_prefix), "byteEnd": len(bsky_prefix) + len(bsky_tok)},
+                        "features": [{"$type": "app.bsky.richtext.facet#link", "uri": "https://youtu.be/JLjyYDakdXo?si=test"}],
+                    }],
+                },
+                "embed": {
+                    "$type": "app.bsky.embed.external#view",
+                    "external": {
+                        "uri": "https://youtu.be/JLjyYDakdXo?si=test",
+                        "title": "Morning Song",
+                        "description": "Live session",
+                        "thumb": "https://cdn.bsky.app/img/thumb.jpg",
+                    },
+                },
+            }
+        })
+        assert 'href="https://youtu.be/JLjyYDakdXo?si=test"' in bsky_item["content_html"]
+        assert ">youtu.be/JLjyYDakdXo?...</a>" in bsky_item["content_html"]
+        assert bsky_item["_meta"]["linkCard"]["title"] == "Morning Song"
+
+        masto_card_item = normalize_mastodon_status(
+            {
+                "id": "999",
+                "created_at": "2026-11-19T10:00:00Z",
+                "content": "<p>Link post</p>",
+                "account": {"id": "1", "acct": "alice", "username": "alice"},
+                "card": {"url": "https://example.org/story", "title": "Example Story", "description": "Summary"},
+            },
+            "https://mastodon.social",
+        )
+        assert masto_card_item["_meta"]["linkCard"]["url"] == "https://example.org/story"
+
+        # 8b. Verify Threads OAuth 2.0 code exchange, 60-day upgrade, carousel normalization, conversation tree, and direct DM skip
+        from social.adapters.threads.adapter import ThreadsAdapter
+        from social.core.schema.unified_item import normalize_threads_post
+
+        assert ThreadsAdapter.clean_auth_code("https://localhost/?code=TH_CODE_9#_") == "TH_CODE_9"
+        auth_url = ThreadsAdapter.build_authorize_url(client_id="app_1", redirect_uri="https://localhost/", state="st1")
+        assert auth_url.startswith("https://threads.net/oauth/authorize?")
+        assert "threads_basic" in auth_url
+
+        threads_req_log = []
+
+        def _threads_handler(request: httpx.Request) -> httpx.Response:
+            threads_req_log.append((request.method, request.url.path, request.content.decode("utf-8", errors="ignore")))
+            if request.url.path == "/oauth/access_token":
+                return httpx.Response(200, json={"access_token": "short_tok", "user_id": "th_99"})
+            if request.url.path == "/access_token":
+                return httpx.Response(200, json={"access_token": "long_tok_60d", "expires_in": 5184000})
+            if request.url.path == "/refresh_access_token":
+                return httpx.Response(200, json={"access_token": "refreshed_tok_60d", "expires_in": 5184000})
+            if request.url.path == "/v1.0/th_post_1":
+                return httpx.Response(
+                    200,
+                    json={
+                        "id": "th_post_1",
+                        "username": "davy",
+                        "text": "Album release",
+                        "timestamp": "2026-11-19T04:00:00Z",
+                        "link_attachment_url": "https://example.org/release",
+                        "children": {"data": [{"id": "c1", "media_type": "IMAGE", "media_url": "https://cdn.example.org/a.jpg", "alt_text": "Cover"}]},
+                    },
+                )
+            if request.url.path == "/v1.0/th_post_1/conversation":
+                return httpx.Response(
+                    200,
+                    json={
+                        "data": [
+                            {"id": "rep_1", "username": "bob", "text": "Nice!", "timestamp": "2026-11-19T04:01:00Z", "replied_to": {"id": "th_post_1"}},
+                            {"id": "rep_2", "username": "carol", "text": "Agreed", "timestamp": "2026-11-19T04:02:00Z", "replied_to": {"id": "rep_1"}},
+                        ]
+                    },
+                )
+            return httpx.Response(404, json={})
+
+        th_client = httpx.Client(transport=httpx.MockTransport(_threads_handler))
+        short_res = ThreadsAdapter.exchange_oauth_code(
+            client_id="app_1",
+            client_secret="sec_1",
+            redirect_uri="https://localhost/",
+            code="https://localhost/?code=TH_CODE_9#_",
+            http_client=th_client,
+        )
+        assert short_res["access_token"] == "short_tok"
+        long_res = ThreadsAdapter.exchange_long_lived_token(client_secret="sec_1", access_token="short_tok", http_client=th_client)
+        assert long_res["access_token"] == "long_tok_60d"
+        ref_res = ThreadsAdapter.refresh_long_lived_token(access_token="long_tok_60d", http_client=th_client)
+        assert ref_res["access_token"] == "refreshed_tok_60d"
+
+        real_th = ThreadsAdapter(user_id="th_99", access_token="long_tok_60d", username="davy", http_client=th_client)
+        th_thread = real_th.get_post_thread("threads:th_post_1")
+        assert len(th_thread["status"]["attachments"]) == 1
+        assert th_thread["status"]["_meta"]["linkCard"]["url"] == "https://example.org/release"
+        assert [d["_threadDepth"] for d in th_thread["descendants"]] == [0, 1]
+
+        norm_car = normalize_threads_post({"id": "x1", "link_attachment_url": "https://example.org/item", "topic_tag": "IndieDev"})
+        assert norm_car["_meta"]["threads"]["topicTag"] == "IndieDev"
+
+        masto.calls.clear()
+        threads.calls.clear()
+        bsky.calls.clear()
+        engine.publish_unified(draft="Direct Mastodon message only", visibility="direct")
+        assert len(masto.calls) == 1
+        assert len(threads.calls) == 0
+        assert len(bsky.calls) == 0
+
+        # 9. Verify semantic feed concept scoring & normalized sensitivity/label fields
+        from social.semantic_scorer import reset_semantic_scorer_cache, score_items_for_concepts
+
+        reset_semantic_scorer_cache()
+
+        def fake_encode(texts):
+            out = []
+            for t in texts:
+                tl = t.lower()
+                if "cooperative" in tl or "union" in tl:
+                    out.append([1.0, 0.0, 0.0])
+                elif "crypto" in tl or "sponsored" in tl:
+                    out.append([0.0, 1.0, 0.0])
+                else:
+                    out.append([0.0, 0.0, 1.0])
+            return out
+
+        sem_res = score_items_for_concepts(
+            [
+                {"id": "p_coop", "text": "Worker cooperative bakeries thriving"},
+                {"id": "p_crypto", "text": "Sponsored crypto drop today"},
+                {"id": "p_neutral", "text": "Rainy morning walk"},
+            ],
+            boost_concepts=["worker cooperatives"],
+            dampen_concepts=["crypto hype"],
+            encode_fn=fake_encode,
+        )
+        assert sem_res["available"] is True
+        assert sem_res["scores"]["p_coop"] > 0.5
+        assert sem_res["scores"]["p_crypto"] < -0.5
+        assert abs(sem_res["scores"]["p_neutral"]) < 0.01
+
+        from social.core.schema.unified_item import normalize_bluesky_post, normalize_mastodon_status
+
+        m_sens = normalize_mastodon_status(
+            {"id": "s_sens", "content": "<p>CW test</p>", "sensitive": True, "spoiler_text": "18+ NSFW", "account": {"id": "a1", "acct": "a1"}},
+            "https://mastodon.social",
+        )
+        assert m_sens["_meta"]["mastodon"]["sensitive"] is True
+        b_lbl = normalize_bluesky_post(
+            {
+                "post": {
+                    "uri": "at://did:plc:x/app.bsky.feed.post/9",
+                    "cid": "cid9",
+                    "author": {"did": "did:plc:x", "handle": "x.bsky.social"},
+                    "record": {"text": "Artwork", "createdAt": "2026-11-19T00:00:00Z"},
+                    "labels": [{"val": "nudity"}],
+                },
+                "reason": {"by": {"did": "did:plc:rep", "handle": "rep.bsky.social", "displayName": "Rep"}},
+            }
+        )
+        assert b_lbl["_meta"]["bluesky"]["labels"] == ["nudity"]
+        assert b_lbl["_meta"]["bluesky"]["rebloggedBy"]["acct"] == "rep.bsky.social"
+
+        # 9b. Scoped Threads notifications, cross-platform metrics aggregation, Threads profile routing, and replace_bridges edit
+        from social.adapters.bluesky.adapter import BlueskyAdapter
+
+        agg_calls = []
+
+        def _agg_threads_handler(request: httpx.Request) -> httpx.Response:
+            agg_calls.append(("threads", request.method, request.url.path))
+            path = request.url.path
+            if path == "/v1.0/th_linked_1/replies":
+                return httpx.Response(
+                    200,
+                    json={
+                        "data": [
+                            {"id": "tr_ext", "username": "shinybags.plus", "text": "well its fascism", "timestamp": "2026-11-19T12:00:00Z"},
+                            {"id": "tr_self", "username": "davyrhodes_", "text": "Self reply ignore", "timestamp": "2026-11-19T12:01:00Z"},
+                        ]
+                    },
+                )
+            if path == "/v1.0/me/mentions":
+                return httpx.Response(
+                    200,
+                    json={
+                        "data": [
+                            {"id": "tm_untracked", "username": "random_user", "text": "Untracked reply", "replied_to": {"id": "th_foreign_999"}, "timestamp": "2026-11-19T12:02:00Z"},
+                            {"id": "tm_top", "username": "friend_top", "text": "Top level @davyrhodes_ ping", "timestamp": "2026-11-19T12:03:00Z"},
+                        ]
+                    },
+                )
+            if path == "/v1.0/th_linked_1/insights":
+                return httpx.Response(
+                    200,
+                    json={
+                        "data": [
+                            {"name": "likes", "values": [{"value": 4}]},
+                            {"name": "replies", "values": [{"value": 1}]},
+                            {"name": "reposts", "values": [{"value": 2}]},
+                            {"name": "quotes", "values": [{"value": 1}]},
+                        ]
+                    },
+                )
+            if path == "/v1.0/29797930329813883/threads":
+                if request.method == "GET":
+                    return httpx.Response(200, json={"data": [{"id": "own_th_9", "username": "davyrhodes_", "text": "Own native post", "timestamp": "2026-11-19T10:00:00Z"}]})
+                return httpx.Response(200, json={"id": "th_c_new"})
+            if path == "/v1.0/29797930329813883/threads_publish":
+                return httpx.Response(200, json={"id": "th_replaced_1"})
+            if path == "/v1.0/th_linked_1" and request.method == "DELETE":
+                return httpx.Response(200, json={"success": True})
+            if path == "/v1.0/profile_lookup":
+                return httpx.Response(400, json={"error": {"message": "Missing scope"}})
+            return httpx.Response(200, json={})
+
+        def _agg_bsky_handler(request: httpx.Request) -> httpx.Response:
+            agg_calls.append(("bluesky", request.method, request.url.path))
+            if request.url.path == "/xrpc/app.bsky.feed.getPosts":
+                return httpx.Response(
+                    200,
+                    json={
+                        "posts": [
+                            {"uri": "at://did:plc:davy/app.bsky.feed.post/agg1", "likeCount": 5, "replyCount": 2, "repostCount": 1, "quoteCount": 1}
+                        ]
+                    },
+                )
+            if request.url.path == "/xrpc/com.atproto.repo.deleteRecord":
+                return httpx.Response(200, json={})
+            if request.url.path == "/xrpc/com.atproto.repo.createRecord":
+                return httpx.Response(200, json={"uri": "at://did:plc:davy/app.bsky.feed.post/replaced1", "cid": "cid_rep_1"})
+            return httpx.Response(200, json={})
+
+        agg_th = ThreadsAdapter(
+            user_id="29797930329813883",
+            access_token="t_tok",
+            username="davyrhodes_",
+            http_client=httpx.Client(transport=httpx.MockTransport(_agg_threads_handler)),
+        )
+        agg_bsky = BlueskyAdapter(
+            service_url="https://bsky.social",
+            did="did:plc:davy",
+            handle="davy.bsky.social",
+            access_jwt="b_jwt",
+            http_client=httpx.Client(transport=httpx.MockTransport(_agg_bsky_handler)),
+        )
+        # Verify Threads notifications strictly exclude self-replies, untracked thread mentions, and unlinked timeline polling
+        scoped_notifs = agg_th.fetch_notifications(limit=10, tracked_post_ids=["th_linked_1"])
+        notif_texts = [n["content_text"] for n in scoped_notifs]
+        assert "well its fascism" in notif_texts
+        assert "Top level @davyrhodes_ ping" in notif_texts
+        assert "Self reply ignore" not in notif_texts
+        assert "Untracked reply" not in notif_texts
+        assert all(p != "/v1.0/29797930329813883/threads" for (_, m, p) in agg_calls if m == "GET")
+
+        # Verify Insights + Bluesky getPosts metrics parsing
+        ins = agg_th.get_post_insights("th_linked_1")
+        assert ins == {"likes": 4, "replies": 1, "reposts": 3}
+        bm = agg_bsky.get_posts_metrics(["at://did:plc:davy/app.bsky.feed.post/agg1"])
+        assert bm["at://did:plc:davy/app.bsky.feed.post/agg1"] == {"likes": 5, "replies": 2, "reposts": 2}
+
+        class _EditMastoFake(FakeMastodonAdapter):
+            def edit_status(self, status_id, draft, spoiler_text=""):
+                self.calls.append(("edit", status_id, draft))
+                item = self.publish(draft)
+                item["id"] = f"mastodon:{status_id}"
+                item["_meta"]["mastodon"]["statusId"] = str(status_id)
+                return item
+
+            def fetch_account_profile(self, account_id):
+                raise RuntimeError(f"Mastodon 404 called for {account_id}")
+
+        agg_store = SocialSQLiteStore(str(Path(tmpdir) / "agg_social.db"))
+        agg_store.save_linked_post(
+            canonical_id="mastodon:m_agg_99",
+            mastodon_status_id="m_agg_99",
+            mastodon_instance="https://mastodon.social",
+            bluesky_uri="at://did:plc:davy/app.bsky.feed.post/agg1",
+            bluesky_cid="cid_old",
+            threads_post_id="th_linked_1",
+        )
+        agg_masto = _EditMastoFake()
+        agg_engine = SocialSyncEngine(store=agg_store, keychain=engine.keychain)
+        agg_engine.get_mastodon_adapter = lambda *a, **kw: agg_masto
+        agg_engine.get_public_mastodon_adapter = lambda *a, **kw: agg_masto
+        agg_engine.get_bluesky_adapter = lambda *a, **kw: agg_bsky
+        agg_engine.get_threads_adapter = lambda *a, **kw: agg_th
+        set_social_engine_for_tests(agg_engine)
+
+        enrich_resp = client.post("/api/social/posts/enrich-metrics", json={
+            "items": [{
+                "id": "mastodon:m_agg_99",
+                "protocol": "mastodon",
+                "metrics": {"likes": 3, "replies": 1, "reposts": 2},
+                "_meta": {"mastodon": {"statusId": "m_agg_99"}},
+            }]
+        })
+        assert enrich_resp.status_code == 200
+        enriched_item = enrich_resp.get_json()["items"][0]
+        assert enriched_item["metrics"] == {"likes": 12, "replies": 4, "reposts": 7}
+        assert enriched_item["_meta"]["metricsBreakdown"]["threads"]["likes"] == 4
+        # Second call does not double count
+        twice = agg_engine.enrich_linked_metrics([enriched_item])[0]
+        assert twice["metrics"] == {"likes": 12, "replies": 4, "reposts": 7}
+
+        # Foreign Threads profile & statuses routes never hit Mastodon or leak own Threads timeline
+        prof_resp = client.get("/api/social/accounts/shinybags.plus/profile?protocol=threads")
+        assert prof_resp.status_code == 200
+        prof_json = prof_resp.get_json()["profile"]
+        assert prof_json["protocol"] == "threads"
+        assert prof_json["url"] == "https://www.threads.net/@shinybags.plus"
+        assert prof_json["threadsLimited"] is True
+
+        foreign_st = client.get("/api/social/accounts/shinybags.plus/statuses?protocol=threads")
+        assert foreign_st.status_code == 200
+        assert foreign_st.get_json()["items"] == []
+
+        own_st = client.get("/api/social/accounts/29797930329813883/statuses?protocol=threads&acct=davyrhodes_")
+        assert own_st.status_code == 200
+        assert len(own_st.get_json()["items"]) == 1
+
+        # PUT /api/social/posts/<id> with replace_bridges replaces Bluesky & Threads copies
+        agg_calls.clear()
+        edit_resp = client.put("/api/social/posts/m_agg_99", json={"text": "Updated across all", "replace_bridges": True})
+        assert edit_resp.status_code == 200
+        edited_json = edit_resp.get_json()["item"]
+        assert edited_json["_meta"]["linkedIds"]["threadsPostId"] == "th_replaced_1"
+        assert edited_json["_meta"]["linkedIds"]["blueskyUri"] == "at://did:plc:davy/app.bsky.feed.post/replaced1"
+        assert ("threads", "DELETE", "/v1.0/th_linked_1") in agg_calls
+        assert ("threads", "POST", "/v1.0/29797930329813883/threads_publish") in agg_calls
+        assert ("bluesky", "POST", "/xrpc/com.atproto.repo.deleteRecord") in agg_calls
+        assert ("bluesky", "POST", "/xrpc/com.atproto.repo.createRecord") in agg_calls
+
+        # 9c. Link previews, SSRF rejection, outbound embeds, and Threads export archive importer
+        import io
+        import json
+        import zipfile
+        from social.link_preview import extract_first_https_url, fetch_link_preview, parse_video_embed
+        from social.threads_import import build_mastodon_csv, decode_meta_mojibake, parse_threads_export_zip
+
+        assert extract_first_https_url("Check https://youtu.be/j_wrosWPRTc?is=38GtLIIGCGc06tEB!") == "https://youtu.be/j_wrosWPRTc?is=38GtLIIGCGc06tEB"
+        v_info = parse_video_embed("https://youtu.be/j_wrosWPRTc?is=38GtLIIGCGc06tEB")
+        assert v_info and v_info["provider"] == "youtube" and v_info["videoId"] == "j_wrosWPRTc"
+
+        for bad_ssrf in ("https://127.0.0.1/secret", "https://10.0.0.5/internal", "http://localhost:5000/api", "https://node.local/x"):
+            ssrf_blocked = False
+            try:
+                fetch_link_preview(bad_ssrf)
+            except ValueError:
+                ssrf_blocked = True
+            assert ssrf_blocked, f"Expected SSRF ValueError for {bad_ssrf}"
+
+        def _preview_handler(request: httpx.Request) -> httpx.Response:
+            if request.url.host == "www.youtube.com" and request.url.path == "/oembed":
+                return httpx.Response(
+                    200,
+                    json={"title": "Workers Anthem", "author_name": "Solidarity", "provider_name": "YouTube", "thumbnail_url": "https://i.ytimg.com/vi/j_wrosWPRTc/hqdefault.jpg"},
+                )
+            if request.url.host == "article.example":
+                return httpx.Response(
+                    200,
+                    headers={"content-type": "text/html; charset=utf-8"},
+                    text='<html><head><meta property="og:title" content="Deep Dive"><meta property="og:description" content="Analysis"><meta property="og:image" content="/thumb.png"></head></html>',
+                )
+            return httpx.Response(404, json={})
+
+        pv_client = httpx.Client(transport=httpx.MockTransport(_preview_handler))
+        yt_card = fetch_link_preview("https://youtu.be/j_wrosWPRTc?is=38GtLIIGCGc06tEB", http_client=pv_client)
+        assert yt_card and yt_card["title"] == "Workers Anthem" and yt_card["embedUrl"].startswith("https://www.youtube-nocookie.com/embed/j_wrosWPRTc")
+        art_card = fetch_link_preview("https://article.example/post", http_client=pv_client)
+        assert art_card and art_card["title"] == "Deep Dive" and art_card["image"] == "https://article.example/thumb.png"
+
+        def _embed_bsky_handler(request: httpx.Request) -> httpx.Response:
+            if request.url.host == "i.ytimg.com":
+                return httpx.Response(200, headers={"content-type": "image/jpeg"}, content=b"JPGDATA")
+            if request.url.path == "/xrpc/com.atproto.repo.uploadBlob":
+                return httpx.Response(200, json={"blob": {"$type": "blob", "ref": {"$link": "bafkthumb"}}})
+            if request.url.path == "/xrpc/com.atproto.repo.createRecord":
+                body = json.loads(request.content.decode("utf-8"))
+                agg_calls.append(("bsky_record", body["record"].get("embed")))
+                return httpx.Response(200, json={"uri": "at://did:plc:davy/app.bsky.feed.post/emb1", "cid": "cid_emb1"})
+            return httpx.Response(200, json={})
+
+        def _embed_threads_handler(request: httpx.Request) -> httpx.Response:
+            raw_body = request.content.decode("utf-8", errors="ignore")
+            if request.url.path.endswith("/threads"):
+                agg_calls.append(("threads_create", raw_body))
+                return httpx.Response(200, json={"id": "th_c_emb"})
+            if request.url.path.endswith("/threads_publish"):
+                return httpx.Response(200, json={"id": "th_pub_emb"})
+            return httpx.Response(200, json={})
+
+        agg_engine.get_bluesky_adapter = lambda *a, **kw: BlueskyAdapter(
+            service_url="https://bsky.social",
+            did="did:plc:davy",
+            handle="davy.bsky.social",
+            access_jwt="b_jwt",
+            http_client=httpx.Client(transport=httpx.MockTransport(_embed_bsky_handler)),
+        )
+        agg_engine.get_threads_adapter = lambda *a, **kw: ThreadsAdapter(
+            user_id="29797930329813883",
+            access_token="t_tok",
+            username="davyrhodes_",
+            http_client=httpx.Client(transport=httpx.MockTransport(_embed_threads_handler)),
+        )
+        agg_calls.clear()
+        pub_emb = agg_engine.publish_unified(draft="Watch this", link_card=yt_card)
+        assert pub_emb["items"][0]["_meta"]["linkCard"]["title"] == "Workers Anthem"
+        bsky_embeds = [c[1] for c in agg_calls if c[0] == "bsky_record"]
+        assert len(bsky_embeds) == 1 and bsky_embeds[0]["$type"] == "app.bsky.embed.external"
+        assert bsky_embeds[0]["external"]["thumb"]["ref"]["$link"] == "bafkthumb"
+        th_forms = [c[1] for c in agg_calls if c[0] == "threads_create"]
+        assert any("link_attachment=" in f for f in th_forms)
+
+        # Bluesky native video + quote post normalization
+        from social.core.schema.unified_item import normalize_bluesky_post
+        bsky_vid_item = normalize_bluesky_post({
+            "post": {
+                "uri": "at://did:plc:lzsxyxqebfmpx6jia6wjqgtx/app.bsky.feed.post/vid1",
+                "cid": "bafy_vid",
+                "author": {"did": "did:plc:lzsxyxqebfmpx6jia6wjqgtx", "handle": "jonathanslater.bsky.social", "displayName": "Jonathan Slater"},
+                "record": {"text": "These two are awesome", "createdAt": "2026-11-19T13:05:50Z"},
+                "embed": {
+                    "$type": "app.bsky.embed.recordWithMedia#view",
+                    "media": {
+                        "$type": "app.bsky.embed.video#view",
+                        "cid": "bafk_vid_cid",
+                        "playlist": "https://video.bsky.app/watch/did%3Aplc%3Alzs/bafk_vid_cid/playlist.m3u8",
+                        "thumbnail": "https://video.bsky.app/watch/did%3Aplc%3Alzs/bafk_vid_cid/thumbnail.jpg",
+                        "aspectRatio": {"width": 576, "height": 1024},
+                        "presentation": "default",
+                    },
+                    "record": {
+                        "record": {
+                            "$type": "app.bsky.embed.record#viewRecord",
+                            "uri": "at://did:plc:orig/app.bsky.feed.post/q1",
+                            "cid": "bafy_q1",
+                            "author": {"did": "did:plc:orig", "handle": "orig.bsky.social", "displayName": "Orig"},
+                            "value": {"text": "Quoted text", "createdAt": "2026-11-19T12:00:00Z"},
+                        }
+                    },
+                },
+            }
+        })
+        assert len(bsky_vid_item["attachments"]) == 1
+        assert bsky_vid_item["attachments"][0]["type"] == "video"
+        assert bsky_vid_item["attachments"][0]["width"] == 576 and bsky_vid_item["attachments"][0]["height"] == 1024
+        assert "cid=bafk_vid_cid" in bsky_vid_item["attachments"][0]["url"]
+        assert bsky_vid_item["_meta"]["quotePost"]["authorHandle"] == "orig.bsky.social"
+        assert bsky_vid_item["_meta"]["quotePost"]["text"] == "Quoted text"
+
+        # Build test Threads export ZIP covering mojibake, _-prefixed handles, mutuals, blocks, mutes
+        zip_buf = io.BytesIO()
+        with zipfile.ZipFile(zip_buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("threads/followers.json", json.dumps({
+                "text_post_app_text_post_app_followers": [
+                    {"title": "Jos\u00c3\u00a9", "string_list_data": [{"value": "_jaoga_", "timestamp": 100}]},
+                    {"title": "Mutual Peer", "string_list_data": [{"value": "mutual_peer", "timestamp": 101}]},
+                ]
+            }))
+            zf.writestr("threads/following.json", json.dumps({
+                "text_post_app_text_post_app_following": [
+                    {"title": "", "string_list_data": [{"value": "mutual_peer", "timestamp": 102}]},
+                    {"title": "", "string_list_data": [{"value": "only_following", "timestamp": 103}]},
+                ]
+            }))
+            zf.writestr("threads/blocked_profiles.json", json.dumps([
+                {"timestamp": 200, "label_values": [{"label": "Name", "value": "Bad Bot"}, {"label": "Username", "value": "bad_troll"}]}
+            ]))
+            zf.writestr("threads/restricted_profiles.json", json.dumps([
+                {"timestamp": 201, "label_values": [{"label": "Name", "value": "Noisy"}, {"label": "Username", "value": "noisy_acct"}]}
+            ]))
+
+        assert decode_meta_mojibake("Jos\u00c3\u00a9") == "José"
+        parsed_zip = parse_threads_export_zip(zip_buf.getvalue(), source_name="unit.zip")
+        assert parsed_zip["counts"] == {"mutuals": 1, "following": 2}
+        assert parsed_zip["mutuals"][0]["displayName"] == "Mutual Peer"
+        csv_m = build_mastodon_csv("mutuals", parsed_zip["mutuals"])
+        assert "Account address,Show boosts,Notify on new posts,Languages" in csv_m
+        assert "mutual_peer@threads.net,true,false," in csv_m
+
+        parse_resp = client.post(
+            "/api/social/threads/import-parse",
+            data={"file": (io.BytesIO(zip_buf.getvalue()), "threads-export.zip")},
+            content_type="multipart/form-data",
+        )
+        assert parse_resp.status_code == 200
+        assert parse_resp.get_json()["counts"] == {"mutuals": 1, "following": 2}
+
+        mod_blocks = client.get("/api/social/moderation/blocks")
+        assert mod_blocks.status_code == 200
+        assert not any(a.get("username") == "bad_troll" and a.get("protocol") == "threads" for a in mod_blocks.get_json()["accounts"])
+
+        csv_resp = client.get("/api/social/threads/import-csv/following")
+        assert csv_resp.status_code == 200
+        assert "only_following@threads.net,true,false," in csv_resp.get_data(as_text=True)
+        assert client.get("/api/social/threads/import-csv/blocks").status_code == 400
+
+        class _ImportMastoFake(FakeMastodonAdapter):
+            def lookup_account(self, acct):
+                if acct == "mutual_peer@threads.net":
+                    return {"id": "fed_mp_1", "username": "mutual_peer", "acct": "mutual_peer@threads.net"}
+                if acct == "only_following@threads.net":
+                    return {"id": "fed_local_wrong", "username": "only_following", "acct": "only_following@other.example"}
+                return None
+
+            def follow_account(self, aid, undo=False):
+                self.calls.append(("follow", aid, undo))
+                return {"id": aid, "following": not undo}
+
+        imp_masto = _ImportMastoFake()
+        agg_engine.get_mastodon_adapter = lambda *a, **kw: imp_masto
+        sync_resp = client.post(
+            "/api/social/threads/import-sync",
+            json={"followScope": "following", "delaySec": 0},
+        )
+        assert sync_resp.status_code == 200
+        import time as _time
+        for _ in range(40):
+            st = client.get("/api/social/threads/import-state").get_json()["job"]
+            if st["status"] != "running":
+                break
+            _time.sleep(0.02)
+        assert st["status"] == "completed"
+        assert st["followed"] == 1 and st["notFederated"] == 1
+        assert ("follow", "fed_mp_1", False) in imp_masto.calls
+
+        # 9c. Aggregated notifications, Threads insights watermarks, dismiss, clear & seen endpoints
+        class _ActMastoFake(FakeMastodonAdapter):
+            def __init__(self):
+                super().__init__()
+                self.dismissed_ids = []
+                self.cleared = 0
+
+            def fetch_notifications(self, cursor="", limit=30):
+                return [
+                    {
+                        "id": "mastodon:notif:act_m1",
+                        "protocol": "mastodon",
+                        "url": "https://mastodon.social/@davy/m_act_py",
+                        "content_html": "<p>Unified crosspost</p>",
+                        "content_text": "Unified crosspost",
+                        "date_published": "2026-11-19T10:00:00Z",
+                        "author": {"id": "a1", "name": "Fan1", "handle": "fan1@mastodon.social", "avatar_url": ""},
+                        "attachments": [],
+                        "metrics": {"likes": 2, "reposts": 1, "replies": 1},
+                        "_meta": {
+                            "mastodon": {"statusId": "m_act_py", "instanceUrl": "https://mastodon.social"},
+                            "notification": {
+                                "notifId": "act_m1",
+                                "type": "like",
+                                "actor": {"id": "a1", "name": "Fan1", "handle": "fan1@mastodon.social"},
+                            },
+                        },
+                    }
+                ]
+
+            def dismiss_notification(self, notif_id):
+                self.dismissed_ids.append(notif_id)
+                return True
+
+            def clear_notifications(self):
+                self.cleared += 1
+                return True
+
+        class _ActBskyFake(FakeBlueskyAdapter):
+            def __init__(self):
+                super().__init__()
+                self.seen_calls = 0
+
+            def fetch_notifications(self, cursor="", limit=30):
+                return [
+                    {
+                        "id": "bluesky:notif:act_b1:like",
+                        "protocol": "bluesky",
+                        "url": "https://bsky.app/profile/davy/post/b_act_py",
+                        "content_html": "<p>Unified crosspost</p>",
+                        "content_text": "Unified crosspost",
+                        "date_published": "2026-11-19T10:01:00Z",
+                        "author": {"id": "did:plc:fanb", "name": "FanB", "handle": "fanb.bsky.social", "avatar_url": ""},
+                        "attachments": [],
+                        "metrics": {"likes": 3, "reposts": 1, "replies": 0},
+                        "_meta": {
+                            "bluesky": {"uri": "at://did:plc:me/app.bsky.feed.post/b_act_py", "subjectUri": "at://did:plc:me/app.bsky.feed.post/b_act_py"},
+                            "notification": {
+                                "notifId": "bsky:act_b1",
+                                "type": "like",
+                                "targetPostUri": "at://did:plc:me/app.bsky.feed.post/b_act_py",
+                                "targetMetrics": {"likes": 3, "reposts": 1, "replies": 0},
+                                "actor": {"id": "did:plc:fanb", "name": "FanB", "handle": "fanb.bsky.social"},
+                            },
+                        },
+                    }
+                ]
+
+            def get_posts_metrics(self, uris):
+                return {"at://did:plc:me/app.bsky.feed.post/b_act_py": {"likes": 3, "reposts": 1, "replies": 0}}
+
+            def update_notifications_seen(self, seen_at=""):
+                self.seen_calls += 1
+                return True
+
+        class _ActThreadsFake:
+            def __init__(self):
+                self.likes = 4
+
+            def fetch_notifications(self, cursor="", limit=20, tracked_post_ids=None):
+                return []
+
+            def get_post_insights(self, post_id):
+                if post_id == "th_act_py":
+                    return {"likes": self.likes, "reposts": 1, "replies": 2}
+                return {"likes": 0, "reposts": 0, "replies": 0}
+
+        act_masto = _ActMastoFake()
+        act_bsky = _ActBskyFake()
+        act_thr = _ActThreadsFake()
+        act_store = SocialSQLiteStore(Path(tmpdir) / "activity_test.db")
+        act_store.save_linked_post(
+            canonical_id="mastodon:m_act_py",
+            mastodon_status_id="m_act_py",
+            mastodon_instance="https://mastodon.social",
+            bluesky_uri="at://did:plc:me/app.bsky.feed.post/b_act_py",
+            bluesky_cid="cid_act_py",
+            threads_post_id="th_act_py",
+        )
+        act_engine = SocialSyncEngine(store=act_store, keychain=agg_engine.keychain, enable_streaming=False)
+        act_engine.get_mastodon_adapter = lambda *a, **kw: act_masto
+        act_engine.get_bluesky_adapter = lambda *a, **kw: act_bsky
+        act_engine.get_threads_adapter = lambda *a, **kw: act_thr
+        set_social_engine_for_tests(act_engine)
+
+        n_resp = client.get("/api/social/notifications")
+        assert n_resp.status_code == 200
+        n_items = n_resp.get_json()["items"]
+        assert len(n_items) == 4  # Mastodon like, Bluesky like, Threads insights like (4), Threads insights repost (1)
+        m_like = next(i for i in n_items if i["id"] == "mastodon:notif:act_m1")
+        assert m_like["metrics"]["likes"] == 9  # 2 Masto + 3 Bsky + 4 Threads
+        assert m_like["_meta"]["notification"]["canonicalPostKey"] == "mastodon:m_act_py"
+
+        d_resp = client.post(
+            "/api/social/notifications/dismiss",
+            json={
+                "ids": ["mastodon:notif:act_m1", "bluesky:notif:act_b1:like", "threads:notif:likes:th_act_py"],
+                "mastodonNotifIds": ["act_m1"],
+                "threadsWatermarks": {"th_act_py": {"likes": 4}},
+            },
+        )
+        assert d_resp.status_code == 200
+        assert act_masto.dismissed_ids == ["act_m1"]
+
+        after_dismiss = client.get("/api/social/notifications").get_json()["items"]
+        assert [i["id"] for i in after_dismiss] == ["threads:notif:reposts:th_act_py"]
+
+        act_thr.likes = 6
+        after_bump = client.get("/api/social/notifications").get_json()["items"]
+        bump_likes = next(i for i in after_bump if i["id"] == "threads:notif:likes:th_act_py")
+        assert bump_likes["_meta"]["notification"]["aggregateCount"] == 2
+
+        s_resp = client.post("/api/social/notifications/seen", json={})
+        assert s_resp.status_code == 200 and act_bsky.seen_calls == 1
+
+        c_resp = client.post("/api/social/notifications/clear", json={"threadsWatermarks": {"th_act_py": {"likes": 6, "reposts": 1}}})
+        assert c_resp.status_code == 200 and act_masto.cleared == 1
+        assert client.get("/api/social/notifications").get_json()["items"] == []
+
+        # 9d. Threads delete error precision (403 vs 400 subcode 33), overflow split linking, edit_unified & auto-drain
+        def _del_handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path.endswith("/v1.0/th_perm_403") and request.method == "DELETE":
+                return httpx.Response(403, json={"error": {"message": "No perm", "code": 10}})
+            if request.url.path.endswith("/v1.0/th_gone_33") and request.method == "DELETE":
+                return httpx.Response(400, json={"error": {"message": "Missing", "code": 100, "error_subcode": 33}})
+            if request.url.path.endswith("/v1.0/th_gone_33") and request.method == "GET":
+                return httpx.Response(404, json={"error": {"message": "Not found"}})
+            if request.url.path.endswith("/v1.0/th_live_33") and request.method == "DELETE":
+                return httpx.Response(400, json={"error": {"message": "Missing perm", "code": 100, "error_subcode": 33}})
+            if request.url.path.endswith("/v1.0/th_live_33") and request.method == "GET":
+                return httpx.Response(200, json={"id": "th_live_33"})
+            if request.url.path == "/v1.0/me":
+                return httpx.Response(200, json={"id": "th_drain_u", "username": "drain_u"})
+            return httpx.Response(404, json={})
+
+        del_th = ThreadsAdapter(user_id="th_u", access_token="tok", http_client=httpx.Client(transport=httpx.MockTransport(_del_handler)))
+        try:
+            del_th.delete({"postId": "th_perm_403"})
+            raise AssertionError("Expected threads_delete error on 403")
+        except RuntimeError as exc:
+            assert "threads_delete" in str(exc)
+        assert del_th.delete({"postId": "th_gone_33"}) is True
+        try:
+            del_th.delete({"postId": "th_live_33"})
+            raise AssertionError("Expected threads_delete error when object still exists")
+        except RuntimeError as exc:
+            assert "threads_delete" in str(exc)
+
+        class _BrMasto(FakeMastodonAdapter):
+            def edit_status(self, status_id, draft, spoiler_text=""):
+                return {
+                    "id": f"mastodon:{status_id}",
+                    "protocol": "mastodon",
+                    "url": f"https://mastodon.social/@davy/{status_id}",
+                    "content_text": draft,
+                    "content_html": f"<p>{draft}</p>",
+                    "date_published": "2026-11-19T12:00:00Z",
+                    "author": {"id": "42", "name": "Davy", "handle": "davy@mastodon.social"},
+                    "attachments": [],
+                    "metrics": {"replies": 0, "reposts": 0, "likes": 0},
+                    "_meta": {"mastodon": {"statusId": status_id, "visibility": "public"}},
+                }
+
+        class _BrThreads(FailingThreadsAdapter):
+            def __init__(self):
+                super().__init__(fail_publish=False)
+                self.fail_delete = False
+                self.pub_n = 0
+
+            def publish(self, draft, media=None, options=None):
+                self.pub_n += 1
+                self.calls.append(("publish", draft, options))
+                return {
+                    "id": f"threads:th_r_{self.pub_n}",
+                    "protocol": "threads",
+                    "content_text": draft,
+                    "content_html": f"<p>{draft}</p>",
+                    "date_published": "2026-11-19T12:00:02Z",
+                    "author": {"id": "th_drain_u", "name": "drain_u", "handle": "drain_u"},
+                    "attachments": [],
+                    "metrics": {"replies": 0, "reposts": 0, "likes": 0},
+                    "_meta": {"threads": {"postId": f"th_r_{self.pub_n}"}},
+                }
+
+            def delete(self, native_meta):
+                if self.fail_delete:
+                    raise RuntimeError("Threads token lacks 'threads_delete' permission")
+                return super().delete(native_meta)
+
+        br_store = SocialSQLiteStore(Path(tmpdir) / "bridge_audit.db")
+        br_masto = _BrMasto()
+        br_bsky = FakeBlueskyAdapter()
+        br_thr = _BrThreads()
+        br_engine = SocialSyncEngine(
+            store=br_store,
+            keychain=agg_engine.keychain,
+            mastodon_adapter_factory=lambda inst, tok: br_masto,
+            bluesky_adapter_factory=lambda **kw: br_bsky,
+            threads_adapter_factory=lambda **kw: br_thr,
+            on_profile_sync=lambda p: None,
+            enable_streaming=False,
+        )
+        br_store.upsert_account(account_id="mastodon:davy", protocol="mastodon", instance_url="https://mastodon.social", handle="davy", is_primary=True, meta={"userId": "42"})
+        agg_engine.keychain.set_secret("mastodon:davy", {"accessToken": "m_tok"})
+        br_store.upsert_account(account_id="bluesky:did:plc:davy", protocol="bluesky", instance_url="https://bsky.social", handle="davy.bsky.social", is_primary=True, meta={"did": "did:plc:davy"})
+        agg_engine.keychain.set_secret("bluesky:did:plc:davy", {"accessJwt": "b_j", "refreshJwt": "b_r"})
+        br_store.upsert_account(account_id="threads:th_drain_u", protocol="threads", handle="drain_u", is_primary=True, meta={"userId": "th_drain_u"})
+        agg_engine.keychain.set_secret("threads:th_drain_u", {"accessToken": "t_tok"})
+
+        long_draft = ("word " * 72).strip() + " fin"
+        pub_split = br_engine.publish_unified(draft=long_draft)
+        split_grp = br_store.find_linked_post_group(pub_split["items"][0]["id"])
+        assert len(split_grp) == 2  # Root + overflow :part:1 child
+
+        br_thr.fail_delete = True
+        br_bsky.calls.clear()
+        edited = br_engine.edit_unified(pub_split["items"][0]["id"], "Edited https://example.org/post", replace_bridges=True)
+        assert any("threads_delete" in w for w in (edited["_meta"].get("bridgeWarnings") or []))
+        assert edited["_meta"]["linkedIds"]["threadsPostId"] == "th_r_1"
+        assert len([c for c in br_bsky.calls if c[0] == "delete"]) == 2  # Both split chunks deleted before republish!
+
+        del_res = br_engine.delete_unified(pub_split["items"][0]["id"])
+        assert any("threads_delete" in w for w in del_res["warnings"])
+        assert len([r for r in br_store.list_retries() if r["protocol"] == "threads"]) == 1
+
+        br_thr.fail_delete = False
+        orig_verify = ThreadsAdapter.verify_credentials
+        try:
+            ThreadsAdapter.verify_credentials = staticmethod(lambda tok: {"id": "th_drain_u", "username": "drain_u", "name": "Drain"})
+            drained_status = br_engine.connect_threads("fresh_tok_with_delete")
+            assert len([r for r in drained_status["retryQueue"] if r["protocol"] == "threads"]) == 0
+        finally:
+            ThreadsAdapter.verify_credentials = orig_verify
+
+        set_social_engine_for_tests(agg_engine)
+
+        # 10. Verify runners/ and tools/ never import social/
         for py_dir in (SANCTUARY_DIR / "runners", SANCTUARY_DIR / "tools"):
             for py_file in py_dir.rglob("*.py"):
                 content = py_file.read_text(encoding="utf-8")

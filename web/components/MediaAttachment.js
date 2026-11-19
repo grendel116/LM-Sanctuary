@@ -7,22 +7,107 @@ const CAROUSEL_PREV_SVG = `<svg width="16" height="16" viewBox="0 0 24 24" fill=
 const CAROUSEL_NEXT_SVG = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6"></polyline></svg>`;
 
 function buildMediaElement(doc, item, idx, total, onExpand, allItems) {
-  const type = String(item.type || item.mimeType || item.mime_type || 'image');
-  const url = item.url || item.previewUrl || '';
+  const type = String(item.type || item.mimeType || item.mime_type || 'image').toLowerCase();
+  const mime = String(item.mime_type || item.mimeType || '').toLowerCase();
+  const url = item.url || item.previewUrl || item.hlsUrl || '';
   const altDesc = item.description || item.alt_text || '';
+  const isVideo = type === 'video' || type === 'gifv' || mime.startsWith('video/') || mime === 'application/vnd.apple.mpegurl';
+  const isAudio = type === 'audio' || mime.startsWith('audio/');
 
-  if (type === 'video' || type === 'gifv' || type.startsWith('video/')) {
+  if (isVideo) {
+    const isGifv = type === 'gifv';
     const video = doc.createElement('video');
     video.className = 'post-media-item post-media-video';
-    video.src = url;
+    const w = Number.parseInt(item.width, 10) > 0 ? Number.parseInt(item.width, 10) : 640;
+    const h = Number.parseInt(item.height, 10) > 0 ? Number.parseInt(item.height, 10) : 360;
+    video.width = w;
+    video.height = h;
+    video.setAttribute('width', String(w));
+    video.setAttribute('height', String(h));
     video.controls = true;
-    video.muted = type === 'gifv';
-    video.loop = type === 'gifv';
+    video.setAttribute('controls', '');
     video.playsInline = true;
+    video.setAttribute('playsinline', '');
+    video.preload = 'metadata';
+    video.setAttribute('preload', 'metadata');
+    video.setAttribute('loading', 'lazy');
+    if (item.previewUrl && item.previewUrl !== url) {
+      video.poster = item.previewUrl;
+      video.setAttribute('poster', item.previewUrl);
+    }
+    if (isGifv) {
+      video.muted = true;
+      video.loop = true;
+      const reducedMotion = Boolean(globalThis.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches);
+      if (!reducedMotion) {
+        video.autoplay = true;
+      }
+    }
     if (altDesc) {
       video.setAttribute('aria-label', altDesc);
     }
+
+    const canPlayHls = Boolean(item.hlsUrl && video.canPlayType?.('application/vnd.apple.mpegurl'));
+    if (canPlayHls) {
+      const hlsSource = doc.createElement('source');
+      hlsSource.setAttribute('src', item.hlsUrl);
+      hlsSource.setAttribute('type', 'application/vnd.apple.mpegurl');
+      video.appendChild(hlsSource);
+      if (url && url !== item.hlsUrl) {
+        const mp4Source = doc.createElement('source');
+        mp4Source.setAttribute('src', url);
+        mp4Source.setAttribute('type', mime.startsWith('video/') ? mime : 'video/mp4');
+        video.appendChild(mp4Source);
+      }
+    } else if (url) {
+      video.src = url;
+      video.setAttribute('src', url);
+    }
+
+    if (item.did && item.cid) {
+      video.addEventListener('error', () => {
+        void (async () => {
+          try {
+            const plcRes = await fetch(`https://plc.directory/${encodeURIComponent(item.did)}`);
+            if (!plcRes.ok) return;
+            const plcDoc = await plcRes.json();
+            const services = Array.isArray(plcDoc?.service) ? plcDoc.service : [];
+            const pds = services.find((s) => s?.id === '#atproto_pds')?.serviceEndpoint || '';
+            if (typeof pds === 'string' && pds.startsWith('https://')) {
+              const directUrl = `${pds.replace(/\/+$/, '')}/xrpc/com.atproto.sync.getBlob?did=${encodeURIComponent(item.did)}&cid=${encodeURIComponent(item.cid)}`;
+              if (directUrl !== video.src) {
+                video.src = directUrl;
+                video.setAttribute('src', directUrl);
+              }
+            }
+          } catch {
+            // Ignore PDS lookup failure
+          }
+        })();
+      }, { once: true });
+    }
+
+    video.addEventListener('click', (e) => e.stopPropagation());
     return video;
+  }
+
+  if (isAudio) {
+    const audio = doc.createElement('audio');
+    audio.className = 'post-media-audio';
+    audio.controls = true;
+    audio.setAttribute('controls', '');
+    audio.preload = 'metadata';
+    audio.setAttribute('preload', 'metadata');
+    audio.setAttribute('loading', 'lazy');
+    if (url) {
+      audio.src = url;
+      audio.setAttribute('src', url);
+    }
+    if (altDesc) {
+      audio.setAttribute('aria-label', altDesc);
+    }
+    audio.addEventListener('click', (e) => e.stopPropagation());
+    return audio;
   }
 
   const btn = doc.createElement('button');
@@ -33,7 +118,7 @@ function buildMediaElement(doc, item, idx, total, onExpand, allItems) {
 
   const img = doc.createElement('img');
   img.className = 'post-media-item';
-  img.src = item.previewUrl || url;
+  img.src = mime === 'image/gif' ? (url || item.previewUrl || '') : (item.previewUrl || url);
   img.alt = altDesc || 'Post attachment';
   img.loading = 'lazy';
   img.decoding = 'async';
@@ -50,11 +135,21 @@ function buildMediaElement(doc, item, idx, total, onExpand, allItems) {
 
 export function createPostMediaGrid(media = [], { onExpand } = {}) {
   const doc = globalThis.document;
-  const validItems = (Array.isArray(media) ? media : []).filter((item) => item && (item.url || item.previewUrl));
+  const validItems = (Array.isArray(media) ? media : []).filter((item) => item && (item.url || item.previewUrl || item.hlsUrl));
 
   if (validItems.length <= 1) {
     const single = doc.createElement('div');
-    single.className = `post-media-grid post-media-single post-media-count-${validItems.length}`;
+    let extraClass = '';
+    if (validItems.length === 1) {
+      const sType = String(validItems[0].type || '').toLowerCase();
+      const sMime = String(validItems[0].mime_type || validItems[0].mimeType || '').toLowerCase();
+      if (sType === 'video' || sType === 'gifv' || sMime.startsWith('video/') || sMime === 'application/vnd.apple.mpegurl') {
+        extraClass = ' has-video';
+      } else if (sType === 'audio' || sMime.startsWith('audio/')) {
+        extraClass = ' has-audio';
+      }
+    }
+    single.className = `post-media-grid post-media-single post-media-count-${validItems.length}${extraClass}`;
     if (validItems.length === 1) {
       single.appendChild(buildMediaElement(doc, validItems[0], 0, 1, onExpand, validItems));
     }

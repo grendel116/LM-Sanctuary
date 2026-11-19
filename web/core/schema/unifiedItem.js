@@ -31,13 +31,83 @@ export function stripHtmlToText(html) {
     .trim();
 }
 
+function escapeAttr(text) {
+  return escapeHtml(text)
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function linkifyLineFragment(fragment) {
+  const input = String(fragment || '');
+  if (!input) return '';
+  const urlRe = /(?:^|[\s(])(https?:\/\/[^\s<>[\]{}"']+)/g;
+  const parts = [];
+  let cursor = 0;
+
+  for (const m of input.matchAll(urlRe)) {
+    const token = m[1];
+    const tokenStart = m.index + m[0].indexOf(token);
+    let clean = token.replace(/[.,!?;:]+$/, '');
+    while (clean.endsWith(')')) {
+      const opens = (clean.match(/\(/g) || []).length;
+      const closes = (clean.match(/\)/g) || []).length;
+      if (closes > opens) {
+        clean = clean.slice(0, -1).replace(/[.,!?;:]+$/, '');
+      } else {
+        break;
+      }
+    }
+    if (!clean) continue;
+
+    let href = '';
+    try {
+      const parsed = new URL(clean);
+      if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+        href = parsed.href;
+      }
+    } catch {
+      href = '';
+    }
+    if (!href) continue;
+
+    if (tokenStart > cursor) {
+      parts.push(escapeHtml(input.slice(cursor, tokenStart)));
+    }
+    parts.push(`<a href="${escapeAttr(href)}" target="_blank" rel="noopener noreferrer">${escapeHtml(clean)}</a>`);
+    const suffix = token.slice(clean.length);
+    if (suffix) parts.push(escapeHtml(suffix));
+    cursor = tokenStart + token.length;
+  }
+
+  if (cursor < input.length) {
+    parts.push(escapeHtml(input.slice(cursor)));
+  }
+  return parts.join('');
+}
+
 export function plainTextToHtml(text) {
-  const raw = String(text || '').trim();
+  const raw = String(text || '').replace(/\r\n/g, '\n').trim();
   if (!raw) return '';
   return raw
     .split(/\n{2,}/)
-    .map((block) => `<p>${escapeHtml(block).replace(/\n/g, '<br>')}</p>`)
+    .map((block) => `<p>${block.split('\n').map(linkifyLineFragment).join('<br>')}</p>`)
     .join('');
+}
+
+function normalizeLinkCard(rawCard) {
+  if (!rawCard || typeof rawCard !== 'object' || !rawCard.url) return null;
+  try {
+    const parsed = new URL(String(rawCard.url).trim());
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null;
+    return {
+      url: parsed.href,
+      title: String(rawCard.title || ''),
+      description: String(rawCard.description || ''),
+      image: String(rawCard.image || rawCard.thumb || ''),
+    };
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -62,7 +132,7 @@ export function canonicalizeActorHandle(handle, protocol = 'mastodon') {
 }
 
 function mapAttachmentMime(att) {
-  if (att?.mime_type) return String(att.mime_type);
+  if (att?.mime_type || att?.mimeType) return String(att.mime_type || att.mimeType);
   const t = String(att?.type || 'image').toLowerCase();
   if (t === 'video' || t === 'gifv') return 'video/mp4';
   if (t === 'audio') return 'audio/mpeg';
@@ -72,12 +142,26 @@ function mapAttachmentMime(att) {
 function normalizeAttachmentsList(rawList = []) {
   if (!Array.isArray(rawList)) return [];
   return rawList
-    .filter((att) => att && (att.url || att.previewUrl || att.remote_url))
-    .map((att) => ({
-      url: String(att.url || att.remote_url || att.previewUrl || ''),
-      mime_type: mapAttachmentMime(att),
-      alt_text: String(att.alt_text ?? att.description ?? ''),
-    }));
+    .filter((att) => att && (att.url || att.previewUrl || att.remote_url || att.hlsUrl))
+    .map((att) => {
+      const mime = mapAttachmentMime(att);
+      const rawType = String(att.type || '').toLowerCase();
+      const type = rawType || (mime.startsWith('video/') ? 'video' : mime.startsWith('audio/') ? 'audio' : 'image');
+      const w = Number.parseInt(att.width, 10);
+      const h = Number.parseInt(att.height, 10);
+      return {
+        url: String(att.url || att.remote_url || att.previewUrl || att.hlsUrl || ''),
+        type,
+        mime_type: mime,
+        alt_text: String(att.alt_text ?? att.description ?? ''),
+        ...(att.previewUrl || att.preview_url ? { previewUrl: String(att.previewUrl || att.preview_url) } : {}),
+        ...(att.hlsUrl ? { hlsUrl: String(att.hlsUrl) } : {}),
+        ...(Number.isFinite(w) && w > 0 ? { width: w } : {}),
+        ...(Number.isFinite(h) && h > 0 ? { height: h } : {}),
+        ...(att.did ? { did: String(att.did) } : {}),
+        ...(att.cid ? { cid: String(att.cid) } : {}),
+      };
+    });
 }
 
 /**
@@ -128,6 +212,7 @@ export function toUnifiedItem(item) {
       statusId: String(item._meta?.mastodon?.statusId || nativeId || ''),
       uri: item._meta?.mastodon?.uri || item.uri || item.url || '',
       visibility: item._meta?.mastodon?.visibility || item.visibility || 'public',
+      sensitive: Boolean(item._meta?.mastodon?.sensitive ?? item.sensitive ?? item.raw?.sensitive ?? item.raw?.reblog?.sensitive),
       favourited: Boolean(item._meta?.mastodon?.favourited ?? item.viewerState?.favourited),
       reblogged: Boolean(item._meta?.mastodon?.reblogged ?? item.viewerState?.reblogged),
       bookmarked: Boolean(item._meta?.mastodon?.bookmarked ?? item.viewerState?.bookmarked),
@@ -139,11 +224,26 @@ export function toUnifiedItem(item) {
       ...(item._meta?.mastodon?.rebloggedBy || item.rebloggedBy ? { rebloggedBy: item._meta?.mastodon?.rebloggedBy || item.rebloggedBy } : {}),
     };
   } else if (protocol === 'bluesky') {
+    const bskyFacets = Array.isArray(item._meta?.bluesky?.facets)
+      ? item._meta.bluesky.facets
+      : (Array.isArray(item.facets) ? item.facets : []);
+    const bskyLabels = [
+      ...new Set(
+        [
+          ...(Array.isArray(item._meta?.bluesky?.labels) ? item._meta.bluesky.labels : []),
+          ...(Array.isArray(item.labels) ? item.labels : []),
+        ]
+          .map((l) => String(l?.val ?? l ?? '').trim().toLowerCase())
+          .filter(Boolean)
+      ),
+    ];
     meta.bluesky = {
       uri: item._meta?.bluesky?.uri || item.uri || '',
       cid: item._meta?.bluesky?.cid || item.cid || '',
       likeUri: item._meta?.bluesky?.likeUri ?? item.viewerState?.likeUri ?? null,
       repostUri: item._meta?.bluesky?.repostUri ?? item.viewerState?.repostUri ?? null,
+      ...(bskyFacets.length > 0 ? { facets: bskyFacets } : {}),
+      ...(bskyLabels.length > 0 ? { labels: bskyLabels } : {}),
       ...(item._meta?.bluesky?.reply || item.reply ? { reply: item._meta?.bluesky?.reply || item.reply } : {}),
       ...(item._meta?.bluesky?.rebloggedBy || item.rebloggedBy
         ? { rebloggedBy: item._meta?.bluesky?.rebloggedBy || item.rebloggedBy }
@@ -152,11 +252,27 @@ export function toUnifiedItem(item) {
   } else {
     meta.threads = {
       postId: String(item._meta?.threads?.postId || nativeId || ''),
+      ...(item._meta?.threads?.parentPostId ? { parentPostId: String(item._meta.threads.parentPostId) } : {}),
+      ...(item._meta?.threads?.repliedToId ? { repliedToId: String(item._meta.threads.repliedToId) } : {}),
+      ...(item._meta?.threads?.rootPostId ? { rootPostId: String(item._meta.threads.rootPostId) } : {}),
+      ...(item._meta?.threads?.topicTag ? { topicTag: String(item._meta.threads.topicTag) } : {}),
+      ...(item._meta?.threads?.shortcode ? { shortcode: String(item._meta.threads.shortcode) } : {}),
+      ...(item._meta?.threads?.isQuotePost ? { isQuotePost: true } : {}),
     };
   }
 
+  const linkCard = normalizeLinkCard(item.linkCard || item.link_card || item._meta?.linkCard);
+  if (linkCard) {
+    meta.linkCard = linkCard;
+  }
+  if (item._meta?.quotePost || item.quotePost) {
+    meta.quotePost = item._meta?.quotePost || item.quotePost;
+  }
   if (item._meta?.linkedIds || item.linkedIds) {
     meta.linkedIds = item._meta?.linkedIds || item.linkedIds;
+  }
+  if (item._meta?.metricsBreakdown) {
+    meta.metricsBreakdown = item._meta.metricsBreakdown;
   }
   if (item._meta?.notification) {
     meta.notification = item._meta.notification;
@@ -229,7 +345,7 @@ export function deduplicateUnifiedItems(items = [], windowMs = 120_000) {
       (ex) => sigOf(ex) === candSig && Math.abs((Date.parse(ex.date_published || '') || 0) - candTs) <= windowMs
     );
     if (dup) {
-      for (const k of ['mastodon', 'bluesky', 'threads', 'linkedIds']) {
+      for (const k of ['mastodon', 'bluesky', 'threads', 'linkedIds', 'metricsBreakdown']) {
         if (cand._meta?.[k] && !dup._meta?.[k]) {
           dup._meta = { ...dup._meta, [k]: cand._meta[k] };
         }
@@ -242,31 +358,101 @@ export function deduplicateUnifiedItems(items = [], windowMs = 120_000) {
   return kept;
 }
 
+function escapeFilterRegex(text) {
+  return String(text || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function buildFilterMatcher(rawTerm) {
+  const term = String(rawTerm || '').trim();
+  if (!term) return null;
+  const startsWord = /^[\p{L}\p{N}_]/u.test(term);
+  const endsWord = /[\p{L}\p{N}_]$/u.test(term);
+  const prefix = startsWord ? '(?<![\\p{L}\\p{N}_])' : '';
+
+  let body;
+  if (endsWord && term.length >= 6 && /s$/i.test(term) && !/(?:ss|us|is)$/i.test(term)) {
+    const stem = escapeFilterRegex(term.slice(0, -1)).replace(/\s+/g, '\\s+');
+    body = `(?:${stem}s?)`;
+  } else {
+    const base = escapeFilterRegex(term).replace(/\s+/g, '\\s+');
+    body = endsWord && term.length >= 4 ? `${base}(?:s|es)?` : base;
+  }
+
+  const suffix = endsWord ? '(?![\\p{L}\\p{N}_])' : '';
+  return new RegExp(`${prefix}${body}${suffix}`, 'iu');
+}
+
 /**
- * Enforce Mastodon and local SQLite keyword filter rules ('hide' or 'warn').
+ * Enforce Mastodon and local SQLite keyword filter rules ('hide' or 'warn')
+ * across post text, content warnings, link preview cards, media alt text, and author metadata.
  * @param {Array<object>} items
- * @param {Array<{ phrase: string, filter_action?: string, title?: string }>} rules
+ * @param {Array<{ phrase?: string, keywords?: string[], filter_action?: string, title?: string }>} rules
  * @returns {Array<object>}
  */
-export function applyKeywordFilters(items = [], rules = []) {
-  if (!Array.isArray(rules) || rules.length === 0) return items;
-  const activeRules = rules.filter((r) => r?.phrase && String(r.phrase).trim());
-  if (activeRules.length === 0) return items;
+export function applyKeywordFilters(items = [], rules = [], moderatedActors = []) {
+  const modSet = new Set(
+    (Array.isArray(moderatedActors) ? moderatedActors : [])
+      .map((a) => String(a || '').trim().toLowerCase())
+      .filter(Boolean)
+  );
+  const compiledRules = [];
+  for (const r of Array.isArray(rules) ? rules : []) {
+    if (!r) continue;
+    const rawTerms = Array.isArray(r.keywords) && r.keywords.length > 0
+      ? r.keywords
+      : [r.phrase || r.title || ''];
+    const matchers = rawTerms.map(buildFilterMatcher).filter(Boolean);
+    if (matchers.length === 0) continue;
+    compiledRules.push({
+      action: String(r.filter_action || 'hide').toLowerCase(),
+      title: r.title || (r.phrase ? `Filtered: ${r.phrase}` : 'Filtered'),
+      matchers,
+    });
+  }
+  if (compiledRules.length === 0 && modSet.size === 0) return items;
 
   const out = [];
   for (const raw of items) {
     const item = toUnifiedItem(raw);
-    const haystack = `${item.content_text || ''}\n${item._meta?.mastodon?.spoilerText || ''}`.toLowerCase();
+    if (modSet.size > 0) {
+      const actorKey = canonicalizeActorHandle(item.author?.handle || '', item.protocol || 'mastodon');
+      if (actorKey && modSet.has(actorKey)) continue;
+      const rebloggedBy = item._meta?.mastodon?.rebloggedBy || item._meta?.bluesky?.rebloggedBy || null;
+      if (rebloggedBy?.acct || rebloggedBy?.handle) {
+        const boosterKey = canonicalizeActorHandle(
+          rebloggedBy.acct || rebloggedBy.handle,
+          item.protocol || 'mastodon'
+        );
+        if (boosterKey && modSet.has(boosterKey)) continue;
+      }
+    }
+    const linkCard = item._meta?.linkCard || {};
+    const altTexts = Array.isArray(item.attachments)
+      ? item.attachments.map((a) => a?.alt_text || '').filter(Boolean)
+      : [];
+    const quote = item._meta?.quotePost || null;
+    const haystack = [
+      item.content_text || '',
+      item._meta?.mastodon?.spoilerText || '',
+      linkCard.title || '',
+      linkCard.description || '',
+      linkCard.url || '',
+      quote?.text || '',
+      quote?.authorHandle || '',
+      ...altTexts,
+      item.author?.name || '',
+      item.author?.handle || '',
+    ].join('\n');
+
     let hidden = false;
     let warnTitle = '';
-    for (const r of activeRules) {
-      const needle = String(r.phrase).trim().toLowerCase();
-      if (!haystack.includes(needle)) continue;
-      if ((r.filter_action || 'hide') === 'hide') {
+    for (const r of compiledRules) {
+      if (!r.matchers.some((rx) => rx.test(haystack))) continue;
+      if (r.action === 'hide') {
         hidden = true;
         break;
       }
-      warnTitle = warnTitle || r.title || `Filtered: ${r.phrase}`;
+      warnTitle = warnTitle || r.title;
     }
     if (hidden) continue;
     if (warnTitle && !item._meta?.mastodon?.spoilerText) {

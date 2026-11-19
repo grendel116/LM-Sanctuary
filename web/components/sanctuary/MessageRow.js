@@ -15,6 +15,21 @@ const EDIT_SVG = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" st
 const DELETE_SVG = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path><line x1="10" y1="11" x2="10" y2="17"></line><line x1="14" y1="11" x2="14" y2="17"></line></svg>`;
 const SPEAK_SVG = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"></path></svg>`;
 const PHONE_SVG = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"></path></svg>`;
+const CHEVRON_DOWN_SVG = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"></polyline></svg>`;
+
+function getLogIconSvg(kind) {
+  const svgs = {
+    timer: `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>`,
+    file: `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline></svg>`,
+    webpage: `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"></circle><line x1="2" y1="12" x2="22" y2="12"></line><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path></svg>`,
+    folder: `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>`,
+    search: `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>`,
+    edit: `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"></path><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"></path></svg>`,
+    command: `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="4 17 10 11 4 5"></polyline><line x1="12" y1="19" x2="20" y2="19"></line></svg>`,
+    gear: `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>`,
+  };
+  return svgs[kind] || svgs.command;
+}
 
 function fallbackMsgId() {
   return `local_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
@@ -273,12 +288,110 @@ export function normalizeTurnMedia(msg) {
   return [];
 }
 
+function normalizeToolArgs(raw) {
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+    return { args: raw, rawArgs: null };
+  }
+  if (typeof raw === 'string') {
+    const trimmed = raw.trim();
+    if (trimmed.startsWith('{')) {
+      try {
+        const parsed = JSON.parse(trimmed);
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          return { args: parsed, rawArgs: null };
+        }
+      } catch {
+        // Keep raw string when args is key=val or truncated live preview
+      }
+    }
+    return { args: {}, rawArgs: raw };
+  }
+  return { args: {}, rawArgs: null };
+}
+
+/**
+ * Pair persisted call/response tool_calls records (e.g., _build_tool_calls_pair) into single entries.
+ */
+export function pairToolCalls(toolCalls = []) {
+  if (!Array.isArray(toolCalls) || toolCalls.length === 0) return [];
+  const paired = [];
+  const byId = new Map();
+
+  for (const tc of toolCalls) {
+    if (!tc || typeof tc !== 'object') continue;
+    const type = tc.type;
+    const isResult = type === 'response' || type === 'result';
+
+    if (!isResult) {
+      const { args, rawArgs } = normalizeToolArgs(tc.args);
+      const rawResponse = tc.response ?? tc.content ?? tc.output ?? null;
+      const entry = {
+        id: String(tc.id || ''),
+        name: String(tc.name || 'tool'),
+        args,
+        rawArgs,
+        response: rawResponse === null ? null : String(rawResponse),
+        status: String(tc.status || ''),
+        duration: tc.duration ?? null,
+      };
+      paired.push(entry);
+      if (entry.id) {
+        byId.set(entry.id, entry);
+      }
+      continue;
+    }
+
+    const resId = String(tc.id || '');
+    const resName = String(tc.name || 'tool');
+    const resText = String(tc.response ?? tc.content ?? tc.output ?? '');
+
+    if (resId && byId.has(resId)) {
+      byId.get(resId).response = resText;
+      if (tc.status) byId.get(resId).status = String(tc.status);
+      if (tc.duration !== undefined && tc.duration !== null) byId.get(resId).duration = tc.duration;
+      continue;
+    }
+
+    let matched = null;
+    for (let i = paired.length - 1; i >= 0; i -= 1) {
+      if (paired[i].name === resName && paired[i].response === null) {
+        matched = paired[i];
+        break;
+      }
+    }
+    if (matched) {
+      matched.response = resText;
+      if (tc.status) matched.status = String(tc.status);
+      if (tc.duration !== undefined && tc.duration !== null) matched.duration = tc.duration;
+    } else {
+      paired.push({
+        id: resId,
+        name: resName,
+        args: {},
+        rawArgs: null,
+        response: resText,
+        status: String(tc.status || ''),
+        duration: tc.duration ?? null,
+      });
+    }
+  }
+
+  return paired.map((entry) => ({
+    ...entry,
+    response: entry.response ?? '',
+  }));
+}
+
 /**
  * Parse search_music tool output into structured discovery cards.
  */
 export function parseMusicDiscoveryItems(toolCalls = []) {
+  const sourceCalls =
+    Array.isArray(toolCalls) && toolCalls.some((tc) => tc?.type === 'response' || tc?.type === 'result')
+      ? pairToolCalls(toolCalls)
+      : toolCalls;
   const cards = [];
-  for (const tc of toolCalls) {
+  for (const tc of sourceCalls) {
     if (tc?.name !== 'search_music') continue;
     const raw = String(tc.response || '');
     if (!raw || raw.startsWith('No music results')) continue;
@@ -350,7 +463,16 @@ export function highlightQuotedDialogue(rootEl) {
     if (!node) return;
     if (node.nodeType === 1) {
       const tag = node.tagName?.toLowerCase?.();
-      if (tag === 'pre' || tag === 'code' || tag === 'a' || tag === 'button' || tag === 'textarea') {
+      if (
+        tag === 'pre' ||
+        tag === 'code' ||
+        tag === 'a' ||
+        tag === 'button' ||
+        tag === 'textarea' ||
+        tag === 'details' ||
+        tag === 'summary' ||
+        node.classList?.contains?.('antigravity-logs-container')
+      ) {
         return;
       }
       for (const child of [...node.childNodes]) {
@@ -395,65 +517,350 @@ function renderMarkdownInto(element, rawText) {
   highlightQuotedDialogue(element);
 }
 
+function formatToolTargetPath(rawPath) {
+  const value = String(rawPath || '').trim();
+  if (!value) return '';
+  if (value.startsWith('http://') || value.startsWith('https://')) {
+    try {
+      const parsed = new URL(value);
+      const pathname = parsed.pathname === '/' ? '' : parsed.pathname;
+      return `${parsed.hostname}${pathname}`;
+    } catch {
+      return value;
+    }
+  }
+  const parts = value.split(/[\\/]/).filter(Boolean);
+  return parts[parts.length - 1] || value;
+}
+
+function parseToolResultCount(toolName, responseText) {
+  if (!responseText) return null;
+  const trimmed = String(responseText).trim();
+  if (!trimmed || trimmed === 'No search results found.' || trimmed === 'No search results found' || trimmed.startsWith('Error')) {
+    return trimmed ? 0 : null;
+  }
+  try {
+    if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+      const parsed = JSON.parse(trimmed);
+      if (Array.isArray(parsed)) return parsed.length;
+      if (Array.isArray(parsed?.results)) return parsed.results.length;
+      if (Array.isArray(parsed?.matches)) return parsed.matches.length;
+    }
+  } catch {
+    // Fallback to text heuristics
+  }
+  if (toolName === 'web_search' || toolName === 'google_search' || toolName === 'search_music') {
+    return trimmed.split(/\n{2,}/).filter((b) => b.trim().length > 0).length;
+  }
+  const lines = trimmed.split('\n').filter((l) => l.trim().length > 0);
+  if (lines.length > 0 && lines.length < 50) {
+    return lines.length;
+  }
+  return null;
+}
+
+function formatToolLogDescriptor(tool, { live = false } = {}) {
+  const name = String(tool?.name || 'tool');
+  const args = tool?.args || {};
+  let category = 'other';
+  let icon = getLogIconSvg('gear');
+  let action = 'Ran';
+  let target = name;
+  let suffix = '';
+  let isMutation = true;
+
+  if (name === 'read_file' || name === 'view_file' || name === 'read_webpage') {
+    category = 'file';
+    icon = name === 'read_webpage' ? getLogIconSvg('webpage') : getLogIconSvg('file');
+    action = live && (!tool.status || tool.status === 'running') ? 'Reading' : 'Analyzed';
+    target = formatToolTargetPath(args.path || args.AbsolutePath || args.url || '') || (tool.rawArgs || name);
+    isMutation = false;
+    const start = args.StartLine || args.start_line || '';
+    const end = args.EndLine || args.end_line || '';
+    if (start && end) suffix = ` #L${start}-${end}`;
+    else if (start) suffix = ` #L${start}`;
+  } else if (name === 'get_workspace_structure' || name === 'list_dir' || name === 'find_files') {
+    category = 'folder';
+    icon = getLogIconSvg('folder');
+    action = live && (!tool.status || tool.status === 'running') ? 'Exploring' : 'Explored';
+    target = args.path || args.DirectoryPath || args.pattern || 'workspace';
+    isMutation = false;
+  } else if (
+    name === 'search_codebase' ||
+    name === 'grep_search' ||
+    name === 'web_search' ||
+    name === 'google_search' ||
+    name === 'search_github' ||
+    name === 'search_arxiv' ||
+    name === 'search_hacker_news' ||
+    name === 'search_music'
+  ) {
+    category = 'search';
+    icon = getLogIconSvg('search');
+    action = live && (!tool.status || tool.status === 'running') ? 'Searching' : 'Searched';
+    target = String(args.query || args.keyword || args.Query || tool.rawArgs || name);
+    isMutation = false;
+    if (tool.response) {
+      const count = parseToolResultCount(name, tool.response);
+      if (count !== null) {
+        suffix = ` ${count} result${count === 1 ? '' : 's'}`;
+      }
+    }
+  } else if (name === 'tune_feed_algorithm') {
+    category = 'edit';
+    icon = getLogIconSvg('edit');
+    action = live && (!tool.status || tool.status === 'running') ? 'Tuning' : 'Tuned';
+    target = args.preset ? `feed algorithm (${args.preset})` : 'feed algorithm';
+    isMutation = false;
+  } else if (name === 'write_file' || name === 'write_to_file') {
+    category = 'edit';
+    icon = getLogIconSvg('edit');
+    action = live && (!tool.status || tool.status === 'running') ? 'Writing' : (args.Overwrite ? 'Edited' : 'Created');
+    target = formatToolTargetPath(args.path || args.TargetFile || '') || name;
+    const contentVal = String(args.content || args.CodeContent || '');
+    if (contentVal) suffix = ` +${contentVal.split('\n').length} -0`;
+  } else if (name === 'replace_in_file' || name === 'replace_file_content' || name === 'multi_replace_file_content') {
+    category = 'edit';
+    icon = getLogIconSvg('edit');
+    action = live && (!tool.status || tool.status === 'running') ? 'Editing' : 'Edited';
+    target = formatToolTargetPath(args.path || args.TargetFile || '') || name;
+    const added = args.ReplacementContent ? String(args.ReplacementContent).split('\n').length : 0;
+    const removed = args.TargetContent ? String(args.TargetContent).split('\n').length : 0;
+    if (added || removed) suffix = ` +${added} -${removed}`;
+  } else if (name === 'run_shell_command' || name === 'run_command') {
+    category = 'command';
+    icon = getLogIconSvg('command');
+    action = live && (!tool.status || tool.status === 'running') ? 'Running' : 'Ran';
+    const cmd = String(args.command || args.CommandLine || tool.rawArgs || name);
+    target = cmd.length > 50 ? `${cmd.slice(0, 47)}...` : cmd;
+  } else if (tool.rawArgs) {
+    const trimmedArgs = String(tool.rawArgs).trim();
+    target = `${name}(${trimmedArgs.length > 44 ? `${trimmedArgs.slice(0, 41)}...` : trimmedArgs})`;
+  }
+
+  if (live) {
+    if (tool.status === 'failed') action = 'Failed';
+    if (tool.duration) suffix = `${suffix} (${tool.duration}s)`.trimStart();
+    else if (!tool.status || tool.status === 'running') suffix = `${suffix} (running)`.trimStart();
+  }
+
+  let argsBlock = '';
+  if (args && Object.keys(args).length > 0) {
+    argsBlock = `Parameters:\n${JSON.stringify(args, null, 2)}\n\n`;
+  } else if (tool.rawArgs) {
+    argsBlock = `Parameters:\n${tool.rawArgs}\n\n`;
+  }
+  const responseBody = tool.response || (live && (!tool.status || tool.status === 'running') ? 'Running...' : 'No response data');
+
+  return {
+    id: tool.id || '',
+    category,
+    icon,
+    action,
+    target,
+    suffix,
+    isMutation,
+    detail: `${argsBlock}Response:\n${responseBody}`,
+  };
+}
+
+function createToolEntryDetails(doc, descriptor) {
+  const details = doc.createElement('details');
+  details.className = `antigravity-log-entry${descriptor.isMutation ? ' mutation-item' : ''}`;
+  if (descriptor.id) details.dataset.callId = descriptor.id;
+
+  const summary = doc.createElement('summary');
+  summary.className = 'antigravity-log-item';
+
+  const chevron = doc.createElement('span');
+  chevron.className = 'ag-item-chevron';
+  chevron.setAttribute('aria-hidden', 'true');
+  chevron.innerHTML = CHEVRON_DOWN_SVG;
+
+  const iconEl = doc.createElement('span');
+  iconEl.className = 'ag-log-icon';
+  iconEl.setAttribute('aria-hidden', 'true');
+  iconEl.innerHTML = descriptor.icon;
+
+  const actionEl = doc.createElement('span');
+  actionEl.className = 'ag-log-action';
+  actionEl.textContent = descriptor.action;
+
+  const targetEl = doc.createElement('span');
+  targetEl.className = 'ag-log-target';
+  targetEl.textContent = descriptor.target;
+
+  summary.append(chevron, iconEl, actionEl, targetEl);
+
+  if (descriptor.suffix) {
+    const suffixEl = doc.createElement('span');
+    suffixEl.className = 'ag-log-suffix';
+    suffixEl.textContent = descriptor.suffix;
+    summary.appendChild(suffixEl);
+  }
+
+  const detailWrap = doc.createElement('div');
+  detailWrap.className = 'antigravity-log-detail';
+  const pre = doc.createElement('pre');
+  const code = doc.createElement('code');
+  code.textContent = descriptor.detail;
+  pre.appendChild(code);
+  detailWrap.appendChild(pre);
+
+  details.append(summary, detailWrap);
+  return details;
+}
+
+function buildExploreGroupSummaryText(explorationItems) {
+  const uniqueFiles = new Set();
+  const uniqueFolders = new Set();
+  let searchesCount = 0;
+
+  for (const item of explorationItems) {
+    if (item.category === 'file') uniqueFiles.add(item.target);
+    else if (item.category === 'folder') uniqueFolders.add(item.target);
+    else if (item.category === 'search') searchesCount += 1;
+  }
+
+  const parts = [];
+  if (uniqueFiles.size > 0) parts.push(`${uniqueFiles.size} file${uniqueFiles.size === 1 ? '' : 's'}`);
+  if (uniqueFolders.size > 0) parts.push(`${uniqueFolders.size} folder${uniqueFolders.size === 1 ? '' : 's'}`);
+  if (searchesCount > 0) parts.push(`${searchesCount} search${searchesCount === 1 ? '' : 'es'}`);
+  return parts.length > 0 ? `Explored ${parts.join(', ')}` : 'Explored workspace';
+}
+
+function ensureActivityLogsCard(doc, bubble) {
+  let container = bubble.querySelector('.antigravity-logs-container');
+  if (!container) {
+    container = doc.createElement('div');
+    container.className = 'antigravity-logs-container';
+    bubble.appendChild(container);
+  }
+
+  let card = container.querySelector('details.antigravity-logs-card');
+  if (!card) {
+    card = doc.createElement('details');
+    card.className = 'antigravity-logs-card';
+
+    const summary = doc.createElement('summary');
+    summary.className = 'antigravity-logs-header';
+
+    const chevron = doc.createElement('span');
+    chevron.className = 'ag-header-chevron';
+    chevron.setAttribute('aria-hidden', 'true');
+    chevron.innerHTML = CHEVRON_DOWN_SVG;
+
+    const timerIcon = doc.createElement('span');
+    timerIcon.className = 'ag-timer-icon';
+    timerIcon.setAttribute('aria-hidden', 'true');
+    timerIcon.innerHTML = getLogIconSvg('timer');
+
+    const label = doc.createElement('span');
+    label.className = 'ag-timer-text';
+
+    summary.append(chevron, timerIcon, label);
+
+    const body = doc.createElement('div');
+    body.className = 'antigravity-logs-body';
+
+    card.append(summary, body);
+    container.replaceChildren(card);
+  }
+
+  return {
+    card,
+    label: card.querySelector('.ag-timer-text'),
+    body: card.querySelector('.antigravity-logs-body'),
+  };
+}
+
+function populateLogsBody(doc, body, descriptors) {
+  const explorationItems = descriptors.filter((item) => !item.isMutation);
+  const mutationItems = descriptors.filter((item) => item.isMutation);
+  const nodes = [];
+
+  if (explorationItems.length > 2) {
+    const exploreDetails = doc.createElement('details');
+    exploreDetails.className = 'antigravity-explore-container';
+
+    const exploreSummary = doc.createElement('summary');
+    exploreSummary.className = 'antigravity-explore-header';
+
+    const exploreChevron = doc.createElement('span');
+    exploreChevron.className = 'ag-explore-chevron';
+    exploreChevron.setAttribute('aria-hidden', 'true');
+    exploreChevron.innerHTML = CHEVRON_DOWN_SVG;
+
+    const exploreText = doc.createElement('span');
+    exploreText.className = 'ag-explore-text';
+    exploreText.textContent = buildExploreGroupSummaryText(explorationItems);
+
+    exploreSummary.append(exploreChevron, exploreText);
+
+    const exploreBody = doc.createElement('div');
+    exploreBody.className = 'antigravity-explore-body';
+    for (const item of explorationItems) {
+      exploreBody.appendChild(createToolEntryDetails(doc, item));
+    }
+
+    exploreDetails.append(exploreSummary, exploreBody);
+    nodes.push(exploreDetails);
+  } else {
+    for (const item of explorationItems) {
+      nodes.push(createToolEntryDetails(doc, item));
+    }
+  }
+
+  for (const item of mutationItems) {
+    nodes.push(createToolEntryDetails(doc, item));
+  }
+
+  body.replaceChildren(...nodes);
+}
+
+/**
+ * Render live polling tool activity inside the typing indicator bubble,
+ * preserving the card's open/closed toggle state across updates.
+ */
+export function renderLiveToolLogs(typingBubble, toolCalls = []) {
+  if (!typingBubble || !Array.isArray(toolCalls) || toolCalls.length === 0) return;
+  const paired = pairToolCalls(toolCalls);
+  if (paired.length === 0) return;
+  const doc = globalThis.document;
+  const { card, label, body } = ensureActivityLogsCard(doc, typingBubble);
+  const wasOpen = Boolean(card.open);
+  const countLabel = `${paired.length} tool call${paired.length === 1 ? '' : 's'}`;
+  label.textContent = `Working... · ${countLabel}`;
+
+  const descriptors = paired.map((tool) => formatToolLogDescriptor(tool, { live: true }));
+  const openIds = new Set(
+    [...body.querySelectorAll('details.antigravity-log-entry')]
+      .filter((el) => el.open && el.dataset.callId)
+      .map((el) => el.dataset.callId)
+  );
+  populateLogsBody(doc, body, descriptors);
+  for (const entryEl of body.querySelectorAll('details.antigravity-log-entry')) {
+    if (entryEl.dataset.callId && openIds.has(entryEl.dataset.callId)) {
+      entryEl.open = true;
+    }
+  }
+  card.open = wasOpen;
+}
+
 function renderToolLogsAndMusic(bubble, toolCalls = [], duration = null) {
   const doc = globalThis.document;
-  const paired = [];
-  const resById = new Map();
-  for (const tc of toolCalls) {
-    if (tc?.type === 'result') {
-      resById.set(tc.id || tc.name, tc.content || tc.response || '');
-    }
-  }
-  for (const tc of toolCalls) {
-    if (tc?.type === 'result') continue;
-    paired.push({
-      id: tc.id || '',
-      name: tc.name || 'tool',
-      args: tc.args || {},
-      response: tc.response ?? resById.get(tc.id || tc.name) ?? '',
-    });
-  }
+  const paired = pairToolCalls(toolCalls);
 
   if (paired.length > 0) {
-    const container = doc.createElement('div');
-    container.className = 'tool-logs-container';
+    const { card, label, body } = ensureActivityLogsCard(doc, bubble);
+    card.open = false;
+    const countLabel = `${paired.length} tool call${paired.length === 1 ? '' : 's'}`;
+    label.textContent = duration
+      ? `Worked for ${duration}s · ${countLabel}`
+      : `Activity · ${countLabel}`;
 
-    const summaryBtn = doc.createElement('button');
-    summaryBtn.type = 'button';
-    summaryBtn.className = 'tool-logs-summary-btn';
-    summaryBtn.setAttribute('aria-expanded', 'false');
-    summaryBtn.textContent = duration
-      ? `Worked for ${duration}s (${paired.length} tool call${paired.length > 1 ? 's' : ''})`
-      : `Activity (${paired.length} tool call${paired.length > 1 ? 's' : ''})`;
-
-    const listEl = doc.createElement('div');
-    listEl.className = 'tool-logs-body';
-    listEl.hidden = true;
-
-    for (const tc of paired) {
-      const item = doc.createElement('div');
-      item.className = 'tool-log-entry';
-      const head = doc.createElement('div');
-      head.className = 'tool-log-head';
-      head.textContent = `${tc.name}(${Object.keys(tc.args).length ? JSON.stringify(tc.args).slice(0, 80) : ''})`;
-      const detail = doc.createElement('pre');
-      detail.className = 'tool-log-detail';
-      detail.textContent = String(tc.response || '').slice(0, 600);
-      item.appendChild(head);
-      item.appendChild(detail);
-      listEl.appendChild(item);
-    }
-
-    summaryBtn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      const expanded = !listEl.hidden;
-      listEl.hidden = expanded;
-      summaryBtn.setAttribute('aria-expanded', expanded ? 'false' : 'true');
-    });
-
-    container.appendChild(summaryBtn);
-    container.appendChild(listEl);
-    bubble.appendChild(container);
+    const descriptors = paired.map((tool) => formatToolLogDescriptor(tool));
+    populateLogsBody(doc, body, descriptors);
   }
 
   const musicItems = parseMusicDiscoveryItems(paired);

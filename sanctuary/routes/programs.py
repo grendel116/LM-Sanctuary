@@ -1369,6 +1369,25 @@ def sync_mastodon_user_profile():
         return jsonify({"error": str(e)}), 500
 
 
+@programs_bp.route('/api/feed_profile', methods=['GET', 'POST', 'PUT'])
+@st.requires_auth
+def feed_profile_route():
+    """Read or update the token-free declarative local feed weighting profile."""
+    from core.feed_tuning import load_feed_profile, save_feed_profile
+
+    if request.method == 'GET':
+        return jsonify(load_feed_profile())
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return jsonify({"error": "Invalid feed profile payload"}), 400
+    saved = save_feed_profile(data, updated_by=str(data.get("updatedBy") or "user"), bump_timestamp=True)
+    try:
+        st.broadcast_status()
+    except Exception:
+        pass
+    return jsonify(saved)
+
+
 @programs_bp.route('/api/user_profiles/delete', methods=['POST'])
 @st.requires_auth
 def delete_user_profile():

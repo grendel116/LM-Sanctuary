@@ -4,10 +4,17 @@ import assert from 'node:assert/strict';
 import { installMockDom } from '../__mocks__/mockDom.js';
 import {
   LIVE_ROW_SELECTOR,
+  pairToolCalls,
   parseMusicDiscoveryItems,
   reconcileChat,
+  renderLiveToolLogs,
   renderMessage,
 } from '../web/components/sanctuary/MessageRow.js';
+import {
+  createPortraitGrid,
+  updatePortraitGridToolbar,
+} from '../web/components/sanctuary/PortraitGrid.js';
+import { connectionStore } from '../web/state/sanctuary/connection.js';
 
 test('reconcileChat is idempotent, deduplicates IDs, preserves busy/transient rows, and clears queued badge', () => {
   const dom = installMockDom();
@@ -95,6 +102,193 @@ test('MessageRow renders music discovery cards from search_music tool_calls', ()
     assert.equal(card.querySelector('.music-discovery-title').textContent, 'Geogaddi Deep Dive');
     assert.equal(card.querySelector('.music-discovery-link').getAttribute('href'), 'https://bandcamp.com/tag/boards-of-canada');
   } finally {
+    dom.restore();
+  }
+});
+
+test('MessageRow pairs call/response tool_calls into a single collapsible Activity Log details card', () => {
+  const dom = installMockDom();
+  try {
+    const rawToolCalls = [
+      {
+        type: 'call',
+        id: 'call_1',
+        name: 'read_webpage',
+        args: { url: 'https://github.com/jobu-shoffone/CalliopeZED' },
+      },
+      {
+        type: 'response',
+        id: 'call_1',
+        name: 'read_webpage',
+        response: 'main\n\n[Branches](/jobu-shoffone/CalliopeZED/branches)',
+      },
+    ];
+
+    const paired = pairToolCalls(rawToolCalls);
+    assert.equal(paired.length, 1);
+    assert.equal(paired[0].name, 'read_webpage');
+    assert.ok(paired[0].response.includes('CalliopeZED'));
+
+    const chat = dom.document.createElement('div');
+    reconcileChat(chat, [{
+      id: 'prgm_tools_1',
+      role: 'program',
+      sender_id: 'sebile',
+      text: 'Checked the repo.',
+      duration: 45.4,
+      tool_calls: rawToolCalls,
+    }]);
+
+    const card = chat.querySelector('details.antigravity-logs-card');
+    assert.ok(card);
+    assert.equal(card.open, false);
+    const headerText = card.querySelector('.ag-timer-text')?.textContent;
+    assert.equal(headerText, 'Worked for 45.4s · 1 tool call');
+
+    // Legacy unstyled class must not be emitted
+    assert.equal(chat.querySelector('.tool-logs-summary-btn'), null);
+
+    // Click summary opens outer card without duplicating read_webpage
+    card.querySelector('summary.antigravity-logs-header').click();
+    assert.equal(card.open, true);
+
+    const entries = card.querySelectorAll('details.antigravity-log-entry');
+    assert.equal(entries.length, 1);
+    assert.equal(entries[0].querySelector('.ag-log-action')?.textContent, 'Analyzed');
+    assert.equal(entries[0].querySelector('.ag-log-target')?.textContent, 'github.com/jobu-shoffone/CalliopeZED');
+    assert.equal(entries[0].open, false);
+
+    // Click inner entry reveals Parameters + Response
+    entries[0].querySelector('summary.antigravity-log-item').click();
+    assert.equal(entries[0].open, true);
+    const detailText = entries[0].querySelector('.antigravity-log-detail pre code')?.textContent || '';
+    assert.match(detailText, /Parameters:/);
+    assert.match(detailText, /CalliopeZED/);
+    assert.match(detailText, /Response:/);
+  } finally {
+    dom.restore();
+  }
+});
+
+test('renderLiveToolLogs preserves open state of card across polling ticks', () => {
+  const dom = installMockDom();
+  try {
+    const bubble = dom.document.createElement('div');
+    bubble.className = 'message program';
+
+    renderLiveToolLogs(bubble, [
+      { id: 'live_1', name: 'web_search', args: { query: 'skyrim shaders' }, status: 'running' },
+    ]);
+
+    const card = bubble.querySelector('details.antigravity-logs-card');
+    assert.ok(card);
+    assert.equal(card.open, false);
+    assert.equal(card.querySelector('.ag-timer-text')?.textContent, 'Working... · 1 tool call');
+
+    card.querySelector('summary.antigravity-logs-header').click();
+    assert.equal(card.open, true);
+
+    renderLiveToolLogs(bubble, [
+      { id: 'live_1', name: 'web_search', args: { query: 'skyrim shaders' }, status: 'completed', duration: 1.4, response: 'Res 1' },
+      { id: 'live_2', name: 'read_webpage', args: { url: 'https://example.com/a' }, status: 'running' },
+    ]);
+
+    assert.equal(bubble.querySelector('details.antigravity-logs-card').open, true);
+    assert.equal(card.querySelector('.ag-timer-text')?.textContent, 'Working... · 2 tool calls');
+  } finally {
+    dom.restore();
+  }
+});
+
+test('PortraitGrid renders trash delete icon, concise Regenerate toolbar label, and <progress> card spinner', async () => {
+  const dom = installMockDom();
+  const origFetch = globalThis.fetch;
+  const prevNodeUrl = connectionStore.get().nodeUrl;
+  connectionStore.set({ nodeUrl: 'http://127.0.0.1:5000' });
+  try {
+    const doc = dom.document;
+    const bubble = doc.createElement('div');
+    bubble.className = 'message program image-message';
+
+    const grid = createPortraitGrid(
+      [
+        { url: '/images/portraits/p1.png', prompt: 'moonlit studio' },
+        { url: '/images/portraits/v1.mp4', type: 'video', prompt: 'animated clip' },
+      ],
+      'msg_p1',
+      'program',
+      'sebile',
+      'moonlit studio',
+      { sessionId: 'default' }
+    );
+    // Simulate a single remaining portrait with 2 deleted slots for toolbar test
+    grid.dataset.deletedCount = '2';
+    bubble.appendChild(grid);
+    updatePortraitGridToolbar(grid, { sessionId: 'default' });
+
+    const delBtns = grid.querySelectorAll('.portrait-delete-btn');
+    assert.equal(delBtns.length, 2);
+    assert.equal(delBtns[0].getAttribute('aria-label'), 'Delete image');
+    assert.equal(delBtns[1].getAttribute('aria-label'), 'Delete video');
+    for (const delBtn of delBtns) {
+      assert.match(delBtn.innerHTML, /<polyline points="3 6 5 6 21 6">/);
+      assert.doesNotMatch(delBtn.innerHTML, /x1="18" y1="6"/);
+    }
+
+    const batchBtn = bubble.querySelector('.portrait-reroll-missing-btn');
+    assert.ok(batchBtn);
+    assert.equal(batchBtn.textContent, 'Regenerate');
+
+    let resolveFetch;
+    globalThis.fetch = () => new Promise((resolve) => {
+      resolveFetch = resolve;
+    });
+
+    batchBtn.click();
+    assert.equal(batchBtn.disabled, true);
+    assert.equal(batchBtn.classList.contains('is-loading'), true);
+    assert.equal(batchBtn.getAttribute('aria-busy'), 'true');
+    assert.equal(batchBtn.textContent, 'Regenerate');
+
+    resolveFetch(new Response(JSON.stringify({ ok: true }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    }));
+    await new Promise((r) => setTimeout(r, 0));
+
+    assert.equal(batchBtn.disabled, false);
+    assert.equal(batchBtn.classList.contains('is-loading'), false);
+    assert.equal(batchBtn.getAttribute('aria-busy'), null);
+    assert.equal(batchBtn.textContent, 'Regenerate');
+
+    const card = grid.querySelector('.message-image-container');
+    const regenBtn = card.querySelector('.portrait-regen-btn');
+    assert.ok(regenBtn);
+
+    let resolveCardFetch;
+    globalThis.fetch = () => new Promise((resolve) => {
+      resolveCardFetch = resolve;
+    });
+
+    regenBtn.click();
+    const overlay = card.querySelector('.image-loading-overlay');
+    assert.ok(overlay);
+    const spinner = overlay.querySelector('progress.loading-spinner');
+    assert.ok(spinner);
+    assert.equal(spinner.getAttribute('aria-label'), 'Regenerate image');
+    assert.equal(spinner.getAttribute('value'), null);
+    assert.equal(overlay.querySelector('.image-loading-text'), null);
+    assert.doesNotMatch(overlay.textContent, /Regenerating/);
+
+    resolveCardFetch(new Response(JSON.stringify({ ok: true }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    }));
+    await new Promise((r) => setTimeout(r, 0));
+    assert.equal(card.querySelector('.image-loading-overlay'), null);
+  } finally {
+    connectionStore.set({ nodeUrl: prevNodeUrl });
+    globalThis.fetch = origFetch;
     dom.restore();
   }
 });

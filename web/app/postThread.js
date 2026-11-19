@@ -1,5 +1,5 @@
 import { createPostCard } from '../components/PostCard.js';
-import { showConfirm } from '../components/sanctuary/SanctuaryDialog.js';
+import { showAlert, showConfirm } from '../components/sanctuary/SanctuaryDialog.js';
 import { createLoadingState } from '../components/ui/index.js';
 import { DEFAULT_AVATAR_DATA_URI } from '../constants/avatars.js';
 import { toUnifiedItem } from '../core/schema/unifiedItem.js';
@@ -7,12 +7,14 @@ import {
   deleteUnified,
   fetchPostThread,
   likeUnified,
+  pinUnified,
   replyUnified,
   repostUnified,
 } from '../queries/socialClient.js';
 import { authStore } from '../state/authStore.js';
 import { prefillReply } from '../state/composeStore.js';
-import { mutatePostAcrossStreams, removePostAcrossStreams } from '../state/feedStore.js';
+import { mutatePostAcrossStreams, recordAuthorInteraction, removePostAcrossStreams } from '../state/feedStore.js';
+import { openEditPostDialog } from './profile.js';
 
 function pickReplyAvatar(authState, protocol) {
   const accounts = authState?.accounts || [];
@@ -141,8 +143,12 @@ export function renderPostThreadView(containerEl, {
     return {
       onReply: (p) => prefillReply(p),
       onToggleLike: async (p) => {
+        const wasLiked = Boolean(p?._meta?.mastodon?.favourited || p?._meta?.bluesky?.likeUri);
         const updated = await likeUnified(p);
         if (!updated || destroyed) return;
+        if (!wasLiked) {
+          void recordAuthorInteraction(p, p?.protocol, 1);
+        }
         applyUpdatedItem(updated);
         mutatePostAcrossStreams(p.id || p.key, () => updated);
       },
@@ -165,28 +171,59 @@ export function renderPostThreadView(containerEl, {
             void loadThreadContext();
           },
       onSelectAuthor,
-      onAskSanctuary,
-      onDeletePost: (p) => {
-        showConfirm('Delete Post', 'Delete this post?', async () => {
-          await deleteUnified(p);
-          removePostAcrossStreams(p.id || p.key);
-          if (destroyed) return;
-          if (p.id === currentFocal.id || toUnifiedItem(p).id === currentFocal.id) {
-            if (historyStack.length > 0) {
-              currentFocal = historyStack.pop();
-              ancestors = [];
-              descendants = [];
-              renderSections();
-              void loadThreadContext();
-            } else {
-              onBack?.();
-            }
-          } else {
-            descendants = descendants.filter((d) => d.item.id !== toUnifiedItem(p).id);
-            ancestors = ancestors.filter((a) => a.id !== toUnifiedItem(p).id);
-            renderSections();
+      onAskSanctuary: onAskSanctuary
+        ? (p) => {
+            void recordAuthorInteraction(p, p?.protocol, 1.5);
+            onAskSanctuary(p);
           }
+        : undefined,
+      onEditPost: authStore.get().isMastodonConnected ? (p) => {
+        if (p?.protocol !== 'mastodon') return;
+        openEditPostDialog(p, {
+          onSaved: (updated) => {
+            if (!updated || destroyed) return;
+            applyUpdatedItem(updated);
+            mutatePostAcrossStreams(p.id || p.key, () => updated);
+          },
         });
+      } : null,
+      onTogglePin: authStore.get().isMastodonConnected ? async (p) => {
+        if (p?.protocol !== 'mastodon') return;
+        const updated = await pinUnified(p, Boolean(p._meta?.mastodon?.pinned));
+        if (!updated || destroyed) return;
+        applyUpdatedItem(updated);
+        mutatePostAcrossStreams(p.id || p.key, () => updated);
+      } : null,
+      onDeletePost: (p) => {
+        showConfirm(
+          'Delete Post',
+          p?._meta?.linkedIds?.blueskyUri || p?._meta?.linkedIds?.threadsPostId
+            ? 'Delete this post from Mastodon and all linked bridges?'
+            : 'Delete this post?',
+          async () => {
+            const res = await deleteUnified(p);
+            removePostAcrossStreams(p.id || p.key);
+            if (res?.warnings?.length > 0) {
+              showAlert('Bridge Delete Warning', res.warnings.join('\n\n'));
+            }
+            if (destroyed) return;
+            if (p.id === currentFocal.id || toUnifiedItem(p).id === currentFocal.id) {
+              if (historyStack.length > 0) {
+                currentFocal = historyStack.pop();
+                ancestors = [];
+                descendants = [];
+                renderSections();
+                void loadThreadContext();
+              } else {
+                onBack?.();
+              }
+            } else {
+              descendants = descendants.filter((d) => d.item.id !== toUnifiedItem(p).id);
+              ancestors = ancestors.filter((a) => a.id !== toUnifiedItem(p).id);
+              renderSections();
+            }
+          }
+        );
       },
       showSanctuaryAction,
     };
@@ -229,9 +266,11 @@ export function renderPostThreadView(containerEl, {
     const canFetch =
       currentFocal.protocol === 'bluesky'
         ? Boolean(currentFocal._meta?.bluesky?.uri || currentFocal.id.replace(/^bluesky:/, ''))
-        : currentFocal.protocol === 'mastodon'
-          ? Boolean(currentFocal._meta?.mastodon?.statusId || currentFocal.id.replace(/^mastodon:/, ''))
-          : false;
+        : currentFocal.protocol === 'threads'
+          ? Boolean(currentFocal._meta?.threads?.postId || currentFocal.id.replace(/^threads:(?:notif:)?/, ''))
+          : currentFocal.protocol === 'mastodon'
+            ? Boolean(currentFocal._meta?.mastodon?.statusId || currentFocal.id.replace(/^mastodon:/, ''))
+            : false;
 
     if (!canFetch) {
       statusEl.replaceChildren();
@@ -280,6 +319,7 @@ export function renderPostThreadView(containerEl, {
         visibility: currentFocal._meta?.mastodon?.visibility || 'public',
       });
       if (destroyed) return;
+      void recordAuthorInteraction(currentFocal, currentFocal?.protocol, 2);
       replyInput.value = '';
       replyStatus.hidden = true;
       replyStatus.textContent = '';

@@ -21,8 +21,8 @@ export const MAX_IMAGES_PER_ROW = 3;
 const REGEN_SVG = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="23 4 23 10 17 10"></polyline><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path></svg>`;
 const VIDEO_SVG = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="23 7 16 12 23 17 23 7"></polygon><rect x="1" y="5" width="15" height="14" rx="2" ry="2"></rect></svg>`;
 const SHARE_SVG = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="18" cy="5" r="3"></circle><circle cx="6" cy="12" r="3"></circle><circle cx="18" cy="19" r="3"></circle><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"></line><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"></line></svg>`;
-const DELETE_SVG = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>`;
-const VIEWER_DELETE_SVG = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 6px; display: inline-block; vertical-align: middle;" aria-hidden="true"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>`;
+const DELETE_SVG = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path><line x1="10" y1="11" x2="10" y2="17"></line><line x1="14" y1="11" x2="14" y2="17"></line></svg>`;
+const VIEWER_DELETE_SVG = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 6px; display: inline-block; vertical-align: middle;" aria-hidden="true"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path><line x1="10" y1="11" x2="10" y2="17"></line><line x1="14" y1="11" x2="14" y2="17"></line></svg>`;
 const VIEWER_PROFILE_SVG = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 6px; display: inline-block; vertical-align: middle;" aria-hidden="true"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></svg>`;
 const PREV_SVG = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="15 18 9 12 15 6"></polyline></svg>`;
 const NEXT_SVG = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6"></polyline></svg>`;
@@ -54,23 +54,37 @@ function stripNodeBase(url, nodeUrl = '') {
   return s;
 }
 
-function showOverlayOnCard(cardEl, label = 'Generating...') {
+function showOverlayOnCard(cardEl, label = '', ariaLabel = label || 'Loading') {
   const doc = globalThis.document;
   let overlay = cardEl.querySelector('.image-loading-overlay');
   if (!overlay) {
     overlay = doc.createElement('div');
     overlay.className = 'image-loading-overlay';
-    const spinner = doc.createElement('div');
+    const spinner = doc.createElement('progress');
     spinner.className = 'loading-spinner';
-    const textEl = doc.createElement('span');
-    textEl.className = 'image-loading-text';
-    textEl.textContent = label;
+    spinner.setAttribute('aria-label', ariaLabel);
     overlay.appendChild(spinner);
-    overlay.appendChild(textEl);
+    if (label) {
+      const textEl = doc.createElement('span');
+      textEl.className = 'image-loading-text';
+      textEl.textContent = label;
+      overlay.appendChild(textEl);
+    }
     cardEl.appendChild(overlay);
   } else {
-    const textEl = overlay.querySelector('.image-loading-text');
-    if (textEl) textEl.textContent = label;
+    const spinner = overlay.querySelector('.loading-spinner');
+    spinner?.setAttribute('aria-label', ariaLabel);
+    let textEl = overlay.querySelector('.image-loading-text');
+    if (label) {
+      if (!textEl) {
+        textEl = doc.createElement('span');
+        textEl.className = 'image-loading-text';
+        overlay.appendChild(textEl);
+      }
+      textEl.textContent = label;
+    } else if (textEl) {
+      textEl.remove();
+    }
   }
   return overlay;
 }
@@ -109,9 +123,11 @@ export function updatePortraitGridToolbar(gridEl, ctx = {}) {
     const btn = doc.createElement('button');
     btn.type = 'button';
     btn.className = 'portrait-batch-reroll-btn portrait-reroll-missing-btn';
+    btn.innerHTML = `${REGEN_SVG}<span>Regenerate</span>`;
     btn.addEventListener('click', async () => {
       btn.disabled = true;
-      btn.textContent = 'Regenerating missing slots...';
+      btn.classList.add('is-loading');
+      btn.setAttribute('aria-busy', 'true');
       try {
         await regenerateImage({
           session_id: ctx.sessionId || 'default',
@@ -121,14 +137,16 @@ export function updatePortraitGridToolbar(gridEl, ctx = {}) {
         await ctx.onRefreshHistory?.();
       } finally {
         btn.disabled = false;
+        btn.classList.remove('is-loading');
+        btn.removeAttribute('aria-busy');
       }
     });
     toolbar.appendChild(btn);
     gridEl.parentElement?.appendChild(toolbar);
   }
   const btn = toolbar.querySelector('.portrait-reroll-missing-btn');
-  if (btn) {
-    btn.textContent = `Fill ${deletedCount} empty portrait slot${deletedCount > 1 ? 's' : ''}`;
+  if (btn && btn.textContent !== 'Regenerate') {
+    btn.innerHTML = `${REGEN_SVG}<span>Regenerate</span>`;
   }
 }
 
@@ -210,7 +228,7 @@ export function createPortraitCardElement(imgUrl, prompt, msgId, role = 'program
   if (role === 'program') {
     actions.appendChild(
       makeMiniBtn('Regenerate image', REGEN_SVG, 'portrait-regen-btn', async () => {
-        showOverlayOnCard(container, 'Regenerating...');
+        showOverlayOnCard(container, '', 'Regenerate image');
         try {
           await regenerateImage({
             session_id: ctx.sessionId || 'default',
@@ -324,7 +342,7 @@ export async function streamPortraitGeneration(chatContainer, {
   for (let i = 0; i < count; i += 1) {
     const slot = doc.createElement('div');
     slot.className = 'message-image-container is-pending-slot';
-    showOverlayOnCard(slot, `Slot ${i + 1}...`);
+    showOverlayOnCard(slot, '', `Generating portrait ${i + 1}`);
     slots.push(slot);
     grid.appendChild(slot);
   }

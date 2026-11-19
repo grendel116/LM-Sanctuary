@@ -2,7 +2,9 @@ import { SocialAdapter } from '../base.js';
 import { normalizeInstanceUrl } from '../../constants/endpoints.js';
 import { plainTextToHtml, toUnifiedItem } from '../../core/schema/unifiedItem.js';
 import {
+  clearMastodonNotifications,
   deleteStatus,
+  dismissMastodonNotification,
   editStatus,
   getNotifications,
   getTimeline,
@@ -72,9 +74,8 @@ export class MastodonAdapter extends SocialAdapter {
     });
   }
 
-  async reply(targetItem, draft, media = [], options = {}) {
-    const item = toUnifiedItem(targetItem);
-    let statusId = item._meta?.mastodon?.statusId || item.id.replace(/^mastodon:/, '');
+  async _resolveLocalStatusId(item) {
+    let statusId = item._meta?.mastodon?.statusId || String(item.id || '').replace(/^mastodon:/, '');
     const homeOrigin = normalizeInstanceUrl(this.instanceUrl);
     const itemOrigin = item._meta?.mastodon?.instanceUrl
       ? normalizeInstanceUrl(item._meta.mastodon.instanceUrl)
@@ -93,6 +94,39 @@ export class MastodonAdapter extends SocialAdapter {
         statusId = searchRes.statuses[0].id;
       }
     }
+    return statusId;
+  }
+
+  _preservePostIdentity(item, updated, fallbackStatusId = '') {
+    const normalized = toUnifiedItem(updated);
+    const prevMasto = item._meta?.mastodon || {};
+    const { metricsBreakdown: _omitBd, ...restPrevMeta } = item._meta || {};
+    const nextMasto = {
+      ...(normalized._meta?.mastodon || {}),
+      statusId: prevMasto.statusId || normalized._meta?.mastodon?.statusId || fallbackStatusId,
+      instanceUrl: prevMasto.instanceUrl || normalized._meta?.mastodon?.instanceUrl || this.instanceUrl,
+      ...(prevMasto.wrapperId ? { wrapperId: prevMasto.wrapperId } : {}),
+    };
+    if (prevMasto.rebloggedBy) {
+      nextMasto.rebloggedBy = prevMasto.rebloggedBy;
+    } else {
+      delete nextMasto.rebloggedBy;
+    }
+    return {
+      ...normalized,
+      id: item.id || normalized.id,
+      date_published: item.date_published || normalized.date_published,
+      _meta: {
+        ...restPrevMeta,
+        ...(normalized._meta || {}),
+        mastodon: nextMasto,
+      },
+    };
+  }
+
+  async reply(targetItem, draft, media = [], options = {}) {
+    const item = toUnifiedItem(targetItem);
+    const statusId = await this._resolveLocalStatusId(item);
     return this.publish(draft, media, {
       visibility: item._meta?.mastodon?.visibility || 'public',
       ...options,
@@ -102,7 +136,7 @@ export class MastodonAdapter extends SocialAdapter {
 
   async like(targetItem, undo = false) {
     const item = toUnifiedItem(targetItem);
-    const statusId = item._meta?.mastodon?.statusId || item.id.replace(/^mastodon:/, '');
+    const statusId = await this._resolveLocalStatusId(item);
     const updated = await toggleFavourite({
       instanceUrl: this.instanceUrl,
       accessToken: this.accessToken,
@@ -110,12 +144,12 @@ export class MastodonAdapter extends SocialAdapter {
       favourited: undo,
       fetchImpl: this.fetchImpl,
     });
-    return toUnifiedItem(updated);
+    return this._preservePostIdentity(item, updated, statusId);
   }
 
   async repost(targetItem, undo = false) {
     const item = toUnifiedItem(targetItem);
-    const statusId = item._meta?.mastodon?.statusId || item.id.replace(/^mastodon:/, '');
+    const statusId = await this._resolveLocalStatusId(item);
     const updated = await toggleReblog({
       instanceUrl: this.instanceUrl,
       accessToken: this.accessToken,
@@ -123,7 +157,7 @@ export class MastodonAdapter extends SocialAdapter {
       reblogged: undo,
       fetchImpl: this.fetchImpl,
     });
-    return toUnifiedItem(updated);
+    return this._preservePostIdentity(item, updated, statusId);
   }
 
   async edit(statusId, draft, spoilerText = '') {
@@ -217,6 +251,23 @@ export class MastodonAdapter extends SocialAdapter {
           notification: { notifId: n.id, type: mapType[n.type] || 'mention', actor },
         },
       };
+    });
+  }
+
+  async dismissNotification(notifId) {
+    return dismissMastodonNotification({
+      instanceUrl: this.instanceUrl,
+      accessToken: this.accessToken,
+      notifId,
+      fetchImpl: this.fetchImpl,
+    });
+  }
+
+  async clearNotifications() {
+    return clearMastodonNotifications({
+      instanceUrl: this.instanceUrl,
+      accessToken: this.accessToken,
+      fetchImpl: this.fetchImpl,
     });
   }
 }

@@ -313,47 +313,148 @@ export function sanitizeFediverseHtmlToString(html, customEmojis = []) {
   return out.join('');
 }
 
+const ALLOWED_NODE_ATTRS = new Set(['href', 'rel', 'target', 'class', 'title', 'src', 'alt', 'loading']);
+
+function buildAllowlistedDomNode(doc, sourceNode) {
+  if (sourceNode.nodeType === 3) {
+    return doc.createTextNode(sourceNode.nodeValue || '');
+  }
+  if (sourceNode.nodeType !== 1) {
+    return null;
+  }
+  const tag = sourceNode.tagName.toLowerCase();
+  if (!ALLOWED_TAGS.has(tag) && tag !== 'img') {
+    const frag = doc.createDocumentFragment();
+    for (const child of sourceNode.childNodes) {
+      const built = buildAllowlistedDomNode(doc, child);
+      if (built) frag.appendChild(built);
+    }
+    return frag;
+  }
+  const el = doc.createElement(tag);
+  for (const attr of sourceNode.attributes) {
+    if (ALLOWED_NODE_ATTRS.has(attr.name.toLowerCase())) {
+      el.setAttribute(attr.name, attr.value);
+    }
+  }
+  if (tag === 'a' && el.getAttribute('href')) {
+    el.setAttribute('rel', 'noopener noreferrer');
+    el.setAttribute('target', '_blank');
+  }
+  for (const child of sourceNode.childNodes) {
+    const built = buildAllowlistedDomNode(doc, child);
+    if (built) el.appendChild(built);
+  }
+  return el;
+}
+
+function appendCleanHtmlWithoutDomParser(containerEl, cleanHtml) {
+  const doc = containerEl.ownerDocument || globalThis.document;
+  if (!doc) return;
+  const rootNodes = [];
+  const stack = [];
+  const appendTarget = (node) => {
+    const parent = stack[stack.length - 1];
+    if (parent) parent.appendChild(node);
+    else rootNodes.push(node);
+  };
+
+  let cursor = 0;
+  while (cursor < cleanHtml.length) {
+    const lt = cleanHtml.indexOf('<', cursor);
+    if (lt === -1) {
+      const tail = decodeHtmlEntities(cleanHtml.slice(cursor));
+      if (tail) appendTarget(doc.createTextNode(tail));
+      break;
+    }
+    if (lt > cursor) {
+      const text = decodeHtmlEntities(cleanHtml.slice(cursor, lt));
+      if (text) appendTarget(doc.createTextNode(text));
+    }
+    let gt = lt + 1;
+    let quote = '';
+    while (gt < cleanHtml.length) {
+      const ch = cleanHtml[gt];
+      if (quote) {
+        if (ch === quote) quote = '';
+      } else if (ch === '"' || ch === "'") {
+        quote = ch;
+      } else if (ch === '>') {
+        break;
+      }
+      gt += 1;
+    }
+    if (gt >= cleanHtml.length) {
+      appendTarget(doc.createTextNode(decodeHtmlEntities(cleanHtml.slice(lt))));
+      break;
+    }
+    const rawBody = cleanHtml.slice(lt + 1, gt).trim();
+    cursor = gt + 1;
+    if (!rawBody) continue;
+    const isClosing = rawBody.startsWith('/');
+    const tagContent = isClosing ? rawBody.slice(1).trim() : rawBody;
+    const m = /^([a-zA-Z][a-zA-Z0-9-]*)/.exec(tagContent);
+    if (!m) continue;
+    const tagName = m[1].toLowerCase();
+    if (!ALLOWED_TAGS.has(tagName) && tagName !== 'img') continue;
+
+    if (isClosing) {
+      for (let i = stack.length - 1; i >= 0; i -= 1) {
+        if (stack[i].tagName.toLowerCase() === tagName) {
+          stack.length = i;
+          break;
+        }
+      }
+      continue;
+    }
+
+    const el = doc.createElement(tagName);
+    const attrs = parseTagAttributes(tagContent.slice(m[0].length));
+    for (const [k, v] of attrs.entries()) {
+      if (ALLOWED_NODE_ATTRS.has(k)) {
+        el.setAttribute(k, decodeHtmlEntities(v));
+      }
+    }
+    if (tagName === 'a' && el.getAttribute('href')) {
+      el.setAttribute('rel', 'noopener noreferrer');
+      el.setAttribute('target', '_blank');
+    }
+    appendTarget(el);
+    if (!VOID_TAGS.has(tagName) && !rawBody.endsWith('/')) {
+      stack.push(el);
+    }
+  }
+
+  containerEl.replaceChildren(...rootNodes);
+}
+
 function appendDomNodesFromCleanHtml(containerEl, cleanHtml) {
   const doc = containerEl.ownerDocument;
-  if (typeof DOMParser === 'function' && doc) {
-    const parsed = new DOMParser().parseFromString(cleanHtml, 'text/html');
-    const buildNode = (sourceNode) => {
-      if (sourceNode.nodeType === 3) {
-        return doc.createTextNode(sourceNode.nodeValue || '');
-      }
-      if (sourceNode.nodeType !== 1) {
-        return null;
-      }
-      const tag = sourceNode.tagName.toLowerCase();
-      if (!ALLOWED_TAGS.has(tag) && tag !== 'img') {
-        const frag = doc.createDocumentFragment();
-        for (const child of sourceNode.childNodes) {
-          const built = buildNode(child);
-          if (built) frag.appendChild(built);
-        }
-        return frag;
-      }
-      const el = doc.createElement(tag);
-      for (const attr of sourceNode.attributes) {
-        el.setAttribute(attr.name, attr.value);
-      }
-      for (const child of sourceNode.childNodes) {
-        const built = buildNode(child);
-        if (built) el.appendChild(built);
-      }
-      return el;
-    };
+  if (!doc) return;
 
+  let parsedDoc = null;
+  if (typeof globalThis.Document?.parseHTML === 'function') {
+    try {
+      parsedDoc = globalThis.Document.parseHTML(cleanHtml);
+    } catch {
+      parsedDoc = null;
+    }
+  }
+  if (!parsedDoc && typeof DOMParser === 'function') {
+    parsedDoc = new DOMParser().parseFromString(cleanHtml, 'text/html');
+  }
+
+  if (parsedDoc?.body) {
     const nodes = [];
-    for (const child of parsed.body.childNodes) {
-      const built = buildNode(child);
+    for (const child of parsedDoc.body.childNodes) {
+      const built = buildAllowlistedDomNode(doc, child);
       if (built) nodes.push(built);
     }
     containerEl.replaceChildren(...nodes);
     return;
   }
 
-  containerEl.textContent = decodeHtmlEntities(cleanHtml.replace(/<[^>]*>/g, ''));
+  appendCleanHtmlWithoutDomParser(containerEl, cleanHtml);
 }
 
 /**
@@ -628,6 +729,44 @@ export function normalizeMastodonStatus(raw, instanceUrl) {
   const reblogSource = raw?.reblog || null;
   const post = reblogSource || raw;
   const emojis = Array.isArray(post?.emojis) ? post.emojis : [];
+  let linkCard = null;
+  if (post?.card?.url) {
+    const safeCardUrl = sanitizeHref(post.card.url);
+    if (safeCardUrl) {
+      linkCard = {
+        url: safeCardUrl,
+        title: decodeHtmlEntities(String(post.card.title || '')),
+        description: decodeHtmlEntities(String(post.card.description || '')),
+        image: cleanMastodonMediaUrl(post.card.image),
+      };
+    }
+  }
+
+  const rawQuote = post?.quote?.quoted_status || post?.quote || null;
+  let quotePost = null;
+  if (rawQuote && typeof rawQuote === 'object' && (rawQuote.id || rawQuote.content) && rawQuote.account) {
+    const qAcc = normalizeMastodonAccount(rawQuote.account, origin);
+    const qText = decodeHtmlEntities(
+      String(rawQuote.content || '')
+        .replace(/<br\s*\/?>/gi, '\n')
+        .replace(/<\/p\s*>/gi, '\n\n')
+        .replace(/<[^>]*>/g, '')
+    ).trim();
+    const qThumb = cleanMastodonMediaUrl(rawQuote.media_attachments?.[0]?.preview_url || rawQuote.media_attachments?.[0]?.url);
+    quotePost = {
+      id: `mastodon:${rawQuote.id || ''}`,
+      protocol: 'mastodon',
+      statusId: String(rawQuote.id || ''),
+      instanceUrl: origin,
+      url: rawQuote.url || rawQuote.uri || '',
+      authorName: qAcc.displayName,
+      authorHandle: qAcc.acct,
+      authorAvatar: qAcc.avatar,
+      text: qText,
+      createdAt: rawQuote.created_at || '',
+      ...(qThumb ? { thumbUrl: qThumb } : {}),
+    };
+  }
 
   return {
     key: `fediverse:${origin}:${post.uri || post.id}`,
@@ -644,6 +783,7 @@ export function normalizeMastodonStatus(raw, instanceUrl) {
     contentHtml: post.content || '',
     sanitizedHtml: sanitizeFediverseHtmlToString(post.content || '', emojis),
     spoilerText: post.spoiler_text || '',
+    sensitive: Boolean(post.sensitive),
     visibility: post.visibility || 'public',
     inReplyToId: post.in_reply_to_id ? String(post.in_reply_to_id) : null,
     media: Array.isArray(post.media_attachments)
@@ -653,10 +793,14 @@ export function normalizeMastodonStatus(raw, instanceUrl) {
           url: att.url || att.remote_url || '',
           previewUrl: att.preview_url || att.url || '',
           description: att.description || '',
+          width: Number.parseInt(att.meta?.original?.width || att.meta?.small?.width || 0, 10) || 0,
+          height: Number.parseInt(att.meta?.original?.height || att.meta?.small?.height || 0, 10) || 0,
           meta: att.meta || null,
         }))
       : [],
     emojis,
+    linkCard,
+    ...(quotePost ? { quotePost } : {}),
     counts: {
       replies: post.replies_count ?? 0,
       reposts: post.reblogs_count ?? 0,
@@ -841,6 +985,37 @@ export async function getNotifications({
         status: n.status ? normalizeMastodonStatus(n.status, origin) : null,
       }))
     : [];
+}
+
+export async function dismissMastodonNotification({
+  instanceUrl,
+  accessToken,
+  notifId,
+  fetchImpl,
+}) {
+  const cleanId = String(notifId || '').replace(/^mastodon:(?:notif:)?/, '').trim();
+  if (!cleanId) return false;
+  const origin = normalizeInstanceUrl(instanceUrl);
+  await fetchWrapper(`${origin}/api/v1/notifications/${encodeURIComponent(cleanId)}/dismiss`, {
+    method: 'POST',
+    headers: authHeaders(accessToken),
+    fetchImpl,
+  });
+  return true;
+}
+
+export async function clearMastodonNotifications({
+  instanceUrl,
+  accessToken,
+  fetchImpl,
+}) {
+  const origin = normalizeInstanceUrl(instanceUrl);
+  await fetchWrapper(`${origin}/api/v1/notifications/clear`, {
+    method: 'POST',
+    headers: authHeaders(accessToken),
+    fetchImpl,
+  });
+  return true;
 }
 
 export async function getStatus({ instanceUrl, accessToken = '', statusId, fetchImpl }) {
@@ -1295,14 +1470,20 @@ export async function getFilters({ instanceUrl, accessToken, fetchImpl }) {
       headers: authHeaders(accessToken),
       fetchImpl,
     });
-    return (Array.isArray(rows) ? rows : []).map((f) => ({
-      id: String(f.id),
-      title: f.title || f.keywords?.[0]?.keyword || '',
-      phrase: f.keywords?.[0]?.keyword || f.title || '',
-      context: f.context || ['home', 'public', 'notifications', 'thread'],
-      filter_action: f.filter_action || 'hide',
-      mastodon_filter_id: String(f.id),
-    }));
+    return (Array.isArray(rows) ? rows : []).map((f) => {
+      const kws = Array.isArray(f.keywords)
+        ? f.keywords.map((k) => String(k?.keyword || '').trim()).filter(Boolean)
+        : [];
+      return {
+        id: String(f.id),
+        title: f.title || kws[0] || '',
+        phrase: kws[0] || f.title || '',
+        ...(kws.length > 0 ? { keywords: kws } : {}),
+        context: f.context || ['home', 'public', 'notifications', 'thread'],
+        filter_action: f.filter_action || 'hide',
+        mastodon_filter_id: String(f.id),
+      };
+    });
   } catch {
     const rows = await fetchWrapper(`${origin}/api/v1/filters`, {
       headers: authHeaders(accessToken),
@@ -1321,15 +1502,17 @@ export async function getFilters({ instanceUrl, accessToken, fetchImpl }) {
 
 export async function createFilterRule({ instanceUrl, accessToken, title, phrase, context = ['home', 'public', 'notifications', 'thread'], filterAction = 'hide', fetchImpl }) {
   const origin = normalizeInstanceUrl(instanceUrl);
+  const cleanPhrase = String(phrase || '').trim();
+  const wholeWord = /^[\p{L}\p{N}_].*[\p{L}\p{N}_]$|^[\p{L}\p{N}_]$/u.test(cleanPhrase);
   try {
     const created = await fetchWrapper(`${origin}/api/v2/filters`, {
       method: 'POST',
       headers: authHeaders(accessToken),
       json: {
-        title: title || phrase,
+        title: title || cleanPhrase,
         context,
         filter_action: filterAction,
-        keywords_attributes: [{ keyword: phrase, whole_word: false }],
+        keywords_attributes: [{ keyword: cleanPhrase, whole_word: wholeWord }],
       },
       fetchImpl,
     });

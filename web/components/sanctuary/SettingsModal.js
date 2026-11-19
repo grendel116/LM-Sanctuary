@@ -1,3 +1,4 @@
+import { DEFAULT_AVATAR_DATA_URI } from '../../constants/avatars.js';
 import {
   browseWorkspaceFolder,
   fetchNativeModels,
@@ -14,6 +15,7 @@ import {
   fetchKeywordFilters,
   fetchModerationAccounts,
   removeKeywordFilter,
+  removeModeratedAccount,
   toggleBlockAuthor,
   toggleMuteAuthor,
 } from '../../queries/socialClient.js';
@@ -24,15 +26,16 @@ import {
   setSanctuaryNodeUrl,
 } from '../../state/sanctuary/connection.js';
 import { flushOutbox, outboxStore } from '../../state/sanctuary/outboxModel.js';
+import { openFeedTuningModal } from '../FeedTuningModal.js';
 import { createClassicModalDialog, showAlert, showPrompt } from './SanctuaryDialog.js';
 
 const SETTINGS_SVG = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--primary-accent)" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="21" x2="4" y2="14"></line><line x1="4" y1="10" x2="4" y2="3"></line><line x1="12" y1="21" x2="12" y2="12"></line><line x1="12" y1="8" x2="12" y2="3"></line><line x1="20" y1="21" x2="20" y2="16"></line><line x1="20" y1="12" x2="20" y2="3"></line><line x1="1" y1="14" x2="7" y2="14"></line><line x1="9" y1="8" x2="15" y2="8"></line><line x1="17" y1="16" x2="23" y2="16"></line></svg>`;
 const FOLDER_SVG = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>`;
 
 const TAB_DESCRIPTORS = {
-  engine: 'Select your preferred model configuration for local in-process execution.',
-  project: 'Configure workspace folders, execution policies, search integration, and Sanctuary node connection.',
-  moderation: 'Manage Mastodon keyword filters, muted accounts, and blocked accounts.',
+  engine: 'Select local chat and image models.',
+  project: 'Workspace folders, execution policy, search, and node connection.',
+  moderation: 'Keyword filters, feed ranking, mutes, and blocks.',
 };
 
 function normalizeSecurityPreset(raw) {
@@ -168,7 +171,7 @@ export function openSettingsModal({
 
     const llmDesc = doc.createElement('p');
     llmDesc.className = 'option-desc';
-    llmDesc.textContent = 'Executes GGUF chat models in-process directly from sanctuary/models/llm/.';
+    llmDesc.textContent = 'Runs GGUF chat models from sanctuary/models/llm/.';
 
     const llmGrp = doc.createElement('div');
     llmGrp.className = 'input-group';
@@ -232,7 +235,7 @@ export function openSettingsModal({
 
     const diffDesc = doc.createElement('p');
     diffDesc.className = 'option-desc';
-    diffDesc.textContent = 'Renders character portraits in-process from sanctuary/models/checkpoints/ and sanctuary/models/workflows/.';
+    diffDesc.textContent = 'Renders portraits from sanctuary/models/checkpoints/ and workflows/.';
 
     const ckptGrp = doc.createElement('div');
     ckptGrp.className = 'input-group';
@@ -435,7 +438,7 @@ export function openSettingsModal({
     secLbl.textContent = 'Security Preset';
     const secSub = doc.createElement('p');
     secSub.className = 'classic-card-subtext';
-    secSub.textContent = 'Execution policy for shell commands and file operations.';
+    secSub.textContent = 'Approval policy for shell commands and file edits.';
     secInfo.append(secLbl, secSub);
 
     const secSelect = doc.createElement('select');
@@ -464,7 +467,7 @@ export function openSettingsModal({
     revLbl.textContent = 'Review Policy';
     const revSub = doc.createElement('p');
     revSub.className = 'classic-card-subtext';
-    revSub.textContent = 'Specifies behavior when generating documentation and plans.';
+    revSub.textContent = 'Approval policy for generated plans and documents.';
     revInfo.append(revLbl, revSub);
 
     const revSelect = doc.createElement('select');
@@ -683,10 +686,10 @@ export function openSettingsModal({
     fh.textContent = 'Keyword Filters';
     const fSub = doc.createElement('p');
     fSub.className = 'classic-card-subtext';
-    fSub.textContent = 'Hide or wrap matching posts across timelines using Mastodon server filters or local SQLite rules.';
+    fSub.textContent = 'Hide or warn on matching posts across timelines.';
 
     const addForm = doc.createElement('form');
-    addForm.className = 'list-create-row';
+    addForm.className = 'list-create-row moderation-filter-form';
     const phraseIn = doc.createElement('input');
     phraseIn.type = 'text';
     phraseIn.id = 'moderation-filter-phrase';
@@ -694,8 +697,7 @@ export function openSettingsModal({
     phraseIn.placeholder = 'Keyword or phrase...';
     const actSelect = doc.createElement('select');
     actSelect.id = 'moderation-filter-action';
-    actSelect.className = 'onboarding-input glass-select';
-    actSelect.style.width = '115px';
+    actSelect.className = 'onboarding-input glass-select moderation-filter-action';
     for (const [val, lbl] of [['hide', 'Hide'], ['warn', 'Warn']]) {
       const opt = doc.createElement('option');
       opt.value = val;
@@ -715,46 +717,83 @@ export function openSettingsModal({
       void renderModerationTab();
     });
 
-    const filtersStack = doc.createElement('div');
-    filtersStack.className = 'classic-cards-stack';
+    const filtersWrap = doc.createElement('div');
+    filtersWrap.className = 'moderation-filter-chips';
     if (filters.length === 0) {
       const p = doc.createElement('p');
       p.className = 'classic-card-subtext';
       p.textContent = 'No keyword filters active.';
-      filtersStack.appendChild(p);
+      filtersWrap.appendChild(p);
     } else {
       for (const f of filters) {
-        const row = doc.createElement('div');
-        row.className = 'list-entry-row row-layout';
+        const phrase = f.phrase || f.title || '';
+        const mode = String(f.filter_action || 'hide').toLowerCase();
+        const chip = doc.createElement('div');
+        chip.className = 'moderation-filter-chip';
+        chip.dataset.filterAction = mode;
+
         const lbl = doc.createElement('span');
-        lbl.textContent = f.phrase || f.title;
-        const metaRight = doc.createElement('div');
-        metaRight.className = 'classic-card-actions';
-        const badgeEl = doc.createElement('span');
-        badgeEl.className = 'badge-default';
-        badgeEl.textContent = f.filter_action || 'hide';
+        lbl.className = 'moderation-filter-chip-label';
+        lbl.textContent = phrase;
+        chip.appendChild(lbl);
+
+        if (mode !== 'hide') {
+          const modeEl = doc.createElement('span');
+          modeEl.className = 'moderation-filter-chip-mode';
+          modeEl.textContent = mode;
+          chip.appendChild(modeEl);
+        }
+
         const delBtn = doc.createElement('button');
         delBtn.type = 'button';
-        delBtn.className = 'action-icon-btn';
-        delBtn.setAttribute('aria-label', `Remove filter ${f.phrase || f.title}`);
+        delBtn.className = 'moderation-filter-chip-remove';
+        delBtn.setAttribute('aria-label', `Remove filter ${phrase}`);
         delBtn.textContent = '×';
         delBtn.addEventListener('click', async () => {
-          await removeKeywordFilter(f.id);
-          void renderModerationTab();
+          delBtn.disabled = true;
+          try {
+            await removeKeywordFilter(f.id);
+            void renderModerationTab();
+          } catch (err) {
+            delBtn.disabled = false;
+            showAlert('Filter Error', err?.message || 'Unable to remove filter.');
+          }
         });
-        metaRight.append(badgeEl, delBtn);
-        row.append(lbl, metaRight);
-        filtersStack.appendChild(row);
+        chip.appendChild(delBtn);
+        filtersWrap.appendChild(chip);
       }
     }
-    filterBlock.append(fh, fSub, addForm, filtersStack);
+    filterBlock.append(fh, fSub, addForm, filtersWrap);
+
+    const algoBlock = doc.createElement('div');
+    algoBlock.className = 'classic-section-divider';
+    const algoRow = doc.createElement('div');
+    algoRow.className = 'classic-setting-row';
+    const algoInfo = doc.createElement('div');
+    const ah = doc.createElement('h4');
+    ah.className = 'modal-sub-header';
+    ah.style.marginBlockEnd = '2px';
+    ah.textContent = 'Feed Algorithm';
+    const aSub = doc.createElement('p');
+    aSub.className = 'classic-card-subtext';
+    aSub.textContent = 'Adjust local ranking weights and concept filters.';
+    algoInfo.append(ah, aSub);
+    const tuneBtn = doc.createElement('button');
+    tuneBtn.type = 'button';
+    tuneBtn.className = 'btn-sleek-pill';
+    tuneBtn.textContent = 'Tune Feed...';
+    tuneBtn.addEventListener('click', () => {
+      openFeedTuningModal();
+    });
+    algoRow.append(algoInfo, tuneBtn);
+    algoBlock.appendChild(algoRow);
 
     const buildModAccountSection = (title, emptyText, items, btnLabel, actionFn) => {
       const section = doc.createElement('div');
       section.className = 'classic-section-divider';
       const h = doc.createElement('h4');
       h.className = 'modal-sub-header';
-      h.textContent = title;
+      h.textContent = items.length > 0 ? `${title} (${items.length})` : title;
       section.appendChild(h);
       if (items.length === 0) {
         const p = doc.createElement('p');
@@ -763,32 +802,126 @@ export function openSettingsModal({
         section.appendChild(p);
         return section;
       }
+
+      let filterQuery = '';
+      let visibleLimit = 50;
       const stack = doc.createElement('div');
       stack.className = 'classic-cards-stack';
-      for (const acc of items) {
-        const row = doc.createElement('div');
-        row.className = 'list-entry-row row-layout';
-        const lbl = doc.createElement('span');
-        lbl.textContent = `${acc.displayName || acc.username} (@${acc.acct})`;
-        const btn = doc.createElement('button');
-        btn.type = 'button';
-        btn.className = 'edit-btn';
-        btn.textContent = btnLabel;
-        btn.addEventListener('click', async () => {
-          await actionFn(acc.id);
-          void renderModerationTab();
+      const moreBtn = doc.createElement('button');
+      moreBtn.type = 'button';
+      moreBtn.className = 'edit-btn edit-cancel-btn';
+      moreBtn.hidden = true;
+
+      const renderRows = () => {
+        const q = filterQuery.trim().toLowerCase();
+        const filtered = q
+          ? items.filter((acc) => {
+              const txt = `${acc.displayName || ''} ${acc.username || ''} ${acc.acct || ''}`.toLowerCase();
+              return txt.includes(q);
+            })
+          : items;
+        const slice = filtered.slice(0, visibleLimit);
+        stack.replaceChildren();
+        for (const acc of slice) {
+          const row = doc.createElement('div');
+          row.className = 'moderation-account-row';
+
+          const avatar = doc.createElement('img');
+          avatar.className = 'moderation-account-avatar';
+          avatar.src = acc.avatar || DEFAULT_AVATAR_DATA_URI;
+          avatar.alt = '';
+          avatar.loading = 'lazy';
+
+          const info = doc.createElement('div');
+          info.className = 'moderation-account-info';
+          const nameEl = doc.createElement('span');
+          nameEl.className = 'moderation-account-name';
+          nameEl.textContent = acc.displayName || acc.username || acc.acct || '';
+          const cleanAcct = String(acc.acct || acc.username || '').replace(/^@/, '');
+          info.appendChild(nameEl);
+          if (cleanAcct) {
+            const handleEl = doc.createElement('span');
+            handleEl.className = 'moderation-account-handle';
+            handleEl.textContent = `@${cleanAcct}`;
+            info.appendChild(handleEl);
+          }
+
+          const badgeEl = doc.createElement('span');
+          badgeEl.className = 'post-protocol-badge';
+          badgeEl.textContent = acc.protocol === 'threads'
+            ? 'Threads'
+            : (acc.protocol === 'bluesky' ? 'Bluesky' : 'Mastodon');
+
+          const btn = doc.createElement('button');
+          btn.type = 'button';
+          btn.className = 'edit-btn moderation-unaction-btn';
+          btn.textContent = btnLabel;
+          btn.addEventListener('click', async () => {
+            btn.disabled = true;
+            try {
+              await actionFn(acc);
+              void renderModerationTab();
+            } catch (err) {
+              btn.disabled = false;
+              showAlert('Moderation Error', err?.message || `Unable to ${btnLabel.toLowerCase()} account.`);
+            }
+          });
+          row.append(avatar, info, badgeEl, btn);
+          stack.appendChild(row);
+        }
+        const rem = filtered.length - slice.length;
+        moreBtn.hidden = rem <= 0;
+        if (rem > 0) {
+          moreBtn.textContent = `Show ${Math.min(rem, 100)} more (${rem} remaining)`;
+        }
+      };
+
+      if (items.length > 20) {
+        const searchBox = doc.createElement('search');
+        searchBox.className = 'moderation-account-search';
+        const searchIn = doc.createElement('input');
+        searchIn.type = 'search';
+        searchIn.className = 'onboarding-input';
+        searchIn.placeholder = `Filter ${title.toLowerCase()}...`;
+        searchIn.setAttribute('aria-label', `Filter ${title}`);
+        searchIn.setAttribute('autocorrect', 'off');
+        searchIn.setAttribute('autocapitalize', 'none');
+        searchIn.setAttribute('spellcheck', 'false');
+        searchIn.addEventListener('input', () => {
+          filterQuery = searchIn.value || '';
+          visibleLimit = 50;
+          renderRows();
         });
-        row.append(lbl, btn);
-        stack.appendChild(row);
+        searchBox.appendChild(searchIn);
+        section.appendChild(searchBox);
       }
-      section.appendChild(stack);
+
+      moreBtn.addEventListener('click', () => {
+        visibleLimit += 100;
+        renderRows();
+      });
+
+      renderRows();
+      section.append(stack, moreBtn);
       return section;
     };
 
     card.append(
       filterBlock,
-      buildModAccountSection('Muted Accounts', 'No muted accounts.', mutes, 'Unmute', (id) => toggleMuteAuthor(id, true)),
-      buildModAccountSection('Blocked Accounts', 'No blocked accounts.', blocks, 'Unblock', (id) => toggleBlockAuthor(id, true))
+      algoBlock,
+      buildModAccountSection('Muted Accounts', 'No muted accounts.', mutes, 'Unmute', (acc) =>
+        acc.localModeration
+          ? removeModeratedAccount('mutes', acc)
+          : toggleMuteAuthor(acc.id, true, { protocol: acc.protocol })
+      ),
+      buildModAccountSection('Blocked Accounts', 'No blocked accounts.', blocks, 'Unblock', (acc) =>
+        acc.localModeration
+          ? removeModeratedAccount('blocks', acc)
+          : toggleBlockAuthor(acc.id, true, {
+              protocol: acc.protocol,
+              blockUri: acc.relationship?.blockUri || acc.viewer?.blocking || null,
+            })
+      )
     );
   }
 

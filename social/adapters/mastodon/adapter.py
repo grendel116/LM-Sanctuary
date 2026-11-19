@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import time
 from typing import Any
 from urllib.parse import parse_qs, urlencode, urlparse
@@ -304,17 +305,59 @@ class MastodonAdapter(SocialAdapter):
         merged_opts = {"visibility": masto_meta.get("visibility") or "public", **(options or {}), "in_reply_to_id": status_id}
         return self.publish(draft, media=media, options=merged_opts)
 
+    def _resolve_local_status_id(self, target_item: dict[str, Any]) -> str:
+        masto_meta = target_item.get("_meta", {}).get("mastodon") or {}
+        status_id = str(masto_meta.get("statusId") or str(target_item.get("id") or "").removeprefix("mastodon:"))
+        item_origin = normalize_instance_url(str(masto_meta.get("instanceUrl") or "")) if masto_meta.get("instanceUrl") else ""
+        target_url = str(target_item.get("url") or "").strip()
+        if item_origin and item_origin != self.instance_url and target_url:
+            try:
+                found = self._request(
+                    "GET",
+                    "/api/v2/search",
+                    params={"q": target_url, "type": "statuses", "resolve": "true", "limit": 1},
+                ).json()
+                statuses = found.get("statuses") if isinstance(found, dict) else None
+                if isinstance(statuses, list) and statuses and statuses[0].get("id"):
+                    return str(statuses[0]["id"])
+            except Exception:
+                pass
+        return status_id
+
+    def _preserve_post_identity(self, target_item: dict[str, Any], updated: dict[str, Any]) -> dict[str, Any]:
+        orig_meta = (target_item.get("_meta") or {}).get("mastodon") or {}
+        new_meta = (updated.get("_meta") or {}).get("mastodon") or {}
+        if target_item.get("id"):
+            updated["id"] = str(target_item["id"])
+        if target_item.get("date_published"):
+            updated["date_published"] = str(target_item["date_published"])
+        if orig_meta.get("statusId"):
+            new_meta["statusId"] = str(orig_meta["statusId"])
+        if orig_meta.get("instanceUrl"):
+            new_meta["instanceUrl"] = str(orig_meta["instanceUrl"])
+        if orig_meta.get("wrapperId"):
+            new_meta["wrapperId"] = str(orig_meta["wrapperId"])
+        if orig_meta.get("rebloggedBy"):
+            new_meta["rebloggedBy"] = orig_meta["rebloggedBy"]
+        else:
+            new_meta.pop("rebloggedBy", None)
+        if (target_item.get("_meta") or {}).get("linkedIds"):
+            updated.setdefault("_meta", {})["linkedIds"] = target_item["_meta"]["linkedIds"]
+        updated.setdefault("_meta", {}).pop("metricsBreakdown", None)
+        updated["_meta"]["mastodon"] = new_meta
+        return updated
+
     def like(self, target_item: dict[str, Any], undo: bool = False) -> dict[str, Any]:
-        status_id = str((target_item.get("_meta", {}).get("mastodon") or {}).get("statusId") or "")
+        status_id = self._resolve_local_status_id(target_item)
         action = "unfavourite" if undo else "favourite"
         updated = self._request("POST", f"/api/v1/statuses/{status_id}/{action}").json()
-        return normalize_mastodon_status(updated, self.instance_url)
+        return self._preserve_post_identity(target_item, normalize_mastodon_status(updated, self.instance_url))
 
     def repost(self, target_item: dict[str, Any], undo: bool = False) -> dict[str, Any]:
-        status_id = str((target_item.get("_meta", {}).get("mastodon") or {}).get("statusId") or "")
+        status_id = self._resolve_local_status_id(target_item)
         action = "unreblog" if undo else "reblog"
         updated = self._request("POST", f"/api/v1/statuses/{status_id}/{action}").json()
-        return normalize_mastodon_status(updated, self.instance_url)
+        return self._preserve_post_identity(target_item, normalize_mastodon_status(updated, self.instance_url))
 
     # ── Timelines, Profile Statuses, Context, Notifications ──────────────
 
@@ -410,6 +453,24 @@ class MastodonAdapter(SocialAdapter):
             for r in (rows if isinstance(rows, list) else [])
         ]
 
+    def dismiss_notification(self, notif_id: str) -> bool:
+        """Dismiss a single Mastodon notification by ID."""
+        clean_id = str(notif_id or "").removeprefix("mastodon:notif:").removeprefix("mastodon:").strip()
+        if not clean_id:
+            return False
+        try:
+            self._request("POST", f"/api/v1/notifications/{clean_id}/dismiss")
+        except RuntimeError as exc:
+            if "Mastodon API 404" in str(exc):
+                return True
+            raise
+        return True
+
+    def clear_notifications(self) -> bool:
+        """Clear all Mastodon notifications for the signed-in account."""
+        self._request("POST", "/api/v1/notifications/clear")
+        return True
+
     # ── Native Social Graph, Lists, Filters, Mutes/Blocks, Search ────────
 
     def list_lists(self) -> list[dict[str, Any]]:
@@ -451,8 +512,13 @@ class MastodonAdapter(SocialAdapter):
             out = []
             for f in rows if isinstance(rows, list) else []:
                 kws = f.get("keywords") or []
-                phrase = kws[0].get("keyword", "") if kws else ""
-                out.append({
+                kw_list = [
+                    str(k.get("keyword")).strip()
+                    for k in kws
+                    if isinstance(k, dict) and str(k.get("keyword") or "").strip()
+                ]
+                phrase = kw_list[0] if kw_list else str(f.get("title") or "").strip()
+                entry: dict[str, Any] = {
                     "id": str(f.get("id")),
                     "title": f.get("title") or phrase,
                     "phrase": phrase,
@@ -460,7 +526,10 @@ class MastodonAdapter(SocialAdapter):
                     "filter_action": f.get("filter_action") or "hide",
                     "expires_at": f.get("expires_at"),
                     "mastodon_filter_id": str(f.get("id")),
-                })
+                }
+                if kw_list:
+                    entry["keywords"] = kw_list
+                out.append(entry)
             return out
         except Exception:
             rows = self._request("GET", "/api/v1/filters").json()
@@ -486,15 +555,17 @@ class MastodonAdapter(SocialAdapter):
         filter_action: str = "hide",
     ) -> dict[str, Any]:
         ctx = context or ["home", "public", "notifications", "thread"]
+        clean_phrase = str(phrase or "").strip()
+        whole_word = bool(re.match(r"^\w.*\w$|^\w$", clean_phrase))
         try:
             f = self._request(
                 "POST",
                 "/api/v2/filters",
                 json_body={
-                    "title": title or phrase,
+                    "title": title or clean_phrase,
                     "context": ctx,
                     "filter_action": filter_action,
-                    "keywords_attributes": [{"keyword": phrase, "whole_word": False}],
+                    "keywords_attributes": [{"keyword": clean_phrase, "whole_word": whole_word}],
                 },
             ).json()
             return {

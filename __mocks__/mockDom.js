@@ -175,7 +175,113 @@ class MockStyle {
   }
 }
 
-export class MockNode extends EventTarget {
+class MockDomEventTarget {
+  constructor() {
+    this._domListeners = new Map();
+  }
+
+  addEventListener(type, listener, options = false) {
+    if (typeof listener !== 'function') return;
+    const capture = typeof options === 'boolean' ? options : Boolean(options?.capture);
+    const once = typeof options === 'object' && options !== null ? Boolean(options.once) : false;
+    const signal = typeof options === 'object' && options !== null ? options.signal : null;
+    if (signal?.aborted) return;
+
+    const list = this._domListeners.get(type) || [];
+    if (!list.some((item) => item.listener === listener && item.capture === capture)) {
+      const entry = { listener, capture, once };
+      list.push(entry);
+      this._domListeners.set(type, list);
+      if (signal && typeof signal.addEventListener === 'function') {
+        signal.addEventListener('abort', () => this.removeEventListener(type, listener, capture), { once: true });
+      }
+    }
+  }
+
+  removeEventListener(type, listener, options = false) {
+    const capture = typeof options === 'boolean' ? options : Boolean(options?.capture);
+    const list = this._domListeners.get(type);
+    if (!list) return;
+    const next = list.filter((item) => !(item.listener === listener && item.capture === capture));
+    if (next.length > 0) this._domListeners.set(type, next);
+    else this._domListeners.delete(type);
+  }
+
+  _invokeListeners(event, currentTarget, matchCapture) {
+    const list = this._domListeners.get(event.type);
+    if (!list || list.length === 0) return false;
+    let immediateStopped = false;
+    const origStopImmediate = event.stopImmediatePropagation.bind(event);
+    const prevStopImmediate = event.stopImmediatePropagation;
+    Object.defineProperty(event, 'currentTarget', { value: currentTarget, configurable: true });
+    event.stopImmediatePropagation = () => {
+      immediateStopped = true;
+      event.stopPropagation();
+      origStopImmediate();
+    };
+    try {
+      for (const entry of [...list]) {
+        if (immediateStopped) break;
+        if (matchCapture !== null && entry.capture !== matchCapture) continue;
+        if (entry.once) {
+          this.removeEventListener(event.type, entry.listener, entry.capture);
+        }
+        entry.listener.call(currentTarget, event);
+      }
+    } finally {
+      event.stopImmediatePropagation = prevStopImmediate;
+    }
+    return immediateStopped;
+  }
+
+  dispatchEvent(event) {
+    if (!event || !event.type) return true;
+    const path = [];
+    let cur = this;
+    while (cur) {
+      path.push(cur);
+      if (cur.parentNode) {
+        cur = cur.parentNode;
+      } else if (cur.ownerDocument && cur !== cur.ownerDocument) {
+        cur = cur.ownerDocument;
+      } else {
+        cur = null;
+      }
+    }
+
+    let propagationStopped = false;
+    const origStop = event.stopPropagation.bind(event);
+    event.stopPropagation = () => {
+      propagationStopped = true;
+      origStop();
+    };
+    Object.defineProperty(event, 'target', { value: this, configurable: true });
+
+    // Capture phase (document down to parent)
+    for (let i = path.length - 1; i >= 1; i -= 1) {
+      if (propagationStopped) break;
+      path[i]._invokeListeners(event, path[i], true);
+    }
+
+    // At-target phase
+    if (!propagationStopped) {
+      this._invokeListeners(event, this, null);
+    }
+
+    // Bubble phase (parent up to document)
+    if (event.bubbles) {
+      for (let i = 1; i < path.length; i += 1) {
+        if (propagationStopped) break;
+        path[i]._invokeListeners(event, path[i], false);
+      }
+    }
+
+    Object.defineProperty(event, 'currentTarget', { value: null, configurable: true });
+    return !event.defaultPrevented;
+  }
+}
+
+export class MockNode extends MockDomEventTarget {
   constructor(nodeType, ownerDocument) {
     super();
     this.nodeType = nodeType;
@@ -378,6 +484,14 @@ export class MockElement extends MockNode {
     this._attrs.set('title', String(val));
   }
 
+  get type() {
+    return this._attrs.get('type') || '';
+  }
+
+  set type(val) {
+    this._attrs.set('type', String(val));
+  }
+
   get textContent() {
     if (this.childNodes.length === 0 && this._innerHtml) {
       return this._innerHtml.replace(/<[^>]*>/g, '');
@@ -498,12 +612,29 @@ export class MockElement extends MockNode {
   }
 
   click() {
-    this.dispatchEvent(new Event('click', { bubbles: true, cancelable: true }));
+    const ev = new Event('click', { bubbles: true, cancelable: true });
+    this.dispatchEvent(ev);
+    if (!ev.defaultPrevented) {
+      const summary = this.tagName === 'SUMMARY' ? this : this.closest('summary');
+      const details = summary?.parentElement;
+      if (details && details.tagName === 'DETAILS') {
+        details.open = !details.open;
+        details.dispatchEvent(new Event('toggle'));
+      }
+    }
   }
 
   focus() {
     if (!this.disabled && this.ownerDocument) {
       this.ownerDocument.activeElement = this;
+    }
+  }
+
+  scrollTo(optsOrX, y) {
+    if (optsOrX && typeof optsOrX === 'object') {
+      if (typeof optsOrX.top === 'number') this.scrollTop = optsOrX.top;
+    } else if (typeof y === 'number') {
+      this.scrollTop = y;
     }
   }
 
@@ -537,7 +668,22 @@ export class MockDialogElement extends MockElement {
   }
 }
 
-export class MockDocument extends EventTarget {
+export class MockDetailsElement extends MockElement {
+  constructor(ownerDocument) {
+    super('details', ownerDocument);
+  }
+
+  get open() {
+    return this.hasAttribute('open');
+  }
+
+  set open(val) {
+    if (val) this.setAttribute('open', '');
+    else this.removeAttribute('open');
+  }
+}
+
+export class MockDocument extends MockDomEventTarget {
   constructor() {
     super();
     this.title = 'Sanctuary';
@@ -548,8 +694,12 @@ export class MockDocument extends EventTarget {
   }
 
   createElement(tagName) {
-    if (String(tagName).toLowerCase() === 'dialog') {
+    const lower = String(tagName).toLowerCase();
+    if (lower === 'dialog') {
       return new MockDialogElement(this);
+    }
+    if (lower === 'details') {
+      return new MockDetailsElement(this);
     }
     return new MockElement(tagName, this);
   }

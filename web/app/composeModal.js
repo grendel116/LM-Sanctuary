@@ -1,10 +1,12 @@
 import { createEmojiPicker } from '../components/EmojiPickerPopover.js';
+import { createEmbedCard } from '../components/EmbedCard.js';
 import { createComposerMediaEditor } from '../components/MediaAttachment.js';
-import { createClassicModalDialog } from '../components/sanctuary/SanctuaryDialog.js';
+import { createClassicModalDialog, showAlert } from '../components/sanctuary/SanctuaryDialog.js';
 import { DEFAULT_AVATAR_DATA_URI } from '../constants/avatars.js';
 import { BLUESKY_MAX_GRAPHEMES, MASTODON_MAX_CHARS } from '../constants/endpoints.js';
 import { toUnifiedItem } from '../core/schema/unifiedItem.js';
 import { createBskyPost, uploadBskyBlob } from '../queries/bluesky.js';
+import { extractFirstHttpsUrl, fetchLinkPreview } from '../queries/linkPreview.js';
 import { resolveSanctuaryMediaUrl } from '../queries/sanctuary.js';
 import { publishUnified, replyUnified, syncRecentUserPostsToSanctuary } from '../queries/socialClient.js';
 import { publishThreadsPost } from '../queries/threads.js';
@@ -16,20 +18,31 @@ import {
   composeStore,
   computeRemainingCounts,
   deleteComposeDraft,
+  dismissComposeLinkCard,
   listComposeDrafts,
   loadComposeDraft,
   removeMediaAttachment,
   removeThreadItem,
   resetCompose,
   saveCurrentComposeDraft,
+  setComposeLinkCard,
   setComposeText,
   updateThreadItem,
 } from '../state/composeStore.js';
 
 const MEDIA_ICON_SVG = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="3" ry="3"></rect><circle cx="8.5" cy="8.5" r="1.5"></circle><path d="m21 15-5-5L5 21"></path></svg>`;
 
-function syncAutoHeight(textarea, minHeight = 68, maxHeight = 260) {
-  if (!textarea || !(textarea.scrollHeight > 0)) return;
+function supportsNativeFieldSizing() {
+  return typeof globalThis.CSS?.supports === 'function' && globalThis.CSS.supports('field-sizing', 'content');
+}
+
+export function syncAutoHeight(textarea, minHeight = 68, maxHeight = 340) {
+  if (!textarea || supportsNativeFieldSizing()) return;
+  if (!(textarea.scrollHeight > 0)) {
+    textarea.style.removeProperty('height');
+    textarea.style.overflowY = 'auto';
+    return;
+  }
   textarea.style.overflowY = 'hidden';
   textarea.style.height = 'auto';
   const rawScroll = textarea.scrollHeight;
@@ -65,7 +78,7 @@ function splitOverflowAtLimit(rawText, limit) {
   };
 }
 
-function summarizeAccountIdentity(accounts = []) {
+export function summarizeAccountIdentity(accounts = []) {
   const primary = accounts[0] || null;
   const handle = primary
     ? String(primary.acct || primary.handle || primary.displayName || 'You').replace(/^@/, '')
@@ -107,6 +120,8 @@ export async function publishOrganicPost({
   spoilerText = '',
   visibility = 'public',
   language = 'en',
+  linkCard = null,
+  dismissLinkCard = false,
 } = {}) {
   const cleanText = String(text || '').trim();
   const extraPosts = Array.isArray(threadItems)
@@ -164,6 +179,8 @@ export async function publishOrganicPost({
       visibility: visibility || 'public',
       spoilerText,
       language,
+      linkCard,
+      dismissLinkCard,
     });
     return {
       results: out.results || out.items || [],
@@ -175,6 +192,17 @@ export async function publishOrganicPost({
 
   const results = [];
   const errors = [];
+  let resolvedCard = null;
+  if (preparedAttachments.length === 0 && !dismissLinkCard) {
+    if (linkCard?.url && String(linkCard.url).startsWith('https://')) {
+      resolvedCard = { ...linkCard };
+    } else {
+      const firstUrl = extractFirstHttpsUrl(cleanText);
+      if (firstUrl) {
+        resolvedCard = await fetchLinkPreview(firstUrl).catch(() => null);
+      }
+    }
+  }
 
   if (sendBsky && bskyAccount) {
     try {
@@ -202,6 +230,7 @@ export async function publishOrganicPost({
         onSessionRefreshed: (tok) => updateAccountTokens(bskyAccount.meta.id, tok),
         text: cleanText,
         images: uploadedImages,
+        externalEmbed: uploadedImages.length === 0 ? resolvedCard : null,
         reply: replyParentRef ? { root: replyParentRef, parent: replyParentRef } : null,
       });
       results.push(created);
@@ -239,6 +268,7 @@ export async function publishOrganicPost({
         media: preparedAttachments,
         mastodonUrls: [],
         publicMediaBaseUrl: authStore.get().publicMediaBaseUrl || '',
+        ...(preparedAttachments.length === 0 && resolvedCard?.url ? { linkAttachment: resolvedCard.url } : {}),
       });
       results.push(thr);
 
@@ -274,7 +304,18 @@ export function mountComposeModal(hostEl, { onPublished } = {}) {
   const doc = globalThis.document;
   let viewingDrafts = false;
   let draftsList = [];
+  let lastPreviewTargetUrl = '';
+  let lastRenderedLinkCardSig = '';
+  let linkPreviewTimer = null;
+  let linkPreviewAbort = null;
   const activeTextTarget = { kind: 'main', itemId: null, start: 0, end: 0 };
+
+  const clearPendingLinkPreview = () => {
+    clearTimeout(linkPreviewTimer);
+    linkPreviewTimer = null;
+    linkPreviewAbort?.abort();
+    linkPreviewAbort = null;
+  };
 
   const captureCaret = (kind, itemId, el) => {
     activeTextTarget.kind = kind;
@@ -290,6 +331,7 @@ export function mountComposeModal(hostEl, { onPublished } = {}) {
   };
 
   const dismissCompose = () => {
+    clearPendingLinkPreview();
     if (composeStore.get().activeDraftId) {
       resetCompose();
       return;
@@ -396,6 +438,9 @@ export function mountComposeModal(hostEl, { onPublished } = {}) {
   const mediaHostEl = doc.createElement('div');
   mediaHostEl.className = 'compose-media-host';
 
+  const linkPreviewHostEl = doc.createElement('div');
+  linkPreviewHostEl.className = 'compose-link-preview-host';
+
   const inlineTools = doc.createElement('div');
   inlineTools.className = 'compose-inline-tools';
 
@@ -450,7 +495,7 @@ export function mountComposeModal(hostEl, { onPublished } = {}) {
     }
     if (targetInput) {
       targetInput.value = nextText;
-      syncAutoHeight(targetInput, threadEntry ? 52 : 68, threadEntry ? 220 : 260);
+      syncAutoHeight(targetInput, threadEntry ? 52 : 68, threadEntry ? 260 : 340);
       targetInput.focus?.();
       targetInput.setSelectionRange?.(nextPos, nextPos);
     }
@@ -462,7 +507,7 @@ export function mountComposeModal(hostEl, { onPublished } = {}) {
   });
 
   inlineTools.append(attachBtn, emojiPicker.triggerBtn, emojiPicker.panel, fileInput);
-  editorCol.append(authorLine, mainLbl, textarea, mediaHostEl, inlineTools);
+  editorCol.append(authorLine, mainLbl, textarea, mediaHostEl, linkPreviewHostEl, inlineTools);
   mainUnit.append(avatarCol, editorCol);
 
   const threadExtraList = doc.createElement('div');
@@ -523,6 +568,13 @@ export function mountComposeModal(hostEl, { onPublished } = {}) {
   const renderedThreadRows = new Map();
   let lastMediaSignature = '';
 
+  const syncAllTextareaHeights = () => {
+    syncAutoHeight(textarea, 68, 340);
+    for (const entry of renderedThreadRows.values()) {
+      syncAutoHeight(entry.extraTextarea, 52, 260);
+    }
+  };
+
   function formatDraftAge(ts) {
     if (!Number.isFinite(ts)) return 'Saved';
     const diffSec = Math.max(0, Math.floor((Date.now() - ts) / 1000));
@@ -581,9 +633,10 @@ export function mountComposeModal(hostEl, { onPublished } = {}) {
       info.append(snippet, meta);
       selectBtn.appendChild(info);
       selectBtn.addEventListener('click', () => {
-        loadComposeDraft(draft);
         viewingDrafts = false;
+        loadComposeDraft(draft);
         syncUi(composeStore.get(), authStore.get());
+        syncAllTextareaHeights();
         textarea.focus?.();
       });
 
@@ -716,7 +769,42 @@ export function mountComposeModal(hostEl, { onPublished } = {}) {
     }
   });
 
+  function syncLinkPreviewForState(s) {
+    const firstUrl = s.isOpen && !s.replyTo && s.mediaAttachments.length === 0
+      ? extractFirstHttpsUrl(s.text)
+      : '';
+    if (!firstUrl || firstUrl === s.dismissedLinkUrl) {
+      lastPreviewTargetUrl = '';
+      clearPendingLinkPreview();
+      if (s.linkCard) {
+        queueMicrotask(() => setComposeLinkCard(null));
+      }
+      return;
+    }
+    if (firstUrl === lastPreviewTargetUrl) return;
+    lastPreviewTargetUrl = firstUrl;
+    clearPendingLinkPreview();
+    if (s.linkCard && s.linkCard.url !== firstUrl) {
+      queueMicrotask(() => setComposeLinkCard(null));
+    }
+    const controller = typeof AbortController === 'function' ? new AbortController() : null;
+    linkPreviewAbort = controller;
+    linkPreviewTimer = setTimeout(() => {
+      linkPreviewTimer = null;
+      void fetchLinkPreview(firstUrl, { signal: controller?.signal })
+        .then((card) => {
+          if (controller?.signal?.aborted) return;
+          const cur = composeStore.get();
+          if (!cur.isOpen || cur.mediaAttachments.length > 0) return;
+          if (extractFirstHttpsUrl(cur.text) !== firstUrl || cur.dismissedLinkUrl === firstUrl) return;
+          setComposeLinkCard(card);
+        })
+        .catch(() => {});
+    }, 180);
+  }
+
   async function publishAll() {
+    clearPendingLinkPreview();
     const s = composeStore.get();
     const consumedDraftId = s.activeDraftId;
     composeStore.set({ submitting: true, error: null });
@@ -731,10 +819,12 @@ export function mountComposeModal(hostEl, { onPublished } = {}) {
         spoilerText: s.spoilerText,
         visibility: s.visibility,
         language: s.language,
+        linkCard: s.mediaAttachments.length === 0 ? s.linkCard : null,
+        dismissLinkCard: Boolean(
+          s.dismissedLinkUrl && s.dismissedLinkUrl === extractFirstHttpsUrl(s.text)
+        ),
       });
-      if (errors.length > 0) {
-        statusLine.textContent = `Posted with warning: ${errors.join(' | ')}`;
-      }
+      const warnMsg = errors.length > 0 ? errors.join('\n\n') : '';
       if (consumedDraftId) {
         await deleteComposeDraft(consumedDraftId).catch(() => {});
         await refreshDraftsList();
@@ -745,6 +835,9 @@ export function mountComposeModal(hostEl, { onPublished } = {}) {
       resetCompose();
       modal.close();
       await onPublished?.(results);
+      if (warnMsg) {
+        showAlert('Bridge Sync Warning', warnMsg);
+      }
     } catch (err) {
       composeStore.set({ submitting: false, error: err?.message || 'Publish failed' });
       statusLine.textContent = err?.message || 'Publish failed';
@@ -774,6 +867,7 @@ export function mountComposeModal(hostEl, { onPublished } = {}) {
     authorDestEl.textContent = destLabel;
 
     const extraItems = Array.isArray(s.threadItems) ? s.threadItems : [];
+    const wasBodyHidden = Boolean(body.hidden);
     titleEl.textContent = viewingDrafts ? 'Drafts' : (s.replyTo ? 'Reply' : 'New post');
     cancelBtn.textContent = viewingDrafts ? '← Back' : 'Cancel';
     countsEl.hidden = viewingDrafts;
@@ -795,7 +889,7 @@ export function mountComposeModal(hostEl, { onPublished } = {}) {
 
     if (textarea.value !== s.text) {
       textarea.value = s.text;
-      syncAutoHeight(textarea);
+      syncAutoHeight(textarea, 68, 340);
     }
 
     // Reconcile follow-up thread rows keyed by id so active inputs never lose focus.
@@ -817,8 +911,12 @@ export function mountComposeModal(hostEl, { onPublished } = {}) {
       entry.handleEl.textContent = handle;
       if (entry.extraTextarea.value !== (item.text || '')) {
         entry.extraTextarea.value = item.text || '';
-        syncAutoHeight(entry.extraTextarea, 52, 220);
+        syncAutoHeight(entry.extraTextarea, 52, 260);
       }
+    }
+
+    if (!viewingDrafts && wasBodyHidden) {
+      syncAllTextareaHeights();
     }
 
     const canAddThread = Boolean(s.text.trim() || s.mediaAttachments.length > 0 || extraItems.length > 0);
@@ -876,6 +974,23 @@ export function mountComposeModal(hostEl, { onPublished } = {}) {
       );
     }
 
+    syncLinkPreviewForState(s);
+    const activeCard = s.mediaAttachments.length === 0 && !s.replyTo && s.linkCard?.url ? s.linkCard : null;
+    const nextCardSig = activeCard
+      ? `${activeCard.url}\u001f${activeCard.title || ''}\u001f${activeCard.image || ''}\u001f${activeCard.embedUrl || ''}`
+      : '';
+    if (nextCardSig !== lastRenderedLinkCardSig) {
+      lastRenderedLinkCardSig = nextCardSig;
+      linkPreviewHostEl.replaceChildren();
+      if (activeCard) {
+        const cardNode = createEmbedCard(activeCard, {
+          compact: true,
+          onDismiss: () => dismissComposeLinkCard(activeCard.url),
+        });
+        if (cardNode) linkPreviewHostEl.appendChild(cardNode);
+      }
+    }
+
     if (s.error) {
       statusLine.textContent = s.error;
     } else if (!s.submitting && !statusLine.textContent.startsWith('Bridge limit exceeded')) {
@@ -885,11 +1000,12 @@ export function mountComposeModal(hostEl, { onPublished } = {}) {
     if (s.isOpen && !modal.dialog.open) {
       viewingDrafts = false;
       modal.open();
-      syncAutoHeight(textarea);
+      syncAllTextareaHeights();
       void refreshDraftsList();
     }
     if (!s.isOpen && modal.dialog.open) {
       viewingDrafts = false;
+      clearPendingLinkPreview();
       emojiPicker.close();
       modal.close();
     }
@@ -904,6 +1020,7 @@ export function mountComposeModal(hostEl, { onPublished } = {}) {
     open: () => modal.open(),
     close: () => closeCompose(),
     destroy: () => {
+      clearPendingLinkPreview();
       unsubCompose();
       unsubAuth();
       modal.dialog.remove();

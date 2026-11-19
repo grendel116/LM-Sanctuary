@@ -10,6 +10,9 @@ export const BLUESKY_CHAT_PROXY = 'did:web:api.bsky.chat#bsky_chat';
 export const DEFAULT_BSKY_SERVICE = 'https://bsky.social';
 export const PUBLIC_BSKY_API = 'https://public.api.bsky.app';
 export const THREADS_GRAPH_BASE = 'https://graph.threads.net/v1.0';
+export const THREADS_TOKEN_BASE = 'https://graph.threads.net';
+export const THREADS_OAUTH_AUTHORIZE_URL = 'https://threads.net/oauth/authorize';
+export const DEFAULT_THREADS_SCOPES = 'threads_basic,threads_content_publish,threads_delete,threads_read_replies,threads_manage_replies,threads_manage_insights';
 
 const LOCAL_DOMAIN_RE = /^[a-z0-9-]+(?:\.[a-z0-9-]+)*\.(?:local|ts\.net)$/;
 const TAILSCALE_DOMAIN_RE = /^[a-z0-9-]+(?:\.[a-z0-9-]+)*\.ts\.net$/;

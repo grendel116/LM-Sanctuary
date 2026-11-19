@@ -155,6 +155,8 @@ export async function upsertSocialAccount(meta, secrets = null) {
     statusesCount: meta.statusesCount ?? 0,
     userId: meta.userId || '',
     did: meta.did || '',
+    isVerified: Boolean(meta.isVerified),
+    expiresAt: Number(meta.expiresAt || 0),
     updatedAt: Date.now(),
   };
 

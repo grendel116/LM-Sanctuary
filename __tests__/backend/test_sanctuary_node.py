@@ -411,6 +411,45 @@ def run_tests():
     assert sp_hist_item["shared_post"]["authorName"] == "Charlie"
     assert sp_hist_item["user_note"] == "Mood check"
 
+    # Unapproved feed tuning skill/tool & declarative /api/feed_profile sync
+    fp_get = client.get("/api/feed_profile")
+    assert fp_get.status_code == 200
+    assert fp_get.get_json()["sliders"]["commercial"] == 0
+
+    with mock.patch.object(tools_mod, "confirm_tool_execution", side_effect=AssertionError("Should never require approval")):
+        tool_out = tools_mod.tune_feed_algorithm(
+            commercial=-100,
+            bourgeois_politics=-100,
+            mature_content=-80,
+            small_web=70,
+            add_boost_concepts=["worker cooperatives", "Linux audio"],
+            add_dampen_concepts=["crypto hype"],
+        )
+    assert "[Feed Profile Updated]" in tool_out
+
+    fp_after_tool = client.get("/api/feed_profile").get_json()
+    assert fp_after_tool["sliders"]["commercial"] == -100
+    assert fp_after_tool["sliders"]["bourgeoisPolitics"] == -100
+    assert fp_after_tool["sliders"]["matureContent"] == -80
+    assert fp_after_tool["sliders"]["smallWeb"] == 70
+    assert fp_after_tool["boostConcepts"] == ["worker cooperatives", "Linux audio"]
+    assert fp_after_tool["dampenConcepts"] == ["crypto hype"]
+    assert fp_after_tool["updatedAt"] > 0
+
+    mh_after_tune = client.get("/api/mobile/health").get_json()
+    assert mh_after_tune["feed_profile_updated_at"] == fp_after_tool["updatedAt"]
+
+    fp_put = client.put(
+        "/api/feed_profile",
+        json={
+            "sliders": {"longform": 65, "commercial": -50},
+            "boostConcepts": ["botanical art"],
+            "dampenConcepts": [],
+        },
+    )
+    assert fp_put.status_code == 200
+    assert fp_put.get_json()["sliders"]["longform"] == 65
+
     print(f"PHASE_1_BACKEND_VERIFIED (mobile/health={elapsed_ms:.1f}ms, routes={len(rules)})")
 
 

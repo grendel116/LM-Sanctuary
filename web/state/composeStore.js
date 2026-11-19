@@ -19,6 +19,8 @@ function createInitialComposeState() {
     language: 'en',
     mediaAttachments: [],
     threadItems: [],
+    linkCard: null,
+    dismissedLinkUrl: '',
     replyTo: null,
     targets: {
       fediverse: true,
@@ -99,6 +101,8 @@ export function prefillFromUserBubble({
     visibility: 'public',
     mediaAttachments: nextMedia,
     threadItems: [],
+    linkCard: null,
+    dismissedLinkUrl: '',
     replyTo: null,
     targets: {
       ...prevTargets,
@@ -125,6 +129,8 @@ export function prefillReply(post) {
     visibility: post?._meta?.mastodon?.visibility || post?.visibility || 'public',
     mediaAttachments: [],
     threadItems: [],
+    linkCard: null,
+    dismissedLinkUrl: '',
     replyTo: post || null,
     targets: {
       fediverse: proto === 'mastodon',
@@ -139,6 +145,17 @@ export function prefillReply(post) {
 
 export function setComposeText(text) {
   composeStore.set({ text: String(text ?? ''), error: null });
+}
+
+export function setComposeLinkCard(card) {
+  composeStore.set({ linkCard: card ? { ...card } : null });
+}
+
+export function dismissComposeLinkCard(url) {
+  composeStore.set({
+    linkCard: null,
+    dismissedLinkUrl: String(url || ''),
+  });
 }
 
 export function setSpoilerText(spoilerText) {
@@ -246,8 +263,10 @@ export async function listComposeDrafts() {
     .sort((a, b) => Number(b.updatedAt || 0) - Number(a.updatedAt || 0));
 }
 
+let lastDraftTimestamp = 0;
+
 /**
- * Save the active compose state (text, thread follow-ups, and media blobs <= 8 MB) as a draft.
+ * Save the active compose state (text, thread follow-ups, and media blobs <= 8 MB) as a new draft snapshot.
  */
 export async function saveCurrentComposeDraft() {
   const s = composeStore.get();
@@ -280,8 +299,11 @@ export async function saveCurrentComposeDraft() {
     }
   }
 
+  const now = Math.max(Date.now(), lastDraftTimestamp + 1);
+  lastDraftTimestamp = now;
+
   const draft = {
-    id: s.activeDraftId || `draft_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+    id: `draft_${now}_${Math.random().toString(36).slice(2, 8)}`,
     text: String(s.text || ''),
     threadItems: (s.threadItems || []).map((it) => ({
       id: it.id,
@@ -291,8 +313,10 @@ export async function saveCurrentComposeDraft() {
     spoilerText: String(s.spoilerText || ''),
     visibility: s.visibility || 'public',
     language: s.language || 'en',
+    linkCard: s.linkCard ? { ...s.linkCard } : null,
+    dismissedLinkUrl: String(s.dismissedLinkUrl || ''),
     media: serializedMedia,
-    updatedAt: Date.now(),
+    updatedAt: now,
   };
   await storePut('drafts', draft.id, draft);
   composeStore.set({ activeDraftId: draft.id });
@@ -349,6 +373,8 @@ export function loadComposeDraft(draft) {
     contentWarningOpen: Boolean(draft.spoilerText),
     visibility: draft.visibility || 'public',
     language: draft.language || 'en',
+    linkCard: draft.linkCard ? { ...draft.linkCard } : null,
+    dismissedLinkUrl: String(draft.dismissedLinkUrl || ''),
     mediaAttachments: hydratedMedia,
     replyTo: null,
     submitting: false,

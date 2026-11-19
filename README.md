@@ -1,28 +1,29 @@
-# 👾 THE SANCTUARY
+# 👾 LM-SANCTUARY
 
-This is your private computer workspace. 
-Here, you roleplay, code, and chat with AI Programs on your own machine.
+**A Local LLM and Fediverse Sanctuary.**
+
+Your private, local-first computer workspace and federated social home. Converse across the open Fediverse, bridge outward to Bluesky and Threads on your own terms, and roleplay, code, and build with local AI Programs running directly on your own hardware.
 
 ---
 
 ## ✨ THE ETHOS
 
-The Sanctuary is a unified program home built on human-in-the-loop engagement.
+LM-Sanctuary is a unified sovereign client and local companion built on human-in-the-loop engagement:
 
-1. **Roleplay**: Uncensored conversation. Talk to programs as assistants.
-2. **Coding**: Build software. Your programs read and write files directly on your own drive.
-3. **Autonomous Action**: Let the AI run code, run tests, and manage workflows.
+1. **Fediverse Commons**: Publish, read, and converse across ActivityPub (`Mastodon`, `Pixelfed`, `GoToSocial`, `Akkoma`) with chronological timelines and transparent user-controlled feed tuning—free from corporate engagement algorithms.
+2. **Roleplay & Companion Programs**: Uncensored dialogue, voice calls, and persistent memory with local AI Programs on your machine.
+3. **Coding & Autonomous Action**: Read, write, audit, and execute code directly on your local drive with human-in-the-loop approval.
 
 ### Sovereign Workspace
-100% Local-First workspace. Your chats, your memory, and your data stay on your drive. Local models do all the heavy lifting directly on your hardware.
+100% Local-First workspace and social client. Your chats, memories, local SQLite social caches, credentials, and model weights stay on your own hardware, where local models and native clients do the work without cloud telemetry.
 
 > [!NOTE]
 > **The Sanctuary Ethos**:
-> AI is a new means of production. We must seize it, expropriate it from the hyperscale data centers, and return it to the people. We want local, sovereign, and democratic. The code and the models should belong to the worker, not the shareholder.
+> AI and public communication are new means of production. We must seize them, expropriate them from the hyperscale data centers and walled-garden platforms, and return them to the people. We want local, federated, sovereign, and democratic. The code, the models, and the social graph belong to the user and worker, not the shareholder.
 
 ---
 
-## 💬 WORKSPACE PREVIEW
+## 🌐 FEDIVERSE & SOCIAL BRIDGES
 
 Here is what the LM-Sanctuary workspace looks like:
 
@@ -30,10 +31,12 @@ Here is what the LM-Sanctuary workspace looks like:
   <img src="./web/assets/img/samplechat.jpg" alt="LM-Sanctuary Workspace Preview" width="100%">
 </p>
 
-### Social Client & Companion Architecture
-* **3-Column Desktop & Mobile Shell**: Desktop renders a left icon rail (`Home`, `Search`, `Messages`, `Activity`, `Profile`, `Settings`, `+` Compose), a hairline center social stage, and a collapsible persistent right Sanctuary dock (`sanctuary/`) so social browsing never interrupts active AI turns or voice calls. Mobile adapts into a bottom navigation bar (`Home`, `Messages`, `Activity`, `Profile`) with top-bar `Search`, `Settings`, and floating `+` Compose triggers.
-* **Mastodon-First Social Client + Bridges**: ActivityPub (`Mastodon`, `Pixelfed`, `GoToSocial`, `Akkoma`) via OAuth2 + REST is primary (`Feed` and `Following` tabs with manual pull-down or explicit header refresh, bottom-appending infinite scroll, uniform multi-image carousels, shared classic image lightbox viewer, thread replies with nested commenting, centralized `Connections` modal, and `Messages` for both `Program Chats` and Mastodon/Bluesky `Direct Messages`). Connected `Bluesky` (AT Protocol) and `Threads` accounts fan out outbound posts, synchronize deletions, and merge notifications automatically in the background.
-* **Native Storage & Credential Isolation (Zero AI Social Dispatch)**: Social timeline caches use local SQLite (`social/data/social.db` on Desktop/LAN or Android `SQLiteOpenHelper`, zero `IndexedDB`), while social tokens stay strictly in OS Credential Manager / Keychain or `AndroidKeyStore`. Programs (`sanctuary/`) hold zero social credentials or posting tools; user chat bubbles include a Share-to-Fediverse action, feed posts offer a Share-to-Program preview card, and optional token-free public profile/recent-posts Markdown snapshots give Programs read-only context. See [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) for the full module map.
+* **3-Column Desktop, PWA & Android Shell**: Desktop renders a left navigation rail (`Home`, `Search`, `Messages`, `Activity`, `Profile`, `Settings`, `+` Compose), a hairline center Fediverse stage, and a collapsible right Sanctuary dock (`sanctuary/`) so social browsing never interrupts active AI generations or voice calls. Mobile adapts into a bottom navigation bar (`Home`, `Messages`, `Activity`, `Profile`) with top-bar `Search`, `Settings`, and floating `+` Compose triggers, sharing the same pure-static `web/` bundle with Capacitor Android (`android/`).
+* **Mastodon-First ActivityPub Client**: OAuth 2.0 and access-token sign-in (`mastodon.social` default or any ActivityPub server), `Feed` and `Following` timelines with stable scroll anchoring, nested conversation threads, rich link previews and privacy-preserving YouTube/Vimeo embed façades, multi-media carousels and classic lightbox viewer, snapshot post drafts, lists, keyword filters, follow/mutual graph explorer, profile studio, and Direct Messages (`Direct | Programs`).
+* **Unified `Bluesky` & `Threads` Bridges**: Optional AT Protocol (`Bluesky`) and Meta `Threads` bridges fan out posts and multi-part threads concurrently (auto-splitting at `300` graphemes for Bluesky and `500` characters for Mastodon and Threads), forward media and link embeds, synchronize post edits (in-place on Mastodon, delete-and-republish across bridges) and deletions with automatic retry queuing, and include a `.zip` archive importer to migrate Threads following and mutuals onto the Fediverse.
+* **Aggregated Cross-Platform Activity**: Unified `Activity` view merging Mastodon, Bluesky, and Threads notifications with grouped likes and reposts, cross-network engagement totals, unread nav indicator, and persistent notification deletion.
+* **Transparent Local Feed Tuning**: Declarative local feed sliders and optional local CPU semantic concept anchors (`web/core/feedRanker.js`, `social/semantic_scorer.py`, `tune_feed_algorithm`) stored in `sanctuary/variables/feed_profile.json`—zero opaque remote ranking.
+* **Strict Credential Isolation (Zero AI Social Dispatch)**: Timeline caches use local SQLite (`social/data/social.db` on Desktop/LAN or Android `SQLiteOpenHelper`, zero `IndexedDB`), while social tokens stay strictly in OS Credential Manager / Keychain (`social/storage/keychain.py`) or `AndroidKeyStore`. AI Programs (`sanctuary/`) hold zero social credentials and zero social publishing or timeline-reading tools; cross-over is strictly user-initiated via **Share-to-Fediverse** on your chat bubbles, **Share-to-Program** on feed posts, and optional token-free public Mastodon profile snapshots. See [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) for the module map.
 
 ---
 
@@ -59,6 +62,7 @@ These are the things your program can do on your computer. By default, before th
 * **Task Manager** (`manage_task` / `wait_task`): Monitor, write to stdin, kill, or block and wait on active background commands.
 * **Add Quest** (`add_quest`): Create and append a structured task or chore to the user's local quest log with objectives, target date/time, coordinates/address, and alarm offsets.
 * **Add Journal Memory** (`add_journal_entry`): Autonomously record permanent personal facts, core relationships, and milestones into the program's long-term memory journal (`journals.json`).
+* **Local Feed Weight Tuning** (`tune_feed_algorithm`): Read and adjust declarative local feed weights and concept anchors in `sanctuary/variables/feed_profile.json` without social tokens or timeline access.
 
 ### Network Grounding & Research (Online)
 * **Unified Web Search** (`web_search`): A unified search client that queries SearXNG (for Baidu/Yandex/Bing), DuckDuckGo, Brave, and Tavily concurrently. It aggregates and deduplicates URLs, supports concurrent page content enrichment for thin search results, and provides explicit query prefix routing (e.g. `github: query`, `arxiv: query`, `hn: query`, `wikipedia: query`).

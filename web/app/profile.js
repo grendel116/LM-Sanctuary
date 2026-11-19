@@ -1,9 +1,12 @@
+import { createEmojiPicker } from '../components/EmojiPickerPopover.js';
+import { createEmbedCard, resolvePostEmbedCard } from '../components/EmbedCard.js';
 import { openFollowGraphModal } from '../components/FollowGraphModal.js';
 import { createOfflineNotice } from '../components/OfflineNotice.js';
 import { createPostCard } from '../components/PostCard.js';
-import { createClassicModalDialog, showConfirm } from '../components/sanctuary/SanctuaryDialog.js';
+import { createClassicModalDialog, showAlert, showConfirm } from '../components/sanctuary/SanctuaryDialog.js';
 import { createLoadingState } from '../components/ui/index.js';
 import { DEFAULT_AVATAR_DATA_URI } from '../constants/avatars.js';
+import { MASTODON_MAX_CHARS } from '../constants/endpoints.js';
 import {
   cleanMastodonMediaUrl,
   decodeHtmlEntities,
@@ -16,6 +19,7 @@ import {
 import {
   deleteUnified,
   editUnified,
+  enrichUnifiedItemsMetrics,
   fetchAuthorWithRelationship,
   fetchOwnStatuses,
   likeUnified,
@@ -26,9 +30,10 @@ import {
   updateMastodonProfileCredentials,
 } from '../queries/socialClient.js';
 import { authStore, getAuthenticatedAccount, upsertSocialAccount } from '../state/authStore.js';
-import { prefillReply } from '../state/composeStore.js';
-import { removePostAcrossStreams } from '../state/feedStore.js';
+import { computeRemainingCounts, prefillReply } from '../state/composeStore.js';
+import { mutatePostAcrossStreams, removePostAcrossStreams } from '../state/feedStore.js';
 import { connectionStore } from '../state/sanctuary/connection.js';
+import { summarizeAccountIdentity, syncAutoHeight } from './composeModal.js';
 
 const PROFILE_TABS = [
   ['posts', 'Posts'],
@@ -747,59 +752,274 @@ export function openEditMastodonProfileModal({ accountMeta, onSaved } = {}) {
 
 export function openEditPostDialog(post, { onSaved } = {}) {
   const doc = globalThis.document;
+  let emojiPicker = null;
   const modal = createClassicModalDialog({
     id: 'edit-post-dialog',
-    maxWidth: '520px',
-    onClose: () => modal.dialog.remove(),
+    maxWidth: '560px',
+    closedBy: 'any',
+    onClose: () => {
+      emojiPicker?.close?.();
+      modal.dialog.remove();
+    },
   });
+  modal.closeBtn.hidden = true;
+  modal.card.classList.add('compose-sheet-card');
+
+  const authState = authStore.get();
+  const { handle, avatarUrl } = summarizeAccountIdentity(authState.accounts || []);
+  const mastoMeta = post?._meta?.mastodon || {};
+  const spoiler = String(mastoMeta.spoilerText || post?.spoilerText || '');
+  const visibility = String(mastoMeta.visibility || 'public').toLowerCase();
+  const linked = post?._meta?.linkedIds || {};
+  const hasBsky = Boolean(linked.blueskyUri || authState.isBlueskyConnected);
+  const hasThreads = Boolean(linked.threadsPostId || authState.isThreadsConnected);
+  const canReplaceBridges = visibility !== 'direct' && (hasBsky || hasThreads);
+  const attachments = Array.isArray(post?.attachments) ? post.attachments : [];
+
+  const form = doc.createElement('form');
+  form.className = 'compose-sheet-form';
+
+  const header = doc.createElement('header');
+  header.className = 'compose-sheet-header';
+
+  const cancelBtn = doc.createElement('button');
+  cancelBtn.type = 'button';
+  cancelBtn.className = 'compose-cancel-btn';
+  cancelBtn.textContent = 'Cancel';
+  cancelBtn.addEventListener('click', () => modal.close());
 
   const heading = doc.createElement('h3');
   heading.id = modal.titleId;
-  heading.className = 'classic-modal-title';
-  heading.textContent = 'Edit Post';
+  heading.className = 'compose-sheet-title';
+  heading.textContent = 'Edit post';
 
-  const form = doc.createElement('form');
-  form.className = 'profile-edit-form';
+  const countsEl = doc.createElement('span');
+  countsEl.className = 'compose-counts';
+  countsEl.setAttribute('aria-live', 'polite');
+
+  header.append(cancelBtn, heading, countsEl);
+
+  const body = doc.createElement('div');
+  body.className = 'compose-sheet-body';
+
+  const unit = doc.createElement('div');
+  unit.className = 'compose-thread-unit';
+
+  const avatarCol = doc.createElement('div');
+  avatarCol.className = 'compose-avatar-col';
+  const avImg = doc.createElement('img');
+  avImg.className = 'compose-user-avatar';
+  avImg.alt = '';
+  avImg.src = avatarUrl;
+  const rail = doc.createElement('div');
+  rail.className = 'compose-thread-rail';
+  rail.style.opacity = '0.25';
+  avatarCol.append(avImg, rail);
+
+  const editorCol = doc.createElement('div');
+  editorCol.className = 'compose-editor-col';
+
+  const authorLine = doc.createElement('div');
+  authorLine.className = 'compose-author-line';
+  const handleEl = doc.createElement('span');
+  handleEl.className = 'compose-author-handle';
+  handleEl.textContent = handle;
+  const destEl = doc.createElement('span');
+  destEl.className = 'compose-author-dest';
+  authorLine.append(handleEl, destEl);
+
+  const taLbl = doc.createElement('label');
+  taLbl.setAttribute('for', 'edit-post-textarea');
+  taLbl.className = 'sr-only';
+  taLbl.textContent = 'Post text';
+
   const ta = doc.createElement('textarea');
-  ta.rows = 5;
-  ta.className = 'onboarding-input';
-  ta.value = post.content_text || '';
+  ta.id = 'edit-post-textarea';
+  ta.name = 'text';
+  ta.rows = 3;
+  ta.className = 'compose-seamless-textarea';
+  ta.placeholder = 'Edit post...';
+  ta.value = post?.content_text || '';
   ta.setAttribute('autofocus', '');
-  const statusEl = doc.createElement('p');
-  statusEl.className = 'classic-modal-status';
-  statusEl.setAttribute('role', 'status');
 
-  const btnRow = doc.createElement('div');
-  btnRow.className = 'classic-card-actions';
-  const cancelBtn = doc.createElement('button');
-  cancelBtn.type = 'button';
-  cancelBtn.className = 'edit-btn edit-cancel-btn';
-  cancelBtn.textContent = 'Cancel';
-  cancelBtn.addEventListener('click', () => modal.close());
+  let caretStart = ta.value.length;
+  let caretEnd = ta.value.length;
+  const captureCaret = () => {
+    if (typeof ta.selectionStart === 'number') {
+      caretStart = ta.selectionStart;
+      caretEnd = typeof ta.selectionEnd === 'number' ? ta.selectionEnd : ta.selectionStart;
+    } else {
+      caretStart = ta.value.length;
+      caretEnd = ta.value.length;
+    }
+  };
+  for (const evt of ['focus', 'keyup', 'mouseup', 'blur']) {
+    ta.addEventListener(evt, captureCaret);
+  }
+
+  editorCol.append(authorLine, taLbl, ta);
+
+  if (attachments.length > 0) {
+    const strip = doc.createElement('div');
+    strip.className = 'edit-readonly-media-strip';
+    for (const att of attachments.slice(0, 4)) {
+      const thumbUrl = cleanMastodonMediaUrl(att.previewUrl || att.url || '');
+      if (!thumbUrl) continue;
+      const img = doc.createElement('img');
+      img.className = 'edit-readonly-media-thumb';
+      img.src = thumbUrl;
+      img.alt = att.alt_text || att.description || '';
+      strip.appendChild(img);
+    }
+    if (strip.childNodes.length > 0) {
+      editorCol.appendChild(strip);
+    }
+  } else {
+    const embedCard = resolvePostEmbedCard(post);
+    if (embedCard) {
+      const cardNode = createEmbedCard(embedCard, { compact: true });
+      if (cardNode) {
+        const previewHost = doc.createElement('div');
+        previewHost.className = 'compose-link-preview-host';
+        previewHost.appendChild(cardNode);
+        editorCol.appendChild(previewHost);
+      }
+    }
+  }
+
+  const inlineTools = doc.createElement('div');
+  inlineTools.className = 'compose-inline-tools';
+  emojiPicker = createEmojiPicker({
+    popoverId: 'edit-post-emoji-popover',
+    onSelectEmoji: (emoji) => {
+      const cur = String(ta.value || '');
+      const sIdx = Math.max(0, Math.min(caretStart, cur.length));
+      const eIdx = Math.max(sIdx, Math.min(caretEnd, cur.length));
+      const nextText = `${cur.slice(0, sIdx)}${emoji}${cur.slice(eIdx)}`;
+      const nextPos = sIdx + emoji.length;
+      caretStart = nextPos;
+      caretEnd = nextPos;
+      ta.value = nextText;
+      updateComposerMetrics();
+      ta.focus?.();
+      ta.setSelectionRange?.(nextPos, nextPos);
+    },
+  });
+  inlineTools.append(emojiPicker.triggerBtn, emojiPicker.panel);
+  editorCol.appendChild(inlineTools);
+
+  unit.append(avatarCol, editorCol);
+  body.appendChild(unit);
+
+  const footer = doc.createElement('footer');
+  footer.className = 'compose-sheet-footer';
+
+  const footerLeft = doc.createElement('div');
+  footerLeft.className = 'compose-footer-left';
+
+  let replaceCheckbox = null;
+  let replaceLabel = null;
+  if (canReplaceBridges) {
+    replaceCheckbox = doc.createElement('input');
+    replaceCheckbox.type = 'checkbox';
+    replaceCheckbox.id = 'edit-post-replace-bridges';
+    replaceCheckbox.name = 'replace_bridges';
+    replaceCheckbox.className = 'visually-hidden';
+    replaceCheckbox.checked = true;
+
+    replaceLabel = doc.createElement('label');
+    replaceLabel.setAttribute('for', 'edit-post-replace-bridges');
+    replaceLabel.className = 'compose-bridge-toggle-pill is-active';
+
+    const dot = doc.createElement('span');
+    dot.className = 'compose-bridge-toggle-dot';
+    dot.setAttribute('aria-hidden', 'true');
+    const lblText = doc.createElement('span');
+    lblText.textContent = 'Update bridges';
+    replaceLabel.append(dot, lblText);
+
+    replaceCheckbox.addEventListener('change', () => updateComposerMetrics());
+    footerLeft.append(replaceCheckbox, replaceLabel);
+  }
+
+  const statusEl = doc.createElement('p');
+  statusEl.className = 'compose-status-msg';
+  statusEl.setAttribute('role', 'status');
+  statusEl.setAttribute('aria-live', 'polite');
+
   const saveBtn = doc.createElement('button');
   saveBtn.type = 'submit';
-  saveBtn.className = 'btn-sleek-pill';
-  saveBtn.textContent = 'Save Post';
-  btnRow.append(cancelBtn, saveBtn);
+  saveBtn.className = 'compose-publish-btn is-ready';
+  saveBtn.textContent = 'Save';
 
-  form.append(ta, statusEl, btnRow);
+  footer.append(footerLeft, statusEl, saveBtn);
+  form.append(header, body, footer);
+
+  function updateComposerMetrics() {
+    syncAutoHeight(ta, 68, 340);
+    const replaceActive = Boolean(replaceCheckbox?.checked);
+    if (replaceLabel) {
+      replaceLabel.classList.toggle('is-active', replaceActive);
+    }
+
+    if (visibility === 'direct') {
+      destEl.textContent = 'Direct message';
+    } else if (canReplaceBridges && replaceActive) {
+      destEl.textContent = ['Fediverse', hasBsky ? 'Bluesky' : '', hasThreads ? 'Threads' : '']
+        .filter(Boolean)
+        .join(' · ');
+    } else {
+      destEl.textContent = 'Fediverse';
+    }
+
+    const counts = computeRemainingCounts(
+      { text: ta.value, spoilerText: spoiler },
+      { isBlueskyConnected: replaceActive && hasBsky, isThreadsConnected: replaceActive && hasThreads }
+    );
+    const remaining = counts.tightestRemaining;
+    countsEl.textContent = String(remaining);
+    countsEl.classList.toggle('is-over-limit', remaining < 0);
+
+    const overMastodon = [...(ta.value || '')].length + [...spoiler].length > MASTODON_MAX_CHARS;
+    const hasContent = Boolean(ta.value.trim() || attachments.length > 0);
+    saveBtn.classList.toggle('is-ready', hasContent && !overMastodon && !saveBtn.disabled);
+  }
+
+  ta.addEventListener('input', () => {
+    captureCaret();
+    updateComposerMetrics();
+  });
+
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
+    if (saveBtn.disabled) return;
     saveBtn.disabled = true;
+    statusEl.textContent = '';
+    updateComposerMetrics();
     try {
-      const sid = post._meta?.mastodon?.statusId || post.id;
-      const updated = await editUnified(sid, ta.value);
+      const sid = post?._meta?.mastodon?.statusId || post?.id;
+      const updated = await editUnified(sid, ta.value, spoiler, {
+        replaceBridges: Boolean(replaceCheckbox?.checked),
+      });
+      const warnings = Array.isArray(updated?._bridgeWarnings) ? updated._bridgeWarnings : [];
       modal.close();
-      onSaved?.(updated);
+      await onSaved?.(updated);
+      if (warnings.length > 0) {
+        showAlert('Bridge Edit Warning', warnings.join('\n\n'));
+      }
     } catch (err) {
       statusEl.textContent = err?.message || 'Edit failed.';
     } finally {
       saveBtn.disabled = false;
+      updateComposerMetrics();
     }
   });
 
-  modal.card.append(heading, form);
+  modal.card.appendChild(form);
+  updateComposerMetrics();
   modal.open();
+  syncAutoHeight(ta, 68, 340);
+  return modal;
 }
 
 /**
@@ -960,6 +1180,7 @@ export function mountProfileScreen(containerEl, {
         tab: activeSubTab,
         instanceUrl: primary.instanceUrl || 'https://mastodon.social',
       });
+      ownItems = await enrichUnifiedItemsMetrics(ownItems);
       if (activeSubTab === 'posts') {
         void syncRecentUserPostsToSanctuary({ preloadedItems: ownItems }).catch(() => {});
       }
@@ -1139,7 +1360,10 @@ export function mountProfileScreen(containerEl, {
         const btn = doc.createElement('button');
         btn.type = 'button';
         btn.className = `stage-tab-btn${activeSubTab === id ? ' active' : ''}`;
-        btn.textContent = label;
+        const labelEl = doc.createElement('span');
+        labelEl.className = 'stage-tab-label';
+        labelEl.textContent = label;
+        btn.appendChild(labelEl);
         btn.addEventListener('click', () => {
           activeSubTab = id;
           renderSubTabs();
@@ -1195,6 +1419,7 @@ export function mountProfileScreen(containerEl, {
             openEditPostDialog(p, {
               onSaved: (updated) => {
                 ownItems = ownItems.map((it) => (it.id === updated.id ? updated : it));
+                mutatePostAcrossStreams(updated.id, () => updated);
                 renderPosts();
               },
             });
@@ -1214,13 +1439,16 @@ export function mountProfileScreen(containerEl, {
                 ? 'Delete this post from Mastodon and all linked bridges?'
                 : 'Delete this Mastodon post?',
               async () => {
-                await deleteUnified(p);
+                const res = await deleteUnified(p);
                 ownItems = ownItems.filter((it) => it.id !== p.id);
                 removePostAcrossStreams(p.id);
                 if (activeSubTab === 'posts') {
                   void syncRecentUserPostsToSanctuary({ preloadedItems: ownItems }).catch(() => {});
                 }
                 renderPosts();
+                if (res?.warnings?.length > 0) {
+                  showAlert('Bridge Delete Warning', res.warnings.join('\n\n'));
+                }
               }
             );
           },

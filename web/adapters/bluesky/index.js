@@ -1,12 +1,15 @@
 import { SocialAdapter } from '../base.js';
-import { plainTextToHtml, toUnifiedItem } from '../../core/schema/unifiedItem.js';
+import { toUnifiedItem } from '../../core/schema/unifiedItem.js';
 import {
   createBskyPost,
   deleteBskyPost,
+  getBskyPostsByUris,
   getBskyTimeline,
   likeBskyPost,
   listBskyNotifications,
+  renderBskyRichTextToHtml,
   repostBskyPost,
+  updateBskyNotificationsSeen,
   uploadBskyBlob,
 } from '../../queries/bluesky.js';
 
@@ -46,11 +49,38 @@ export class BlueskyAdapter extends SocialAdapter {
       });
       uploadedImages.push({ alt: att.altText || att.alt_text || '', blob: uploadedBlob });
     }
+    let externalEmbed = null;
+    if (uploadedImages.length === 0 && options.externalEmbed?.url) {
+      externalEmbed = { ...options.externalEmbed };
+      if (!externalEmbed.thumb && typeof externalEmbed.image === 'string' && /^https:\/\//i.test(externalEmbed.image)) {
+        try {
+          const doFetch = this.fetchImpl || globalThis.fetch;
+          if (typeof doFetch === 'function') {
+            const imgRes = await doFetch(externalEmbed.image);
+            if (imgRes.ok) {
+              const ctype = String(imgRes.headers?.get?.('content-type') || 'image/jpeg').split(';')[0].trim().toLowerCase();
+              const imgBlob = await imgRes.blob();
+              if (ctype.startsWith('image/') && imgBlob.size > 0 && imgBlob.size <= 950_000) {
+                const upThumb = await uploadBskyBlob({
+                  ...this._authArgs(),
+                  blob: imgBlob,
+                  mimeType: ctype,
+                });
+                if (upThumb) externalEmbed.thumb = upThumb;
+              }
+            }
+          }
+        } catch {
+          // Non-fatal on cross-origin or missing thumbnail fetch
+        }
+      }
+    }
     const created = await createBskyPost({
       ...this._authArgs(),
       repo: this.did,
       text: draft,
       images: uploadedImages,
+      externalEmbed,
       reply: options.reply || null,
     });
     const uri = created?.uri || '';
@@ -60,7 +90,7 @@ export class BlueskyAdapter extends SocialAdapter {
       id: `bluesky:${uri || cid}`,
       protocol: 'bluesky',
       url: this.handle && rkey ? `https://bsky.app/profile/${this.handle}/post/${rkey}` : '',
-      content_html: plainTextToHtml(draft),
+      content_html: renderBskyRichTextToHtml(draft),
       content_text: String(draft || ''),
       date_published: new Date().toISOString(),
       author: {
@@ -78,6 +108,7 @@ export class BlueskyAdapter extends SocialAdapter {
           cid,
           ...(options.reply ? { reply: options.reply } : {}),
         },
+        ...(externalEmbed ? { linkCard: options.externalEmbed } : {}),
       },
     };
   }
@@ -92,7 +123,11 @@ export class BlueskyAdapter extends SocialAdapter {
     const item = toUnifiedItem(targetItem);
     const meta = item._meta?.bluesky || {};
     const uri = meta.uri || item.id.replace(/^bluesky:/, '');
-    const cid = meta.cid || '';
+    let cid = meta.cid || '';
+    if (uri && !cid) {
+      const byUri = await getBskyPostsByUris({ ...this._authArgs(), uris: [uri] }).catch(() => ({}));
+      cid = byUri?.[uri]?._meta?.bluesky?.cid || '';
+    }
     const parentRef = { uri, cid };
     const rootCandidate = meta.reply?.root;
     const rootRef = rootCandidate?.uri && rootCandidate?.cid
@@ -155,7 +190,7 @@ export class BlueskyAdapter extends SocialAdapter {
     const data = await listBskyNotifications({ ...this._authArgs(), cursor, limit });
     const rows = Array.isArray(data?.notifications) ? data.notifications : [];
     const allowReasons = new Set(['reply', 'mention', 'quote', 'like', 'repost', 'follow']);
-    return rows
+    const items = rows
       .filter((r) => allowReasons.has(r.reason))
       .map((r) => {
         const h = r.author?.handle || r.author?.did || '';
@@ -169,25 +204,83 @@ export class BlueskyAdapter extends SocialAdapter {
         const text = r.record?.text || '';
         const published = r.indexedAt || r.record?.createdAt || new Date().toISOString();
         const rkey = String(r.uri || '').split('/').pop() || '';
+        const subjectUri = String(
+          r.reasonSubject || r.record?.subject?.uri || r.record?.reply?.parent?.uri || ''
+        );
         return {
           id: `bluesky:notif:${r.cid || r.uri || published}:${r.reason}`,
           protocol: 'bluesky',
           url: h && rkey ? `https://bsky.app/profile/${h}/post/${rkey}` : actor.url,
-          content_html: plainTextToHtml(text),
+          content_html: renderBskyRichTextToHtml(text, r.record?.facets),
           content_text: text,
           date_published: published,
           author: actor,
           attachments: [],
           metrics: { replies: 0, reposts: 0, likes: 0 },
           _meta: {
-            bluesky: { uri: r.uri || '', cid: r.cid || '' },
+            bluesky: {
+              uri: r.uri || '',
+              cid: r.cid || '',
+              ...(subjectUri ? { subjectUri } : {}),
+            },
             notification: {
               notifId: `bsky:${r.cid || r.uri || published}`,
               type: r.reason,
               actor,
+              ...(subjectUri ? { targetPostUri: subjectUri } : {}),
+              ...(r.uri ? { notifRecordUri: r.uri } : {}),
+              ...(typeof r.isRead === 'boolean' ? { isRead: r.isRead } : {}),
             },
           },
         };
       });
+
+    const subjectUris = [
+      ...new Set(
+        items
+          .map((it) => it._meta?.bluesky?.subjectUri || '')
+          .filter((u) => u.startsWith('at://'))
+      ),
+    ].slice(0, 25);
+
+    if (subjectUris.length > 0) {
+      const postsByUri = await getBskyPostsByUris({ uris: subjectUris, ...this._authArgs() }).catch(() => ({}));
+      for (const it of items) {
+        const subjUri = it._meta?.bluesky?.subjectUri || '';
+        const rawSubj = subjUri ? postsByUri[subjUri] : null;
+        if (!rawSubj) continue;
+        const subj = toUnifiedItem(rawSubj);
+        it._meta.notification.targetPost = {
+          id: subj.id,
+          uri: subjUri,
+          cid: subj._meta?.bluesky?.cid || '',
+          text: subj.content_text || '',
+          url: subj.url || '',
+          attachments: subj.attachments || [],
+          metrics: { ...(subj.metrics || { likes: 0, replies: 0, reposts: 0 }) },
+        };
+        const kind = it._meta.notification.type;
+        if (kind === 'like' || kind === 'repost') {
+          it.content_text = subj.content_text || '';
+          it.content_html = subj.content_html || '';
+          it.attachments = subj.attachments || [];
+          it.url = subj.url || it.url;
+          it.metrics = { ...(subj.metrics || { likes: 0, replies: 0, reposts: 0 }) };
+          it._meta.bluesky.uri = subjUri;
+          it._meta.bluesky.cid = subj._meta?.bluesky?.cid || it._meta.bluesky.cid;
+        } else if (kind === 'reply' || kind === 'quote' || kind === 'mention') {
+          it._meta.notification.targetMetrics = { ...(subj.metrics || { likes: 0, replies: 0, reposts: 0 }) };
+        }
+      }
+    }
+    return items;
+  }
+
+  async updateNotificationsSeen(seenAt = '') {
+    await updateBskyNotificationsSeen({
+      ...this._authArgs(),
+      ...(seenAt ? { seenAt } : {}),
+    });
+    return true;
   }
 }

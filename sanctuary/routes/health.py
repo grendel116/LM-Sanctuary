@@ -142,12 +142,15 @@ def mobile_health():
                 "last_snippet": last_snippet,
             })
 
+    from core.feed_tuning import get_feed_profile_updated_at
+
     return jsonify({
         "status": "online",
         "gpu_mode": gpu_mode,
         "active_model": active_model,
         "active_program": active_program,
         "generating_sessions": gen_sessions,
+        "feed_profile_updated_at": get_feed_profile_updated_at(),
         "programs": programs,
     })
 

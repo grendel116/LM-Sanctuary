@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import html
 import re
+import time
 from datetime import datetime, timezone
 from typing import Any, Callable
 from urllib.parse import urlparse
@@ -141,6 +142,7 @@ class BlueskyAdapter(SocialAdapter):
         self.refresh_jwt = str(refresh_jwt or "")
         self.on_session_refreshed = on_session_refreshed
         self._client = http_client or httpx.Client(timeout=20.0)
+        self._metrics_cache: dict[str, tuple[float, dict[str, int]]] = {}
 
     def _xrpc(
         self,
@@ -316,8 +318,32 @@ class BlueskyAdapter(SocialAdapter):
                 blob = self.upload_blob(raw_bytes, mime)
                 if blob:
                     images_embed.append({"alt": str(att.get("alt_text") or ""), "image": blob})
+        resolved_ext_card: dict[str, Any] | None = None
         if images_embed:
             record["embed"] = {"$type": "app.bsky.embed.images", "images": images_embed}
+        elif isinstance(opts.get("external_embed"), dict):
+            ext = opts["external_embed"]
+            ext_url = str(ext.get("url") or "").strip()
+            if ext_url.startswith("https://"):
+                ext_payload: dict[str, Any] = {
+                    "uri": ext_url,
+                    "title": str(ext.get("title") or ext_url)[:300],
+                    "description": str(ext.get("description") or "")[:1000],
+                }
+                img_url = str(ext.get("image") or "").strip()
+                if img_url.startswith("https://"):
+                    try:
+                        from social.link_preview import fetch_public_image_bytes
+
+                        fetched = fetch_public_image_bytes(img_url, http_client=self._client)
+                        if fetched:
+                            thumb_blob = self.upload_blob(fetched[0], fetched[1])
+                            if thumb_blob:
+                                ext_payload["thumb"] = thumb_blob
+                    except Exception:
+                        pass
+                record["embed"] = {"$type": "app.bsky.embed.external", "external": ext_payload}
+                resolved_ext_card = dict(ext)
 
         created = self._xrpc(
             "com.atproto.repo.createRecord",
@@ -327,6 +353,9 @@ class BlueskyAdapter(SocialAdapter):
         uri = str(created.get("uri") or "")
         cid = str(created.get("cid") or "")
         rkey = _rkey_from_uri(uri)
+        out_meta: dict[str, Any] = {"bluesky": {"uri": uri, "cid": cid}}
+        if resolved_ext_card:
+            out_meta["linkCard"] = resolved_ext_card
         return {
             "id": f"bluesky:{uri or cid}",
             "protocol": "bluesky",
@@ -343,7 +372,7 @@ class BlueskyAdapter(SocialAdapter):
             },
             "attachments": [],
             "metrics": {"replies": 0, "reposts": 0, "likes": 0},
-            "_meta": {"bluesky": {"uri": uri, "cid": cid}},
+            "_meta": out_meta,
         }
 
     def delete(self, native_meta: dict[str, Any]) -> bool:
@@ -351,11 +380,17 @@ class BlueskyAdapter(SocialAdapter):
         rkey = _rkey_from_uri(uri)
         if not rkey:
             return False
-        self._xrpc(
-            "com.atproto.repo.deleteRecord",
-            method="POST",
-            json_body={"repo": self.did, "collection": "app.bsky.feed.post", "rkey": rkey},
-        )
+        try:
+            self._xrpc(
+                "com.atproto.repo.deleteRecord",
+                method="POST",
+                json_body={"repo": self.did, "collection": "app.bsky.feed.post", "rkey": rkey},
+            )
+        except RuntimeError as exc:
+            msg = str(exc)
+            if "404" in msg or "RecordNotFound" in msg or "Could not locate record" in msg:
+                return True
+            raise
         return True
 
     def reply(
@@ -368,6 +403,14 @@ class BlueskyAdapter(SocialAdapter):
         bsky_meta = target_item.get("_meta", {}).get("bluesky") or {}
         uri = str(bsky_meta.get("uri") or target_item.get("id", "").removeprefix("bluesky:"))
         cid = str(bsky_meta.get("cid") or "")
+        if uri and not cid:
+            try:
+                data = self._xrpc_public_read("app.bsky.feed.getPosts", params={"uris": [uri]})
+                posts = data.get("posts") or []
+                if posts and isinstance(posts[0], dict):
+                    cid = str(posts[0].get("cid") or "")
+            except Exception:
+                cid = ""
         if not uri or not cid:
             raise ValueError("Target item missing Bluesky uri and cid")
         parent_ref = {"uri": uri, "cid": cid}
@@ -450,11 +493,66 @@ class BlueskyAdapter(SocialAdapter):
         if cursor:
             params["cursor"] = cursor
         data = self._xrpc("app.bsky.notification.listNotifications", params=params)
-        return [
+        items = [
             normalize_bluesky_notification(row)
             for row in data.get("notifications", [])
             if row.get("reason") in ("reply", "mention", "quote", "like", "repost", "follow")
         ]
+        subject_uris = list(
+            dict.fromkeys(
+                u
+                for it in items
+                for u in [str(((it.get("_meta") or {}).get("bluesky") or {}).get("subjectUri") or "")]
+                if u.startswith("at://")
+            )
+        )[:25]
+        if subject_uris:
+            try:
+                posts_res = self._xrpc_public_read("app.bsky.feed.getPosts", params={"uris": subject_uris})
+                posts_by_uri: dict[str, dict[str, Any]] = {}
+                for raw_post in posts_res.get("posts") or []:
+                    if isinstance(raw_post, dict) and raw_post.get("uri"):
+                        posts_by_uri[str(raw_post["uri"])] = normalize_bluesky_post({"post": raw_post})
+                for it in items:
+                    meta = it.setdefault("_meta", {})
+                    bsky_meta = meta.setdefault("bluesky", {})
+                    notif_meta = meta.setdefault("notification", {})
+                    subj_uri = str(bsky_meta.get("subjectUri") or "")
+                    subj = posts_by_uri.get(subj_uri)
+                    if not subj:
+                        continue
+                    notif_meta["targetPost"] = {
+                        "id": subj.get("id") or "",
+                        "uri": subj_uri,
+                        "cid": str((subj.get("_meta", {}).get("bluesky") or {}).get("cid") or ""),
+                        "text": subj.get("content_text") or "",
+                        "url": subj.get("url") or "",
+                        "attachments": subj.get("attachments") or [],
+                        "metrics": dict(subj.get("metrics") or {}),
+                    }
+                    kind = str(notif_meta.get("type") or "")
+                    if kind in ("like", "repost"):
+                        it["content_text"] = subj.get("content_text") or ""
+                        it["content_html"] = subj.get("content_html") or ""
+                        it["attachments"] = subj.get("attachments") or []
+                        it["url"] = subj.get("url") or it.get("url") or ""
+                        it["metrics"] = dict(subj.get("metrics") or {})
+                        bsky_meta["uri"] = subj_uri
+                        bsky_meta["cid"] = str((subj.get("_meta", {}).get("bluesky") or {}).get("cid") or bsky_meta.get("cid") or "")
+                    elif kind in ("reply", "quote", "mention"):
+                        notif_meta["targetMetrics"] = dict(subj.get("metrics") or {})
+            except Exception:
+                pass
+        return items
+
+    def update_notifications_seen(self, seen_at: str = "") -> bool:
+        """Mark Bluesky notifications as seen up to seen_at."""
+        self._xrpc(
+            "app.bsky.notification.updateSeen",
+            method="POST",
+            json_body={"seenAt": seen_at or _now_iso()},
+        )
+        return True
 
     @staticmethod
     def _build_rel(viewer: dict[str, Any] | None) -> dict[str, Any]:
@@ -550,6 +648,14 @@ class BlueskyAdapter(SocialAdapter):
 
     def list_followers(self, actor: str, *, cursor: str = "", limit: int = 40) -> dict[str, Any]:
         return self._fetch_graph_page("app.bsky.graph.getFollowers", "followers", actor, cursor=cursor, limit=limit)
+
+    def list_mutes(self, limit: int = 100) -> list[dict[str, Any]]:
+        data = self._xrpc("app.bsky.graph.getMutes", params={"limit": min(max(int(limit), 1), 100)})
+        return [self._normalize_actor_summary(a) for a in (data.get("mutes") or []) if isinstance(a, dict)]
+
+    def list_blocks(self, limit: int = 100) -> list[dict[str, Any]]:
+        data = self._xrpc("app.bsky.graph.getBlocks", params={"limit": min(max(int(limit), 1), 100)})
+        return [self._normalize_actor_summary(a) for a in (data.get("blocks") or []) if isinstance(a, dict)]
 
     def search_actors(self, query: str, *, limit: int = 15) -> list[dict[str, Any]]:
         data = self._xrpc_public_read(
@@ -716,6 +822,47 @@ class BlueskyAdapter(SocialAdapter):
         )
         return [normalize_bluesky_post(it) for it in data.get("feed", [])]
 
+    def get_posts_metrics(self, uris: list[str]) -> dict[str, dict[str, int]]:
+        """Batch-fetch engagement counts (likes, replies, reposts + quotes) via app.bsky.feed.getPosts."""
+        clean_uris: list[str] = []
+        seen: set[str] = set()
+        for raw in uris or []:
+            u = str(raw or "").removeprefix("bluesky:").strip()
+            if u.startswith("at://") and u not in seen:
+                seen.add(u)
+                clean_uris.append(u)
+        if not clean_uris:
+            return {}
+
+        now = time.time()
+        out: dict[str, dict[str, int]] = {}
+        to_fetch: list[str] = []
+        for u in clean_uris:
+            cached = self._metrics_cache.get(u)
+            if cached and cached[0] > now:
+                out[u] = dict(cached[1])
+            else:
+                to_fetch.append(u)
+
+        for start in range(0, len(to_fetch), 25):
+            chunk = to_fetch[start : start + 25]
+            try:
+                data = self._xrpc_public_read("app.bsky.feed.getPosts", params={"uris": chunk})
+                for post in data.get("posts") or []:
+                    if not isinstance(post, dict) or not post.get("uri"):
+                        continue
+                    uri_val = str(post["uri"])
+                    m = {
+                        "likes": int(post.get("likeCount") or 0),
+                        "replies": int(post.get("replyCount") or 0),
+                        "reposts": int(post.get("repostCount") or 0) + int(post.get("quoteCount") or 0),
+                    }
+                    out[uri_val] = m
+                    self._metrics_cache[uri_val] = (now + 60.0, dict(m))
+            except Exception:
+                continue
+        return out
+
     def get_post_thread(self, uri: str, *, depth: int = 6, parent_height: int = 20) -> dict[str, Any]:
         clean_uri = str(uri or "").strip()
         if clean_uri.startswith("bluesky:"):
@@ -816,11 +963,24 @@ class BlueskyAdapter(SocialAdapter):
 
     def _toggle_graph_record(self, collection: str, target_did: str, record_uri: str | None, undo: bool) -> tuple[bool, str | None]:
         if undo:
-            if record_uri:
+            resolved_uri = record_uri
+            if not resolved_uri and target_did:
+                try:
+                    listed = self._xrpc(
+                        "com.atproto.repo.listRecords",
+                        params={"repo": self.did, "collection": collection, "limit": 100},
+                    )
+                    for rec in listed.get("records") or []:
+                        if isinstance(rec, dict) and (rec.get("value") or {}).get("subject") == target_did and rec.get("uri"):
+                            resolved_uri = str(rec["uri"])
+                            break
+                except Exception:
+                    resolved_uri = None
+            if resolved_uri:
                 self._xrpc(
                     "com.atproto.repo.deleteRecord",
                     method="POST",
-                    json_body={"repo": self.did, "collection": collection, "rkey": _rkey_from_uri(record_uri)},
+                    json_body={"repo": self.did, "collection": collection, "rkey": _rkey_from_uri(resolved_uri)},
                 )
             return False, None
         res = self._xrpc(

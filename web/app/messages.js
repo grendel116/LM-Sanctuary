@@ -199,13 +199,19 @@ export function mountMessagesScreen(containerEl, {
   directTabBtn.type = 'button';
   directTabBtn.className = 'stage-tab-btn';
   directTabBtn.dataset.messagesTab = 'direct';
-  directTabBtn.textContent = 'Direct';
+  const directTabLabel = doc.createElement('span');
+  directTabLabel.className = 'stage-tab-label';
+  directTabLabel.textContent = 'Direct';
+  directTabBtn.appendChild(directTabLabel);
 
   const programsTabBtn = doc.createElement('button');
   programsTabBtn.type = 'button';
   programsTabBtn.className = 'stage-tab-btn';
   programsTabBtn.dataset.messagesTab = 'programs';
-  programsTabBtn.textContent = 'Programs';
+  const programsTabLabel = doc.createElement('span');
+  programsTabLabel.className = 'stage-tab-label';
+  programsTabLabel.textContent = 'Programs';
+  programsTabBtn.appendChild(programsTabLabel);
 
   tabsRow.append(directTabBtn, programsTabBtn);
   stageHeader.append(titleEl, tabsRow);

@@ -135,6 +135,18 @@ class SocialSQLiteStore:
                     updated_at REAL NOT NULL,
                     PRIMARY KEY (store_name, key)
                 );
+
+                CREATE TABLE IF NOT EXISTS moderated_accounts (
+                    canonical_actor TEXT PRIMARY KEY,
+                    kind TEXT NOT NULL,
+                    protocol TEXT NOT NULL,
+                    handle TEXT NOT NULL,
+                    display_name TEXT NOT NULL DEFAULT '',
+                    federated_acct TEXT NOT NULL DEFAULT '',
+                    created_ts REAL NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_moderated_kind
+                    ON moderated_accounts (kind, created_ts DESC);
                 """
             )
 
@@ -264,15 +276,21 @@ class SocialSQLiteStore:
         bluesky_cid: str = "",
         threads_post_id: str = "",
         parent_canonical_id: str = "",
+        replace: bool = False,
     ) -> dict[str, Any]:
         now = time.time()
-        with self._lock, self._connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO linked_posts (
-                    canonical_id, mastodon_status_id, mastodon_instance,
-                    bluesky_uri, bluesky_cid, threads_post_id, parent_canonical_id, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        update_sql = (
+            """
+                ON CONFLICT(canonical_id) DO UPDATE SET
+                    mastodon_status_id=excluded.mastodon_status_id,
+                    mastodon_instance=COALESCE(NULLIF(excluded.mastodon_instance, ''), linked_posts.mastodon_instance),
+                    bluesky_uri=excluded.bluesky_uri,
+                    bluesky_cid=excluded.bluesky_cid,
+                    threads_post_id=excluded.threads_post_id,
+                    parent_canonical_id=excluded.parent_canonical_id
+            """
+            if replace
+            else """
                 ON CONFLICT(canonical_id) DO UPDATE SET
                     mastodon_status_id=COALESCE(NULLIF(excluded.mastodon_status_id, ''), linked_posts.mastodon_status_id),
                     mastodon_instance=COALESCE(NULLIF(excluded.mastodon_instance, ''), linked_posts.mastodon_instance),
@@ -280,6 +298,16 @@ class SocialSQLiteStore:
                     bluesky_cid=COALESCE(NULLIF(excluded.bluesky_cid, ''), linked_posts.bluesky_cid),
                     threads_post_id=COALESCE(NULLIF(excluded.threads_post_id, ''), linked_posts.threads_post_id),
                     parent_canonical_id=COALESCE(NULLIF(excluded.parent_canonical_id, ''), linked_posts.parent_canonical_id)
+            """
+        )
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                f"""
+                INSERT INTO linked_posts (
+                    canonical_id, mastodon_status_id, mastodon_instance,
+                    bluesky_uri, bluesky_cid, threads_post_id, parent_canonical_id, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                {update_sql}
                 """,
                 (
                     canonical_id,
@@ -328,17 +356,38 @@ class SocialSQLiteStore:
             "parentCanonicalId": row["parent_canonical_id"] or None,
         }
 
+    def list_linked_posts(self, limit: int = 50) -> list[dict[str, Any]]:
+        with self._lock, self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM linked_posts ORDER BY created_at DESC LIMIT ?",
+                (max(1, int(limit)),),
+            ).fetchall()
+        return [self._row_to_linked_dict(r) for r in rows]
+
     def find_linked_post_group(self, any_id: str) -> list[dict[str, Any]]:
         """Find the linked record and any child thread replies linked under it."""
         root = self.find_linked_post(any_id)
         if not root:
             return []
+        parent_cid = str(root.get("parentCanonicalId") or "").strip()
+        if parent_cid and parent_cid != root["canonical_id"]:
+            parent_rec = self.find_linked_post(parent_cid)
+            if parent_rec:
+                root = parent_rec
         with self._lock, self._connect() as conn:
             children = conn.execute(
                 "SELECT * FROM linked_posts WHERE parent_canonical_id = ?",
                 (root["canonical_id"],),
             ).fetchall()
-        return [root] + [self._row_to_linked_dict(r) for r in children]
+        return [root] + [self._row_to_linked_dict(r) for r in children if r["canonical_id"] != root["canonical_id"]]
+
+    def delete_linked_children(self, parent_canonical_id: str) -> int:
+        clean = str(parent_canonical_id or "").strip()
+        if not clean:
+            return 0
+        with self._lock, self._connect() as conn:
+            cur = conn.execute("DELETE FROM linked_posts WHERE parent_canonical_id = ?", (clean,))
+            return cur.rowcount
 
     def delete_linked_post(self, any_id: str) -> int:
         group = self.find_linked_post_group(any_id)
@@ -477,6 +526,21 @@ class SocialSQLiteStore:
                     ),
                 )
 
+    def get_cached_item_by_id(self, any_id: str) -> dict[str, Any] | None:
+        raw = str(any_id or "").strip()
+        if not raw:
+            return None
+        candidates = [raw]
+        if not raw.startswith(("mastodon:", "bluesky:", "threads:")):
+            candidates.extend([f"mastodon:{raw}", f"bluesky:{raw}", f"threads:{raw}"])
+        placeholders = ",".join("?" for _ in candidates)
+        with self._lock, self._connect() as conn:
+            row = conn.execute(
+                f"SELECT item_json FROM unified_items WHERE id IN ({placeholders}) ORDER BY published_ts DESC LIMIT 1",
+                candidates,
+            ).fetchone()
+        return json.loads(row["item_json"]) if row else None
+
     def get_notifications(self, limit: int = 50) -> list[dict[str, Any]]:
         with self._lock, self._connect() as conn:
             rows = conn.execute(
@@ -484,6 +548,18 @@ class SocialSQLiteStore:
                 (limit,),
             ).fetchall()
         return [json.loads(r["item_json"]) for r in rows]
+
+    def delete_notifications(self, notif_ids: list[str] | None = None, *, clear_all: bool = False) -> int:
+        with self._lock, self._connect() as conn:
+            if clear_all:
+                cur = conn.execute("DELETE FROM notifications")
+                return cur.rowcount
+            clean_ids = [str(nid or "").strip() for nid in (notif_ids or []) if str(nid or "").strip()]
+            if not clean_ids:
+                return 0
+            placeholders = ",".join("?" for _ in clean_ids)
+            cur = conn.execute(f"DELETE FROM notifications WHERE id IN ({placeholders})", clean_ids)
+            return cur.rowcount
 
     # ── Keyword Filters & Lists Cache ────────────────────────────────────
 
@@ -679,3 +755,85 @@ class SocialSQLiteStore:
     def kv_clear(self, store_name: str) -> None:
         with self._lock, self._connect() as conn:
             conn.execute("DELETE FROM kv_store WHERE store_name = ?", (store_name,))
+
+    # ── Local Cross-Network Moderation (e.g. Threads Archive Blocks/Mutes) ─
+
+    @staticmethod
+    def _norm_mod_kind(kind: str) -> str:
+        raw = str(kind or "").strip().lower()
+        return "mute" if raw in ("mute", "mutes") else "block"
+
+    def upsert_moderated_accounts(self, entries: list[dict[str, Any]]) -> int:
+        if not entries:
+            return 0
+        now_ts = time.time()
+        with self._lock, self._connect() as conn:
+            count = 0
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                handle = str(entry.get("handle") or "").strip().lstrip("@").lower()
+                proto = str(entry.get("protocol") or "threads").strip().lower()
+                canon = str(entry.get("canonical_actor") or canonicalize_actor_handle(handle, proto))
+                kind = self._norm_mod_kind(entry.get("kind") or "block")
+                if not canon or not handle:
+                    continue
+                conn.execute(
+                    """
+                    INSERT INTO moderated_accounts
+                        (canonical_actor, kind, protocol, handle, display_name, federated_acct, created_ts)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(canonical_actor) DO UPDATE SET
+                        kind=excluded.kind,
+                        protocol=excluded.protocol,
+                        handle=excluded.handle,
+                        display_name=excluded.display_name,
+                        federated_acct=excluded.federated_acct,
+                        created_ts=excluded.created_ts
+                    """,
+                    (
+                        canon,
+                        kind,
+                        proto,
+                        handle,
+                        str(entry.get("display_name") or handle),
+                        str(entry.get("federated_acct") or handle),
+                        float(entry.get("created_ts") or now_ts),
+                    ),
+                )
+                count += 1
+            return count
+
+    def list_moderated_accounts(self, kind: str) -> list[dict[str, Any]]:
+        clean_kind = self._norm_mod_kind(kind)
+        with self._lock, self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM moderated_accounts WHERE kind = ? ORDER BY created_ts DESC",
+                (clean_kind,),
+            ).fetchall()
+        return [
+            {
+                "id": r["canonical_actor"],
+                "protocol": r["protocol"],
+                "network": r["protocol"],
+                "username": r["handle"],
+                "acct": r["federated_acct"] or r["handle"],
+                "display_name": r["display_name"] or r["handle"],
+                "avatar_url": "",
+                "localModeration": True,
+            }
+            for r in rows
+        ]
+
+    def delete_moderated_account(self, kind: str, actor_or_handle: str) -> int:
+        clean_kind = self._norm_mod_kind(kind)
+        raw = str(actor_or_handle or "").strip()
+        clean_h = raw.removeprefix("threads:").removeprefix("bluesky:").removeprefix("mastodon:").lstrip("@").split("@")[0].lower()
+        candidates = {raw, raw.lower(), f"threads:{clean_h}", f"bluesky:{clean_h}", clean_h, f"{clean_h}@threads.net"}
+        placeholders = ",".join("?" for _ in candidates)
+        with self._lock, self._connect() as conn:
+            cur = conn.execute(
+                f"DELETE FROM moderated_accounts WHERE kind = ? AND (canonical_actor IN ({placeholders}) OR handle IN ({placeholders}) OR federated_acct IN ({placeholders}))",
+                [clean_kind, *candidates, *candidates, *candidates],
+            )
+            return cur.rowcount

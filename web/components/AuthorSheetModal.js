@@ -6,6 +6,7 @@ import {
 } from '../queries/fediverse.js';
 import {
   addAccountToMastodonList,
+  deleteUnified,
   fetchAuthorWithRelationship,
   fetchLists,
   fetchOwnStatuses,
@@ -18,10 +19,11 @@ import {
 } from '../queries/socialClient.js';
 import { authStore } from '../state/authStore.js';
 import { prefillReply } from '../state/composeStore.js';
+import { mutatePostAcrossStreams, removePostAcrossStreams } from '../state/feedStore.js';
 import { connectionStore } from '../state/sanctuary/connection.js';
 import { openFollowGraphModal } from './FollowGraphModal.js';
 import { createPostCard } from './PostCard.js';
-import { createClassicModalDialog } from './sanctuary/SanctuaryDialog.js';
+import { createClassicModalDialog, showAlert, showConfirm } from './sanctuary/SanctuaryDialog.js';
 import { createLoadingState } from './ui/index.js';
 
 /**
@@ -36,24 +38,36 @@ export function openAuthorSheetModal({
   onReply,
   onOpenPostThread,
   onAskSanctuary,
+  onEditPost,
 } = {}) {
   const doc = globalThis.document;
   if (!author?.id && !author?.handle && !author?.acct) return null;
 
   const rawAcct = String(author.handle || author.acct || '').trim().replace(/^@/, '');
   const isBridgyBluesky = rawAcct.toLowerCase().endsWith('@bsky.brid.gy');
+  const isThreads = Boolean(
+    !isBridgyBluesky
+    && (
+      author?.protocol === 'threads'
+      || author?.network === 'threads'
+      || item?.protocol === 'threads'
+      || String(author?.url || '').includes('threads.net')
+    )
+  );
   const nativeAcct = isBridgyBluesky ? rawAcct.slice(0, -'@bsky.brid.gy'.length) : rawAcct;
 
-  const protocol = (
-    isBridgyBluesky
-    || author?.protocol === 'bluesky'
-    || author?.network === 'bluesky'
-    || item?.protocol === 'bluesky'
-    || String(author?.id || '').startsWith('did:')
-    || String(author?.url || '').includes('bsky.app')
-  )
-    ? 'bluesky'
-    : 'mastodon';
+  const protocol = isThreads
+    ? 'threads'
+    : (
+        isBridgyBluesky
+        || author?.protocol === 'bluesky'
+        || author?.network === 'bluesky'
+        || item?.protocol === 'bluesky'
+        || String(author?.id || '').startsWith('did:')
+        || String(author?.url || '').includes('bsky.app')
+      )
+      ? 'bluesky'
+      : 'mastodon';
 
   let profile = {
     id: isBridgyBluesky && !String(author.id || '').startsWith('did:') ? '' : String(author.id || ''),
@@ -61,7 +75,11 @@ export function openAuthorSheetModal({
     acct: nativeAcct,
     avatar: cleanMastodonMediaUrl(author.avatar_url || author.avatar) || DEFAULT_AVATAR_DATA_URI,
     header: cleanMastodonMediaUrl(author.header_url || author.header),
-    url: author.url || (protocol === 'bluesky' && nativeAcct ? `https://bsky.app/profile/${nativeAcct}` : ''),
+    url: author.url || (
+      protocol === 'bluesky' && nativeAcct
+        ? `https://bsky.app/profile/${nativeAcct}`
+        : (protocol === 'threads' && nativeAcct ? `https://www.threads.net/@${nativeAcct}` : '')
+    ),
     note: '',
     fields: [],
     emojis: [],
@@ -70,6 +88,8 @@ export function openAuthorSheetModal({
     followersCount: 0,
     followingCount: 0,
     statusesCount: 0,
+    threadsLimited: false,
+    federatedMastodonId: '',
   };
   let statsLoaded = Boolean(author.followersCount || author.followingCount || author.statusesCount);
   let rel = author.viewer
@@ -152,8 +172,8 @@ export function openAuthorSheetModal({
     dn.className = 'profile-display-name';
     dn.textContent = profile.displayName || profile.acct;
     const protoBadge = doc.createElement('span');
-    protoBadge.className = 'post-protocol-badge';
-    protoBadge.textContent = protocol === 'bluesky' ? 'Bluesky' : 'Mastodon';
+    protoBadge.className = `post-protocol-badge post-protocol-badge--${protocol}`;
+    protoBadge.textContent = protocol === 'threads' ? 'Threads' : (protocol === 'bluesky' ? 'Bluesky' : 'Mastodon');
     titleLine.append(dn, protoBadge);
 
     const hdl = doc.createElement('span');
@@ -229,6 +249,21 @@ export function openAuthorSheetModal({
       const loadingLbl = doc.createElement('span');
       loadingLbl.textContent = 'Loading profile…';
       stats.appendChild(loadingLbl);
+    } else if (protocol === 'threads') {
+      if (Number(profile.statusesCount || 0) > 0) {
+        const postsLbl = doc.createElement('span');
+        postsLbl.textContent = `${Number(profile.statusesCount).toLocaleString()} Posts`;
+        stats.appendChild(postsLbl);
+      }
+      if (Number(profile.followersCount || 0) > 0) {
+        const followersLbl = doc.createElement('span');
+        followersLbl.textContent = `${Number(profile.followersCount).toLocaleString()} Followers`;
+        stats.appendChild(followersLbl);
+      } else {
+        const protoLbl = doc.createElement('span');
+        protoLbl.textContent = profile.federatedMastodonId ? 'Federated Threads account' : 'Threads account';
+        stats.appendChild(protoLbl);
+      }
     } else {
       const postsLbl = doc.createElement('span');
       postsLbl.textContent = `${Number(profile.statusesCount ?? 0).toLocaleString()} Posts`;
@@ -283,14 +318,19 @@ export function openAuthorSheetModal({
     const authSnapshot = authStore.get();
     const canInteract = protocol === 'bluesky'
       ? Boolean(authSnapshot.isBlueskyConnected)
-      : Boolean(authSnapshot.isMastodonConnected);
+      : (protocol === 'threads'
+        ? Boolean(authSnapshot.isMastodonConnected && profile.federatedMastodonId)
+        : Boolean(authSnapshot.isMastodonConnected));
 
     const actionsRow = doc.createElement('div');
     actionsRow.className = 'author-sheet-actions';
 
     if (canInteract) {
+      const actionTargetId = protocol === 'threads' && profile.federatedMastodonId
+        ? profile.federatedMastodonId
+        : profile.id;
       const actionOpts = {
-        protocol,
+        protocol: protocol === 'threads' ? 'mastodon' : protocol,
         followUri: rel?.followUri || null,
         blockUri: rel?.blockUri || null,
       };
@@ -301,7 +341,7 @@ export function openAuthorSheetModal({
       followBtn.textContent = rel?.following ? 'Following' : (rel?.requested ? 'Requested' : 'Follow');
       followBtn.addEventListener('click', () =>
         void runGraphAction(
-          () => toggleFollowAuthor(profile.id, Boolean(rel?.following), actionOpts),
+          () => toggleFollowAuthor(actionTargetId, Boolean(rel?.following), actionOpts),
           'Unable to update follow status.'
         )
       );
@@ -313,7 +353,7 @@ export function openAuthorSheetModal({
       muteBtn.textContent = rel?.muting ? 'Unmute' : 'Mute';
       muteBtn.addEventListener('click', () =>
         void runGraphAction(
-          () => toggleMuteAuthor(profile.id, Boolean(rel?.muting), actionOpts),
+          () => toggleMuteAuthor(actionTargetId, Boolean(rel?.muting), actionOpts),
           'Unable to update mute status.'
         )
       );
@@ -325,7 +365,7 @@ export function openAuthorSheetModal({
       blockBtn.textContent = rel?.blocking ? 'Unblock' : 'Block';
       blockBtn.addEventListener('click', () =>
         void runGraphAction(
-          () => toggleBlockAuthor(profile.id, Boolean(rel?.blocking), actionOpts),
+          () => toggleBlockAuthor(actionTargetId, Boolean(rel?.blocking), actionOpts),
           'Unable to update block status.'
         )
       );
@@ -334,7 +374,9 @@ export function openAuthorSheetModal({
     } else {
       const hint = doc.createElement('span');
       hint.className = 'classic-card-subtext';
-      hint.textContent = `Connect ${protocol === 'bluesky' ? 'Bluesky' : 'Mastodon'} under Profile → Accounts & Bridges to follow, mute, or block.`;
+      hint.textContent = protocol === 'threads'
+        ? 'Follow and moderation for Threads accounts are managed on Threads — use Open ↗.'
+        : `Connect ${protocol === 'bluesky' ? 'Bluesky' : 'Mastodon'} under Profile → Accounts & Bridges to follow, mute, or block.`;
       actionsRow.appendChild(hint);
     }
     hero.appendChild(actionsRow);
@@ -389,7 +431,9 @@ export function openAuthorSheetModal({
     } else if (recentPosts.length === 0) {
       const empty = doc.createElement('p');
       empty.className = 'empty-state';
-      empty.textContent = 'No public posts yet.';
+      empty.textContent = protocol === 'threads' && profile.threadsLimited
+        ? 'Threads does not expose other users’ timelines via the API — use Open ↗ to view their posts on Threads.'
+        : 'No public posts yet.';
       recentSection.appendChild(empty);
     } else {
       const connState = connectionStore.get();
@@ -428,6 +472,33 @@ export function openAuthorSheetModal({
                   onAskSanctuary(target);
                 }
               : null,
+            onEditPost: onEditPost
+              ? (target) => {
+                  onEditPost(target, (updated) => {
+                    if (!updated) return;
+                    recentPosts = recentPosts.map((x) => (x === target || (x.id && x.id === updated.id) ? updated : x));
+                    mutatePostAcrossStreams(updated.id, () => updated);
+                    render();
+                  });
+                }
+              : null,
+            onDeletePost: (target) => {
+              showConfirm(
+                'Delete Post',
+                target?._meta?.linkedIds?.blueskyUri || target?._meta?.linkedIds?.threadsPostId
+                  ? 'Delete this post from Mastodon and all linked bridges?'
+                  : 'Delete this post?',
+                async () => {
+                  const res = await deleteUnified(target);
+                  recentPosts = recentPosts.filter((x) => x !== target && (!target?.id || x.id !== target.id));
+                  removePostAcrossStreams(target?.id || target?.key);
+                  render();
+                  if (res?.warnings?.length > 0) {
+                    showAlert('Bridge Delete Warning', res.warnings.join('\n\n'));
+                  }
+                }
+              );
+            },
             showSanctuaryAction: showSanctuary,
           })
         );
@@ -470,19 +541,22 @@ export function openAuthorSheetModal({
           followersCount: detail.profile.followers_count ?? detail.profile.followersCount ?? 0,
           followingCount: detail.profile.following_count ?? detail.profile.followingCount ?? 0,
           statusesCount: detail.profile.statuses_count ?? detail.profile.statusesCount ?? 0,
+          threadsLimited: Boolean(detail.profile.threadsLimited),
+          federatedMastodonId: String(detail.profile.federatedMastodonId || profile.federatedMastodonId || ''),
         };
         statsLoaded = true;
       }
       rel = detail?.relationship || rel;
       heading.textContent = profile.displayName || `@${profile.acct}`;
 
-      const statusInstanceUrl = detail?.resolvedInstanceUrl || (protocol === 'mastodon' ? instanceUrl : 'https://bsky.app');
+      const statusInstanceUrl = detail?.resolvedInstanceUrl || (protocol === 'mastodon' ? instanceUrl : (protocol === 'threads' ? 'https://www.threads.net' : 'https://bsky.app'));
       const [statuses, userLists] = await Promise.all([
         fetchOwnStatuses(profile.id || profile.acct, {
           tab: 'posts',
           instanceUrl: statusInstanceUrl,
           protocol,
           acct: profile.acct,
+          federatedMastodonId: profile.federatedMastodonId || '',
         }).catch(() => []),
         protocol === 'mastodon' && authStore.get().isMastodonConnected
           ? fetchLists().catch(() => [])

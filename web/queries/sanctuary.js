@@ -740,3 +740,21 @@ export function syncMastodonUserProfileToSanctuary(profile, opts = {}) {
     ...opts,
   });
 }
+
+export function fetchSanctuaryFeedProfile(opts = {}) {
+  return requestNode('/api/feed_profile', {
+    background: true,
+    timeoutMs: 3000,
+    ...opts,
+  });
+}
+
+export function saveSanctuaryFeedProfile(profile, opts = {}) {
+  return requestNode('/api/feed_profile', {
+    method: 'PUT',
+    json: profile,
+    background: true,
+    timeoutMs: 3000,
+    ...opts,
+  });
+}

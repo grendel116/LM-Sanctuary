@@ -8,7 +8,7 @@ import re
 from datetime import datetime, timezone
 from html.parser import HTMLParser
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 ORIGIN_PROTOCOLS = ("mastodon", "bluesky", "threads")
 
@@ -241,16 +241,126 @@ def strip_html_to_text(raw_html: str) -> str:
     return re.sub(r"\n{3,}", "\n\n", text).strip()
 
 
+_URL_TEXT_RE = re.compile(r"(?:^|(?<=[\s(]))(https?://[^\s<>()\[\]{}\"']+)")
+
+
+def _linkify_line_fragment(fragment: str) -> str:
+    text = str(fragment or "")
+    if not text:
+        return ""
+    parts: list[str] = []
+    cursor = 0
+    for m in _URL_TEXT_RE.finditer(text):
+        token = m.group(1)
+        clean = token.rstrip(".,!?;:")
+        while clean.endswith(")") and clean.count(")") > clean.count("("):
+            clean = clean[:-1].rstrip(".,!?;:")
+        safe_url = _safe_href(clean) if clean else None
+        if not safe_url:
+            continue
+        if m.start(1) > cursor:
+            parts.append(html.escape(text[cursor:m.start(1)], quote=False))
+        parts.append(
+            f'<a href="{html.escape(safe_url, quote=True)}" rel="noopener noreferrer" target="_blank">'
+            f'{html.escape(clean, quote=False)}</a>'
+        )
+        suffix = token[len(clean):]
+        if suffix:
+            parts.append(html.escape(suffix, quote=False))
+        cursor = m.end(1)
+    if cursor < len(text):
+        parts.append(html.escape(text[cursor:], quote=False))
+    return "".join(parts)
+
+
 def plain_text_to_html(text: str) -> str:
-    """Convert plain-text social posts into paragraph-wrapped sanitized HTML."""
-    raw = str(text or "").strip()
+    """Convert plain-text social posts into paragraph-wrapped sanitized HTML with clickable URLs."""
+    raw = str(text or "").replace("\r\n", "\n").strip()
     if not raw:
         return ""
     blocks = re.split(r"\n{2,}", raw)
     return "".join(
-        f"<p>{html.escape(block, quote=False).replace(chr(10), '<br>')}</p>"
+        f"<p>{'<br>'.join(_linkify_line_fragment(line) for line in block.split(chr(10)))}</p>"
         for block in blocks
+        if block
     )
+
+
+def _render_bsky_facet_anchor(label: str, features: list[dict[str, Any]]) -> str:
+    for feat in features:
+        if not isinstance(feat, dict):
+            continue
+        ftype = str(feat.get("$type") or "")
+        if (ftype == "app.bsky.richtext.facet#link" or (not ftype and feat.get("uri"))) and feat.get("uri"):
+            safe_url = _safe_href(str(feat["uri"]))
+            if safe_url:
+                return (
+                    f'<a href="{html.escape(safe_url, quote=True)}" rel="noopener noreferrer" target="_blank">'
+                    f'{html.escape(label, quote=False)}</a>'
+                )
+        elif ftype == "app.bsky.richtext.facet#mention" and feat.get("did"):
+            href = f"https://bsky.app/profile/{quote(str(feat['did']), safe='')}"
+            return (
+                f'<a href="{html.escape(href, quote=True)}" class="mention" rel="noopener noreferrer" target="_blank">'
+                f'{html.escape(label, quote=False)}</a>'
+            )
+        elif ftype == "app.bsky.richtext.facet#tag" and feat.get("tag"):
+            href = f"https://bsky.app/hashtag/{quote(str(feat['tag']), safe='')}"
+            return (
+                f'<a href="{html.escape(href, quote=True)}" class="hashtag" rel="noopener noreferrer" target="_blank">'
+                f'{html.escape(label, quote=False)}</a>'
+            )
+    return _linkify_line_fragment(label)
+
+
+def bluesky_richtext_to_html(text: str, facets: list[dict[str, Any]] | None = None) -> str:
+    """Convert AT Protocol plain text + UTF-8 byte-indexed facets into paragraph-wrapped HTML."""
+    source = str(text or "")
+    if not source:
+        return ""
+    raw_bytes = source.encode("utf-8")
+    valid_facets = [
+        f for f in (facets or [])
+        if isinstance(f, dict)
+        and isinstance(f.get("index"), dict)
+        and isinstance(f["index"].get("byteStart"), int)
+        and isinstance(f["index"].get("byteEnd"), int)
+        and 0 <= f["index"]["byteStart"] < f["index"]["byteEnd"] <= len(raw_bytes)
+    ]
+    valid_facets.sort(key=lambda item: item["index"]["byteStart"])
+
+    inline_parts: list[str] = []
+    cursor = 0
+    for facet in valid_facets:
+        b_start = facet["index"]["byteStart"]
+        b_end = facet["index"]["byteEnd"]
+        if b_start < cursor:
+            continue
+        if b_start > cursor:
+            inline_parts.append(_linkify_line_fragment(raw_bytes[cursor:b_start].decode("utf-8", errors="replace")))
+        label = raw_bytes[b_start:b_end].decode("utf-8", errors="replace")
+        feats = facet.get("features") if isinstance(facet.get("features"), list) else []
+        inline_parts.append(_render_bsky_facet_anchor(label, feats))
+        cursor = b_end
+
+    if cursor < len(raw_bytes):
+        inline_parts.append(_linkify_line_fragment(raw_bytes[cursor:].decode("utf-8", errors="replace")))
+
+    assembled = "".join(inline_parts).replace("\r\n", "\n")
+    blocks = [b for b in re.split(r"\n{2,}", assembled) if b]
+    return "".join(f"<p>{b.replace(chr(10), '<br>')}</p>" for b in blocks)
+
+
+def _normalize_link_card(url_raw: Any, title_raw: Any = "", desc_raw: Any = "", image_raw: Any = "") -> dict[str, str] | None:
+    safe_url = _safe_href(str(url_raw or ""))
+    if not safe_url:
+        return None
+    return {
+        "url": safe_url,
+        "title": html.unescape(str(title_raw or "")),
+        "description": html.unescape(str(desc_raw or "")),
+        "image": str(image_raw or ""),
+    }
 
 
 def canonicalize_actor_handle(handle: str, protocol: str = "mastodon") -> str:
@@ -364,16 +474,28 @@ def normalize_mastodon_status(
         url = str(att.get("url") or att.get("remote_url") or att.get("preview_url") or "")
         if not url:
             continue
-        attachments.append({
+        orig_meta = (att.get("meta") or {}).get("original") if isinstance(att.get("meta"), dict) else {}
+        mapped_att: dict[str, Any] = {
             "url": url,
             "mime_type": _derive_mime_type(att),
             "alt_text": str(att.get("description") or ""),
-        })
+        }
+        if att.get("type"):
+            mapped_att["type"] = str(att["type"])
+        if att.get("preview_url"):
+            mapped_att["previewUrl"] = str(att["preview_url"])
+        if isinstance(orig_meta, dict):
+            if orig_meta.get("width"):
+                mapped_att["width"] = int(orig_meta["width"])
+            if orig_meta.get("height"):
+                mapped_att["height"] = int(orig_meta["height"])
+        attachments.append(mapped_att)
 
     mastodon_meta: dict[str, Any] = {
         "statusId": status_id,
         "uri": str(post.get("uri") or post.get("url") or ""),
         "visibility": str(post.get("visibility") or "public"),
+        "sensitive": bool(post.get("sensitive", False)),
         "favourited": bool(post.get("favourited", False)),
         "reblogged": bool(post.get("reblogged", False)),
         "bookmarked": bool(post.get("bookmarked", False)),
@@ -394,6 +516,36 @@ def normalize_mastodon_status(
         }
 
     meta: dict[str, Any] = {"mastodon": mastodon_meta}
+    raw_card = post.get("card") if isinstance(post.get("card"), dict) else None
+    if raw_card:
+        card = _normalize_link_card(
+            raw_card.get("url"),
+            raw_card.get("title"),
+            raw_card.get("description"),
+            raw_card.get("image"),
+        )
+        if card:
+            meta["linkCard"] = card
+    raw_quote = (post.get("quote") or {}).get("quoted_status") if isinstance(post.get("quote"), dict) else None
+    if not raw_quote and isinstance(post.get("quote"), dict) and (post["quote"].get("id") or post["quote"].get("content")):
+        raw_quote = post["quote"]
+    if isinstance(raw_quote, dict) and isinstance(raw_quote.get("account"), dict):
+        q_acc = normalize_mastodon_account(raw_quote["account"], origin)
+        q_media = raw_quote.get("media_attachments") or []
+        q_thumb = str(q_media[0].get("preview_url") or q_media[0].get("url") or "") if q_media and isinstance(q_media[0], dict) else ""
+        meta["quotePost"] = {
+            "id": f"mastodon:{raw_quote.get('id') or ''}",
+            "protocol": "mastodon",
+            "statusId": str(raw_quote.get("id") or ""),
+            "instanceUrl": origin,
+            "url": str(raw_quote.get("url") or raw_quote.get("uri") or ""),
+            "authorName": q_acc["display_name"],
+            "authorHandle": q_acc["acct"],
+            "authorAvatar": q_acc["avatar_url"],
+            "text": strip_html_to_text(str(raw_quote.get("content") or "")),
+            "createdAt": str(raw_quote.get("created_at") or ""),
+            **({"thumbUrl": q_thumb} if q_thumb else {}),
+        }
     if linked_ids:
         meta["linkedIds"] = {k: v for k, v in linked_ids.items() if v}
 
@@ -421,6 +573,68 @@ def normalize_mastodon_status(
     }
 
 
+def _is_bsky_gif_external(url: str) -> bool:
+    try:
+        parsed = urlparse(str(url or "").strip())
+        host = (parsed.hostname or "").lower()
+        return (
+            parsed.scheme == "https"
+            and (host == "tenor.com" or host.endswith(".tenor.com") or host == "giphy.com" or host.endswith(".giphy.com"))
+            and parsed.path.lower().endswith(".gif")
+        )
+    except Exception:
+        return False
+
+
+def _extract_bsky_quote_post(embed: dict[str, Any]) -> dict[str, Any] | None:
+    if not isinstance(embed, dict):
+        return None
+    emb_type = str(embed.get("$type") or "")
+    raw_rec = (embed.get("record") or {}).get("record") if emb_type.startswith("app.bsky.embed.recordWithMedia") else embed.get("record")
+    if not isinstance(raw_rec, dict):
+        return None
+    rec_type = str(raw_rec.get("$type") or "")
+    if "viewNotFound" in rec_type or "viewBlocked" in rec_type or "viewDetached" in rec_type or raw_rec.get("notFound") or raw_rec.get("blocked") or raw_rec.get("detached"):
+        return {
+            "unavailable": True,
+            "reason": "Quoted post from blocked account" if raw_rec.get("blocked") else "Quoted post unavailable",
+        }
+    if "viewRecord" not in rec_type and not (raw_rec.get("value") and raw_rec.get("author")):
+        return None
+    q_uri = str(raw_rec.get("uri") or "")
+    q_cid = str(raw_rec.get("cid") or "")
+    q_rkey = q_uri.rsplit("/", 1)[-1] if "/" in q_uri else q_uri
+    q_author = raw_rec.get("author") if isinstance(raw_rec.get("author"), dict) else {}
+    q_handle = str(q_author.get("handle") or q_author.get("did") or "")
+    q_val = raw_rec.get("value") if isinstance(raw_rec.get("value"), dict) else {}
+    first_emb = (raw_rec.get("embeds") or [None])[0] if isinstance(raw_rec.get("embeds"), list) and raw_rec.get("embeds") else None
+    thumb_url = ""
+    if isinstance(first_emb, dict):
+        imgs = first_emb.get("images") or (first_emb.get("media") or {}).get("images") or []
+        if imgs and isinstance(imgs[0], dict):
+            thumb_url = str(imgs[0].get("thumb") or imgs[0].get("fullsize") or "")
+        elif first_emb.get("thumbnail"):
+            thumb_url = str(first_emb["thumbnail"])
+        elif isinstance(first_emb.get("media"), dict) and first_emb["media"].get("thumbnail"):
+            thumb_url = str(first_emb["media"]["thumbnail"])
+        elif isinstance(first_emb.get("external"), dict) and first_emb["external"].get("thumb"):
+            thumb_url = str(first_emb["external"]["thumb"])
+    return {
+        "id": f"bluesky:{q_uri or q_cid}",
+        "protocol": "bluesky",
+        "uri": q_uri,
+        "cid": q_cid,
+        "authorName": str(q_author.get("displayName") or q_handle),
+        "authorHandle": q_handle,
+        "authorDid": str(q_author.get("did") or ""),
+        "authorAvatar": str(q_author.get("avatar") or ""),
+        "text": str(q_val.get("text") or ""),
+        "createdAt": str(q_val.get("createdAt") or raw_rec.get("indexedAt") or ""),
+        "url": f"https://bsky.app/profile/{q_handle}/post/{q_rkey}" if q_handle and q_rkey else "",
+        **({"thumbUrl": thumb_url} if thumb_url else {}),
+    }
+
+
 def normalize_bluesky_post(
     feed_item: dict[str, Any],
     linked_ids: dict[str, Any] | None = None,
@@ -433,35 +647,119 @@ def normalize_bluesky_post(
     cid = str(post.get("cid") or feed_item.get("cid") or "")
     rkey = uri.rsplit("/", 1)[-1] if "/" in uri else uri
     handle = str(author_raw.get("handle") or author_raw.get("did") or "")
+    did = str(author_raw.get("did") or "")
     text = str(record.get("text") or "")
     published = str(record.get("createdAt") or post.get("indexedAt") or _now_iso())
 
     attachments = []
     embed = post.get("embed") if isinstance(post.get("embed"), dict) else {}
-    embed_images = embed.get("images") if isinstance(embed.get("images"), list) else []
+    emb_type = str(embed.get("$type") or "")
+    embed_media = embed.get("media") if emb_type.startswith("app.bsky.embed.recordWithMedia") and isinstance(embed.get("media"), dict) else embed
+    rec_embed = record.get("embed") if isinstance(record.get("embed"), dict) else {}
+    rec_media = rec_embed.get("media") if str(rec_embed.get("$type") or "").startswith("app.bsky.embed.recordWithMedia") and isinstance(rec_embed.get("media"), dict) else rec_embed
+
+    embed_images = embed_media.get("images") if isinstance(embed_media.get("images"), list) else []
     for img in embed_images:
         if not isinstance(img, dict):
             continue
         url = str(img.get("fullsize") or img.get("thumb") or "")
         if url:
-            attachments.append({
+            att_item: dict[str, Any] = {
                 "url": url,
+                "type": "image",
                 "mime_type": "image/jpeg",
                 "alt_text": str(img.get("alt") or ""),
-            })
+            }
+            ar = img.get("aspectRatio") if isinstance(img.get("aspectRatio"), dict) else {}
+            if ar.get("width"):
+                att_item["width"] = int(ar["width"])
+            if ar.get("height"):
+                att_item["height"] = int(ar["height"])
+            attachments.append(att_item)
+
+    vid_type = str(embed_media.get("$type") or "")
+    if vid_type.startswith("app.bsky.embed.video") or embed_media.get("playlist") or rec_media.get("video"):
+        v_cid = str(embed_media.get("cid") or ((rec_media.get("video") or {}).get("ref") or {}).get("$link") or "")
+        mp4_url = f"https://bsky.social/xrpc/com.atproto.sync.getBlob?did={quote(did, safe='')}&cid={quote(v_cid, safe='')}" if did and v_cid else ""
+        hls_url = str(embed_media.get("playlist") or "")
+        if mp4_url or hls_url:
+            ar = embed_media.get("aspectRatio") if isinstance(embed_media.get("aspectRatio"), dict) else (rec_media.get("aspectRatio") if isinstance(rec_media.get("aspectRatio"), dict) else {})
+            v_att: dict[str, Any] = {
+                "url": mp4_url or hls_url,
+                "type": "gifv" if embed_media.get("presentation") == "gif" else "video",
+                "mime_type": str((rec_media.get("video") or {}).get("mimeType") or ("video/mp4" if mp4_url else "application/vnd.apple.mpegurl")),
+                "alt_text": str(embed_media.get("alt") or rec_media.get("alt") or ""),
+                "width": int(ar.get("width") or 640),
+                "height": int(ar.get("height") or 360),
+                "did": did,
+                "cid": v_cid,
+            }
+            if hls_url:
+                v_att["hlsUrl"] = hls_url
+            if embed_media.get("thumbnail"):
+                v_att["previewUrl"] = str(embed_media["thumbnail"])
+            attachments.append(v_att)
+
+    ext_card = embed_media.get("external") if isinstance(embed_media.get("external"), dict) else None
+    is_gif_external = bool(ext_card and _is_bsky_gif_external(str(ext_card.get("uri") or "")))
+    if is_gif_external and ext_card:
+        attachments.append({
+            "url": str(ext_card["uri"]),
+            "type": "image",
+            "mime_type": "image/gif",
+            "alt_text": str(ext_card.get("description") or ext_card.get("title") or ""),
+            **({"previewUrl": str(ext_card["thumb"])} if ext_card.get("thumb") else {}),
+        })
 
     viewer = post.get("viewer") if isinstance(post.get("viewer"), dict) else {}
     reply_ref = record.get("reply") if isinstance(record.get("reply"), dict) else {}
+    facets = record.get("facets") if isinstance(record.get("facets"), list) else []
+    reason = feed_item.get("reason") if isinstance(feed_item.get("reason"), dict) else {}
+    reason_by = reason.get("by") if isinstance(reason.get("by"), dict) else None
+    raw_labels: list[str] = []
+    for lbl in (post.get("labels") or []):
+        if isinstance(lbl, dict) and lbl.get("val"):
+            raw_labels.append(str(lbl["val"]).strip().lower())
+    rec_labels = (record.get("labels") or {}).get("values") if isinstance(record.get("labels"), dict) else []
+    for lbl in (rec_labels or []):
+        if isinstance(lbl, dict) and lbl.get("val"):
+            raw_labels.append(str(lbl["val"]).strip().lower())
+    labels = list(dict.fromkeys(v for v in raw_labels if v))
+
     bsky_meta: dict[str, Any] = {
         "uri": uri,
         "cid": cid,
         "likeUri": viewer.get("like") or None,
         "repostUri": viewer.get("repost") or None,
     }
+    if facets:
+        bsky_meta["facets"] = facets
     if reply_ref:
         bsky_meta["reply"] = reply_ref
+    if labels:
+        bsky_meta["labels"] = labels
+    if reason_by:
+        rb_handle = str(reason_by.get("handle") or reason_by.get("did") or "")
+        bsky_meta["rebloggedBy"] = {
+            "id": str(reason_by.get("did") or ""),
+            "acct": rb_handle,
+            "displayName": str(reason_by.get("displayName") or rb_handle),
+            "avatar": str(reason_by.get("avatar") or ""),
+        }
 
     meta: dict[str, Any] = {"bluesky": bsky_meta}
+    if ext_card and not is_gif_external:
+        card = _normalize_link_card(
+            ext_card.get("uri"),
+            ext_card.get("title"),
+            ext_card.get("description"),
+            ext_card.get("thumb"),
+        )
+        if card:
+            meta["linkCard"] = card
+    quote_post = _extract_bsky_quote_post(embed)
+    if quote_post:
+        meta["quotePost"] = quote_post
     if linked_ids:
         meta["linkedIds"] = {k: v for k, v in linked_ids.items() if v}
 
@@ -469,7 +767,7 @@ def normalize_bluesky_post(
         "id": f"bluesky:{uri or cid}",
         "protocol": "bluesky",
         "url": f"https://bsky.app/profile/{handle}/post/{rkey}" if handle and rkey else "",
-        "content_html": plain_text_to_html(text),
+        "content_html": bluesky_richtext_to_html(text, facets),
         "content_text": text,
         "date_published": published,
         "author": {
@@ -489,6 +787,22 @@ def normalize_bluesky_post(
     }
 
 
+def _map_threads_attachment(node: dict[str, Any], fallback_alt: str = "") -> dict[str, Any] | None:
+    media_url = str(node.get("media_url") or "").strip()
+    if not media_url:
+        return None
+    media_type = str(node.get("media_type") or "").upper()
+    mime_type = "video/mp4" if media_type == "VIDEO" else ("audio/mpeg" if media_type == "AUDIO" else "image/jpeg")
+    att: dict[str, Any] = {
+        "url": media_url,
+        "mime_type": mime_type,
+        "alt_text": str(node.get("alt_text") or fallback_alt or ""),
+    }
+    if node.get("thumbnail_url"):
+        att["preview_url"] = str(node["thumbnail_url"])
+    return att
+
+
 def normalize_threads_post(
     raw: dict[str, Any],
     author_profile: dict[str, Any] | None = None,
@@ -498,20 +812,49 @@ def normalize_threads_post(
     post_id = str(raw.get("id") or "")
     text = str(raw.get("text") or "")
     prof = author_profile or {}
-    username = str(raw.get("username") or prof.get("username") or "")
+    username = str(raw.get("username") or prof.get("username") or "").lstrip("@")
     published = str(raw.get("timestamp") or _now_iso())
 
-    attachments = []
-    media_url = str(raw.get("media_url") or "")
-    media_type = str(raw.get("media_type") or "").upper()
-    if media_url:
-        attachments.append({
-            "url": media_url,
-            "mime_type": "video/mp4" if media_type == "VIDEO" else "image/jpeg",
-            "alt_text": str(raw.get("alt_text") or ""),
-        })
+    child_rows = raw.get("children", {}).get("data") if isinstance(raw.get("children"), dict) else None
+    attachments: list[dict[str, Any]] = []
+    if isinstance(child_rows, list) and child_rows:
+        fallback_alt = str(raw.get("alt_text") or "")
+        for child in child_rows:
+            if isinstance(child, dict):
+                mapped = _map_threads_attachment(child, fallback_alt)
+                if mapped:
+                    attachments.append(mapped)
+    else:
+        mapped = _map_threads_attachment(raw)
+        if mapped:
+            attachments.append(mapped)
 
-    meta: dict[str, Any] = {"threads": {"postId": post_id}}
+    threads_meta: dict[str, Any] = {"postId": post_id}
+    if raw.get("shortcode"):
+        threads_meta["shortcode"] = str(raw["shortcode"])
+    if raw.get("topic_tag"):
+        threads_meta["topicTag"] = str(raw["topic_tag"])
+    if raw.get("is_quote_post"):
+        threads_meta["isQuotePost"] = True
+    if isinstance(raw.get("replied_to"), dict) and raw["replied_to"].get("id"):
+        rid = str(raw["replied_to"]["id"])
+        threads_meta["repliedToId"] = rid
+        threads_meta["parentPostId"] = rid
+    if isinstance(raw.get("root_post"), dict) and raw["root_post"].get("id"):
+        threads_meta["rootPostId"] = str(raw["root_post"]["id"])
+    if raw.get("hide_status"):
+        threads_meta["hideStatus"] = str(raw["hide_status"])
+
+    meta: dict[str, Any] = {"threads": threads_meta}
+    link_url = str(raw.get("link_attachment_url") or "").strip()
+    if link_url and is_allowed_social_url(link_url):
+        parsed_link = urlparse(link_url)
+        meta["linkCard"] = {
+            "url": link_url,
+            "title": parsed_link.hostname or "",
+            "description": "",
+            "image": "",
+        }
     if linked_ids:
         meta["linkedIds"] = {k: v for k, v in linked_ids.items() if v}
 
@@ -525,7 +868,7 @@ def normalize_threads_post(
         "author": {
             "id": str(prof.get("id") or username or post_id),
             "name": str(prof.get("name") or username),
-            "handle": f"@{username}" if username and not username.startswith("@") else username,
+            "handle": username,
             "avatar_url": str(prof.get("threads_profile_picture_url") or ""),
             "url": f"https://www.threads.net/@{username}" if username else "",
         },
@@ -600,24 +943,44 @@ def normalize_bluesky_notification(raw: dict[str, Any]) -> dict[str, Any]:
     cid = str(raw.get("cid") or "")
     reason = str(raw.get("reason") or "mention")
     notif_type = _NOTIF_TYPE_MAP.get(reason, "mention")
+    reply_parent = ((record.get("reply") or {}).get("parent") or {}).get("uri") if isinstance(record.get("reply"), dict) else ""
+    subject_obj = record.get("subject") if isinstance(record.get("subject"), dict) else {}
+    subject_uri = str(raw.get("reasonSubject") or subject_obj.get("uri") or reply_parent or "")
+    is_read = raw.get("isRead")
     text = str(record.get("text") or "")
     published = str(raw.get("indexedAt") or record.get("createdAt") or _now_iso())
     rkey = uri.rsplit("/", 1)[-1] if "/" in uri else uri
     post_url = f"https://bsky.app/profile/{handle}/post/{rkey}" if handle and rkey else actor["url"]
 
+    bsky_meta: dict[str, Any] = {"uri": uri, "cid": cid}
+    if subject_uri:
+        bsky_meta["subjectUri"] = subject_uri
+
+    notif_meta: dict[str, Any] = {
+        "notifId": f"bsky:{cid or uri}",
+        "type": notif_type,
+        "actor": actor,
+    }
+    if subject_uri:
+        notif_meta["targetPostUri"] = subject_uri
+    if uri:
+        notif_meta["notifRecordUri"] = uri
+    if isinstance(is_read, bool):
+        notif_meta["isRead"] = bool(is_read)
+
     return {
         "id": f"bluesky:notif:{cid or uri or published}:{reason}",
         "protocol": "bluesky",
         "url": post_url,
-        "content_html": plain_text_to_html(text),
+        "content_html": bluesky_richtext_to_html(text, record.get("facets") if isinstance(record.get("facets"), list) else None),
         "content_text": text,
         "date_published": published,
         "author": actor,
         "attachments": [],
         "metrics": {"replies": 0, "reposts": 0, "likes": 0},
         "_meta": {
-            "bluesky": {"uri": uri, "cid": cid},
-            "notification": {"notifId": f"bsky:{cid or uri}", "type": notif_type, "actor": actor},
+            "bluesky": bsky_meta,
+            "notification": notif_meta,
         },
     }
 
@@ -625,34 +988,20 @@ def normalize_bluesky_notification(raw: dict[str, Any]) -> dict[str, Any]:
 def normalize_threads_reply_notification(
     raw: dict[str, Any],
     parent_post_id: str = "",
+    notif_type: str = "reply",
 ) -> dict[str, Any]:
-    """Normalize a Threads reply object into a UnifiedItem notification."""
-    reply_id = str(raw.get("id") or "")
-    username = str(raw.get("username") or "threads.user").lstrip("@")
-    text = str(raw.get("text") or "")
-    published = str(raw.get("timestamp") or _now_iso())
-    actor = {
-        "id": username,
-        "name": username,
-        "handle": username,
-        "avatar_url": "",
-        "url": f"https://www.threads.net/@{username}",
+    """Normalize a Threads reply or mention object into a UnifiedItem notification."""
+    item = normalize_threads_post(raw)
+    reply_id = item["_meta"]["threads"]["postId"]
+    if parent_post_id and not item["_meta"]["threads"].get("parentPostId"):
+        item["_meta"]["threads"]["parentPostId"] = str(parent_post_id)
+    item["id"] = f"threads:notif:{reply_id}"
+    item["_meta"]["notification"] = {
+        "notifId": f"threads:{reply_id}",
+        "type": notif_type,
+        "actor": item["author"],
     }
-    return {
-        "id": f"threads:notif:{reply_id}",
-        "protocol": "threads",
-        "url": str(raw.get("permalink") or f"https://www.threads.net/@{username}/post/{reply_id}"),
-        "content_html": plain_text_to_html(text),
-        "content_text": text,
-        "date_published": published,
-        "author": actor,
-        "attachments": [],
-        "metrics": {"replies": 0, "reposts": 0, "likes": 0},
-        "_meta": {
-            "threads": {"postId": reply_id, "parentPostId": parent_post_id},
-            "notification": {"notifId": f"threads:{reply_id}", "type": "reply", "actor": actor},
-        },
-    }
+    return item
 
 
 def _dedupe_signature(item: dict[str, Any]) -> tuple[str, str, str]:
@@ -701,7 +1050,7 @@ def deduplicate_unified_items(
                 if _dedupe_signature(existing) != sig:
                     continue
                 if abs(parse_iso_ts(existing.get("date_published")) - cand_ts) <= time_window_sec:
-                    for key in ("mastodon", "bluesky", "threads", "linkedIds"):
+                    for key in ("mastodon", "bluesky", "threads", "linkedIds", "metricsBreakdown"):
                         if key in cand.get("_meta", {}) and key not in existing.get("_meta", {}):
                             existing.setdefault("_meta", {})[key] = cand["_meta"][key]
                     absorbed = True

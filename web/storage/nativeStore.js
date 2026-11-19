@@ -349,6 +349,34 @@ export async function listVaultIds() {
 
 // ── Cross-Post Linked IDs, Filter Rules, and Retry Queue (Android / Client Bridge) ──
 
+const LINKED_POSTS_KV_KEY = 'local_linked_posts_v1';
+
+async function syncLinkedPostsKvSnapshot() {
+  const android = getAndroidPlugin();
+  if (android && typeof android.listLinkedPosts === 'function') return;
+  const rows = [...memoryLinkedPosts.values()].slice(-120);
+  await storePut('kv', LINKED_POSTS_KV_KEY, rows).catch(() => {});
+}
+
+export async function listLocalLinkedPosts(limit = 50) {
+  const android = getAndroidPlugin();
+  if (android && typeof android.listLinkedPosts === 'function') {
+    const res = await android.listLinkedPosts({ limit });
+    return Array.isArray(res?.records) ? res.records : [];
+  }
+  if (memoryLinkedPosts.size === 0) {
+    const saved = await storeGet('kv', LINKED_POSTS_KV_KEY).catch(() => null);
+    if (Array.isArray(saved)) {
+      for (const rec of saved) {
+        if (rec?.canonicalId) {
+          memoryLinkedPosts.set(String(rec.canonicalId), { ...rec });
+        }
+      }
+    }
+  }
+  return [...memoryLinkedPosts.values()].reverse().slice(0, Math.max(1, limit));
+}
+
 export async function saveLocalLinkedPost(record) {
   if (!record?.canonicalId) return;
   memoryLinkedPosts.set(record.canonicalId, { ...record });
@@ -364,6 +392,7 @@ export async function saveLocalLinkedPost(record) {
       parentCanonicalId: record.parentCanonicalId || '',
     });
   }
+  await syncLinkedPostsKvSnapshot();
 }
 
 export async function findLocalLinkedPost(anyId) {
@@ -373,6 +402,9 @@ export async function findLocalLinkedPost(anyId) {
   if (android) {
     const res = await android.findLinkedPost({ id: clean });
     return res?.record || null;
+  }
+  if (memoryLinkedPosts.size === 0) {
+    await listLocalLinkedPosts(120);
   }
   const bareMasto = clean.replace(/^mastodon:/, '');
   const bareBsky = clean.replace(/^bluesky:/, '');
@@ -390,15 +422,80 @@ export async function findLocalLinkedPost(anyId) {
   return null;
 }
 
+export async function findLocalLinkedPostGroup(anyId) {
+  const root = await findLocalLinkedPost(anyId);
+  if (!root) return [];
+  const rootCanon = root.canonicalId || root.canonical_id || '';
+  if (!rootCanon) return [root];
+  const parentCanon = root.parentCanonicalId || '';
+  let resolvedRoot = root;
+  if (parentCanon && parentCanon !== rootCanon) {
+    const parentRec = await findLocalLinkedPost(parentCanon);
+    if (parentRec) resolvedRoot = parentRec;
+  }
+  const trueRootId = resolvedRoot.canonicalId || resolvedRoot.canonical_id || rootCanon;
+  const android = getAndroidPlugin();
+  if (android && typeof android.findLinkedPost === 'function') {
+    const group = [resolvedRoot];
+    for (let idx = 1; idx <= 20; idx += 1) {
+      const partRec = await findLocalLinkedPost(`${trueRootId}:part:${idx}`);
+      if (!partRec) break;
+      group.push(partRec);
+    }
+    return group;
+  }
+  if (memoryLinkedPosts.size === 0) {
+    await listLocalLinkedPosts(120);
+  }
+  const out = [resolvedRoot];
+  for (const rec of memoryLinkedPosts.values()) {
+    if (rec.parentCanonicalId === trueRootId && rec.canonicalId !== trueRootId) {
+      out.push({ ...rec });
+    }
+  }
+  return out;
+}
+
+export async function deleteLocalLinkedChildren(parentCanonicalId) {
+  const clean = String(parentCanonicalId || '').trim();
+  if (!clean) return 0;
+  const android = getAndroidPlugin();
+  let deleted = 0;
+  if (android && typeof android.deleteLinkedPost === 'function') {
+    for (let idx = 1; idx <= 20; idx += 1) {
+      await android.deleteLinkedPost({ id: `${clean}:part:${idx}` }).catch(() => {});
+    }
+  }
+  if (memoryLinkedPosts.size === 0) {
+    await listLocalLinkedPosts(120);
+  }
+  for (const [k, rec] of [...memoryLinkedPosts.entries()]) {
+    if (rec.parentCanonicalId === clean) {
+      memoryLinkedPosts.delete(k);
+      deleted += 1;
+    }
+  }
+  if (deleted > 0) {
+    await syncLinkedPostsKvSnapshot();
+  }
+  return deleted;
+}
+
 export async function deleteLocalLinkedPost(anyId) {
   const clean = String(anyId || '').trim();
   const android = getAndroidPlugin();
   if (android) {
     await android.deleteLinkedPost({ id: clean });
   }
+  if (memoryLinkedPosts.size === 0) {
+    await listLocalLinkedPosts(120);
+  }
+  const group = await findLocalLinkedPostGroup(clean);
+  const groupIds = new Set(group.map((g) => g.canonicalId || g.canonical_id).filter(Boolean));
   const bare = clean.replace(/^(?:mastodon|bluesky|threads):/, '');
   for (const [k, rec] of [...memoryLinkedPosts.entries()]) {
     if (
+      groupIds.has(k) ||
       k === clean ||
       rec.mastodonStatusId === bare ||
       rec.blueskyUri === bare ||
@@ -408,6 +505,7 @@ export async function deleteLocalLinkedPost(anyId) {
       memoryLinkedPosts.delete(k);
     }
   }
+  await syncLinkedPostsKvSnapshot();
 }
 
 export async function listLocalFilterRules() {
@@ -474,4 +572,51 @@ export async function cacheJournalsAndQuests(programId, sessionId = 'default', p
 
 export async function getCachedJournalsAndQuests(programId, sessionId = 'default') {
   return storeGet('journals_quests', historyCacheKey(programId, sessionId));
+}
+
+function normalizeModEntry(raw) {
+  const username = String(raw?.username || raw?.handle || '').trim().replace(/^@/, '').split('@')[0].toLowerCase();
+  if (!username) return null;
+  const proto = String(raw?.protocol || 'threads').trim().toLowerCase();
+  return {
+    username,
+    displayName: String(raw?.displayName || raw?.display_name || ''),
+    acct: String(raw?.acct || (proto === 'threads' ? `${username}@threads.net` : username)),
+    protocol: proto,
+    canonicalActor: String(raw?.canonicalActor || `${proto}:${username}`),
+  };
+}
+
+export async function getLocalModeratedAccounts() {
+  const raw = await kvGet('local_moderated_accounts_v1', null);
+  return {
+    blocks: Array.isArray(raw?.blocks) ? raw.blocks : [],
+    mutes: Array.isArray(raw?.mutes) ? raw.mutes : [],
+  };
+}
+
+export async function saveLocalModeratedAccounts({ blocks = null, mutes = null } = {}) {
+  const cur = await getLocalModeratedAccounts();
+  const next = {
+    blocks: Array.isArray(blocks) ? blocks.map(normalizeModEntry).filter(Boolean) : cur.blocks,
+    mutes: Array.isArray(mutes) ? mutes.map(normalizeModEntry).filter(Boolean) : cur.mutes,
+  };
+  await kvSet('local_moderated_accounts_v1', next);
+  return next;
+}
+
+export async function removeLocalModeratedAccount(kind, actorOrHandle) {
+  const key = kind === 'mutes' || kind === 'mute' ? 'mutes' : 'blocks';
+  const cur = await getLocalModeratedAccounts();
+  const raw = String(actorOrHandle || '').trim().toLowerCase();
+  const bare = raw.replace(/^(?:threads|bluesky|mastodon):/, '').replace(/^@/, '').split('@')[0];
+  const nextList = cur[key].filter((row) => {
+    const u = String(row?.username || '').toLowerCase();
+    const c = String(row?.canonicalActor || '').toLowerCase();
+    const a = String(row?.acct || '').toLowerCase();
+    return u !== bare && c !== raw && a !== raw;
+  });
+  const next = { ...cur, [key]: nextList };
+  await kvSet('local_moderated_accounts_v1', next);
+  return next;
 }

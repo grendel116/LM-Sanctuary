@@ -1,9 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
+import { installMockDom } from '../__mocks__/mockDom.js';
+import { createAppShell } from '../web/app/_layout.js';
+import { createPostCard } from '../web/components/PostCard.js';
 import {
   bskyRequest,
   extractUtf8ByteFacets,
+  normalizeBskyPost,
+  renderBskyRichTextToHtml,
 } from '../web/queries/bluesky.js';
 import {
   sanitizeFediverseHtmlToString,
@@ -12,6 +17,10 @@ import {
   publishThreadsPost,
   resolveThreadsMediaUrl,
 } from '../web/queries/threads.js';
+import { resetCompose } from '../web/state/composeStore.js';
+import { feedStore, resetFeedStoreForTests, setStreamItems } from '../web/state/feedStore.js';
+import { resetConnectionStoreForTests } from '../web/state/sanctuary/connection.js';
+import { resetMemoryStorageForTests } from '../web/storage/kvStorage.js';
 
 test('extractUtf8ByteFacets computes exact UTF-8 byte offsets around multi-byte emoji', () => {
   // "Hi 🚀 " -> H(1) i(1) space(1) 🚀(4) space(1) = 8 bytes
@@ -145,4 +154,271 @@ test('threads cross-post reuses Mastodon HTTPS CDN url and never touches any fee
 
   assert.equal(published.id, 'pub_99');
   assert.ok(calls[0].body.includes(encodeURIComponent('https://cdn.mastodon.social/media/p1.png')));
+});
+
+test('normalizeBskyPost and PostCard convert UTF-8 record.facets and external link cards into clickable links without triggering thread navigation', () => {
+  const dom = installMockDom();
+  try {
+    const postText = 'Good morning 🌹 🎶 🕊️\n\nyoutu.be/JLjyYDakdXo?...';
+    const encoder = new TextEncoder();
+    const bytes = encoder.encode(postText);
+    const token = 'youtu.be/JLjyYDakdXo?...';
+    const prefix = 'Good morning 🌹 🎶 🕊️\n\n';
+    const byteStart = encoder.encode(prefix).byteLength;
+    const byteEnd = byteStart + encoder.encode(token).byteLength;
+    assert.equal(new TextDecoder().decode(bytes.subarray(byteStart, byteEnd)), token);
+
+    const html = renderBskyRichTextToHtml(postText, [
+      {
+        index: { byteStart, byteEnd },
+        features: [{ $type: 'app.bsky.richtext.facet#link', uri: 'https://youtu.be/JLjyYDakdXo?si=test123' }],
+      },
+    ]);
+    assert.ok(html.includes('href="https://youtu.be/JLjyYDakdXo?si=test123"'));
+    assert.ok(html.includes('>youtu.be/JLjyYDakdXo?...</a>'));
+
+    const normalized = normalizeBskyPost({
+      post: {
+        uri: 'at://did:plc:abc/app.bsky.feed.post/xyz',
+        cid: 'bafy123',
+        author: {
+          did: 'did:plc:abc',
+          handle: 'redheaddeadhead.bsky.social',
+          displayName: 'redheaddeadhead.bsky.social',
+        },
+        record: {
+          text: postText,
+          createdAt: '2026-11-19T10:00:00Z',
+          facets: [
+            {
+              index: { byteStart, byteEnd },
+              features: [{ $type: 'app.bsky.richtext.facet#link', uri: 'https://youtu.be/JLjyYDakdXo?si=test123' }],
+            },
+          ],
+        },
+        embed: {
+          $type: 'app.bsky.embed.external#view',
+          external: {
+            uri: 'https://youtu.be/JLjyYDakdXo?si=test123',
+            title: 'Morning Song',
+            description: 'Live acoustic session',
+            thumb: 'https://cdn.bsky.app/img/thumb.jpg',
+          },
+        },
+      },
+    });
+
+    let openedThread = 0;
+    const card = createPostCard(normalized, {
+      onOpenThread: () => {
+        openedThread += 1;
+      },
+    });
+
+    const bodyLink = card.querySelector('.post-body-html a');
+    assert.ok(bodyLink);
+    assert.equal(bodyLink.getAttribute('href'), 'https://youtu.be/JLjyYDakdXo?si=test123');
+    assert.equal(bodyLink.getAttribute('target'), '_blank');
+    assert.equal(bodyLink.getAttribute('rel'), 'noopener noreferrer');
+    assert.equal(bodyLink.textContent, 'youtu.be/JLjyYDakdXo?...');
+
+    const previewCard = card.querySelector('.post-link-card.post-embed-card');
+    assert.ok(previewCard);
+    const metaLink = previewCard.querySelector('a.post-embed-meta-link');
+    assert.ok(metaLink);
+    assert.equal(metaLink.getAttribute('href'), 'https://youtu.be/JLjyYDakdXo?si=test123');
+    assert.equal(previewCard.querySelector('.post-link-card-title')?.textContent, 'Morning Song');
+    assert.ok(previewCard.querySelector('button.post-embed-play-btn'));
+
+    bodyLink.click();
+    assert.equal(openedThread, 0, 'Clicking an inline link inside PostCard must not open the post thread');
+  } finally {
+    dom.restore();
+  }
+});
+
+test('createAppShell capture external link handler opens links under WebView2 and falls back to window.open when open-external fails', async () => {
+  const dom = installMockDom();
+  const prevFetch = globalThis.fetch;
+  const prevChrome = globalThis.chrome;
+  const prevOpen = globalThis.open;
+  const openedFallback = [];
+  const bridgePosts = [];
+  let app = null;
+
+  globalThis.chrome = { webview: {} };
+  globalThis.open = (url, target, features) => {
+    openedFallback.push({ url, target, features });
+    return null;
+  };
+  globalThis.fetch = async (url, init) => {
+    const u = String(url);
+    if (u.includes('/api/social/open-external')) {
+      bridgePosts.push({ url: u, body: JSON.parse(init?.body || '{}') });
+      return new Response('Not Found', { status: 404 });
+    }
+    return new Response('[]', { status: 200, headers: { 'content-type': 'application/json' } });
+  };
+
+  try {
+    resetMemoryStorageForTests();
+    resetConnectionStoreForTests();
+    resetFeedStoreForTests();
+    resetCompose();
+
+    const doc = dom.document;
+    const host = doc.createElement('div');
+    host.id = 'app-shell';
+    doc.body.appendChild(host);
+
+    setStreamItems('feed', [
+      normalizeBskyPost({
+        post: {
+          uri: 'at://did:plc:abc/app.bsky.feed.post/link1',
+          cid: 'bafy_link1',
+          author: { did: 'did:plc:abc', handle: 'alice.bsky.social', displayName: 'Alice' },
+          record: {
+            text: 'Check https://example.org/watch',
+            createdAt: '2026-11-19T10:30:00Z',
+          },
+        },
+      }),
+    ], null);
+
+    app = createAppShell(host, { initialTab: 'home', skipBackgroundInit: true });
+    const link = host.querySelector('.post-body-html a');
+    assert.ok(link);
+    assert.equal(link.getAttribute('href'), 'https://example.org/watch');
+
+    link.click();
+    await new Promise((r) => setTimeout(r, 20));
+
+    assert.equal(bridgePosts.length, 1);
+    assert.equal(bridgePosts[0].body.url, 'https://example.org/watch');
+    assert.equal(openedFallback.length, 1);
+    assert.equal(openedFallback[0].url, 'https://example.org/watch');
+    assert.equal(openedFallback[0].target, '_blank');
+  } finally {
+    app?.destroy();
+    globalThis.fetch = prevFetch;
+    globalThis.chrome = prevChrome;
+    globalThis.open = prevOpen;
+    dom.restore();
+  }
+});
+
+test('normalizeBskyPost and PostCard render Bluesky native videos, recordWithMedia quote cards, and inline Tenor GIFs', () => {
+  const dom = installMockDom();
+  try {
+    // 1. Standalone app.bsky.embed.video#view (matching Jonathan Slater's 576x1024 portrait clip)
+    const videoPost = normalizeBskyPost({
+      post: {
+        uri: 'at://did:plc:lzsxyxqebfmpx6jia6wjqgtx/app.bsky.feed.post/vid1',
+        cid: 'bafy_vid_post',
+        author: {
+          did: 'did:plc:lzsxyxqebfmpx6jia6wjqgtx',
+          handle: 'jonathanslater.bsky.social',
+          displayName: 'Jonathan Slater',
+        },
+        record: {
+          text: 'These two are awesome',
+          createdAt: '2026-11-19T13:05:50.945Z',
+        },
+        embed: {
+          $type: 'app.bsky.embed.video#view',
+          cid: 'bafkreieoxbiq5jk4ps4v2h7y5kre3nreok3hg2mn4rgluw2lqlujttce7i',
+          playlist: 'https://video.bsky.app/watch/did%3Aplc%3Alzsxyxqebfmpx6jia6wjqgtx/bafkreieoxbiq5jk4ps4v2h7y5kre3nreok3hg2mn4rgluw2lqlujttce7i/playlist.m3u8',
+          thumbnail: 'https://video.bsky.app/watch/did%3Aplc%3Alzsxyxqebfmpx6jia6wjqgtx/bafkreieoxbiq5jk4ps4v2h7y5kre3nreok3hg2mn4rgluw2lqlujttce7i/thumbnail.jpg',
+          aspectRatio: { width: 576, height: 1024 },
+          presentation: 'default',
+        },
+      },
+    });
+
+    const videoCard = createPostCard(videoPost, { onOpenThread: () => {} });
+    const videoEl = videoCard.querySelector('video.post-media-video');
+    assert.ok(videoEl, 'Bluesky video post must render <video>');
+    assert.equal(videoEl.getAttribute('width'), '576');
+    assert.equal(videoEl.getAttribute('height'), '1024');
+    assert.equal(videoEl.getAttribute('loading'), 'lazy');
+    assert.equal(videoEl.getAttribute('preload'), 'metadata');
+    assert.equal(
+      videoEl.getAttribute('poster'),
+      'https://video.bsky.app/watch/did%3Aplc%3Alzsxyxqebfmpx6jia6wjqgtx/bafkreieoxbiq5jk4ps4v2h7y5kre3nreok3hg2mn4rgluw2lqlujttce7i/thumbnail.jpg'
+    );
+    assert.equal(
+      videoEl.getAttribute('src'),
+      'https://bsky.social/xrpc/com.atproto.sync.getBlob?did=did%3Aplc%3Alzsxyxqebfmpx6jia6wjqgtx&cid=bafkreieoxbiq5jk4ps4v2h7y5kre3nreok3hg2mn4rgluw2lqlujttce7i'
+    );
+    assert.ok(videoCard.querySelector('.post-media-single.has-video'));
+
+    // 2. recordWithMedia combining a GIF video + quoted post opens quoted thread on click
+    const openedTargets = [];
+    const quoteVideoPost = normalizeBskyPost({
+      post: {
+        uri: 'at://did:plc:abc/app.bsky.feed.post/qw1',
+        cid: 'bafy_qw1',
+        author: { did: 'did:plc:abc', handle: 'quoter.bsky.social', displayName: 'Quoter' },
+        record: { text: 'Look at this clip', createdAt: '2026-11-19T14:00:00Z' },
+        embed: {
+          $type: 'app.bsky.embed.recordWithMedia#view',
+          media: {
+            $type: 'app.bsky.embed.video#view',
+            cid: 'bafk_clip2',
+            thumbnail: 'https://video.bsky.app/watch/did%3Aplc%3Aabc/bafk_clip2/thumbnail.jpg',
+            aspectRatio: { width: 480, height: 270 },
+            presentation: 'gif',
+          },
+          record: {
+            record: {
+              $type: 'app.bsky.embed.record#viewRecord',
+              uri: 'at://did:plc:orig/app.bsky.feed.post/orig99',
+              cid: 'bafy_orig99',
+              author: { did: 'did:plc:orig', handle: 'orig.bsky.social', displayName: 'Orig Author' },
+              value: { text: 'Original statement being quoted', createdAt: '2026-11-19T12:00:00Z' },
+            },
+          },
+        },
+      },
+    });
+    const quoteCard = createPostCard(quoteVideoPost, {
+      onOpenThread: (target) => openedTargets.push(target),
+    });
+    assert.ok(quoteCard.querySelector('video.post-media-video'));
+    const quoteBtn = quoteCard.querySelector('button.post-quote-card');
+    assert.ok(quoteBtn, 'Quoted record must render inside .post-quote-card');
+    assert.ok(quoteBtn.textContent.includes('Orig Author'));
+    assert.ok(quoteBtn.textContent.includes('Original statement being quoted'));
+    quoteBtn.click();
+    assert.equal(openedTargets.length, 1);
+    assert.equal(openedTargets[0].id, 'bluesky:at://did:plc:orig/app.bsky.feed.post/orig99');
+
+    // 3. Animated Tenor .gif external embed renders inline as GIF image rather than link card
+    const gifPost = normalizeBskyPost({
+      post: {
+        uri: 'at://did:plc:abc/app.bsky.feed.post/gif1',
+        cid: 'bafy_gif1',
+        author: { did: 'did:plc:abc', handle: 'gifuser.bsky.social', displayName: 'GifUser' },
+        record: { text: 'Celebration', createdAt: '2026-11-19T14:05:00Z' },
+        embed: {
+          $type: 'app.bsky.embed.external#view',
+          external: {
+            uri: 'https://media.tenor.com/abc123/party.gif?ww=498&hh=280',
+            title: 'Party',
+            description: 'ALT: confetti',
+            thumb: 'https://cdn.bsky.app/img/feed_thumbnail/plain/did:plc:abc/thumb@jpeg',
+          },
+        },
+      },
+    });
+    assert.equal(gifPost.linkCard, null);
+    assert.equal(gifPost.media.length, 1);
+    assert.equal(gifPost.media[0].mimeType, 'image/gif');
+    const gifDom = createPostCard(gifPost, { onOpenThread: () => {} });
+    const gifImg = gifDom.querySelector('img.post-media-item');
+    assert.ok(gifImg);
+    assert.equal(gifImg.getAttribute('src'), 'https://media.tenor.com/abc123/party.gif?ww=498&hh=280');
+  } finally {
+    dom.restore();
+  }
 });

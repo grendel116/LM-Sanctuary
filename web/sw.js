@@ -1,4 +1,4 @@
-export const CACHE_NAME = 'sanctuary-shell-v26';
+export const CACHE_NAME = 'sanctuary-shell-v42';
 
 export const APP_SHELL_ASSETS = [
   './',
@@ -16,6 +16,7 @@ export const APP_SHELL_ASSETS = [
   './constants/avatars.js',
   './constants/endpoints.js',
   './constants/theme.js',
+  './core/feedRanker.js',
   './core/schema/unifiedItem.js',
   './adapters/base.js',
   './adapters/mastodon/index.js',
@@ -28,9 +29,12 @@ export const APP_SHELL_ASSETS = [
   './queries/fediverse.js',
   './queries/bluesky.js',
   './queries/threads.js',
+  './queries/linkPreview.js',
+  './queries/threadsArchive.js',
   './queries/sanctuary.js',
   './queries/socialClient.js',
   './state/store.js',
+  './state/activityStore.js',
   './state/authStore.js',
   './state/feedStore.js',
   './state/composeStore.js',
@@ -45,8 +49,11 @@ export const APP_SHELL_ASSETS = [
   './components/ui/SwipeSheet.js',
   './components/ui/index.js',
   './components/AuthorSheetModal.js',
+  './components/EmbedCard.js',
   './components/EmojiPickerPopover.js',
+  './components/FeedTuningModal.js',
   './components/FollowGraphModal.js',
+  './components/ThreadsImportModal.js',
   './components/FediverseShareButton.js',
   './components/ContentWarning.js',
   './components/MediaAttachment.js',

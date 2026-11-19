@@ -3,6 +3,7 @@ import { toUnifiedItem } from '../core/schema/unifiedItem.js';
 import { renderSanitizedHtml } from '../queries/fediverse.js';
 import { authStore } from '../state/authStore.js';
 import { createContentWarning } from './ContentWarning.js';
+import { createEmbedCard, resolvePostEmbedCard } from './EmbedCard.js';
 import { createPostMediaGrid } from './MediaAttachment.js';
 import { openMediaLightbox } from './sanctuary/PortraitGrid.js';
 
@@ -98,17 +99,23 @@ function formatRelativeTime(createdAt) {
   return new Date(ts).toLocaleDateString();
 }
 
-function createActionButton({ iconSvg, count, label, pressed = null, active = false, className = '', onClick }) {
+function createActionButton({ iconSvg, count, label, tooltip = '', pressed = null, active = false, className = '', onClick }) {
   const doc = globalThis.document;
   const btn = doc.createElement('button');
   btn.type = 'button';
   btn.className = ['post-action-btn', active ? 'is-active' : '', className].filter(Boolean).join(' ');
-  btn.setAttribute('aria-label', count !== null && count !== undefined ? `${label} (${count})` : label);
-  btn.title = label;
+  const resolvedTitle = tooltip || label;
+  btn.setAttribute('aria-label', count !== null && count !== undefined ? `${resolvedTitle} (${count})` : resolvedTitle);
+  btn.title = resolvedTitle;
   if (pressed !== null) {
     btn.setAttribute('aria-pressed', pressed ? 'true' : 'false');
   }
-  btn.innerHTML = iconSvg;
+  const iconWrap = doc.createElement('span');
+  iconWrap.className = 'post-action-icon';
+  iconWrap.setAttribute('aria-hidden', 'true');
+  iconWrap.style.display = 'contents';
+  iconWrap.innerHTML = iconSvg;
+  btn.appendChild(iconWrap);
   if (count !== null && count !== undefined) {
     const span = doc.createElement('span');
     span.className = 'post-action-count';
@@ -143,6 +150,167 @@ function formatProtocolBadge(unified) {
   if (unified.protocol === 'bluesky') return 'Bluesky';
   if (unified.protocol === 'threads') return 'Threads';
   return '';
+}
+
+function formatBreakdownTip(breakdown, baseLabel, metricKey) {
+  if (!breakdown || typeof breakdown !== 'object') return baseLabel;
+  const order = [
+    ['mastodon', 'Mastodon'],
+    ['bluesky', 'Bluesky'],
+    ['threads', 'Threads'],
+  ];
+  const parts = order
+    .filter(([k]) => breakdown[k] && typeof breakdown[k] === 'object')
+    .map(([k, lbl]) => `${lbl}: ${Number(breakdown[k][metricKey] || 0)}`);
+  return parts.length >= 2 ? `${baseLabel} · ${parts.join(' · ')}` : baseLabel;
+}
+
+function updateActionButtonState(btn, { iconSvg, count, tip, active, pressed }) {
+  if (!btn) return;
+  btn.classList.toggle('is-active', Boolean(active));
+  if (pressed !== null && pressed !== undefined) {
+    btn.setAttribute('aria-pressed', pressed ? 'true' : 'false');
+  }
+  btn.title = tip;
+  btn.setAttribute('aria-label', count !== null && count !== undefined ? `${tip} (${count})` : tip);
+  const iconEl = btn.querySelector('.post-action-icon');
+  if (iconEl) {
+    iconEl.innerHTML = iconSvg;
+  }
+  const countEl = btn.querySelector('.post-action-count');
+  if (countEl && count !== null && count !== undefined) {
+    countEl.textContent = String(count);
+  }
+}
+
+/**
+ * Update Favourite, Reply, and Boost controls on an existing `<article class="post-card">`
+ * in place without detaching DOM nodes or discarding button focus.
+ */
+export function syncPostCardReactions(cardEl, rawPost) {
+  if (!cardEl) return;
+  const unified = toUnifiedItem(rawPost);
+  const mMeta = unified._meta?.mastodon || {};
+  const bMeta = unified._meta?.bluesky || {};
+  const liked = Boolean(mMeta.favourited || bMeta.likeUri || rawPost?.viewerState?.favourited);
+  const reposted = Boolean(mMeta.reblogged || bMeta.repostUri || rawPost?.viewerState?.reblogged);
+  const breakdown = unified._meta?.metricsBreakdown;
+
+  updateActionButtonState(cardEl.querySelector('.post-action-like'), {
+    iconSvg: liked ? HEART_FILLED_SVG : HEART_OUTLINE_SVG,
+    count: unified.metrics?.likes ?? 0,
+    tip: formatBreakdownTip(breakdown, 'Favourite', 'likes'),
+    active: liked,
+    pressed: liked,
+  });
+  updateActionButtonState(cardEl.querySelector('.post-action-reply'), {
+    iconSvg: REPLY_SVG,
+    count: unified.metrics?.replies ?? 0,
+    tip: formatBreakdownTip(breakdown, 'Reply', 'replies'),
+    active: false,
+    pressed: null,
+  });
+  updateActionButtonState(cardEl.querySelector('.post-action-repost'), {
+    iconSvg: reposted ? REPOST_ACTIVE_SVG : REPOST_SVG,
+    count: unified.metrics?.reposts ?? 0,
+    tip: formatBreakdownTip(breakdown, 'Boost', 'reposts'),
+    active: reposted,
+    pressed: reposted,
+  });
+}
+
+function createQuotePostCard(doc, quote, { onOpenThread } = {}) {
+  if (!quote || typeof quote !== 'object') return null;
+  if (quote.unavailable) {
+    const box = doc.createElement('div');
+    box.className = 'post-quote-card is-unavailable';
+    box.textContent = quote.reason || 'Quoted post unavailable';
+    return box;
+  }
+
+  const canOpenInternal = typeof onOpenThread === 'function' && (quote.uri || quote.statusId || quote.id);
+  const el = canOpenInternal ? doc.createElement('button') : doc.createElement('a');
+  if (canOpenInternal) {
+    el.type = 'button';
+  } else {
+    el.href = quote.url || '#';
+    el.setAttribute('target', '_blank');
+    el.setAttribute('rel', 'noopener noreferrer');
+  }
+  el.className = 'post-quote-card';
+
+  const head = doc.createElement('div');
+  head.className = 'post-quote-header';
+  if (quote.authorAvatar) {
+    const av = doc.createElement('img');
+    av.className = 'post-quote-avatar';
+    av.src = quote.authorAvatar;
+    av.alt = '';
+    av.loading = 'lazy';
+    head.appendChild(av);
+  }
+  const nameEl = doc.createElement('strong');
+  nameEl.className = 'post-quote-author-name';
+  nameEl.textContent = quote.authorName || quote.authorHandle || '';
+  const handleEl = doc.createElement('span');
+  handleEl.className = 'post-quote-author-handle';
+  const cleanHandle = String(quote.authorHandle || '').replace(/^@/, '');
+  handleEl.textContent = cleanHandle ? `@${cleanHandle}` : '';
+  head.append(nameEl, handleEl);
+  el.appendChild(head);
+
+  if (quote.text) {
+    const p = doc.createElement('p');
+    p.className = 'post-quote-text';
+    p.textContent = quote.text;
+    el.appendChild(p);
+  }
+
+  if (quote.thumbUrl) {
+    const thumb = doc.createElement('img');
+    thumb.className = 'post-quote-thumb';
+    thumb.src = quote.thumbUrl;
+    thumb.alt = '';
+    thumb.loading = 'lazy';
+    el.appendChild(thumb);
+  }
+
+  el.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (!canOpenInternal) return;
+    let authorUrl = '';
+    if (quote.protocol === 'mastodon') {
+      try {
+        authorUrl = quote.url ? `${new URL(quote.url).origin}/@${cleanHandle.split('@')[0]}` : '';
+      } catch {
+        authorUrl = '';
+      }
+    } else if (cleanHandle) {
+      authorUrl = `https://bsky.app/profile/${cleanHandle}`;
+    }
+    const quotedUnified = toUnifiedItem({
+      id: quote.id || '',
+      protocol: quote.protocol || 'bluesky',
+      url: quote.url || '',
+      content_text: quote.text || '',
+      date_published: quote.createdAt || '',
+      author: {
+        id: quote.authorDid || cleanHandle,
+        name: quote.authorName || cleanHandle,
+        handle: cleanHandle,
+        avatar_url: quote.authorAvatar || '',
+        url: authorUrl,
+      },
+      attachments: [],
+      metrics: { replies: 0, reposts: 0, likes: 0 },
+      _meta: quote.protocol === 'mastodon'
+        ? { mastodon: { statusId: quote.statusId || '', instanceUrl: quote.instanceUrl || 'https://mastodon.social' } }
+        : { bluesky: { uri: quote.uri || '', cid: quote.cid || '' } },
+    });
+    onOpenThread(quotedUnified);
+  });
+
+  return el;
 }
 
 /**
@@ -376,6 +544,17 @@ export function createPostCard(rawPost, {
             });
           };
     contentInner.appendChild(createPostMediaGrid(unified.attachments, { onExpand: handleExpandMedia }));
+  } else {
+    const embedCard = resolvePostEmbedCard(unified);
+    if (embedCard) {
+      const cardNode = createEmbedCard(embedCard);
+      if (cardNode) contentInner.appendChild(cardNode);
+    }
+  }
+
+  const quoteNode = createQuotePostCard(doc, unified._meta?.quotePost, { onOpenThread });
+  if (quoteNode) {
+    contentInner.appendChild(quoteNode);
   }
 
   const spoiler = mMeta.spoilerText || rawPost?.spoilerText || '';
@@ -395,12 +574,14 @@ export function createPostCard(rawPost, {
   actions.className = 'post-card-actions';
   const liked = Boolean(mMeta.favourited || bMeta.likeUri || rawPost?.viewerState?.favourited);
   const reposted = Boolean(mMeta.reblogged || bMeta.repostUri || rawPost?.viewerState?.reblogged);
+  const breakdown = unified._meta?.metricsBreakdown;
 
   actions.appendChild(
     createActionButton({
       iconSvg: liked ? HEART_FILLED_SVG : HEART_OUTLINE_SVG,
       count: unified.metrics?.likes ?? 0,
       label: 'Favourite',
+      tooltip: formatBreakdownTip(breakdown, 'Favourite', 'likes'),
       pressed: liked,
       active: liked,
       className: 'post-action-like',
@@ -412,6 +593,8 @@ export function createPostCard(rawPost, {
       iconSvg: REPLY_SVG,
       count: unified.metrics?.replies ?? 0,
       label: 'Reply',
+      tooltip: formatBreakdownTip(breakdown, 'Reply', 'replies'),
+      className: 'post-action-reply',
       onClick: () => onReply?.(rawPost),
     })
   );
@@ -420,6 +603,7 @@ export function createPostCard(rawPost, {
       iconSvg: reposted ? REPOST_ACTIVE_SVG : REPOST_SVG,
       count: unified.metrics?.reposts ?? 0,
       label: 'Boost',
+      tooltip: formatBreakdownTip(breakdown, 'Boost', 'reposts'),
       pressed: reposted,
       active: reposted,
       className: 'post-action-repost',
@@ -469,7 +653,7 @@ export function createPostCard(rawPost, {
 
   if (typeof onOpenThread === 'function') {
     card.addEventListener('click', (e) => {
-      if (e.target?.closest?.('a, button, video, input, .post-menu-wrap, .post-media-carousel')) return;
+      if (e.target?.closest?.('a, button, video, audio, iframe, input, .post-menu-wrap, .post-media-carousel, .post-embed-card, .post-quote-card')) return;
       onOpenThread(rawPost);
     });
   }

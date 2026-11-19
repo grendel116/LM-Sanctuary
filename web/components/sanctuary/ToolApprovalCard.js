@@ -2,20 +2,7 @@ import {
   approveToolCall,
   fetchSessionToolCalls,
 } from '../../queries/sanctuary.js';
-
-const TOOL_CATEGORY_ACTIONS = {
-  read_file: 'Analyzed',
-  view_file: 'Analyzed',
-  read_webpage: 'Analyzed',
-  get_workspace_structure: 'Explored',
-  search_codebase: 'Searched',
-  web_search: 'Searched',
-  search_music: 'Crate Dug',
-  write_file: 'Wrote',
-  replace_file_content: 'Edited',
-  multi_replace_file_content: 'Edited',
-  run_shell_command: 'Ran',
-};
+import { renderLiveToolLogs } from './MessageRow.js';
 
 /**
  * Inline Human-in-the-Loop approval card mounted inside the live Program thread
@@ -95,23 +82,7 @@ export function createToolApprovalCard({
 }
 
 function updateLiveToolLogs(typingBubble, toolCalls = []) {
-  if (!typingBubble || !Array.isArray(toolCalls) || toolCalls.length === 0) return;
-  const doc = globalThis.document;
-  let logsWrap = typingBubble.querySelector('.tool-logs-container');
-  if (!logsWrap) {
-    logsWrap = doc.createElement('div');
-    logsWrap.className = 'tool-logs-container';
-    typingBubble.appendChild(logsWrap);
-  }
-  const rows = [];
-  for (const tc of toolCalls) {
-    const row = doc.createElement('div');
-    row.className = `live-tool-row status-${tc.status || 'running'}`;
-    const verb = TOOL_CATEGORY_ACTIONS[tc.name] || 'Ran';
-    row.textContent = `${verb}: ${tc.name} (${tc.status || 'running'})`;
-    rows.push(row);
-  }
-  logsWrap.replaceChildren(...rows);
+  renderLiveToolLogs(typingBubble, toolCalls);
 }
 
 /**

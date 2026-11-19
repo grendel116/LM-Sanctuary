@@ -4,9 +4,11 @@ import { openUserModal } from '../components/sanctuary/UserModal.js';
 import { createUserIconSvg } from '../constants/avatars.js';
 import { toUnifiedItem } from '../core/schema/unifiedItem.js';
 import { exchangeOAuthCode, verifyCredentials } from '../queries/fediverse.js';
-import { syncRecentUserPostsToSanctuary } from '../queries/socialClient.js';
+import { completeThreadsOAuthFlow, syncRecentUserPostsToSanctuary } from '../queries/socialClient.js';
 import { authStore, hydrateAuthStore, upsertSocialAccount } from '../state/authStore.js';
+import { activityStore, hydrateActivityStore, markActivitySeen, refreshActivityNotifications } from '../state/activityStore.js';
 import { openCompose, prefillFromUserBubble } from '../state/composeStore.js';
+import { hydrateFeedTuning } from '../state/feedStore.js';
 import { connectionStore, initSanctuaryConnection, onSanctuaryEvent } from '../state/sanctuary/connection.js';
 import { attachOutboxAutoFlush, hydrateOutbox } from '../state/sanctuary/outboxModel.js';
 import { kvDelete, kvGet, kvSet } from '../storage/nativeStore.js';
@@ -15,7 +17,7 @@ import { mountComposeModal } from './composeModal.js';
 import { mountFeedScreen } from './feed.js';
 import { mountMessagesScreen } from './messages.js';
 import { renderPostThreadView } from './postThread.js';
-import { mountProfileScreen } from './profile.js';
+import { mountProfileScreen, openEditPostDialog } from './profile.js';
 import { mountProgramThread } from './programThread.js';
 import { mountSearchScreen } from './search.js';
 
@@ -79,6 +81,21 @@ async function handlePendingOAuthCallback() {
   const params = new URLSearchParams(loc.search);
   const code = params.get('code');
   if (!code) return false;
+
+  const pendingThreads = await kvGet('pending_threads_oauth', null);
+  if (pendingThreads?.clientId && pendingThreads?.clientSecret) {
+    if (!pendingThreads.state || params.get('state') === pendingThreads.state) {
+      try {
+        await completeThreadsOAuthFlow({ ...pendingThreads, code });
+        await kvDelete('pending_threads_oauth');
+        const cleanUrl = `${loc.origin}${loc.pathname}${loc.hash || ''}`;
+        globalThis.history?.replaceState?.(null, '', cleanUrl);
+        return true;
+      } catch {
+        return false;
+      }
+    }
+  }
 
   const pending = await kvGet('pending_oauth_app', null);
   if (!pending?.instanceUrl || !pending?.clientId || !pending?.clientSecret) {
@@ -175,7 +192,14 @@ export function createAppShell(rootEl, { initialTab = 'home', skipBackgroundInit
     btn.dataset.tab = item.id;
     btn.setAttribute('aria-label', item.label);
     btn.title = item.label;
-    btn.innerHTML = `${item.iconSvg}<span class="primary-tab-label">${item.label}</span>`;
+    btn.innerHTML = item.iconSvg;
+    if (item.id === 'activity') {
+      const dot = doc.createElement('span');
+      dot.className = 'nav-unread-dot';
+      dot.setAttribute('aria-hidden', 'true');
+      dot.hidden = true;
+      btn.appendChild(dot);
+    }
     btn.addEventListener('click', () => navigateToTab(item.id));
     li.appendChild(btn);
     navList.appendChild(li);
@@ -343,25 +367,57 @@ export function createAppShell(rootEl, { initialTab = 'home', skipBackgroundInit
   }
 
   function handleSelectAuthor(author, item) {
-    const primary = (authStore.get().accounts || []).find((a) => a.platform === 'fediverse');
-    const authorHandle = String(author?.handle || author?.acct || '').replace(/^@/, '').toLowerCase();
-    const myAcct = String(primary?.acct || primary?.handle || '').replace(/^@/, '').toLowerCase();
-    const sameUser = Boolean(
-      primary && (
-        (author?.id && String(author.id) === String(primary.userId)) ||
-        (myAcct && authorHandle && authorHandle === myAcct)
-      )
-    );
+    const accounts = authStore.get().accounts || [];
+    const rawAcct = String(author?.handle || author?.acct || '').trim().replace(/^@/, '').toLowerCase();
+    const authorId = String(author?.id || author?.did || '');
+    const targetProto = (
+      author?.protocol === 'threads'
+      || author?.network === 'threads'
+      || item?.protocol === 'threads'
+      || String(author?.url || '').includes('threads.net')
+    )
+      ? 'threads'
+      : (
+          author?.protocol === 'bluesky'
+          || author?.network === 'bluesky'
+          || item?.protocol === 'bluesky'
+          || rawAcct.endsWith('@bsky.brid.gy')
+          || authorId.startsWith('did:')
+          || String(author?.url || '').includes('bsky.app')
+        )
+        ? 'bluesky'
+        : 'mastodon';
+
+    const cleanTargetAcct = rawAcct.endsWith('@bsky.brid.gy')
+      ? rawAcct.slice(0, -'@bsky.brid.gy'.length)
+      : rawAcct;
+
+    const sameUser = accounts.some((acc) => {
+      const accProto = acc.platform === 'fediverse' ? 'mastodon' : acc.platform;
+      if (accProto !== targetProto) return false;
+      const accId = String(acc.userId || acc.did || String(acc.id || '').replace(/^(?:fediverse|mastodon|bluesky|threads):/, ''));
+      if (authorId && accId && authorId === accId) return true;
+      const accAcct = String(acc.acct || acc.handle || '').trim().replace(/^@/, '').toLowerCase();
+      if (cleanTargetAcct && accAcct && cleanTargetAcct === accAcct) return true;
+      if (targetProto === 'mastodon' && cleanTargetAcct && accAcct && cleanTargetAcct === accAcct.split('@')[0]) {
+        const myInstance = String(acc.instanceUrl || '').replace(/\/+$/, '');
+        const itemInstance = String(item?._meta?.mastodon?.instanceUrl || '').replace(/\/+$/, '');
+        if (!itemInstance || itemInstance === myInstance) return true;
+      }
+      return false;
+    });
     if (sameUser) {
       navigateToTab('profile');
       return;
     }
+    const primary = accounts.find((a) => a.platform === 'fediverse');
     openAuthorSheetModal({
       author,
       instanceUrl: item?._meta?.mastodon?.instanceUrl || primary?.instanceUrl || 'https://mastodon.social',
       item,
       onOpenPostThread: openPostThread,
       onAskSanctuary: askSanctuaryAboutPost,
+      onEditPost: (p, onDone) => openEditPostDialog(p, { onSaved: onDone }),
     });
   }
 
@@ -401,7 +457,19 @@ export function createAppShell(rootEl, { initialTab = 'home', skipBackgroundInit
 
     shell.classList.toggle('is-mobile-sanctuary-active', activeTab === 'sanctuary');
     doc.title = TAB_TITLES[activeTab] || 'LM-Sanctuary';
+    syncActivityUnreadBadge();
   }
+
+  function syncActivityUnreadBadge() {
+    const actBtn = navButtons.get('activity');
+    if (!actBtn) return;
+    const showDot = Boolean(activityStore.get().hasUnread && activeTab !== 'activity');
+    actBtn.classList.toggle('has-unread-activity', showDot);
+    actBtn.setAttribute('aria-label', showDot ? 'Activity (unread notifications)' : 'Activity');
+    const dot = actBtn.querySelector('.nav-unread-dot');
+    if (dot) dot.hidden = !showDot;
+  }
+  const unsubActivityBadge = activityStore.subscribe(() => syncActivityUnreadBadge());
 
   function askSanctuaryAboutPost(post) {
     if (isSanctuaryCollapsed) setSanctuaryCollapsed(false);
@@ -525,6 +593,21 @@ export function createAppShell(rootEl, { initialTab = 'home', skipBackgroundInit
     }
   }
 
+  function scrollHomeToTop({ smooth = true } = {}) {
+    savedHomeScrollTop = 0;
+    const prefersReduced = Boolean(
+      globalThis.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches
+    );
+    if (smooth && !prefersReduced && typeof centerWrap.scrollTo === 'function') {
+      centerWrap.scrollTo({ top: 0, behavior: 'smooth' });
+    } else {
+      centerWrap.scrollTop = 0;
+    }
+    if (doc.documentElement) {
+      doc.documentElement.scrollTop = 0;
+    }
+  }
+
   function navigateToTab(tabId) {
     if (tabId === 'compose') {
       openCompose({});
@@ -541,6 +624,15 @@ export function createAppShell(rootEl, { initialTab = 'home', skipBackgroundInit
       savedHomeScrollTop = centerWrap.scrollTop || 0;
     }
     if (targetTab === activeTab) {
+      if (targetTab === 'home') {
+        if (threadScreenHandle) {
+          closePostThread({ restoreScroll: false });
+          scrollHomeToTop({ smooth: false });
+        } else {
+          scrollHomeToTop({ smooth: true });
+        }
+        return;
+      }
       if (threadScreenHandle) {
         closePostThread({ restoreScroll: true });
       }
@@ -556,6 +648,10 @@ export function createAppShell(rootEl, { initialTab = 'home', skipBackgroundInit
   dismissSplashOverlay(doc);
 
   let detachOutbox = () => {};
+  let activityPollTimer = null;
+  let activityEventSource = null;
+  let unsubAuthActivity = () => {};
+  let onVisibilityActivityCheck = null;
   const offRecentPostsSync = onSanctuaryEvent('sanctuary:online', () => {
     void syncRecentUserPostsToSanctuary().catch(() => {});
   });
@@ -568,14 +664,85 @@ export function createAppShell(rootEl, { initialTab = 'home', skipBackgroundInit
           syncSanctuaryCollapseUi();
         }
         await hydrateAuthStore();
+        await hydrateActivityStore();
         const handledOAuth = await handlePendingOAuthCallback();
         await hydrateOutbox();
+        await hydrateFeedTuning();
         detachOutbox = attachOutboxAutoFlush();
         await initSanctuaryConnection();
         void syncRecentUserPostsToSanctuary().catch(() => {});
 
+        if ((authStore.get().accounts || []).length > 0) {
+          void refreshActivityNotifications({
+            limit: 40,
+            markSeen: activeTab === 'activity',
+            background: true,
+          }).catch(() => {});
+        }
+        let prevAccSig = (authStore.get().accounts || []).map((a) => a.id).join(',');
+        unsubAuthActivity = authStore.subscribe((st) => {
+          const sig = (st?.accounts || []).map((a) => a.id).join(',');
+          if (sig !== prevAccSig) {
+            prevAccSig = sig;
+            if ((st?.accounts || []).length > 0) {
+              void refreshActivityNotifications({
+                limit: 40,
+                markSeen: activeTab === 'activity',
+                background: true,
+              }).catch(() => {});
+            }
+          }
+        });
+        activityPollTimer = setInterval(() => {
+          if ((authStore.get().accounts || []).length > 0 && doc.visibilityState !== 'hidden') {
+            void refreshActivityNotifications({
+              limit: 40,
+              markSeen: activeTab === 'activity',
+              background: true,
+            }).catch(() => {});
+          }
+        }, 90_000);
+        onVisibilityActivityCheck = () => {
+          if (doc.visibilityState === 'visible' && (authStore.get().accounts || []).length > 0) {
+            void refreshActivityNotifications({
+              limit: 40,
+              markSeen: activeTab === 'activity',
+              background: true,
+            }).catch(() => {});
+          }
+        };
+        doc.addEventListener?.('visibilitychange', onVisibilityActivityCheck);
+
         const isNativeCapacitor = Boolean(globalThis.Capacitor?.isNativePlatform?.());
         const loc = globalThis.location;
+        if (
+          !isNativeCapacitor
+          && typeof globalThis.EventSource === 'function'
+          && loc?.origin
+          && loc.origin !== 'null'
+          && (loc.protocol === 'http:' || loc.protocol === 'https:')
+        ) {
+          try {
+            activityEventSource = new globalThis.EventSource(`${loc.origin}/api/social/events`);
+            activityEventSource.onmessage = (msgEvent) => {
+              try {
+                const ev = JSON.parse(msgEvent.data);
+                if (ev?.type === 'notification') {
+                  if (activeTab === 'activity') {
+                    void activeScreenHandle?.refresh?.();
+                  } else {
+                    activityStore.set({ hasUnread: true });
+                    void refreshActivityNotifications({ limit: 40, background: true }).catch(() => {});
+                  }
+                }
+              } catch {
+                // Ignore keepalive / malformed SSE frame
+              }
+            };
+          } catch {
+            // Optional SSE stream unavailable
+          }
+        }
         const canRegisterSw =
           !isNativeCapacitor &&
           typeof navigator !== 'undefined' &&
@@ -602,7 +769,8 @@ export function createAppShell(rootEl, { initialTab = 'home', skipBackgroundInit
       })();
 
   function handleExternalLinkClick(event) {
-    const anchor = event.target?.closest?.('a[href]');
+    const targetEl = event.target?.nodeType === 1 ? event.target : event.target?.parentElement;
+    const anchor = targetEl?.closest?.('a[href]');
     if (!anchor || anchor.hasAttribute('download')) return;
     const rawHref = anchor.getAttribute('href') || '';
     if (!rawHref || rawHref.startsWith('#')) return;
@@ -620,20 +788,36 @@ export function createAppShell(rootEl, { initialTab = 'home', skipBackgroundInit
     anchor.setAttribute('target', '_blank');
     anchor.setAttribute('rel', 'noopener noreferrer');
 
-    if (globalThis.pywebview || globalThis.chrome?.webview) {
+    if (typeof globalThis.pywebview?.api?.open_external === 'function') {
       event.preventDefault();
-      if (typeof globalThis.pywebview?.api?.open_external === 'function') {
-        void globalThis.pywebview.api.open_external(parsed.href);
-      } else {
-        void fetch('/api/social/open-external', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ url: parsed.href }),
-        }).catch(() => {});
-      }
+      Promise.resolve(globalThis.pywebview.api.open_external(parsed.href))
+        .then((opened) => {
+          if (opened === false) {
+            globalThis.open?.(parsed.href, '_blank', 'noopener,noreferrer');
+          }
+        })
+        .catch(() => {
+          globalThis.open?.(parsed.href, '_blank', 'noopener,noreferrer');
+        });
+    } else if (globalThis.chrome?.webview) {
+      event.preventDefault();
+      fetch('/api/social/open-external', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: parsed.href }),
+      })
+        .then((res) => (res.ok ? res.json() : null))
+        .then((data) => {
+          if (!data?.opened) {
+            globalThis.open?.(parsed.href, '_blank', 'noopener,noreferrer');
+          }
+        })
+        .catch(() => {
+          globalThis.open?.(parsed.href, '_blank', 'noopener,noreferrer');
+        });
     }
   }
-  doc.addEventListener('click', handleExternalLinkClick);
+  doc.addEventListener('click', handleExternalLinkClick, true);
 
   return {
     navigateToTab,
@@ -642,7 +826,12 @@ export function createAppShell(rootEl, { initialTab = 'home', skipBackgroundInit
     sanctuaryCtrl,
     initPromise,
     destroy() {
-      doc.removeEventListener('click', handleExternalLinkClick);
+      doc.removeEventListener('click', handleExternalLinkClick, true);
+      if (onVisibilityActivityCheck) doc.removeEventListener?.('visibilitychange', onVisibilityActivityCheck);
+      if (activityPollTimer) clearInterval(activityPollTimer);
+      activityEventSource?.close?.();
+      unsubAuthActivity();
+      unsubActivityBadge();
       closePostThread({ restoreScroll: false });
       feedScreenHandle?.destroy?.();
       activeScreenHandle?.destroy?.();

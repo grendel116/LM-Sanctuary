@@ -97,6 +97,11 @@ test('3-column shell boots synchronously into Home, keeps right Sanctuary dock m
     assert.equal(desktopTabs[0].getAttribute('aria-current'), 'page');
     assert.equal(doc.title, 'Home | Sanctuary');
     assert.equal(host.querySelector('.rail-brand'), null);
+    assert.equal(host.querySelector('.primary-tab-label'), null);
+    for (const navBtn of mobileTabs) {
+      assert.equal(navBtn.textContent.trim(), '');
+      assert.ok(navBtn.getAttribute('aria-label'));
+    }
 
     // Mobile top utility bar holds Search (replacing Profile) and Settings
     const mobileActions = host.querySelector('.mobile-utility-actions');
@@ -117,6 +122,7 @@ test('3-column shell boots synchronously into Home, keeps right Sanctuary dock m
 
     const shellCss = fs.readFileSync(SHELL_CSS_PATH, 'utf8');
     assert.equal(shellCss.includes('.primary-tab-btn[aria-current="page"]::after'), false);
+    assert.match(shellCss, /\.mobile-compose-fab\s*\{[^}]*inline-size:\s*36px;[^}]*border-radius:\s*50%;/s);
 
     // Right Sanctuary dock mounts once with #user-input, 4 header actions (Voice Call, Image Gallery, Quest Log, Memory), and a collapsible toggle
     const rightDock = host.querySelector('.sanctuary-right-dock');
@@ -176,6 +182,11 @@ test('3-column shell boots synchronously into Home, keeps right Sanctuary dock m
     assert.equal(desktopTabs[0].getAttribute('aria-current'), 'page');
     assert.equal(host.querySelector('.feed-screen'), feedElBefore);
     assert.equal(centerWrap.scrollTop, 320);
+    assert.equal(feedTrendCalls, fetchesBeforeThread);
+
+    // Pressing Home while already on Home scrolls back to the top
+    mobileTabs[0].click();
+    assert.equal(centerWrap.scrollTop, 0);
     assert.equal(feedTrendCalls, fetchesBeforeThread);
 
     // Explicit refresh button next to Following triggers a manual refresh

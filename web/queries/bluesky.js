@@ -9,6 +9,7 @@ import { fetchWrapper } from './fetch/fetchWrapper.js';
 import { extractFieldLinkUrl } from './fediverse.js';
 
 const utf8Encoder = new TextEncoder();
+const utf8Decoder = new TextDecoder('utf-8', { fatal: false });
 
 function cleanServiceOrigin(serviceUrl = DEFAULT_BSKY_SERVICE) {
   return normalizeInstanceUrl(serviceUrl || DEFAULT_BSKY_SERVICE);
@@ -216,11 +217,266 @@ function rkeyFromAtUri(uri) {
   return parts[parts.length - 1] || '';
 }
 
-function escapePlainTextToParagraphs(text) {
+function escapeBskyHtmlText(text) {
   return String(text || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+function escapeBskyHtmlAttr(value) {
+  return escapeBskyHtmlText(value)
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function splitUrlAndTrailingSuffix(token) {
+  let clean = token.replace(/[.,!?;:]+$/, '');
+  while (clean.endsWith(')')) {
+    const opens = (clean.match(/\(/g) || []).length;
+    const closes = (clean.match(/\)/g) || []).length;
+    if (closes > opens) {
+      clean = clean.slice(0, -1).replace(/[.,!?;:]+$/, '');
+    } else {
+      break;
+    }
+  }
+  return { clean, suffix: token.slice(clean.length) };
+}
+
+/**
+ * Escape a plain-text segment and turn raw http(s):// URLs into external <a> links.
+ */
+export function linkifyPlainTextSegment(rawSegment) {
+  const input = String(rawSegment || '');
+  if (!input) return '';
+  const urlRe = /(?:^|[\s(])(https?:\/\/[^\s<>[\]{}"']+)/g;
+  const parts = [];
+  let cursor = 0;
+
+  for (const m of input.matchAll(urlRe)) {
+    const token = m[1];
+    const tokenStart = m.index + m[0].indexOf(token);
+    const { clean, suffix } = splitUrlAndTrailingSuffix(token);
+    if (!clean) continue;
+
+    let href = '';
+    try {
+      const parsed = new URL(clean);
+      if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+        href = parsed.href;
+      }
+    } catch {
+      href = '';
+    }
+    if (!href) continue;
+
+    if (tokenStart > cursor) {
+      parts.push(escapeBskyHtmlText(input.slice(cursor, tokenStart)));
+    }
+    parts.push(`<a href="${escapeBskyHtmlAttr(href)}" target="_blank" rel="noopener noreferrer">${escapeBskyHtmlText(clean)}</a>`);
+    if (suffix) {
+      parts.push(escapeBskyHtmlText(suffix));
+    }
+    cursor = tokenStart + token.length;
+  }
+
+  if (cursor < input.length) {
+    parts.push(escapeBskyHtmlText(input.slice(cursor)));
+  }
+  return parts.join('');
+}
+
+function renderBskyFacetAnchor(label, features = []) {
+  for (const feat of Array.isArray(features) ? features : []) {
+    const type = String(feat?.$type || '');
+    if ((type === 'app.bsky.richtext.facet#link' || (!type && feat?.uri)) && feat?.uri) {
+      try {
+        const parsed = new URL(String(feat.uri).trim());
+        if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+          return `<a href="${escapeBskyHtmlAttr(parsed.href)}" target="_blank" rel="noopener noreferrer">${escapeBskyHtmlText(label)}</a>`;
+        }
+      } catch {
+        // Ignore invalid facet link URI
+      }
+    } else if (type === 'app.bsky.richtext.facet#mention' && feat?.did) {
+      const href = `https://bsky.app/profile/${encodeURIComponent(String(feat.did))}`;
+      return `<a href="${escapeBskyHtmlAttr(href)}" class="mention" target="_blank" rel="noopener noreferrer">${escapeBskyHtmlText(label)}</a>`;
+    } else if (type === 'app.bsky.richtext.facet#tag' && feat?.tag) {
+      const href = `https://bsky.app/hashtag/${encodeURIComponent(String(feat.tag))}`;
+      return `<a href="${escapeBskyHtmlAttr(href)}" class="hashtag" target="_blank" rel="noopener noreferrer">${escapeBskyHtmlText(label)}</a>`;
+    }
+  }
+  return linkifyPlainTextSegment(label);
+}
+
+/**
+ * Convert AT Protocol plain text + UTF-8 byte-indexed facets into paragraph-wrapped sanitized HTML.
+ */
+export function renderBskyRichTextToHtml(text, facets = []) {
+  const source = String(text || '');
+  if (!source) return '';
+
+  const bytes = utf8Encoder.encode(source);
+  const validFacets = (Array.isArray(facets) ? facets : [])
+    .filter(
+      (f) =>
+        Number.isInteger(f?.index?.byteStart) &&
+        Number.isInteger(f?.index?.byteEnd) &&
+        f.index.byteStart >= 0 &&
+        f.index.byteStart < f.index.byteEnd &&
+        f.index.byteEnd <= bytes.byteLength
+    )
+    .sort((a, b) => a.index.byteStart - b.index.byteStart);
+
+  const inlineParts = [];
+  let cursor = 0;
+
+  for (const facet of validFacets) {
+    const { byteStart, byteEnd } = facet.index;
+    if (byteStart < cursor) continue;
+    if (byteStart > cursor) {
+      inlineParts.push(linkifyPlainTextSegment(utf8Decoder.decode(bytes.subarray(cursor, byteStart))));
+    }
+    const label = utf8Decoder.decode(bytes.subarray(byteStart, byteEnd));
+    inlineParts.push(renderBskyFacetAnchor(label, facet.features));
+    cursor = byteEnd;
+  }
+
+  if (cursor < bytes.byteLength) {
+    inlineParts.push(linkifyPlainTextSegment(utf8Decoder.decode(bytes.subarray(cursor))));
+  }
+
+  return inlineParts
+    .join('')
+    .replace(/\r\n/g, '\n')
     .split(/\n{2,}/)
-    .map((block) => `<p>${block.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\n/g, '<br>')}</p>`)
+    .filter((block) => block.length > 0)
+    .map((block) => `<p>${block.replace(/\n/g, '<br>')}</p>`)
     .join('');
+}
+
+function isDirectAnimatedGifUrl(rawUrl) {
+  try {
+    const parsed = new URL(String(rawUrl || '').trim());
+    if (parsed.protocol !== 'https:') return false;
+    const host = parsed.hostname.toLowerCase();
+    const isGifHost =
+      host === 'tenor.com' ||
+      host.endsWith('.tenor.com') ||
+      host === 'giphy.com' ||
+      host.endsWith('.giphy.com');
+    return isGifHost && /\.gif$/i.test(parsed.pathname);
+  } catch {
+    return false;
+  }
+}
+
+function extractBskyVideoMedia(embedMedia, recordMedia, post, author) {
+  const embType = String(embedMedia?.$type || '');
+  if (!embType.startsWith('app.bsky.embed.video') && !embedMedia?.playlist && !recordMedia?.video) {
+    return null;
+  }
+  const cid = String(embedMedia?.cid || recordMedia?.video?.ref?.$link || '');
+  const did = String(author?.did || '');
+  const mp4Url = did && cid
+    ? `https://bsky.social/xrpc/com.atproto.sync.getBlob?did=${encodeURIComponent(did)}&cid=${encodeURIComponent(cid)}`
+    : '';
+  const hlsUrl = String(embedMedia?.playlist || '');
+  if (!mp4Url && !hlsUrl) return null;
+
+  const ar = embedMedia?.aspectRatio || recordMedia?.aspectRatio || {};
+  const width = Number.parseInt(ar.width, 10) > 0 ? Number.parseInt(ar.width, 10) : 640;
+  const height = Number.parseInt(ar.height, 10) > 0 ? Number.parseInt(ar.height, 10) : 360;
+  const isGif = embedMedia?.presentation === 'gif';
+  return {
+    id: `${post?.cid || cid || 'vid'}_0`,
+    type: isGif ? 'gifv' : 'video',
+    mimeType: String(recordMedia?.video?.mimeType || (mp4Url ? 'video/mp4' : 'application/vnd.apple.mpegurl')),
+    url: mp4Url || hlsUrl,
+    hlsUrl,
+    previewUrl: String(embedMedia?.thumbnail || ''),
+    description: String(embedMedia?.alt || recordMedia?.alt || ''),
+    width,
+    height,
+    did,
+    cid,
+  };
+}
+
+function extractBskyQuotePost(rawEmbed) {
+  if (!rawEmbed || typeof rawEmbed !== 'object') return null;
+  const isWithMedia = String(rawEmbed.$type || '').startsWith('app.bsky.embed.recordWithMedia');
+  const rawRec = isWithMedia ? rawEmbed.record?.record : rawEmbed.record;
+  if (!rawRec || typeof rawRec !== 'object') return null;
+
+  const recType = String(rawRec.$type || '');
+  if (
+    recType.includes('viewNotFound') ||
+    recType.includes('viewBlocked') ||
+    recType.includes('viewDetached') ||
+    rawRec.notFound ||
+    rawRec.blocked ||
+    rawRec.detached
+  ) {
+    return {
+      unavailable: true,
+      reason: rawRec.blocked ? 'Quoted post from blocked account' : 'Quoted post unavailable',
+    };
+  }
+
+  if (!recType.includes('viewRecord') && !(rawRec.value && rawRec.author)) {
+    return null;
+  }
+
+  const qUri = String(rawRec.uri || '');
+  const qCid = String(rawRec.cid || '');
+  const qRkey = rkeyFromAtUri(qUri);
+  const qAuthor = rawRec.author || {};
+  const qHandle = String(qAuthor.handle || qAuthor.did || '');
+  const qVal = rawRec.value || {};
+  const firstEmbed = Array.isArray(rawRec.embeds) ? rawRec.embeds[0] : null;
+  const thumbUrl =
+    firstEmbed?.images?.[0]?.thumb ||
+    firstEmbed?.images?.[0]?.fullsize ||
+    firstEmbed?.thumbnail ||
+    firstEmbed?.media?.images?.[0]?.thumb ||
+    firstEmbed?.media?.thumbnail ||
+    firstEmbed?.external?.thumb ||
+    '';
+
+  return {
+    id: `bluesky:${qUri || qCid}`,
+    protocol: 'bluesky',
+    uri: qUri,
+    cid: qCid,
+    authorName: String(qAuthor.displayName || qHandle),
+    authorHandle: qHandle,
+    authorDid: String(qAuthor.did || ''),
+    authorAvatar: String(qAuthor.avatar || ''),
+    text: String(qVal.text || ''),
+    createdAt: String(qVal.createdAt || rawRec.indexedAt || ''),
+    url: qHandle && qRkey ? `https://bsky.app/profile/${qHandle}/post/${qRkey}` : '',
+    ...(thumbUrl ? { thumbUrl: String(thumbUrl) } : {}),
+  };
+}
+
+function extractBskyLinkCard(embedMedia) {
+  const ext = embedMedia?.external;
+  if (!ext || typeof ext !== 'object' || !ext.uri) return null;
+  if (isDirectAnimatedGifUrl(ext.uri)) return null;
+  try {
+    const parsed = new URL(String(ext.uri).trim());
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null;
+    return {
+      url: parsed.href,
+      title: String(ext.title || ''),
+      description: String(ext.description || ''),
+      image: String(ext.thumb || ''),
+    };
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -233,8 +489,64 @@ export function normalizeBskyPost(feedItem) {
   const uri = String(post?.uri || '');
   const rkey = rkeyFromAtUri(uri);
   const handle = author.handle || author.did || '';
-  const embedImages = Array.isArray(post?.embed?.images) ? post.embed.images : [];
+  const rawEmbed = post?.embed || {};
+  const embedMedia = String(rawEmbed.$type || '').startsWith('app.bsky.embed.recordWithMedia')
+    ? (rawEmbed.media || {})
+    : rawEmbed;
+  const recordEmbed = record?.embed || {};
+  const recordMedia = String(recordEmbed.$type || '').startsWith('app.bsky.embed.recordWithMedia')
+    ? (recordEmbed.media || {})
+    : recordEmbed;
+  const embedImages = Array.isArray(embedMedia?.images) ? embedMedia.images : [];
+  const videoMedia = extractBskyVideoMedia(embedMedia, recordMedia, post, author);
+  const gifExternal = embedMedia?.external && isDirectAnimatedGifUrl(embedMedia.external.uri) ? embedMedia.external : null;
+  const linkCard = gifExternal ? null : extractBskyLinkCard(embedMedia);
+  const quotePost = extractBskyQuotePost(rawEmbed);
   const createdAt = record.createdAt || post?.indexedAt || '';
+  const facets = Array.isArray(record.facets) ? record.facets : [];
+  const labelSet = new Set();
+  for (const l of (Array.isArray(post?.labels) ? post.labels : [])) {
+    if (l?.val) labelSet.add(String(l.val).trim().toLowerCase());
+  }
+  const recLabelVals = Array.isArray(record?.labels?.values) ? record.labels.values : [];
+  for (const l of recLabelVals) {
+    if (l?.val) labelSet.add(String(l.val).trim().toLowerCase());
+  }
+  const labels = [...labelSet];
+
+  const media = embedImages.map((img, idx) => ({
+    id: `${post?.cid || 'img'}_${idx}`,
+    type: 'image',
+    url: img.fullsize || img.thumb || '',
+    previewUrl: img.thumb || img.fullsize || '',
+    description: img.alt || '',
+    width: Number.parseInt(img.aspectRatio?.width, 10) || 0,
+    height: Number.parseInt(img.aspectRatio?.height, 10) || 0,
+  }));
+  if (videoMedia) {
+    media.push(videoMedia);
+  }
+  if (gifExternal) {
+    let gifWidth = 0;
+    let gifHeight = 0;
+    try {
+      const parsedGif = new URL(String(gifExternal.uri));
+      gifWidth = Number.parseInt(parsedGif.searchParams.get('ww') || '0', 10) || 0;
+      gifHeight = Number.parseInt(parsedGif.searchParams.get('hh') || '0', 10) || 0;
+    } catch {
+      // Ignore query parse
+    }
+    media.push({
+      id: `${post?.cid || 'gif'}_${media.length}`,
+      type: 'image',
+      mimeType: 'image/gif',
+      url: String(gifExternal.uri),
+      previewUrl: String(gifExternal.thumb || gifExternal.uri),
+      description: String(gifExternal.description || gifExternal.title || ''),
+      width: gifWidth,
+      height: gifHeight,
+    });
+  }
 
   return {
     key: `bluesky:${uri || post?.cid || ''}`,
@@ -264,16 +576,14 @@ export function normalizeBskyPost(feedItem) {
         }
       : null,
     text: record.text || '',
-    sanitizedHtml: escapePlainTextToParagraphs(record.text || ''),
+    facets,
+    sanitizedHtml: renderBskyRichTextToHtml(record.text || '', facets),
     spoilerText: '',
+    labels,
     visibility: 'public',
-    media: embedImages.map((img, idx) => ({
-      id: `${post?.cid || 'img'}_${idx}`,
-      type: 'image',
-      url: img.fullsize || img.thumb || '',
-      previewUrl: img.thumb || img.fullsize || '',
-      description: img.alt || '',
-    })),
+    media,
+    linkCard,
+    ...(quotePost ? { quotePost } : {}),
     counts: {
       replies: post?.replyCount ?? 0,
       reposts: post?.repostCount ?? 0,
@@ -419,7 +729,7 @@ export function normalizeBskyActorProfile(raw) {
       avatar: raw?.avatar || '',
       header: raw?.banner || '',
       url: handle ? `https://bsky.app/profile/${handle}` : '',
-      note: description ? escapePlainTextToParagraphs(description) : '',
+      note: description ? renderBskyRichTextToHtml(description, raw?.descriptionFacets) : '',
       noteText: description,
       fields: fields.slice(0, 4),
       followersCount: raw?.followersCount ?? 0,
@@ -452,6 +762,32 @@ export async function getBskyFollowers(opts) {
   });
   return {
     accounts: Array.isArray(data?.followers) ? data.followers.map(normalizeBskyActorSummary) : [],
+    nextCursor: data?.cursor || null,
+  };
+}
+
+export async function getBskyMutes(opts = {}) {
+  const { cursor = '', limit = 100, ...auth } = opts;
+  const data = await bskyRequest({
+    ...auth,
+    endpoint: 'app.bsky.graph.getMutes',
+    params: { limit, ...(cursor ? { cursor } : {}) },
+  });
+  return {
+    accounts: Array.isArray(data?.mutes) ? data.mutes.map(normalizeBskyActorSummary) : [],
+    nextCursor: data?.cursor || null,
+  };
+}
+
+export async function getBskyBlocks(opts = {}) {
+  const { cursor = '', limit = 100, ...auth } = opts;
+  const data = await bskyRequest({
+    ...auth,
+    endpoint: 'app.bsky.graph.getBlocks',
+    params: { limit, ...(cursor ? { cursor } : {}) },
+  });
+  return {
+    accounts: Array.isArray(data?.blocks) ? data.blocks.map(normalizeBskyActorSummary) : [],
     nextCursor: data?.cursor || null,
   };
 }
@@ -646,6 +982,96 @@ export async function getBskyProfile(opts) {
   });
 }
 
+const bskyMetricsCache = new Map();
+const BSKY_METRICS_TTL_MS = 60_000;
+
+/**
+ * Batch-fetch and normalize Bluesky posts keyed by ATProto URI via app.bsky.feed.getPosts.
+ */
+export async function getBskyPostsByUris({ uris = [], ...auth } = {}) {
+  const cleanUris = [
+    ...new Set(
+      (Array.isArray(uris) ? uris : [])
+        .map((u) => String(u || '').replace(/^bluesky:/, '').trim())
+        .filter((u) => u.startsWith('at://'))
+    ),
+  ];
+  if (cleanUris.length === 0) return {};
+
+  const result = {};
+  for (let i = 0; i < cleanUris.length; i += 25) {
+    const chunk = cleanUris.slice(i, i + 25);
+    try {
+      const data = await bskyPublicReadRequest({
+        ...auth,
+        endpoint: 'app.bsky.feed.getPosts',
+        params: { uris: chunk },
+      });
+      for (const post of Array.isArray(data?.posts) ? data.posts : []) {
+        if (!post?.uri) continue;
+        result[post.uri] = normalizeBskyPost({ post });
+      }
+    } catch {
+      // Non-fatal post lookup failure
+    }
+  }
+  return result;
+}
+
+/**
+ * Batch-fetch engagement counts (likes, replies, reposts + quotes) for ATProto URIs via app.bsky.feed.getPosts.
+ */
+export async function getBskyPostsMetrics({ uris = [], ...auth } = {}) {
+  const cleanUris = [
+    ...new Set(
+      (Array.isArray(uris) ? uris : [])
+        .map((u) => String(u || '').replace(/^bluesky:/, '').trim())
+        .filter((u) => u.startsWith('at://'))
+    ),
+  ];
+  if (cleanUris.length === 0) return {};
+
+  const useCache = typeof auth.fetchImpl !== 'function';
+  const now = Date.now();
+  const result = {};
+  const toFetch = [];
+
+  for (const uri of cleanUris) {
+    const cached = useCache ? bskyMetricsCache.get(uri) : null;
+    if (cached && cached.expiresAt > now) {
+      result[uri] = { ...cached.value };
+    } else {
+      toFetch.push(uri);
+    }
+  }
+
+  for (let i = 0; i < toFetch.length; i += 25) {
+    const chunk = toFetch.slice(i, i + 25);
+    try {
+      const data = await bskyPublicReadRequest({
+        ...auth,
+        endpoint: 'app.bsky.feed.getPosts',
+        params: { uris: chunk },
+      });
+      for (const post of Array.isArray(data?.posts) ? data.posts : []) {
+        if (!post?.uri) continue;
+        const m = {
+          likes: Number(post.likeCount ?? 0),
+          replies: Number(post.replyCount ?? 0),
+          reposts: Number(post.repostCount ?? 0) + Number(post.quoteCount ?? 0),
+        };
+        result[post.uri] = m;
+        if (useCache) {
+          bskyMetricsCache.set(post.uri, { value: m, expiresAt: now + BSKY_METRICS_TTL_MS });
+        }
+      }
+    } catch {
+      // Non-fatal metric batch lookup failure
+    }
+  }
+  return result;
+}
+
 export async function getBskyAuthorFeed(opts) {
   const { actor, limit = 15, cursor = '', filter = 'posts_no_replies', ...auth } = opts;
   const data = await bskyPublicReadRequest({
@@ -746,12 +1172,26 @@ async function toggleBskyGraphRecord({
   fetchImpl,
 }) {
   if (undo) {
-    if (recordUri) {
+    let resolvedUri = recordUri;
+    if (!resolvedUri && targetDid) {
+      const listed = await bskyRequest({
+        serviceUrl,
+        endpoint: 'com.atproto.repo.listRecords',
+        params: { repo, collection, limit: 100 },
+        accessJwt,
+        refreshJwt,
+        onSessionRefreshed,
+        fetchImpl,
+      }).catch(() => ({ records: [] }));
+      const match = (listed?.records || []).find((r) => r?.value?.subject === targetDid);
+      if (match?.uri) resolvedUri = match.uri;
+    }
+    if (resolvedUri) {
       await bskyRequest({
         serviceUrl,
         endpoint: 'com.atproto.repo.deleteRecord',
         method: 'POST',
-        json: { repo, collection, rkey: rkeyFromAtUri(recordUri) },
+        json: { repo, collection, rkey: rkeyFromAtUri(resolvedUri) },
         accessJwt,
         refreshJwt,
         onSessionRefreshed,
@@ -868,6 +1308,7 @@ export async function createBskyPost({
   text,
   langs = ['en'],
   images = [],
+  externalEmbed = null,
   reply = null,
   resolveMentions = true,
   fetchImpl,
@@ -892,6 +1333,19 @@ export async function createBskyPost({
         alt: img.alt || '',
         image: img.blob,
       })),
+    };
+  } else if (externalEmbed && externalEmbed.url) {
+    const ext = {
+      uri: String(externalEmbed.url),
+      title: String(externalEmbed.title || externalEmbed.url).slice(0, 300),
+      description: String(externalEmbed.description || '').slice(0, 1000),
+    };
+    if (externalEmbed.thumb) {
+      ext.thumb = externalEmbed.thumb;
+    }
+    record.embed = {
+      $type: 'app.bsky.embed.external',
+      external: ext,
     };
   }
 
@@ -1026,16 +1480,23 @@ export async function acceptBskyConvo(opts) {
 export async function deleteBskyPost({ serviceUrl = DEFAULT_BSKY_SERVICE, repo, uri, accessJwt, refreshJwt, onSessionRefreshed, fetchImpl }) {
   const rkey = rkeyFromAtUri(uri);
   if (!rkey) return false;
-  await bskyRequest({
-    serviceUrl,
-    endpoint: 'com.atproto.repo.deleteRecord',
-    method: 'POST',
-    json: { repo, collection: 'app.bsky.feed.post', rkey },
-    accessJwt,
-    refreshJwt,
-    onSessionRefreshed,
-    fetchImpl,
-  });
+  try {
+    await bskyRequest({
+      serviceUrl,
+      endpoint: 'com.atproto.repo.deleteRecord',
+      method: 'POST',
+      json: { repo, collection: 'app.bsky.feed.post', rkey },
+      accessJwt,
+      refreshJwt,
+      onSessionRefreshed,
+      fetchImpl,
+    });
+  } catch (err) {
+    if (err instanceof FetchError && (err.status === 404 || /RecordNotFound|Could not locate record/i.test(err.message))) {
+      return true;
+    }
+    throw err;
+  }
   return true;
 }
 
@@ -1044,6 +1505,26 @@ export async function listBskyNotifications({ serviceUrl = DEFAULT_BSKY_SERVICE,
     serviceUrl,
     endpoint: 'app.bsky.notification.listNotifications',
     params: { limit, ...(cursor ? { cursor } : {}) },
+    accessJwt,
+    refreshJwt,
+    onSessionRefreshed,
+    fetchImpl,
+  });
+}
+
+export async function updateBskyNotificationsSeen({
+  serviceUrl = DEFAULT_BSKY_SERVICE,
+  seenAt = new Date().toISOString(),
+  accessJwt,
+  refreshJwt,
+  onSessionRefreshed,
+  fetchImpl,
+}) {
+  return bskyRequest({
+    serviceUrl,
+    endpoint: 'app.bsky.notification.updateSeen',
+    method: 'POST',
+    json: { seenAt },
     accessJwt,
     refreshJwt,
     onSessionRefreshed,

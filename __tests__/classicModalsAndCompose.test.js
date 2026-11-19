@@ -889,7 +889,8 @@ test('composeModal simplifies media previews without alt inputs, provides emoji 
     assert.ok(composeStore.get().text.includes('🔥'));
     assert.equal(popover.hidden, true);
 
-    // 3. Save draft keeps modal open, Cancel resets saved draft session, reopen composer, select draft, and delete upon publish
+    // 3. Each "Save draft" click snapshots a new draft without overwriting older drafts; loading + saving adds a third, and publishing removes only the active snapshot
+    const mainTextarea = ctrl.dialog.querySelector('#compose-main-textarea');
     const saveDraftBtn = ctrl.dialog.querySelector('.compose-draft-btn');
     assert.ok(saveDraftBtn);
     saveDraftBtn.click();
@@ -898,7 +899,19 @@ test('composeModal simplifies media previews without alt inputs, provides emoji 
     assert.equal(ctrl.dialog.querySelector('.compose-status-msg').textContent, 'Draft saved.');
     assert.equal(ctrl.dialog.querySelector('.compose-drafts-toggle-btn').textContent, 'Drafts (1)');
     assert.ok(composeStore.get().text.includes('Draft note '));
-    assert.equal((await listComposeDrafts()).length, 1);
+    const afterFirstSave = await listComposeDrafts();
+    assert.equal(afterFirstSave.length, 1);
+
+    mainTextarea.value = `${composeStore.get().text} snapshot-2`;
+    mainTextarea.dispatchEvent(new Event('input', { bubbles: true }));
+    saveDraftBtn.click();
+    await new Promise((r) => setTimeout(r, 35));
+    assert.equal(ctrl.dialog.querySelector('.compose-drafts-toggle-btn').textContent, 'Drafts (2)');
+    const afterSecondSave = await listComposeDrafts();
+    assert.equal(afterSecondSave.length, 2);
+    assert.notEqual(afterSecondSave[0].id, afterFirstSave[0].id);
+    assert.ok(afterSecondSave[0].text.includes('snapshot-2'));
+    assert.equal(afterSecondSave[1].text.includes('snapshot-2'), false);
 
     ctrl.dialog.querySelector('.compose-cancel-btn').click();
     await new Promise((r) => setTimeout(r, 20));
@@ -908,25 +921,43 @@ test('composeModal simplifies media previews without alt inputs, provides emoji 
     openCompose();
     await new Promise((r) => setTimeout(r, 25));
     const draftsToggle = ctrl.dialog.querySelector('.compose-drafts-toggle-btn');
-    assert.equal(draftsToggle.textContent, 'Drafts (1)');
+    assert.equal(draftsToggle.textContent, 'Drafts (2)');
     draftsToggle.click();
     await new Promise((r) => setTimeout(r, 25));
     assert.equal(ctrl.dialog.querySelector('.compose-sheet-title').textContent, 'Drafts');
-    const draftSelectBtn = ctrl.dialog.querySelector('.compose-draft-select-btn');
-    assert.ok(draftSelectBtn);
-    assert.ok(draftSelectBtn.querySelector('.compose-draft-thumb'));
-    draftSelectBtn.click();
+    const composeBody = ctrl.dialog.querySelector('.compose-sheet-body');
+    Object.defineProperty(mainTextarea, 'scrollHeight', {
+      get: () => (composeBody.hidden ? 0 : 220),
+      configurable: true,
+    });
+
+    const draftSelectBtns = [...ctrl.dialog.querySelectorAll('.compose-draft-select-btn')];
+    assert.equal(draftSelectBtns.length, 2);
+    assert.ok(draftSelectBtns[1].querySelector('.compose-draft-thumb'));
+    draftSelectBtns[1].click();
+    assert.equal(mainTextarea.style.height, '220px');
 
     const restored = composeStore.get();
     assert.ok(restored.text.includes('Draft note '));
     assert.ok(restored.text.includes('🔥'));
+    assert.equal(restored.text.includes('snapshot-2'), false);
     assert.equal(restored.threadItems.length, 1);
     assert.equal(restored.mediaAttachments.length, 1);
     assert.ok(restored.mediaAttachments[0].blob instanceof Blob);
 
+    mainTextarea.value = `${restored.text} snapshot-3`;
+    mainTextarea.dispatchEvent(new Event('input', { bubbles: true }));
+    saveDraftBtn.click();
+    await new Promise((r) => setTimeout(r, 35));
+    assert.equal(ctrl.dialog.querySelector('.compose-drafts-toggle-btn').textContent, 'Drafts (3)');
+    assert.equal((await listComposeDrafts()).length, 3);
+
     ctrl.dialog.querySelector('.compose-publish-btn').click();
     await new Promise((r) => setTimeout(r, 45));
-    assert.equal((await listComposeDrafts()).length, 0);
+    const remainingAfterPublish = await listComposeDrafts();
+    assert.equal(remainingAfterPublish.length, 2);
+    assert.equal(remainingAfterPublish.some((d) => d.text.includes('snapshot-3')), false);
+    assert.equal(remainingAfterPublish.some((d) => d.text.includes('snapshot-2')), true);
     ctrl.destroy();
   } finally {
     globalThis.fetch = prevFetch;

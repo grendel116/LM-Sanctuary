@@ -1,18 +1,28 @@
 import { createUserIconSvg, DEFAULT_AVATAR_DATA_URI } from '../../constants/avatars.js';
+import { DEFAULT_THREADS_SCOPES } from '../../constants/endpoints.js';
 import { createBskySession, getBskyProfile } from '../../queries/bluesky.js';
 import {
   buildOAuthAuthorizeUrl,
   registerOAuthApp,
   verifyCredentials,
 } from '../../queries/fediverse.js';
-import { dismissBridgeRetry, runBridgeRetry } from '../../queries/socialClient.js';
-import { verifyThreadsCredentials } from '../../queries/threads.js';
+import {
+  completeThreadsOAuthFlow,
+  connectThreadsToken,
+  dismissBridgeRetry,
+  fetchSocialBridgeStatus,
+  refreshConnectedThreadsToken,
+  runBridgeRetry,
+  startThreadsOAuthFlow,
+} from '../../queries/socialClient.js';
+import { cleanThreadsAuthCode } from '../../queries/threads.js';
 import {
   authStore,
   removeSocialAccount,
   upsertSocialAccount,
 } from '../../state/authStore.js';
 import { kvSet } from '../../storage/nativeStore.js';
+import { openThreadsImportModal } from '../ThreadsImportModal.js';
 import { createClassicModalDialog } from './SanctuaryDialog.js';
 
 function extractFediverseInstance(rawInput) {
@@ -22,6 +32,292 @@ function extractFediverseInstance(rawInput) {
     clean = parts[parts.length - 1] || 'mastodon.social';
   }
   return clean.replace(/\/+$/, '').trim();
+}
+
+function defaultThreadsRedirectUri() {
+  const loc = globalThis.location;
+  if (loc?.protocol === 'https:' && loc.hostname && loc.hostname !== 'localhost') {
+    return `${loc.origin}${loc.pathname || '/'}`;
+  }
+  return 'https://localhost/';
+}
+
+function openExternalAuthorizeUrl(authorizeUrl) {
+  const win = globalThis.window || globalThis;
+  if (typeof win.pywebview?.api?.open_external === 'function') {
+    return Promise.resolve(win.pywebview.api.open_external(authorizeUrl))
+      .then((opened) => (opened === false ? win.open?.(authorizeUrl, '_blank', 'noopener,noreferrer') : true))
+      .catch(() => win.open?.(authorizeUrl, '_blank', 'noopener,noreferrer'));
+  }
+  if (win.chrome?.webview && typeof globalThis.fetch === 'function') {
+    return globalThis.fetch('/api/social/open-external', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: authorizeUrl }),
+    })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (!d?.opened) return win.open?.(authorizeUrl, '_blank', 'noopener,noreferrer');
+        return true;
+      })
+      .catch(() => win.open?.(authorizeUrl, '_blank', 'noopener,noreferrer'));
+  }
+  if (typeof win.open === 'function') {
+    win.open(authorizeUrl, '_blank', 'noopener,noreferrer');
+    return Promise.resolve(true);
+  }
+  return Promise.resolve(false);
+}
+
+function formatThreadsExpiryRemaining(expiresAtMs) {
+  const exp = Number(expiresAtMs || 0);
+  if (!Number.isFinite(exp) || exp <= 0) return '';
+  const diffDays = Math.ceil((exp - Date.now()) / 86_400_000);
+  if (diffDays <= 0) return 'Token expired — refresh or reconnect';
+  return `60-day token · ${diffDays}d remaining`;
+}
+
+/**
+ * Consolidated Setup Guide & OAuth 2.0 dialog for Meta Threads API.
+ */
+export function openThreadsSetupModal({ onConnected } = {}) {
+  const doc = globalThis.document;
+  let closed = false;
+
+  const modal = createClassicModalDialog({
+    id: 'threads-setup-dialog',
+    maxWidth: '560px',
+    onClose: () => {
+      closed = true;
+      modal.dialog.remove();
+    },
+  });
+
+  const heading = doc.createElement('h3');
+  heading.id = modal.titleId;
+  heading.className = 'classic-modal-title';
+  heading.innerHTML = `${ACCOUNTS_SVG}<span>Threads Setup &amp; OAuth 2.0</span>`;
+
+  const statusEl = doc.createElement('p');
+  statusEl.className = 'classic-modal-status user-modal-feedback';
+  statusEl.setAttribute('role', 'status');
+  statusEl.setAttribute('aria-live', 'polite');
+  statusEl.hidden = true;
+
+  function setStatus(msg) {
+    const clean = String(msg || '').trim();
+    statusEl.textContent = clean;
+    statusEl.hidden = !clean;
+  }
+
+  const bodyHost = doc.createElement('div');
+  bodyHost.className = 'classic-modal-scroll-body';
+  const stack = doc.createElement('div');
+  stack.className = 'classic-cards-stack';
+
+  // Checklist: obtain a token directly for the Threads Bridge field, or authorize below via OAuth 2.0
+  const guideCard = doc.createElement('div');
+  guideCard.className = 'form-card-container account-login-card';
+  const guideTitle = doc.createElement('h4');
+  guideTitle.style.margin = '0';
+  guideTitle.textContent = 'Meta Developer App Checklist';
+
+  const stepsList = doc.createElement('ol');
+  stepsList.className = 'threads-setup-steps';
+
+  const step1 = doc.createElement('li');
+  const devLink = doc.createElement('a');
+  devLink.href = 'https://developers.facebook.com/apps';
+  devLink.target = '_blank';
+  devLink.rel = 'noopener noreferrer';
+  devLink.textContent = 'developers.facebook.com/apps';
+  step1.append(doc.createTextNode('Create an app at '), devLink, doc.createTextNode(' with the '), Object.assign(doc.createElement('strong'), { textContent: 'Access the Threads API' }), doc.createTextNode(' use case.'));
+
+  const step2 = doc.createElement('li');
+  step2.innerHTML = 'Enable <code>threads_basic</code>, <code>threads_content_publish</code>, <code>threads_delete</code>, <code>threads_read_replies</code>, <code>threads_manage_replies</code>, and <code>threads_manage_insights</code>.';
+
+  const step3 = doc.createElement('li');
+  step3.innerHTML = 'Add yourself under <strong>App Roles → Threads Testers</strong> and accept the invite inside the Threads mobile app.';
+
+  const step4 = doc.createElement('li');
+  step4.innerHTML = 'Generate a token in <strong>User Token Generator</strong> and paste it into <strong>Threads Bridge</strong>, or exchange an OAuth 2.0 code below for a 60-day token.';
+
+  stepsList.append(step1, step2, step3, step4);
+  guideCard.append(guideTitle, stepsList);
+
+  // Single OAuth 2.0 60-day Exchange Form
+  const oauthCard = doc.createElement('form');
+  oauthCard.className = 'form-card-container account-login-card';
+  const oauthTitle = doc.createElement('h4');
+  oauthTitle.style.margin = '0';
+  oauthTitle.textContent = 'OAuth 2.0 (60-Day Token)';
+
+  const idSecretRow = doc.createElement('div');
+  idSecretRow.className = 'classic-two-col';
+
+  const cidGroup = doc.createElement('div');
+  cidGroup.className = 'input-group';
+  const cidLbl = doc.createElement('label');
+  cidLbl.setAttribute('for', 'threads-oauth-client-id');
+  cidLbl.textContent = 'App ID';
+  const cidIn = doc.createElement('input');
+  cidIn.type = 'text';
+  cidIn.id = 'threads-oauth-client-id';
+  cidIn.className = 'onboarding-input';
+  cidIn.placeholder = '123456789012345';
+  cidIn.setAttribute('autocomplete', 'off');
+  cidGroup.append(cidLbl, cidIn);
+
+  const csecGroup = doc.createElement('div');
+  csecGroup.className = 'input-group';
+  const csecLbl = doc.createElement('label');
+  csecLbl.setAttribute('for', 'threads-oauth-client-secret');
+  csecLbl.textContent = 'App Secret';
+  const csecIn = doc.createElement('input');
+  csecIn.type = 'password';
+  csecIn.id = 'threads-oauth-client-secret';
+  csecIn.className = 'onboarding-input';
+  csecIn.placeholder = 'Threads App Secret';
+  csecIn.setAttribute('autocomplete', 'off');
+  csecGroup.append(csecLbl, csecIn);
+
+  idSecretRow.append(cidGroup, csecGroup);
+
+  const redirGroup = doc.createElement('div');
+  redirGroup.className = 'input-group';
+  const redirLbl = doc.createElement('label');
+  redirLbl.setAttribute('for', 'threads-oauth-redirect-uri');
+  redirLbl.textContent = 'Valid OAuth Redirect URI';
+  const redirRow = doc.createElement('div');
+  redirRow.className = 'threads-inline-input-row';
+  const redirIn = doc.createElement('input');
+  redirIn.type = 'url';
+  redirIn.id = 'threads-oauth-redirect-uri';
+  redirIn.className = 'onboarding-input';
+  redirIn.value = defaultThreadsRedirectUri();
+  const copyRedirBtn = doc.createElement('button');
+  copyRedirBtn.type = 'button';
+  copyRedirBtn.className = 'edit-btn edit-cancel-btn';
+  copyRedirBtn.textContent = 'Copy';
+  copyRedirBtn.addEventListener('click', async () => {
+    try {
+      await globalThis.navigator?.clipboard?.writeText?.(redirIn.value.trim());
+      setStatus('Copied Redirect URI.');
+    } catch {
+      setStatus('Select and copy the Redirect URI.');
+    }
+  });
+  redirRow.append(redirIn, copyRedirBtn);
+  redirGroup.append(redirLbl, redirRow);
+
+  const authorizeBtn = doc.createElement('button');
+  authorizeBtn.type = 'button';
+  authorizeBtn.id = 'threads-oauth-authorize-btn';
+  authorizeBtn.className = 'onboarding-btn';
+  authorizeBtn.textContent = '1. Authorize on Threads';
+
+  const codeGroup = doc.createElement('div');
+  codeGroup.className = 'input-group';
+  const codeLbl = doc.createElement('label');
+  codeLbl.setAttribute('for', 'threads-oauth-code-input');
+  codeLbl.textContent = 'Redirected URL or Code';
+  const codeIn = doc.createElement('input');
+  codeIn.type = 'text';
+  codeIn.id = 'threads-oauth-code-input';
+  codeIn.className = 'onboarding-input';
+  codeIn.placeholder = 'https://localhost/?code=...#_';
+  codeIn.setAttribute('autocomplete', 'off');
+  codeGroup.append(codeLbl, codeIn);
+
+  const exchangeBtn = doc.createElement('button');
+  exchangeBtn.type = 'button';
+  exchangeBtn.id = 'threads-oauth-exchange-btn';
+  exchangeBtn.className = 'onboarding-btn';
+  exchangeBtn.textContent = '2. Exchange for 60-Day Token';
+
+  oauthCard.addEventListener('submit', (e) => e.preventDefault());
+
+  authorizeBtn.addEventListener('click', async () => {
+    const clientId = cidIn.value.trim();
+    const clientSecret = csecIn.value.trim();
+    const redirectUri = redirIn.value.trim();
+    if (!clientId || !clientSecret || !redirectUri) {
+      setStatus('Enter App ID, App Secret, and Redirect URI.');
+      return;
+    }
+    authorizeBtn.disabled = true;
+    try {
+      const state = `th_${Date.now().toString(36)}`;
+      const res = await startThreadsOAuthFlow({
+        clientId,
+        clientSecret,
+        redirectUri,
+        scope: DEFAULT_THREADS_SCOPES,
+        state,
+      });
+      await kvSet('pending_threads_oauth', {
+        clientId,
+        clientSecret,
+        redirectUri,
+        state,
+      });
+      const loc = globalThis.location;
+      if (loc?.protocol === 'https:' && loc.hostname && loc.hostname !== 'localhost' && redirectUri.startsWith(loc.origin)) {
+        loc.assign(res.authorizeUrl);
+        return;
+      }
+      await openExternalAuthorizeUrl(res.authorizeUrl);
+      setStatus('Approve access in browser, then paste the redirected URL below.');
+    } catch (err) {
+      setStatus(err?.message || 'Unable to start Threads OAuth.');
+    } finally {
+      authorizeBtn.disabled = false;
+    }
+  });
+
+  exchangeBtn.addEventListener('click', async () => {
+    const clientId = cidIn.value.trim();
+    const clientSecret = csecIn.value.trim();
+    const redirectUri = redirIn.value.trim();
+    const cleaned = cleanThreadsAuthCode(codeIn.value.trim());
+    if (!cleaned) {
+      setStatus('Paste the redirected URL or code first.');
+      return;
+    }
+    exchangeBtn.disabled = true;
+    try {
+      await completeThreadsOAuthFlow({
+        code: cleaned,
+        redirectUri,
+        clientId,
+        clientSecret,
+      });
+      codeIn.value = '';
+      setStatus('Connected Threads bridge.');
+      await onConnected?.();
+      if (!closed) modal.close();
+    } catch (err) {
+      setStatus(err?.message || 'Threads code exchange failed.');
+    } finally {
+      exchangeBtn.disabled = false;
+    }
+  });
+
+  oauthCard.append(
+    oauthTitle,
+    idSecretRow,
+    redirGroup,
+    authorizeBtn,
+    codeGroup,
+    exchangeBtn
+  );
+
+  stack.append(guideCard, oauthCard);
+  bodyHost.appendChild(stack);
+  modal.card.append(heading, statusEl, bodyHost);
+
+  modal.open();
+  return modal;
 }
 
 const ACCOUNTS_SVG = createUserIconSvg({ size: 18, stroke: 'var(--primary-accent)', strokeWidth: 2.2 });
@@ -142,7 +438,7 @@ export function openUserModal({
       const rh4 = doc.createElement('div');
       rh4.className = 'modal-section-header';
       const rh4Title = doc.createElement('span');
-      rh4Title.textContent = 'Pending Bridge Retries';
+      rh4Title.textContent = `Pending Bridge Retries (${retryQueue.length})`;
       rh4.appendChild(rh4Title);
       retryBox.appendChild(rh4);
 
@@ -431,6 +727,7 @@ export function openUserModal({
     wrap.appendChild(bskyForm);
 
     // 3. Threads Bridge (Auto-Active)
+    const threadsAcc = accounts.find((a) => a.platform === 'threads');
     const threadsForm = doc.createElement('form');
     threadsForm.className = 'form-card-container account-login-card';
     const threadsHead = doc.createElement('div');
@@ -445,7 +742,7 @@ export function openUserModal({
 
     const threadsHint = doc.createElement('p');
     threadsHint.className = 'account-card-hint';
-    threadsHint.textContent = 'Paste a Threads Graph API token for automatic cross-posting, reply sync, and synchronized delete.';
+    threadsHint.textContent = 'Automatically cross-posts, merges replies, and syncs deletions.';
 
     const thTokGroup = doc.createElement('div');
     thTokGroup.className = 'input-group';
@@ -456,13 +753,13 @@ export function openUserModal({
     thTokIn.type = 'password';
     thTokIn.id = 'user-threads-token';
     thTokIn.className = 'onboarding-input';
-    thTokIn.placeholder = 'Optional Threads Graph API token';
+    thTokIn.placeholder = 'Threads Graph API token';
     thTokGroup.append(thTokLbl, thTokIn);
 
     const thBtn = doc.createElement('button');
     thBtn.type = 'submit';
     thBtn.className = 'onboarding-btn';
-    thBtn.textContent = s.isThreadsConnected ? 'Update Threads Token' : 'Connect Threads Bridge';
+    thBtn.textContent = s.isThreadsConnected ? 'Update Threads Bridge' : 'Connect Threads Bridge';
     threadsForm.addEventListener('submit', async (e) => {
       e.preventDefault();
       const tok = thTokIn.value.trim();
@@ -472,26 +769,12 @@ export function openUserModal({
       }
       thBtn.disabled = true;
       try {
-        const me = await verifyThreadsCredentials({ accessToken: tok });
-        const uid = String(me?.id || '').trim();
-        if (!uid) {
-          throw new Error('Could not resolve Threads profile from token.');
-        }
-        const username = String(me.username || uid).replace(/^@/, '');
-        await upsertSocialAccount(
-          {
-            id: `threads:${uid}`,
-            platform: 'threads',
-            userId: uid,
-            handle: username,
-            acct: username,
-            displayName: me.name || username,
-            avatar: me.threads_profile_picture_url || '',
-          },
-          { accessToken: tok }
-        );
+        const res = await connectThreadsToken({ accessToken: tok });
+        const accHandle = res?.handle || res?.acct
+          || (res?.accounts || []).find((a) => a.protocol === 'threads')?.handle
+          || 'threads';
         thTokIn.value = '';
-        setStatus(`Connected @${username}`);
+        setStatus(`Connected @${String(accHandle).replace(/^@/, '')}`);
         await onAccountsUpdated?.();
         renderBody();
       } catch (err) {
@@ -501,7 +784,68 @@ export function openUserModal({
       }
     });
 
-    threadsForm.append(threadsHead, threadsHint, thTokGroup, thBtn);
+    const threadsFooter = doc.createElement('div');
+    threadsFooter.className = 'threads-card-footer';
+
+    const threadsGuideBtn = doc.createElement('button');
+    threadsGuideBtn.type = 'button';
+    threadsGuideBtn.className = 'edit-btn edit-cancel-btn threads-setup-trigger-btn';
+    threadsGuideBtn.textContent = 'Setup & OAuth';
+    threadsGuideBtn.addEventListener('click', () => {
+      openThreadsSetupModal({
+        onConnected: async () => {
+          setStatus('Connected Threads bridge.');
+          await onAccountsUpdated?.();
+          renderBody();
+        },
+      });
+    });
+
+    const threadsImportBtn = doc.createElement('button');
+    threadsImportBtn.type = 'button';
+    threadsImportBtn.className = 'edit-btn edit-cancel-btn threads-import-trigger-btn';
+    threadsImportBtn.textContent = 'Import Follows (.zip)';
+    threadsImportBtn.addEventListener('click', () => {
+      openThreadsImportModal({
+        onImported: async () => {
+          await onAccountsUpdated?.();
+          renderBody();
+        },
+      });
+    });
+
+    threadsFooter.append(threadsGuideBtn, threadsImportBtn);
+
+    if (s.isThreadsConnected) {
+      const expiryLabel = formatThreadsExpiryRemaining(threadsAcc?.expiresAt);
+      const refreshBtn = doc.createElement('button');
+      refreshBtn.type = 'button';
+      refreshBtn.className = 'edit-btn edit-cancel-btn threads-refresh-token-btn';
+      refreshBtn.textContent = 'Refresh Token';
+      if (expiryLabel) refreshBtn.title = expiryLabel;
+      refreshBtn.addEventListener('click', async () => {
+        refreshBtn.disabled = true;
+        try {
+          await refreshConnectedThreadsToken();
+          setStatus('Refreshed 60-day Threads access token.');
+          await onAccountsUpdated?.();
+          renderBody();
+        } catch (err) {
+          setStatus(err?.message || 'Unable to refresh Threads token (tokens must be long-lived and >=24h old).');
+        } finally {
+          refreshBtn.disabled = false;
+        }
+      });
+      threadsFooter.appendChild(refreshBtn);
+    }
+
+    threadsForm.append(
+      threadsHead,
+      threadsHint,
+      thTokGroup,
+      thBtn,
+      threadsFooter
+    );
     wrap.appendChild(threadsForm);
 
     bodyHost.replaceChildren(desc, wrap);
@@ -512,6 +856,7 @@ export function openUserModal({
   });
 
   renderBody();
+  void fetchSocialBridgeStatus().catch(() => {});
   modal.open();
   return modal;
 }

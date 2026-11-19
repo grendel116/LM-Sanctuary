@@ -13,8 +13,16 @@ from urllib.parse import urlparse
 from flask import Blueprint, Response, jsonify, request
 
 from social.adapters.bluesky.adapter import PUBLIC_BSKY_API, BlueskyAdapter
-from social.core.schema.unified_item import deduplicate_unified_items, normalize_instance_url
+from social.core.schema.unified_item import canonicalize_actor_handle, deduplicate_unified_items, normalize_instance_url
+from social.link_preview import fetch_link_preview
+from social.semantic_scorer import score_items_for_concepts
 from social.sync_engine import SocialSyncEngine
+from social.threads_import import (
+    build_mastodon_csv,
+    decode_meta_mojibake,
+    parse_threads_export_zip,
+    seed_archive_into_store,
+)
 
 social_bp = Blueprint("social", __name__, url_prefix="/api/social")
 
@@ -72,6 +80,45 @@ def mastodon_oauth_callback():
         return _err(exc)
 
 
+@social_bp.route("/oauth/threads/start", methods=["POST"])
+def threads_oauth_start():
+    data = request.get_json(silent=True) or {}
+    try:
+        res = get_social_engine().start_threads_oauth(
+            client_id=data.get("clientId") or "",
+            client_secret=data.get("clientSecret") or "",
+            redirect_uri=data.get("redirectUri") or "",
+            scope=data.get("scope") or "",
+            state=data.get("state") or "",
+        )
+        return jsonify(res)
+    except Exception as exc:
+        return _err(exc)
+
+
+@social_bp.route("/oauth/threads/callback", methods=["POST"])
+def threads_oauth_callback():
+    data = request.get_json(silent=True) or {}
+    try:
+        res = get_social_engine().finish_threads_oauth(
+            code=data.get("code") or "",
+            redirect_uri=data.get("redirectUri") or "",
+            client_id=data.get("clientId") or "",
+            client_secret=data.get("clientSecret") or "",
+        )
+        return jsonify(res)
+    except Exception as exc:
+        return _err(exc)
+
+
+@social_bp.route("/oauth/threads/refresh", methods=["POST"])
+def threads_oauth_refresh():
+    try:
+        return jsonify(get_social_engine().refresh_threads_token())
+    except Exception as exc:
+        return _err(exc)
+
+
 @social_bp.route("/accounts/connect", methods=["POST"])
 def social_connect():
     data = request.get_json(silent=True) or {}
@@ -83,7 +130,13 @@ def social_connect():
         if protocol == "bluesky":
             return jsonify(eng.connect_bluesky(data.get("identifier") or "", data.get("password") or "", service_url=data.get("serviceUrl") or "https://bsky.social"))
         if protocol == "threads":
-            return jsonify(eng.connect_threads(data.get("accessToken") or ""))
+            return jsonify(
+                eng.connect_threads(
+                    data.get("accessToken") or "",
+                    client_secret=str(data.get("clientSecret") or ""),
+                    expires_in=int(data.get("expiresIn") or 0),
+                )
+            )
         return jsonify({"error": f"Unsupported protocol: {protocol}"}), 400
     except Exception as exc:
         return _err(exc)
@@ -183,6 +236,77 @@ def social_author_profile(account_id: str):
     acct = request.args.get("acct") or ""
     protocol = (request.args.get("protocol") or ("bluesky" if account_id.startswith("did:") else "mastodon")).lower()
     try:
+        if protocol == "threads":
+            clean_handle = str(acct or account_id or "").strip().lstrip("@")
+            threads = eng.get_threads_adapter()
+            if threads:
+                own_handle = threads.username.strip().lstrip("@").lower()
+                if (
+                    (own_handle and clean_handle.lower() == own_handle)
+                    or (threads.user_id and str(account_id) == str(threads.user_id))
+                ):
+                    acc = eng.store.get_primary_account("threads") or {}
+                    acc_meta = acc.get("meta") if isinstance(acc.get("meta"), dict) else {}
+                    t_user = threads.username.strip().lstrip("@") or clean_handle
+                    return jsonify({
+                        "profile": {
+                            "id": str(threads.user_id),
+                            "protocol": "threads",
+                            "network": "threads",
+                            "username": t_user,
+                            "acct": t_user,
+                            "display_name": threads.display_name or t_user,
+                            "avatar_url": threads.avatar_url or "",
+                            "url": f"https://www.threads.net/@{t_user}" if t_user else "https://www.threads.net",
+                            "note_text": str(acc_meta.get("noteText") or ""),
+                            "isOwnThreads": True,
+                        },
+                        "relationship": None,
+                    })
+                if clean_handle and not clean_handle.isdigit():
+                    prof = threads.lookup_profile(clean_handle)
+                    if prof:
+                        return jsonify({"profile": prof, "relationship": None})
+
+            if clean_handle and not clean_handle.isdigit():
+                masto = eng.get_mastodon_adapter()
+                if masto:
+                    try:
+                        fed_prof = masto.lookup_account(f"{clean_handle}@threads.net")
+                        if fed_prof and fed_prof.get("id"):
+                            rels = masto.get_relationships([fed_prof["id"]]) if masto.access_token else []
+                            return jsonify({
+                                "profile": {
+                                    **fed_prof,
+                                    "protocol": "threads",
+                                    "network": "threads",
+                                    "acct": clean_handle,
+                                    "username": clean_handle,
+                                    "url": f"https://www.threads.net/@{clean_handle}",
+                                    "federatedMastodonId": str(fed_prof["id"]),
+                                },
+                                "relationship": rels[0] if rels else None,
+                                "resolvedInstanceUrl": masto.instance_url,
+                                "federatedMastodon": True,
+                            })
+                    except Exception:
+                        pass
+
+            return jsonify({
+                "profile": {
+                    "id": clean_handle or str(account_id),
+                    "protocol": "threads",
+                    "network": "threads",
+                    "username": clean_handle,
+                    "acct": clean_handle,
+                    "display_name": clean_handle or "Threads User",
+                    "avatar_url": "",
+                    "url": f"https://www.threads.net/@{clean_handle}" if clean_handle else "https://www.threads.net",
+                    "threadsLimited": True,
+                },
+                "relationship": None,
+            })
+
         if protocol == "bluesky":
             bsky = eng.get_bluesky_adapter() or BlueskyAdapter(service_url=PUBLIC_BSKY_API)
             return jsonify(bsky.fetch_actor_profile(account_id or acct))
@@ -203,26 +327,32 @@ def social_account_statuses(account_id: str):
     max_id = request.args.get("max_id") or ""
     protocol = (request.args.get("protocol") or ("bluesky" if account_id.startswith("did:") else "mastodon")).lower()
     try:
+        if protocol == "threads":
+            clean_handle = str(acct or account_id or "").strip().lstrip("@").lower()
+            threads = eng.get_threads_adapter()
+            is_own_threads = bool(
+                threads
+                and (
+                    (threads.user_id and str(account_id) == str(threads.user_id))
+                    or (threads.username and clean_handle == threads.username.strip().lstrip("@").lower())
+                )
+            )
+            if is_own_threads:
+                res = threads.fetch_timeline(cursor=max_id, limit=20)
+                return jsonify({"items": eng.enrich_linked_metrics(res.get("items") or []), "next_cursor": res.get("next_cursor")})
+            fed_id = str(request.args.get("federatedMastodonId") or "").strip()
+            masto = eng.get_mastodon_adapter()
+            if masto and fed_id:
+                items = masto.fetch_account_statuses(fed_id, tab=tab, max_id=max_id)
+                return jsonify({"items": eng.enrich_linked_metrics(items)})
+            return jsonify({"items": []})
         if protocol == "bluesky":
             bsky = eng.get_bluesky_adapter() or BlueskyAdapter(service_url=PUBLIC_BSKY_API)
             items = bsky.fetch_author_feed(account_id or acct, tab=tab, cursor=max_id)
-            return jsonify({"items": items})
+            return jsonify({"items": eng.enrich_linked_metrics(items)})
         adapter, target_id = _resolve_masto_author_context(eng, instance, account_id, acct)
         items = adapter.fetch_account_statuses(target_id, tab=tab, max_id=max_id)
-        for it in items:
-            linked = eng.store.find_linked_post(it["id"])
-            if linked:
-                it["_meta"]["linkedIds"] = {
-                    k: v
-                    for k, v in {
-                        "mastodonStatusId": linked.get("mastodonStatusId"),
-                        "blueskyUri": linked.get("blueskyUri"),
-                        "blueskyCid": linked.get("blueskyCid"),
-                        "threadsPostId": linked.get("threadsPostId"),
-                    }.items()
-                    if v
-                }
-        return jsonify({"items": items})
+        return jsonify({"items": eng.enrich_linked_metrics(items)})
     except Exception as exc:
         return _err(exc)
 
@@ -329,11 +459,25 @@ def social_timelines():
         return _err(exc)
 
 
+@social_bp.route("/link-preview", methods=["POST"])
+def social_link_preview():
+    data = request.get_json(silent=True) or {}
+    url = str(data.get("url") or "").strip()
+    if not url:
+        return jsonify({"error": "Missing URL"}), 400
+    try:
+        return jsonify({"card": fetch_link_preview(url)})
+    except Exception as exc:
+        return _err(exc)
+
+
 @social_bp.route("/posts", methods=["POST"])
 def social_publish_post():
     eng = get_social_engine()
     try:
         media_list: list[dict[str, Any]] = []
+        link_card: dict[str, Any] | None = None
+        dismiss_link_card = False
         if request.content_type and "multipart/form-data" in request.content_type:
             draft = request.form.get("text") or ""
             visibility = request.form.get("visibility") or "public"
@@ -341,6 +485,10 @@ def social_publish_post():
             language = request.form.get("language") or "en"
             thread_items = json.loads(request.form.get("thread_items") or "[]")
             alts = json.loads(request.form.get("alt_texts") or "[]")
+            raw_lc = request.form.get("link_card") or request.form.get("linkCard") or ""
+            if raw_lc:
+                link_card = json.loads(raw_lc)
+            dismiss_link_card = str(request.form.get("dismiss_link_card") or "").lower() in ("1", "true", "yes")
             for idx, f in enumerate(request.files.getlist("media")):
                 media_list.append({
                     "filename": f.filename or f"upload_{idx}.png",
@@ -355,6 +503,10 @@ def social_publish_post():
             spoiler_text = data.get("spoiler_text") or ""
             language = data.get("language") or "en"
             thread_items = data.get("thread_items") or []
+            raw_lc = data.get("linkCard") or data.get("link_card")
+            if isinstance(raw_lc, dict):
+                link_card = raw_lc
+            dismiss_link_card = bool(data.get("dismissLinkCard") or data.get("dismiss_link_card"))
 
         return jsonify(
             eng.publish_unified(
@@ -364,8 +516,22 @@ def social_publish_post():
                 visibility=visibility,
                 spoiler_text=spoiler_text,
                 language=language,
+                link_card=link_card,
+                dismiss_link_card=dismiss_link_card,
             )
         )
+    except Exception as exc:
+        return _err(exc)
+
+
+@social_bp.route("/posts/enrich-metrics", methods=["POST"])
+def social_enrich_posts_metrics():
+    data = request.get_json(silent=True) or {}
+    try:
+        items = data.get("items") or []
+        if not isinstance(items, list):
+            return jsonify({"items": []})
+        return jsonify({"items": get_social_engine().enrich_linked_metrics(items)})
     except Exception as exc:
         return _err(exc)
 
@@ -377,7 +543,14 @@ def social_modify_post(post_id: str):
         if request.method == "DELETE":
             return jsonify(eng.delete_unified(post_id))
         data = request.get_json(silent=True) or {}
-        return jsonify({"item": eng.edit_unified(post_id, data.get("text") or "", data.get("spoiler_text") or "")})
+        item = eng.edit_unified(
+            post_id,
+            data.get("text") or "",
+            data.get("spoiler_text") or "",
+            replace_bridges=bool(data.get("replace_bridges", False)),
+        )
+        warnings = ((item.get("_meta") or {}).get("bridgeWarnings") or []) if isinstance(item, dict) else []
+        return jsonify({"item": item, "warnings": warnings})
     except Exception as exc:
         return _err(exc)
 
@@ -418,11 +591,27 @@ def social_post_interaction(action: str):
 @social_bp.route("/posts/<path:status_id>/context", methods=["GET"])
 def social_post_context(status_id: str):
     eng = get_social_engine()
-    protocol = (request.args.get("protocol") or ("bluesky" if status_id.startswith(("at://", "bluesky:")) else "mastodon")).lower()
+    default_proto = "bluesky" if status_id.startswith(("at://", "bluesky:")) else ("threads" if status_id.startswith("threads:") else "mastodon")
+    protocol = (request.args.get("protocol") or default_proto).lower()
     try:
+        if protocol == "threads":
+            threads = eng.get_threads_adapter()
+            if not threads:
+                return jsonify({"error": "Connect Threads bridge first"}), 401
+            res = threads.get_post_thread(status_id)
+            if isinstance(res, dict) and res.get("status"):
+                enriched = eng.enrich_linked_metrics([res["status"]])
+                if enriched:
+                    res["status"] = enriched[0]
+            return jsonify(res)
         if protocol == "bluesky":
             bsky = eng.get_bluesky_adapter() or BlueskyAdapter(service_url=PUBLIC_BSKY_API)
-            return jsonify(bsky.get_post_thread(status_id))
+            res = bsky.get_post_thread(status_id)
+            if isinstance(res, dict) and res.get("status"):
+                enriched = eng.enrich_linked_metrics([res["status"]])
+                if enriched:
+                    res["status"] = enriched[0]
+            return jsonify(res)
         instance = request.args.get("instanceUrl") or "https://mastodon.social"
         adapter = eng.get_public_mastodon_adapter(instance)
         return jsonify(adapter.get_status_context(status_id))
@@ -435,6 +624,44 @@ def social_notifications():
     limit = min(int(request.args.get("limit") or 35), 60)
     try:
         return jsonify(get_social_engine().fetch_merged_notifications(limit=limit))
+    except Exception as exc:
+        return _err(exc)
+
+
+@social_bp.route("/notifications/dismiss", methods=["POST"])
+def social_notifications_dismiss():
+    data = request.get_json(silent=True) or {}
+    try:
+        return jsonify(
+            get_social_engine().dismiss_notifications(
+                ids=data.get("ids") if isinstance(data.get("ids"), list) else [],
+                mastodon_notif_ids=data.get("mastodonNotifIds") if isinstance(data.get("mastodonNotifIds"), list) else [],
+                threads_watermarks=data.get("threadsWatermarks") if isinstance(data.get("threadsWatermarks"), dict) else {},
+            )
+        )
+    except Exception as exc:
+        return _err(exc)
+
+
+@social_bp.route("/notifications/clear", methods=["POST"])
+def social_notifications_clear():
+    data = request.get_json(silent=True) or {}
+    try:
+        return jsonify(
+            get_social_engine().clear_all_notifications(
+                threads_watermarks=data.get("threadsWatermarks") if isinstance(data.get("threadsWatermarks"), dict) else {},
+            )
+        )
+    except Exception as exc:
+        return _err(exc)
+
+
+@social_bp.route("/notifications/seen", methods=["POST"])
+def social_notifications_seen():
+    data = request.get_json(silent=True) or {}
+    seen_ts = data.get("seenTs")
+    try:
+        return jsonify(get_social_engine().mark_notifications_seen(seen_ts=seen_ts))
     except Exception as exc:
         return _err(exc)
 
@@ -520,8 +747,15 @@ def social_filters():
             return jsonify({"filters": eng.store.list_filters()})
         try:
             rules = masto.list_filters()
-            eng.store.replace_filters(rules)
-            return jsonify({"filters": rules})
+            seen_phrases = {str(r.get("phrase") or "").strip().lower() for r in rules if r.get("phrase")}
+            local_rules = [
+                lr for lr in eng.store.list_filters()
+                if str(lr.get("id") or "").startswith("local_")
+                and str(lr.get("phrase") or "").strip().lower() not in seen_phrases
+            ]
+            merged_rules = [*rules, *local_rules]
+            eng.store.replace_filters(merged_rules)
+            return jsonify({"filters": merged_rules})
         except Exception:
             return jsonify({"filters": eng.store.list_filters()})
 
@@ -564,19 +798,157 @@ def social_filter_delete(filter_id: str):
     return jsonify({"deleted": True})
 
 
+@social_bp.route("/feed/semantic-score", methods=["POST"])
+def social_feed_semantic_score():
+    data = request.get_json(silent=True) or {}
+    items = data.get("items") if isinstance(data.get("items"), list) else []
+    boost = data.get("boostConcepts") if isinstance(data.get("boostConcepts"), list) else []
+    dampen = data.get("dampenConcepts") if isinstance(data.get("dampenConcepts"), list) else []
+    return jsonify(score_items_for_concepts(items, boost, dampen))
+
+
 @social_bp.route("/moderation/<kind>", methods=["GET"])
 def social_moderation_list(kind: str):
-    masto = get_social_engine().get_mastodon_adapter()
-    if not masto:
-        return jsonify({"accounts": []})
-    try:
-        if kind == "mutes":
-            return jsonify({"accounts": masto.list_mutes()})
-        if kind == "blocks":
-            return jsonify({"accounts": masto.list_blocks()})
+    if kind not in ("mutes", "blocks"):
         return jsonify({"error": "Unknown moderation kind"}), 400
+    eng = get_social_engine()
+    accounts: list[dict[str, Any]] = []
+    masto = eng.get_mastodon_adapter()
+    if masto:
+        try:
+            accounts.extend(masto.list_mutes() if kind == "mutes" else masto.list_blocks())
+        except Exception:
+            pass
+    bsky = eng.get_bluesky_adapter()
+    if bsky:
+        try:
+            accounts.extend(bsky.list_mutes() if kind == "mutes" else bsky.list_blocks())
+        except Exception:
+            pass
+    seen = {
+        canonicalize_actor_handle(a.get("acct") or a.get("username") or "", a.get("protocol") or "mastodon")
+        for a in accounts
+    }
+    for local_acc in eng.store.list_moderated_accounts(kind):
+        canon = canonicalize_actor_handle(
+            local_acc.get("acct") or local_acc.get("username") or "",
+            local_acc.get("protocol") or "threads",
+        )
+        if canon not in seen:
+            seen.add(canon)
+            accounts.append(local_acc)
+    return jsonify({"accounts": accounts})
+
+
+@social_bp.route("/moderation/<kind>/<path:actor_id>", methods=["DELETE"])
+def social_moderation_remove(kind: str, actor_id: str):
+    if kind not in ("mutes", "blocks"):
+        return jsonify({"error": "Unknown moderation kind"}), 400
+    eng = get_social_engine()
+    removed = eng.store.delete_moderated_account(kind, actor_id)
+    local_kv = eng.store.kv_get("kv", "local_moderated_accounts_v1")
+    if isinstance(local_kv, dict):
+        clean_h = str(actor_id).removeprefix("threads:").lstrip("@").split("@")[0].lower()
+        target_key = "mutes" if kind == "mutes" else "blocks"
+        local_kv[target_key] = [
+            row for row in (local_kv.get(target_key) or [])
+            if str((row.get("username") if isinstance(row, dict) else row) or "").lower() != clean_h
+        ]
+        eng.store.kv_put("kv", "local_moderated_accounts_v1", local_kv)
+    return jsonify({"ok": True, "removed": removed})
+
+
+@social_bp.route("/threads/import-state", methods=["GET"])
+def social_threads_import_state():
+    eng = get_social_engine()
+    archive = eng.store.kv_get("kv", "threads_import_archive_v1")
+    summary = (
+        {
+            "sourceName": archive.get("sourceName") or "",
+            "importedAt": archive.get("importedAt") or 0,
+            "counts": archive.get("counts") or {},
+        }
+        if isinstance(archive, dict) and archive.get("counts")
+        else None
+    )
+    return jsonify({"archive": summary, "job": eng.threads_import_runner.status()})
+
+
+@social_bp.route("/threads/import-parse", methods=["POST"])
+def social_threads_import_parse():
+    eng = get_social_engine()
+    try:
+        if request.files.get("file"):
+            f = request.files["file"]
+            parsed = parse_threads_export_zip(f.read(), source_name=f.filename or "threads-export.zip")
+        elif request.content_type and "application/json" in request.content_type:
+            data = request.get_json(silent=True) or {}
+            zip_path = str(data.get("zipPath") or "").strip()
+            remote = str(request.remote_addr or "")
+            if not zip_path or remote not in ("127.0.0.1", "::1", "::ffff:127.0.0.1"):
+                return jsonify({"error": "Local file upload required"}), 400
+            p = Path(zip_path)
+            if p.suffix.lower() != ".zip" or not p.is_file():
+                return jsonify({"error": "Threads export .zip file not found"}), 404
+            parsed = parse_threads_export_zip(p, source_name=p.name)
+        elif request.data:
+            parsed = parse_threads_export_zip(request.data)
+        else:
+            return jsonify({"error": "Attach a Threads export .zip file"}), 400
+
+        summary = seed_archive_into_store(eng.store, parsed)
+        return jsonify({**summary, "job": eng.threads_import_runner.status()})
     except Exception as exc:
         return _err(exc)
+
+
+@social_bp.route("/threads/import-csv/<list_kind>", methods=["GET"])
+def social_threads_import_csv(list_kind: str):
+    kind = str(list_kind or "").strip().lower()
+    if kind not in ("mutuals", "following"):
+        return jsonify({"error": "Invalid CSV list kind"}), 400
+    archive = get_social_engine().store.kv_get("kv", "threads_import_archive_v1")
+    if not isinstance(archive, dict):
+        return jsonify({"error": "No imported Threads archive found"}), 404
+    csv_body = build_mastodon_csv(kind, archive.get(kind) or [])
+    return Response(
+        csv_body,
+        mimetype="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="mastodon_threads_{kind}.csv"'},
+    )
+
+
+@social_bp.route("/threads/import-sync", methods=["POST"])
+def social_threads_import_sync():
+    eng = get_social_engine()
+    archive = eng.store.kv_get("kv", "threads_import_archive_v1")
+    if not isinstance(archive, dict):
+        return jsonify({"error": "Upload a Threads export ZIP first"}), 404
+    data = request.get_json(silent=True) or {}
+    follow_scope = str(data.get("followScope") or "mutuals").strip().lower()
+    if follow_scope not in ("mutuals", "following"):
+        return jsonify({"error": "followScope must be 'mutuals' or 'following'"}), 400
+    delay_sec = float(data.get("delaySec", 1.1))
+
+    follow_list = archive.get(follow_scope) or []
+    if follow_list:
+        masto = eng.get_mastodon_adapter()
+        if not masto:
+            return jsonify({"error": "Connect Mastodon first to follow @threads.net accounts"}), 401
+        job = eng.threads_import_runner.start_sync(
+            masto,
+            follow_accounts=follow_list,
+            delay_sec=delay_sec,
+        )
+    else:
+        job = eng.threads_import_runner.status()
+
+    return jsonify({"ok": True, "job": job})
+
+
+@social_bp.route("/threads/import-cancel", methods=["POST"])
+def social_threads_import_cancel():
+    return jsonify({"job": get_social_engine().threads_import_runner.cancel()})
 
 
 @social_bp.route("/search", methods=["GET"])
@@ -607,6 +979,22 @@ def social_search():
                 try:
                     bsky_posts = bsky.search_posts(q, limit=12)
                     res["statuses"] = deduplicate_unified_items([*res.get("statuses", []), *bsky_posts])
+                except Exception:
+                    pass
+
+        threads = eng.get_threads_adapter()
+        if threads:
+            if (not search_type or search_type == "accounts") and " " not in q.strip():
+                try:
+                    t_prof = threads.lookup_profile(q)
+                    if t_prof:
+                        res["accounts"] = [*res.get("accounts", []), t_prof]
+                except Exception:
+                    pass
+            if not search_type or search_type == "statuses":
+                try:
+                    t_posts = threads.search_posts(q, limit=12)
+                    res["statuses"] = deduplicate_unified_items([*res.get("statuses", []), *t_posts])
                 except Exception:
                     pass
 
