@@ -474,7 +474,7 @@ test('Feed & Following render two clean tabs and avoid unauthenticated home time
   globalThis.fetch = async (url) => {
     const u = String(url);
     calledUrls.push(u);
-    if (u.includes('/api/v1/timelines/tag/councilcommunism') || u.includes('/api/v1/timelines/tag/mutualaid')) {
+    if (u.includes('/api/v1/timelines/tag/news') || u.includes('/api/v1/timelines/tag/technology') || u.includes('/api/v1/timelines/tag/science')) {
       return new Response(
         JSON.stringify([
           {

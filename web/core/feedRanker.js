@@ -98,8 +98,6 @@ export const DEFAULT_FEED_TUNING = Object.freeze({
     bourgeoisPolitics: 0,
     matureContent: 0,
   }),
-  boostConcepts: Object.freeze([]),
-  dampenConcepts: Object.freeze([]),
   discoveryChannels: Object.freeze([]),
   discoveryInstances: Object.freeze([]),
 });
@@ -257,9 +255,6 @@ export function normalizeFeedTuning(raw) {
   for (const [key, spec] of Object.entries(SLIDER_SPECS)) {
     sliders[key] = clampInt(rawSliders[key], spec.min, spec.max, spec.defaultValue);
   }
-  const boostConcepts = cleanConceptArray(raw?.boostConcepts);
-  const boostLower = new Set(boostConcepts.map((c) => c.toLowerCase()));
-  const dampenConcepts = cleanConceptArray(raw?.dampenConcepts).filter((c) => !boostLower.has(c.toLowerCase()));
   const discoveryChannels = cleanConceptArray(raw?.discoveryChannels, 16);
   const discoveryInstances = cleanInstanceArray(raw?.discoveryInstances, 12);
   const updatedAt = Math.max(0, Math.round(Number(raw?.updatedAt) || 0));
@@ -269,8 +264,6 @@ export function normalizeFeedTuning(raw) {
     updatedAt,
     updatedBy,
     sliders,
-    boostConcepts,
-    dampenConcepts,
     discoveryChannels,
     discoveryInstances,
   };
@@ -279,9 +272,7 @@ export function normalizeFeedTuning(raw) {
 export function isDefaultFeedTuning(rawProfile) {
   const profile = normalizeFeedTuning(rawProfile);
   if (
-    profile.boostConcepts.length > 0
-    || profile.dampenConcepts.length > 0
-    || profile.discoveryChannels.length > 0
+    profile.discoveryChannels.length > 0
     || profile.discoveryInstances.length > 0
   ) {
     return false;
@@ -539,41 +530,6 @@ export function scoreConversationVelocity(item, nowMs = Date.now()) {
   return Math.max(-0.9, Math.min(2.0, replyDepth + velocity + organic));
 }
 
-function matchConceptScore(haystackLower, haystackTokens, concept) {
-  const clean = String(concept || '').trim().toLowerCase();
-  if (!clean) return 0;
-  if (haystackLower.includes(clean)) return 1;
-  const cTokens = tokenizeWords(clean);
-  if (cTokens.length === 0) return 0;
-  let hits = 0;
-  for (const tok of cTokens) {
-    if (haystackTokens.has(tok) || [...haystackTokens].some((h) => h.startsWith(tok) || (h.length >= 4 && tok.startsWith(h)))) {
-      hits += 1;
-    }
-  }
-  const ratio = hits / cTokens.length;
-  return ratio >= 0.5 ? ratio * 0.8 : 0;
-}
-
-export function scoreConceptLexical(item, boostConcepts = [], dampenConcepts = []) {
-  const boostList = Array.isArray(boostConcepts) ? boostConcepts : [];
-  const dampenList = Array.isArray(dampenConcepts) ? dampenConcepts : [];
-  if (boostList.length === 0 && dampenList.length === 0) return 0;
-
-  const haystack = `${buildItemSignalText(item)} ${item?.author?.name || ''} ${item?.author?.handle || ''}`.toLowerCase();
-  const tokens = new Set(tokenizeWords(haystack));
-
-  let boostMax = 0;
-  for (const c of boostList) {
-    boostMax = Math.max(boostMax, matchConceptScore(haystack, tokens, c));
-  }
-  let dampenMax = 0;
-  for (const c of dampenList) {
-    dampenMax = Math.max(dampenMax, matchConceptScore(haystack, tokens, c));
-  }
-  const effectiveDampen = boostMax >= 0.8 && MATERIALIST_ANALYSIS_RE.test(haystack) ? dampenMax * 0.25 : dampenMax;
-  return Math.max(-1, Math.min(1, boostMax - effectiveDampen));
-}
 
 function parseTimestampMs(item) {
   if (typeof item?.createdAtMs === 'number') return item.createdAtMs;
@@ -700,8 +656,6 @@ export function rankFeedItems(items = [], rawProfile = null, context = {}) {
     Object.keys(tasteScores).length > 0 ||
     (Array.isArray(tasteMemory?.positive) && tasteMemory.positive.length > 0) ||
     (Array.isArray(tasteMemory?.negative) && tasteMemory.negative.length > 0);
-  const hasConceptAnchors = profile.boostConcepts.length > 0 || profile.dampenConcepts.length > 0;
-
   if (!isFeedMode && !hasPersonalTaste && isDefaultFeedTuning(profile)) {
     return list;
   }
@@ -814,18 +768,7 @@ export function rankFeedItems(items = [], rawProfile = null, context = {}) {
       delta += (s.matureContent / 100) * matureSig * 3.2;
     }
 
-    // 7. Semantic Concept Anchors (Lexical offline + optional local CPU vector blend)
-    if (hasConceptAnchors) {
-      const lex = scoreConceptLexical(item, profile.boostConcepts, profile.dampenConcepts);
-      const vec = Number(semanticScores[item.id] ?? 0);
-      let conceptSig = lex;
-      if (Number.isFinite(vec) && vec !== 0) {
-        conceptSig = lex !== 0 ? lex * 0.45 + vec * 0.55 : vec;
-      }
-      delta += conceptSig * 3.0;
-    }
-
-    // 8. Personal Taste Exemplars (MiniLM local vector + lexical taste blend) & Conversation Velocity
+    // 7. Personal Taste Exemplars (lexical taste blend) & Conversation Velocity
     if (usePersonalSignals) {
       const lexTaste = scorePersonalTasteLexical(item, tasteMemory);
       const rawVecTaste = tasteScores[item.id];
@@ -840,11 +783,22 @@ export function rankFeedItems(items = [], rawProfile = null, context = {}) {
       delta += scoreConversationVelocity(item, nowMs) * 0.85;
     }
 
+    let shuffleJitter = 0;
+    if (isFeedMode && context.shuffleSeed) {
+      const seedText = `${context.shuffleSeed}:${item.id || item.key || ''}`;
+      let hash = 2166136261;
+      for (let i = 0; i < seedText.length; i += 1) {
+        hash ^= seedText.charCodeAt(i);
+        hash = Math.imul(hash, 16777619);
+      }
+      const unit = ((hash >>> 0) % 10000) / 10000;
+      shuffleJitter = (unit - 0.5) * 1.8;
+    }
     scored.push({
       item,
       authorKey,
       publishedMs,
-      baseScore: freshness + delta,
+      baseScore: freshness + delta + shuffleJitter,
     });
   }
 

@@ -559,6 +559,7 @@ dialog.classic-modal-dialog {
 }
 
 .feed-refresh-btn {
+  position: relative;
   align-self: center;
   margin-inline-start: -12px;
   inline-size: 28px;
@@ -600,13 +601,18 @@ dialog.classic-modal-dialog {
 }
 
 .feed-refresh-btn:disabled {
-  opacity: 0.55;
+  opacity: 1;
   cursor: default;
 }
 
-@media (prefers-reduced-motion: no-preference) {
-  .feed-refresh-btn.is-spinning svg {
-    animation: classicSpin 0.75s linear infinite;
+.feed-refresh-btn.is-spinning svg {
+  transform-origin: 50% 50%;
+  animation: classicSpin 0.75s linear infinite;
+}
+
+@keyframes classicSpin {
+  to {
+    transform: rotate(360deg);
   }
 }
 

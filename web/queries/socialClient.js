@@ -71,11 +71,17 @@ import {
 import { authStore, getAuthenticatedAccount, updateAccountTokens, upsertSocialAccount } from '../state/authStore.js';
 import { feedStore, hydrateCachedModeration, persistCachedFilters, purgeModeratedAuthorAffinity, setFilterRules, setModeratedActors } from '../state/feedStore.js';
 import { connectionStore } from '../state/sanctuary/connection.js';
-import { requestSocialBridge, syncMastodonUserProfileToSanctuary } from './sanctuary.js';
+import {
+  deleteSanctuaryLinkedPost,
+  fetchSanctuaryLinkedPosts,
+  requestSocialBridge,
+  saveSanctuaryLinkedPost,
+  syncMastodonUserProfileToSanctuary,
+} from './sanctuary.js';
 import {
   deleteLocalFilterRule,
-  deleteLocalLinkedChildren,
-  deleteLocalLinkedPost,
+  deleteLocalLinkedChildren as deleteLocalLinkedChildrenOnDevice,
+  deleteLocalLinkedPost as deleteLocalLinkedPostOnDevice,
   deleteLocalRetry,
   enqueueLocalRetry,
   findLocalLinkedPost,
@@ -88,11 +94,353 @@ import {
   listLocalRetries,
   removeLocalModeratedAccount,
   saveLocalFilterRule,
-  saveLocalLinkedPost,
+  saveLocalLinkedPost as saveLocalLinkedPostOnDevice,
   saveLocalModeratedAccounts,
 } from '../storage/nativeStore.js';
 
 const IS_NODE_RUNTIME = typeof globalThis.process?.versions?.node === 'string';
+const LINKED_POST_DELETIONS_KEY = 'social_linked_post_deletions_v1';
+const LINKED_POST_FIELDS = [
+  'mastodonStatusId',
+  'mastodonInstance',
+  'blueskyUri',
+  'blueskyCid',
+  'threadsPostId',
+  'parentCanonicalId',
+];
+const CROSSPOST_RECOVERY_KEY = 'crosspost_recovery_v1';
+const CROSSPOST_MATCH_WINDOW_MS = 10 * 60 * 1000;
+let linkedPostSyncPromise = null;
+let crossPostRecoveryPromise = null;
+
+function mergeLinkedPostRecords(local = {}, remote = {}) {
+  const localIsNewer = Number(local.updatedAt || 0) >= Number(remote.updatedAt || 0);
+  const preferred = localIsNewer ? local : remote;
+  const secondary = localIsNewer ? remote : local;
+  const merged = { ...secondary, ...preferred };
+  for (const field of LINKED_POST_FIELDS) {
+    merged[field] = String(preferred[field] || secondary[field] || '');
+    if (!merged[field]) delete merged[field];
+  }
+  merged.canonicalId = String(local.canonicalId || remote.canonicalId || '');
+  return merged;
+}
+
+function sameLinkedPostFields(a = {}, b = {}) {
+  return LINKED_POST_FIELDS.every((field) => String(a[field] || '') === String(b[field] || ''));
+}
+
+async function queueLinkedPostDeletions(canonicalIds) {
+  const pending = await kvGet(LINKED_POST_DELETIONS_KEY, []);
+  const next = new Set(Array.isArray(pending) ? pending.map(String) : []);
+  for (const canonicalId of canonicalIds) {
+    if (canonicalId) next.add(String(canonicalId));
+  }
+  await kvSet(LINKED_POST_DELETIONS_KEY, [...next]);
+}
+
+export async function saveLocalLinkedPost(record) {
+  if (!record?.canonicalId) return;
+  const saved = {
+    ...record,
+    updatedAt: Math.max(Date.now(), Number(record.updatedAt || 0)),
+  };
+  await saveLocalLinkedPostOnDevice(saved);
+  const nodeUrl = connectionStore.get().nodeUrl;
+  if (nodeUrl) {
+    void saveSanctuaryLinkedPost(saved.canonicalId, saved, { nodeUrl }).catch((err) => {
+      console.error('[social links] Could not sync a cross-post mapping:', err);
+    });
+  }
+}
+
+export async function deleteLocalLinkedPost(anyId) {
+  const group = await findLocalLinkedPostGroup(anyId);
+  const record = group[0] || await findLocalLinkedPost(anyId);
+  const canonicalIds = [...new Set(
+    [...group, ...(record ? [record] : [])]
+      .map((item) => String(item?.canonicalId || item?.canonical_id || ''))
+      .filter(Boolean)
+  )];
+  await deleteLocalLinkedPostOnDevice(anyId);
+  if (canonicalIds.length > 0) {
+    await queueLinkedPostDeletions(canonicalIds);
+    void syncLinkedPostsWithSanctuary().catch((err) => {
+      console.error('[social links] Could not sync cross-post deletion:', err);
+    });
+  }
+}
+
+export async function deleteLocalLinkedChildren(parentCanonicalId) {
+  const group = await findLocalLinkedPostGroup(parentCanonicalId);
+  const childIds = group
+    .filter((record) => String(record.parentCanonicalId || '') === String(parentCanonicalId))
+    .map((record) => String(record.canonicalId || record.canonical_id || ''))
+    .filter(Boolean);
+  await deleteLocalLinkedChildrenOnDevice(parentCanonicalId);
+  if (childIds.length > 0) {
+    await queueLinkedPostDeletions(childIds);
+    void syncLinkedPostsWithSanctuary().catch((err) => {
+      console.error('[social links] Could not sync cross-post deletion:', err);
+    });
+  }
+}
+
+export async function syncLinkedPostsWithSanctuary() {
+  if (linkedPostSyncPromise) return linkedPostSyncPromise;
+  const nodeUrl = connectionStore.get().nodeUrl;
+  if (!nodeUrl) return false;
+
+  linkedPostSyncPromise = (async () => {
+    const pending = await kvGet(LINKED_POST_DELETIONS_KEY, []);
+    for (const canonicalId of Array.isArray(pending) ? pending : []) {
+      await deleteSanctuaryLinkedPost(String(canonicalId), { nodeUrl });
+    }
+    await kvSet(LINKED_POST_DELETIONS_KEY, []);
+
+    const response = await fetchSanctuaryLinkedPosts({ nodeUrl });
+    const remoteRecords = Array.isArray(response?.records) ? response.records : [];
+    const deletedIds = new Set(
+      Array.isArray(response?.deletedIds) ? response.deletedIds.map(String) : []
+    );
+    for (const canonicalId of deletedIds) {
+      await deleteLocalLinkedPostOnDevice(canonicalId);
+    }
+
+    const localRecords = await listLocalLinkedPosts(100000);
+    const remoteById = new Map(
+      remoteRecords
+        .filter((record) => record?.canonicalId)
+        .map((record) => [String(record.canonicalId), record])
+    );
+    const localById = new Map(
+      localRecords
+        .filter((record) => record?.canonicalId || record?.canonical_id)
+        .map((record) => [String(record.canonicalId || record.canonical_id), record])
+    );
+
+    for (const [canonicalId, local] of localById) {
+      if (deletedIds.has(canonicalId)) continue;
+      const remote = remoteById.get(canonicalId);
+      if (!remote) {
+        await saveSanctuaryLinkedPost(canonicalId, local, { nodeUrl });
+        continue;
+      }
+      const merged = mergeLinkedPostRecords(local, remote);
+      if (!sameLinkedPostFields(merged, local)) {
+        await saveLocalLinkedPostOnDevice(merged);
+      }
+      if (!sameLinkedPostFields(merged, remote)) {
+        await saveSanctuaryLinkedPost(canonicalId, merged, { nodeUrl });
+      }
+    }
+
+    for (const [canonicalId, remote] of remoteById) {
+      if (!deletedIds.has(canonicalId) && !localById.has(canonicalId)) {
+        await saveLocalLinkedPostOnDevice(remote);
+      }
+    }
+    return true;
+  })().finally(() => {
+    linkedPostSyncPromise = null;
+  });
+  return linkedPostSyncPromise;
+}
+
+function crossPostText(item) {
+  return String(item?.content_text || item?.text || '')
+    .normalize('NFKC')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function crossPostTimestamp(item) {
+  return Date.parse(item?.date_published || item?.createdAt || '');
+}
+
+export function findUniqueCrossPostMatches(primaryItems, secondaryItems) {
+  const secondariesByText = new Map();
+  for (const item of secondaryItems || []) {
+    const text = crossPostText(item);
+    const timestamp = crossPostTimestamp(item);
+    if (text.length < 20 || !Number.isFinite(timestamp) || !item?.id) continue;
+    const bucket = secondariesByText.get(text) || [];
+    bucket.push({ item, timestamp });
+    secondariesByText.set(text, bucket);
+  }
+
+  const primariesByText = new Map();
+  const primaryRows = [];
+  for (const item of primaryItems || []) {
+    const text = crossPostText(item);
+    const timestamp = crossPostTimestamp(item);
+    if (text.length < 20 || !Number.isFinite(timestamp) || !item?.id) continue;
+    const row = { item, text, timestamp };
+    primaryRows.push(row);
+    const bucket = primariesByText.get(text) || [];
+    bucket.push(row);
+    primariesByText.set(text, bucket);
+  }
+
+  const matches = new Map();
+  for (const primary of primaryRows) {
+    const candidates = (secondariesByText.get(primary.text) || [])
+      .filter((secondary) => Math.abs(secondary.timestamp - primary.timestamp) <= CROSSPOST_MATCH_WINDOW_MS);
+    if (candidates.length !== 1) continue;
+    const candidate = candidates[0];
+    const competingPrimaries = (primariesByText.get(primary.text) || [])
+      .filter((other) => Math.abs(other.timestamp - candidate.timestamp) <= CROSSPOST_MATCH_WINDOW_MS);
+    if (competingPrimaries.length === 1) {
+      matches.set(String(primary.item.id), candidate.item);
+    }
+  }
+  return matches;
+}
+
+async function fetchMastodonRecoveryPosts(account) {
+  const posts = [];
+  let maxId = '';
+  for (let page = 0; page < 8; page += 1) {
+    const rows = await getAccountStatuses({
+      instanceUrl: account.meta.instanceUrl || 'https://mastodon.social',
+      accessToken: account.secrets.accessToken,
+      accountId: account.meta.userId || account.meta.acct || account.meta.handle,
+      maxId,
+      excludeReblogs: true,
+      limit: 40,
+    });
+    if (rows.length === 0) break;
+    const items = rows.map((row) => toUnifiedItem(row));
+    posts.push(...items);
+    const last = items[items.length - 1];
+    const nextId = String(last?._meta?.mastodon?.statusId || '').trim();
+    if (!nextId || nextId === maxId) break;
+    maxId = nextId;
+    if (posts.length >= 320) break;
+  }
+  return posts;
+}
+
+async function fetchBlueskyRecoveryPosts(account) {
+  const actor = account.meta.did || account.meta.handle || account.meta.acct;
+  if (!actor) return [];
+  const posts = [];
+  let cursor = '';
+  for (let page = 0; page < 5; page += 1) {
+    const response = await getBskyAuthorFeed({
+      actor,
+      cursor,
+      limit: 100,
+      filter: 'posts_with_replies',
+      ...getBskyReadOpts(account),
+    });
+    const items = (response.items || [])
+      .map((item) => toUnifiedItem(item))
+      .filter((item) => item.author?.id === actor || item.author?.handle === account.meta.handle);
+    posts.push(...items);
+    if (!response.nextCursor || response.nextCursor === cursor || items.length === 0) break;
+    cursor = response.nextCursor;
+  }
+  return posts;
+}
+
+async function fetchThreadsRecoveryPosts() {
+  const { threads } = await getClientAdapters();
+  if (!threads) return [];
+  return threads.fetchOwnPosts(100);
+}
+
+export async function recoverUniqueCrossPostLinks() {
+  if (crossPostRecoveryPromise) return crossPostRecoveryPromise;
+  crossPostRecoveryPromise = (async () => {
+    if (await kvGet(CROSSPOST_RECOVERY_KEY, false)) return { recovered: 0, skipped: true };
+
+    const mastodon = await getAuthenticatedAccount('fediverse');
+    const bluesky = await getAuthenticatedAccount('bluesky');
+    const threads = await getAuthenticatedAccount('threads');
+    if (!mastodon || (!bluesky && !threads)) return { recovered: 0, skipped: true };
+
+    const requests = [
+      fetchMastodonRecoveryPosts(mastodon).then((items) => ['mastodon', items]),
+      ...(bluesky
+        ? [fetchBlueskyRecoveryPosts(bluesky).then((items) => ['bluesky', items])]
+        : []),
+      ...(threads
+        ? [fetchThreadsRecoveryPosts().then((items) => ['threads', items])]
+        : []),
+    ];
+    const settled = await Promise.allSettled(requests);
+    const results = new Map();
+    const errors = [];
+    for (const result of settled) {
+      if (result.status === 'fulfilled') {
+        results.set(result.value[0], result.value[1]);
+      } else {
+        errors.push(result.reason);
+      }
+    }
+    const mastodonPosts = results.get('mastodon');
+    if (!mastodonPosts || (!results.has('bluesky') && !results.has('threads'))) {
+      throw errors[0] || new Error('Could not load enough connected post histories to recover cross-post links.');
+    }
+
+    const bskyMatches = results.has('bluesky')
+      ? findUniqueCrossPostMatches(mastodonPosts, results.get('bluesky'))
+      : new Map();
+    const threadsMatches = results.has('threads')
+      ? findUniqueCrossPostMatches(mastodonPosts, results.get('threads'))
+      : new Map();
+    const existing = await listLocalLinkedPosts(100000);
+    const existingById = new Map(
+      existing.map((record) => [String(record.canonicalId || record.canonical_id || ''), record])
+    );
+    let recovered = 0;
+    for (const post of mastodonPosts) {
+      const canonicalId = String(post.id || '');
+      const statusId = String(post._meta?.mastodon?.statusId || '');
+      if (!canonicalId || !statusId) continue;
+      const previous = existingById.get(canonicalId) || {};
+      const bskyPost = bskyMatches.get(canonicalId);
+      const threadsPost = threadsMatches.get(canonicalId);
+      const record = {
+        ...previous,
+        canonicalId,
+        mastodonStatusId: statusId,
+        mastodonInstance: String(post._meta?.mastodon?.instanceUrl || mastodon.meta.instanceUrl || ''),
+        ...(bskyPost?._meta?.bluesky?.uri
+          ? {
+              blueskyUri: String(bskyPost._meta.bluesky.uri),
+              blueskyCid: String(bskyPost._meta.bluesky.cid || ''),
+            }
+          : {}),
+        ...(threadsPost?._meta?.threads?.postId
+          ? { threadsPostId: String(threadsPost._meta.threads.postId) }
+          : {}),
+      };
+      const hasCrossPost = Boolean(record.blueskyUri || record.threadsPostId);
+      const changed =
+        String(previous.blueskyUri || '') !== String(record.blueskyUri || '')
+        || String(previous.threadsPostId || '') !== String(record.threadsPostId || '');
+      if (hasCrossPost && changed) {
+        await saveLocalLinkedPostOnDevice(record);
+        recovered += 1;
+      }
+    }
+    if (errors.length === 0) {
+      await kvSet(CROSSPOST_RECOVERY_KEY, true);
+    }
+    let serverSynced = false;
+    try {
+      serverSynced = await syncLinkedPostsWithSanctuary();
+    } catch (err) {
+      console.error('[social links] Could not sync recovered mappings with Sanctuary:', err);
+    }
+    return { recovered, skipped: false, serverSynced };
+  })().finally(() => {
+    crossPostRecoveryPromise = null;
+  });
+  return crossPostRecoveryPromise;
+}
 
 function getItemLinkKey(item) {
   return String(

@@ -17,7 +17,7 @@
   - `web/assets/` — `css/`, `img/`, and `vendor/`
 - **`sanctuary/` — Self-Contained Local AI Node:**
   - `sanctuary/app.py`, `sanctuary/state.py`, `sanctuary/desktop.py` (launches pywebview with `private_mode=False` and persistent `webview_data/` profile), `sanctuary/setup_env.py`
-  - `sanctuary/routes/` — Flask Blueprints (`health.py`, `chat.py`, `media.py`, `programs.py`, `knowledge.py`, `voice.py`, `system.py`, `social_bridge.py`)
+  - `sanctuary/routes/` — Flask Blueprints (`health.py`, `chat.py`, `media.py`, `programs.py`, `knowledge.py`, `voice.py`, `system.py`, `social_bridge.py`, `social_accounts.py`)
   - `sanctuary/{core, runners, tools, adapters, models, utils, variables, templates/splash.html}`
 - **Packaging, Scripts, Tests & Docs:**
   - `capacitor.config.ts`, `android/app/src/main/res/xml/network_security_config.xml`
@@ -34,9 +34,13 @@
 2. **Protocols & Organic Composer (Single Source of Truth in `web/`)**:
    - All social protocols (**ActivityPub** via OAuth2 + REST, **AT Protocol** for `Bluesky`, and **Threads Graph API** for `Threads`) and social state live exclusively in `web/` so the Capacitor APK and static webapp run standalone with zero desktop dependency.
    - Top-level posts from `composeModal.js` or `feed.js`'s inline bar publish organically across all signed-in accounts without per-post toggles, while replies target the post's origin network.
-3. **Zero AI Social Dispatch & Stateless 4-Endpoint Bridge**:
-   - `sanctuary/` holds zero social credentials, zero social protocol adapters, and zero AI social-posting or timeline-reading tools.
-   - OAuth tokens and app passwords stay exclusively on the client: inside `AndroidKeyStore` on Capacitor Android, or encrypted inside the `social_vault` store of IndexedDB (`sanctuary_pwa_db`) via a non-extractable Web Crypto `AES-GCM` key in browsers and desktop WebView2 (`webview_data/`).
+3. **Encrypted Social Vault & Zero AI Social Dispatch**:
+   - Clients keep social credentials in their local vault when secure storage is available: Android uses `AndroidKeyStore`; secure browser origins and desktop WebView2 use the encrypted `social_vault` IndexedDB store. On Tailscale HTTP browser origins, synced credentials stay in memory and are reloaded from the server after each app load. Social-vault endpoints do not require Sanctuary app credentials; app login may still protect other app APIs.
+   - Clients sync account metadata and tokens unconditionally through `/api/social/accounts`; this vault API does not require the optional app login. The server encrypts account metadata and tokens in `social/data/accounts.sqlite3` using `social/data/social_vault.key`, protected by Windows DPAPI or POSIX file permissions. Conversation session files are encrypted with the same key and existing JSON sessions are migrated at startup.
+   - Saved post drafts merge with `/api/social/drafts` across devices, including server-side deletion tombstones. Drafts are encrypted in the same SQLite database. This endpoint also does not require app credentials, so any client that can reach the social API can retrieve synchronized drafts.
+   - Cross-post ID mappings merge through `/api/social/linked-posts` and are encrypted in the same database. If local mappings are missing, the client scans connected own-post histories and restores only unique exact-text matches within ten minutes; ambiguous posts remain unlinked.
+   - Ordinary LAN clients must connect over HTTPS; cleartext HTTP is limited to loopback or Tailscale peers (whose traffic is carried in Tailscale's encrypted tunnel). Configure `USE_HTTPS`, `SSL_CERT`, and `SSL_KEY` for ordinary LAN access.
+   - The server-side vault only synchronizes credentials; AI Programs still receive no social credentials and have no social publishing or timeline-reading tools.
    - When `connectionStore.get().mode === 'online'`, `web/queries/sanctuary.js` (`requestSocialBridge` / `requestThreadsProxy`) may call the four stateless endpoints in `sanctuary/routes/social_bridge.py` (`POST /api/social/link-preview`, `POST /api/social/translate`, `POST /api/social/feed/semantic-score`, and `POST /api/social/threads-proxy` strictly pinned to `https://graph.threads.net` for browser CORS bypass; Capacitor Android uses `CapacitorHttp` directly), always falling back silently on failure or offline mode.
 4. **Known Storage & Hosting Limitations**:
    - Browser/WebView2 IndexedDB is origin-scoped: if desktop port `5000` is occupied at startup and `desktop.py` picks a different port, previously stored accounts will appear absent until port `5000` is used again.

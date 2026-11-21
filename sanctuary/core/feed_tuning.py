@@ -123,25 +123,21 @@ FEED_PRESETS: dict[str, dict[str, int]] = {
 
 
 DEFAULT_DISCOVERY_CHANNELS: tuple[str, ...] = (
-    "council communism",
-    "left communism",
-    "workers councils",
-    "historical materialism",
-    "pannekoek",
-    "at://did:plc:b3mupbm5prwiusw43fy7dgwb/app.bsky.feed.generator/aaadx3mkuxx7i",
+    "news",
+    "technology",
+    "science",
+    "culture",
+    "music",
 )
 
 DEFAULT_DISCOVERY_INSTANCES: tuple[str, ...] = (
-    "kolektiva.social",
-    "social.coop",
-    "union.place",
-    "todon.eu",
-    "todon.nl",
-    "babka.social",
+    "mastodon.social",
+    "mastodon.online",
+    "mstdn.social",
+    "mas.to",
+    "infosec.exchange",
+    "lemmy.world",
     "lemmy.ml",
-    "hexbear.net",
-    "lemmygrad.ml",
-    "lemmy.dbzer0.com",
 )
 
 
@@ -151,8 +147,6 @@ def default_feed_profile() -> dict[str, Any]:
         "updatedAt": 0,
         "updatedBy": "default",
         "sliders": {k: default_val for k, (_, _, default_val) in SLIDER_SPECS.items()},
-        "boostConcepts": [],
-        "dampenConcepts": [],
         "discoveryChannels": [],
         "discoveryInstances": [],
     }
@@ -266,10 +260,6 @@ def normalize_feed_profile(raw: Any, *, preserve_updated_at: int | None = None) 
         if key in raw_sliders:
             sliders[key] = _clamp_int(raw_sliders[key], low, high, default_val)
 
-    boost = _clean_concept_list(raw.get("boostConcepts"))
-    dampen_raw = _clean_concept_list(raw.get("dampenConcepts"))
-    boost_lower = {c.lower() for c in boost}
-    dampen = [c for c in dampen_raw if c.lower() not in boost_lower]
     discovery_channels = _clean_concept_list(raw.get("discoveryChannels"), max_items=16)
     discovery_instances = _clean_instance_list(raw.get("discoveryInstances"), max_items=12)
 
@@ -286,8 +276,6 @@ def normalize_feed_profile(raw: Any, *, preserve_updated_at: int | None = None) 
         "updatedAt": max(0, updated_at),
         "updatedBy": updated_by,
         "sliders": sliders,
-        "boostConcepts": boost,
-        "dampenConcepts": dampen,
         "discoveryChannels": discovery_channels,
         "discoveryInstances": discovery_instances,
     }
@@ -371,8 +359,6 @@ def apply_feed_tuning_patch(
     """Merge partial slider/preset/concept updates into feed_profile.json atomically."""
     current = load_feed_profile()
     next_sliders = dict(current["sliders"])
-    next_boost = list(current["boostConcepts"])
-    next_dampen = list(current["dampenConcepts"])
     next_channels = list(current.get("discoveryChannels") or [])
     next_instances = list(current.get("discoveryInstances") or [])
 
@@ -383,8 +369,6 @@ def apply_feed_tuning_patch(
             raise ValueError(f"Unknown feed preset '{preset}'. Valid presets: {valid}")
         next_sliders = dict(FEED_PRESETS[preset_key])
         if preset_key == "reset":
-            next_boost = []
-            next_dampen = []
             next_channels = []
             next_instances = []
 
@@ -398,26 +382,10 @@ def apply_feed_tuning_patch(
             low, high, default_val = SLIDER_SPECS[canon]
             next_sliders[canon] = _clamp_int(raw_v, low, high, next_sliders.get(canon, default_val))
 
-    if boost_concepts is not None:
-        next_boost = _clean_concept_list(boost_concepts)
-    if dampen_concepts is not None:
-        next_dampen = _clean_concept_list(dampen_concepts)
     if discovery_channels is not None:
         next_channels = _clean_concept_list(discovery_channels, max_items=16)
     if discovery_instances is not None:
         next_instances = _clean_instance_list(discovery_instances, max_items=12)
-
-    if add_boost_concepts is not None:
-        additions = _clean_concept_list(add_boost_concepts)
-        add_lower = {c.lower() for c in additions}
-        next_dampen = [c for c in next_dampen if c.lower() not in add_lower]
-        next_boost = _clean_concept_list([*next_boost, *additions])
-
-    if add_dampen_concepts is not None:
-        additions = _clean_concept_list(add_dampen_concepts)
-        add_lower = {c.lower() for c in additions}
-        next_boost = [c for c in next_boost if c.lower() not in add_lower]
-        next_dampen = _clean_concept_list([*next_dampen, *additions])
 
     if add_discovery_channels is not None:
         next_channels = _clean_concept_list(
@@ -449,8 +417,6 @@ def apply_feed_tuning_patch(
         {
             "version": 1,
             "sliders": next_sliders,
-            "boostConcepts": next_boost,
-            "dampenConcepts": next_dampen,
             "discoveryChannels": next_channels,
             "discoveryInstances": next_instances,
         },
@@ -463,16 +429,12 @@ def format_feed_profile_summary(profile: dict[str, Any]) -> str:
     """Human-readable summary returned to Programs and activity logs."""
     sliders = profile.get("sliders") or {}
     active_parts = [f"{k}={v}" for k, v in sliders.items() if int(v or 0) != 0]
-    boost = profile.get("boostConcepts") or []
-    dampen = profile.get("dampenConcepts") or []
     channels = profile.get("discoveryChannels") or []
     instances = profile.get("discoveryInstances") or []
     lines = [
         f"UpdatedBy: {profile.get('updatedBy', 'default')}",
         f"Active Sliders: {', '.join(active_parts) if active_parts else 'default (strict chronological)'}",
-        f"Boost Concepts: {', '.join(boost) if boost else 'none'}",
-        f"Dampen Concepts: {', '.join(dampen) if dampen else 'none'}",
-        f"Discovery Channels: {', '.join(channels) if channels else 'boost concepts + Sanctuary defaults'}",
+        f"Discovery Channels: {', '.join(channels) if channels else 'Sanctuary defaults'}",
         f"Discovery Instances: {', '.join(instances) if instances else 'Sanctuary defaults'}",
     ]
     return "\n".join(lines)

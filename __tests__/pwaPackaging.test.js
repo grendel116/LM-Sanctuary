@@ -16,6 +16,13 @@ const __dirname = path.dirname(__filename);
 const REPO_ROOT = path.resolve(__dirname, '..');
 const WEB_DIR = path.join(REPO_ROOT, 'web');
 
+test('app loading splash displays the logo without a loading circle', () => {
+  const indexHtml = fs.readFileSync(path.join(WEB_DIR, 'index.html'), 'utf8');
+
+  assert.equal(indexHtml.includes('splash-spinner'), false);
+  assert.equal(indexHtml.includes('splashSpin'), false);
+});
+
 test('PWA manifest sets standalone relative scope, #121214 theme, valid icon, and Web Share Target', () => {
   const manifestPath = path.join(WEB_DIR, 'manifest.json');
   const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
@@ -37,7 +44,7 @@ test('PWA manifest sets standalone relative scope, #121214 theme, valid icon, an
 });
 
 test('Service Worker APP_SHELL_ASSETS all exist on disk and match modular SPA without legacy monolith', () => {
-  assert.equal(CACHE_NAME, 'sanctuary-shell-v59');
+  assert.equal(CACHE_NAME, 'sanctuary-shell-v64');
   const swSource = fs.readFileSync(path.join(WEB_DIR, 'sw.js'), 'utf8');
   assert.equal(swSource.includes("cache: 'reload'"), true);
   assert.ok(APP_SHELL_ASSETS.includes('./'));

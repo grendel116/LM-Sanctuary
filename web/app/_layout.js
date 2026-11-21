@@ -4,8 +4,19 @@ import { openUserModal } from '../components/sanctuary/UserModal.js';
 import { createUserIconSvg } from '../constants/avatars.js';
 import { toUnifiedItem } from '../core/schema/unifiedItem.js';
 import { exchangeOAuthCode, verifyCredentials } from '../queries/fediverse.js';
-import { completeThreadsOAuthFlow, fetchSocialBridgeStatus, syncRecentUserPostsToSanctuary } from '../queries/socialClient.js';
-import { authStore, hydrateAuthStore, upsertSocialAccount } from '../state/authStore.js';
+import {
+  completeThreadsOAuthFlow,
+  fetchSocialBridgeStatus,
+  recoverUniqueCrossPostLinks,
+  syncLinkedPostsWithSanctuary,
+  syncRecentUserPostsToSanctuary,
+} from '../queries/socialClient.js';
+import {
+  authStore,
+  hydrateAuthStore,
+  syncSocialAccountsWithServer,
+  upsertSocialAccount,
+} from '../state/authStore.js';
 import { activityStore, hydrateActivityStore, markActivitySeen, refreshActivityNotifications } from '../state/activityStore.js';
 import { openCompose, prefillFromUserBubble } from '../state/composeStore.js';
 import { hydrateCachedModeration, hydrateFeedTuning } from '../state/feedStore.js';
@@ -654,6 +665,21 @@ export function createAppShell(rootEl, { initialTab = 'home', skipBackgroundInit
   const offRecentPostsSync = onSanctuaryEvent('sanctuary:online', () => {
     void syncRecentUserPostsToSanctuary().catch(() => {});
   });
+  const offSocialVaultSync = onSanctuaryEvent('sanctuary:online', () => {
+    void syncSocialAccountsWithServer().catch((err) => {
+      console.error('[social vault] Could not sync accounts with Sanctuary:', err);
+    });
+  });
+  const offLinkedPostSync = onSanctuaryEvent('sanctuary:online', () => {
+    void (async () => {
+      try {
+        await syncLinkedPostsWithSanctuary();
+        await recoverUniqueCrossPostLinks();
+      } catch (err) {
+        console.error('[social links] Could not sync cross-post mappings with Sanctuary:', err);
+      }
+    })();
+  });
   const initPromise = skipBackgroundInit
     ? Promise.resolve()
     : (async () => {
@@ -673,6 +699,26 @@ export function createAppShell(rootEl, { initialTab = 'home', skipBackgroundInit
         void fetchSocialBridgeStatus().catch(() => {});
         detachOutbox = attachOutboxAutoFlush();
         await initSanctuaryConnection();
+        try {
+          await syncSocialAccountsWithServer();
+        } catch (err) {
+          console.error('[social vault] Could not sync accounts with Sanctuary:', err);
+        }
+        void (async () => {
+          try {
+            await syncLinkedPostsWithSanctuary();
+          } catch (err) {
+            console.error('[social links] Could not sync cross-post mappings with Sanctuary:', err);
+          }
+          try {
+            const result = await recoverUniqueCrossPostLinks();
+            if (result.recovered > 0) {
+              console.info(`[social links] Recovered ${result.recovered} historical cross-post mapping(s).`);
+            }
+          } catch (err) {
+            console.error('[social links] Could not recover historical cross-post mappings:', err);
+          }
+        })();
         void syncRecentUserPostsToSanctuary().catch(() => {});
 
         if ((authStore.get().accounts || []).length > 0) {
@@ -726,15 +772,6 @@ export function createAppShell(rootEl, { initialTab = 'home', skipBackgroundInit
           (loc.protocol === 'https:' || loc.hostname === 'localhost' || loc.hostname === '127.0.0.1');
 
         if (canRegisterSw) {
-          const hadSwController = Boolean(navigator.serviceWorker.controller);
-          let swReloading = false;
-          if (hadSwController && typeof navigator.serviceWorker.addEventListener === 'function') {
-            navigator.serviceWorker.addEventListener('controllerchange', () => {
-              if (swReloading) return;
-              swReloading = true;
-              globalThis.location?.reload?.();
-            });
-          }
           navigator.serviceWorker
             .register('./sw.js', { type: 'module', updateViaCache: 'none' })
             .then((reg) => reg?.update?.()?.catch?.(() => {}))
@@ -809,6 +846,8 @@ export function createAppShell(rootEl, { initialTab = 'home', skipBackgroundInit
       composeCtrl.destroy();
       detachOutbox();
       offRecentPostsSync();
+      offSocialVaultSync();
+      offLinkedPostSync();
     },
   };
 }

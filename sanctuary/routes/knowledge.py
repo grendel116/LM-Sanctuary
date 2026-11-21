@@ -24,6 +24,7 @@ from runners.program import (
     set_active_session,
 )
 from core.skills.vectorized_databank.databank import DataBankManager
+from utils.session_data import read_session_data
 
 knowledge_bp = Blueprint("knowledge_bp", __name__)
 
@@ -454,9 +455,8 @@ def get_program_journals():
         memory_meta = None
         if os.path.exists(session_path):
             try:
-                with open(session_path, "r", encoding="utf-8") as f:
-                    sdata = json.load(f)
-                    memory_meta = sdata.get("memory_state")
+                sdata = read_session_data(session_path)
+                memory_meta = sdata.get("memory_state")
             except Exception as se:
                 print(f"Error loading session file {session_path}: {se}")
 

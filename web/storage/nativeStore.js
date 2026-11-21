@@ -1,7 +1,7 @@
 /**
  * Local persistence facade across three runtimes:
  *  1) Capacitor Android: routes to SanctuaryNativeStorePlugin (SQLiteOpenHelper + AndroidKeyStore)
- *  2) Browser / Desktop WebView2: IndexedDB (sanctuary_pwa_db) + Web Crypto non-extractable AES-GCM vault
+ *  2) Browser / Desktop WebView2: IndexedDB + Web Crypto vault when available; server-synced secrets use memory on insecure origins
  *  3) Isolated Test Harness (node --test): AES-GCM WebCrypto encrypted in-memory vault
  */
 
@@ -25,7 +25,7 @@ const RETRIES_KV_KEY = 'local_retries_v1';
 
 let idbPromise = null;
 let vaultKeyPromise = null;
-let linkedPostsHydrated = false;
+let linkedPostsHydrationPromise = null;
 let filtersHydrated = false;
 let retriesHydrated = false;
 const memoryStores = new Map(STORE_NAMES.map((name) => [name, new Map()]));
@@ -140,7 +140,7 @@ export function resetMemoryStorageForTests() {
   memoryLinkedPosts.clear();
   memoryFilters.clear();
   memoryRetries.clear();
-  linkedPostsHydrated = false;
+  linkedPostsHydrationPromise = null;
   filtersHydrated = false;
   retriesHydrated = false;
   vaultKeyPromise = null;
@@ -294,6 +294,12 @@ function getCryptoApi() {
   return cryptoObj;
 }
 
+export function canPersistVaultSecretsLocally() {
+  if (getAndroidPlugin()) return true;
+  const cryptoObj = globalThis.crypto;
+  return Boolean(cryptoObj?.subtle && typeof cryptoObj.getRandomValues === 'function');
+}
+
 function bytesToBase64(bytes) {
   let binary = '';
   const chunkSize = 0x8000;
@@ -399,22 +405,25 @@ export async function listVaultIds() {
 // ── Cross-Post Linked IDs, Filter Rules, and Retry Queue ──
 
 async function ensureLinkedPostsHydrated() {
-  if (linkedPostsHydrated) return;
-  linkedPostsHydrated = true;
-  const saved = await storeGet('kv', LINKED_POSTS_KV_KEY).catch(() => null);
-  if (Array.isArray(saved)) {
-    for (const rec of saved) {
-      if (rec?.canonicalId && !memoryLinkedPosts.has(String(rec.canonicalId))) {
-        memoryLinkedPosts.set(String(rec.canonicalId), { ...rec });
+  if (!linkedPostsHydrationPromise) {
+    linkedPostsHydrationPromise = (async () => {
+      const saved = await storeGet('kv', LINKED_POSTS_KV_KEY).catch(() => null);
+      if (Array.isArray(saved)) {
+        for (const rec of saved) {
+          if (rec?.canonicalId && !memoryLinkedPosts.has(String(rec.canonicalId))) {
+            memoryLinkedPosts.set(String(rec.canonicalId), { ...rec });
+          }
+        }
       }
-    }
+    })();
   }
+  await linkedPostsHydrationPromise;
 }
 
 async function syncLinkedPostsKvSnapshot() {
   const android = getAndroidPlugin();
   if (android && typeof android.listLinkedPosts === 'function') return;
-  const rows = [...memoryLinkedPosts.values()].slice(-120);
+  const rows = [...memoryLinkedPosts.values()];
   await storePut('kv', LINKED_POSTS_KV_KEY, rows).catch(() => {});
 }
 

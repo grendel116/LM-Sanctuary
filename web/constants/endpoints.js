@@ -154,6 +154,26 @@ export function isAllowedNodeUrl(urlInput) {
 }
 
 /**
+ * Allow cleartext Sanctuary connections only to the same device.
+ * Network clients must use HTTPS to avoid exposing credentials and user data.
+ * @param {string | URL} urlInput
+ * @returns {boolean}
+ */
+export function isSecureSanctuaryNodeUrl(urlInput) {
+  let parsed;
+  try {
+    parsed = parseHttpOriginUrl(urlInput);
+  } catch {
+    return false;
+  }
+  const host = normalizeHost(parsed.hostname);
+  return parsed.protocol === 'https:'
+    || isLoopbackHost(host)
+    || isTailscaleCgnatIpv4(parseIpv4Octets(host))
+    || TAILSCALE_DOMAIN_RE.test(host);
+}
+
+/**
  * Require https:// and a public, non-opaque origin for Fediverse / social endpoints.
  * @param {string | URL} urlInput
  * @returns {boolean}

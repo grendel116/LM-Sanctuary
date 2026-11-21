@@ -1,19 +1,26 @@
 import {
   detectDefaultNodeUrl,
+  isSecureSanctuaryNodeUrl,
   normalizeNodeUrl,
   resolveNodeUrl,
 } from '../../constants/endpoints.js';
 import { fetchWrapper } from '../../queries/fetch/fetchWrapper.js';
 import {
   cacheProgramsDirectory,
+  deleteVaultSecret,
   getCachedProgramsDirectory,
+  kvDelete,
   kvGet,
   kvSet,
+  loadVaultSecret,
+  saveVaultSecret,
 } from '../../storage/kvStorage.js';
 import { createStore } from '../store.js';
 
 const NODE_URL_KV_KEY = 'sanctuary_node_url';
 const NODE_AUTH_KV_KEY = 'sanctuary_auth_header';
+const NODE_AUTH_SECRET_ID = 'sanctuary_server_basic_auth';
+const INSECURE_NODE_ERROR = 'HTTPS is required for Sanctuary connections over the network. HTTP is allowed only on localhost.';
 
 const fallbackEventTarget = new EventTarget();
 
@@ -117,14 +124,16 @@ export async function setSanctuaryBasicAuth(username, password) {
   const user = String(username || '').trim();
   const pass = String(password || '');
   if (!user && !pass) {
+    await deleteVaultSecret(NODE_AUTH_SECRET_ID);
+    await kvDelete(NODE_AUTH_KV_KEY);
     connectionStore.set({ authHeaders: {} });
-    await kvSet(NODE_AUTH_KV_KEY, '');
     return;
   }
   const encoded = btoa(String.fromCharCode(...new TextEncoder().encode(`${user}:${pass}`)));
   const headerValue = `Basic ${encoded}`;
+  await saveVaultSecret(NODE_AUTH_SECRET_ID, { authorization: headerValue });
+  await kvDelete(NODE_AUTH_KV_KEY);
   connectionStore.set({ authHeaders: { Authorization: headerValue } });
-  await kvSet(NODE_AUTH_KV_KEY, headerValue);
 }
 
 export function stopSanctuaryConnection() {
@@ -147,6 +156,14 @@ export async function checkSanctuaryHealth(options = {}) {
     return null;
   }
   const gen = connectionGeneration;
+  if (!isSecureSanctuaryNodeUrl(snapshot.nodeUrl)) {
+    connectionStore.set({
+      mode: 'offline',
+      lastCheckedAt: Date.now(),
+      error: INSECURE_NODE_ERROR,
+    });
+    return null;
+  }
   const healthUrl = resolveNodeUrl('/api/mobile/health', snapshot.nodeUrl);
 
   try {
@@ -264,11 +281,21 @@ export async function initSanctuaryConnection(options = {}) {
 
   stopSanctuaryConnection();
 
-  const [savedUrl, savedAuthHeader, cachedPrograms] = await Promise.all([
+  const [savedUrl, legacyAuthHeader, savedAuthSecret, cachedPrograms] = await Promise.all([
     kvGet(NODE_URL_KV_KEY, null),
     kvGet(NODE_AUTH_KV_KEY, ''),
+    loadVaultSecret(NODE_AUTH_SECRET_ID),
     getCachedProgramsDirectory(),
   ]);
+
+  let savedAuthHeader = String(savedAuthSecret?.authorization || '');
+  if (legacyAuthHeader) {
+    if (!savedAuthHeader) {
+      savedAuthHeader = String(legacyAuthHeader);
+      await saveVaultSecret(NODE_AUTH_SECRET_ID, { authorization: savedAuthHeader });
+    }
+    await kvDelete(NODE_AUTH_KV_KEY);
+  }
 
   let resolvedUrl = '';
   if (savedUrl !== null && savedUrl !== undefined) {
@@ -278,6 +305,18 @@ export async function initSanctuaryConnection(options = {}) {
   }
 
   const authHeaders = savedAuthHeader ? { Authorization: savedAuthHeader } : {};
+
+  if (resolvedUrl && !isSecureSanctuaryNodeUrl(resolvedUrl)) {
+    connectionStore.set({
+      ...createInitialConnectionState(),
+      authHeaders,
+      programs: cachedPrograms,
+      mode: 'offline',
+      nodeUrl: '',
+      error: INSECURE_NODE_ERROR,
+    });
+    return connectionStore.get();
+  }
 
   if (!resolvedUrl) {
     connectionStore.set({
@@ -311,6 +350,9 @@ export async function initSanctuaryConnection(options = {}) {
 export async function setSanctuaryNodeUrl(rawUrl, options = {}) {
   const { pollIntervalMs = 10000, fetchImpl, locationObj } = options;
   const normalized = normalizeNodeUrl(rawUrl || '');
+  if (normalized && !isSecureSanctuaryNodeUrl(normalized)) {
+    throw new TypeError(INSECURE_NODE_ERROR);
+  }
 
   stopSanctuaryConnection();
   await kvSet(NODE_URL_KV_KEY, normalized);

@@ -135,6 +135,8 @@ import state as st
 st.base_dir = TMP_SANCTUARY
 st.project_root = Path(TMPDIR)
 st.env_path = Path(TMPDIR) / ".env"
+from utils import social_vault
+social_vault.DATA_DIR = TMP_SANCTUARY / "data" / "social_vault"
 
 import app as app_mod
 
@@ -197,6 +199,21 @@ def run_tests():
     assert not missing, f"Missing routes: {sorted(missing)}"
 
     client = app_mod.app.test_client()
+    remote_http = client.get(
+        "/api/mobile/health",
+        environ_overrides={"REMOTE_ADDR": "192.168.1.25"},
+    )
+    assert remote_http.status_code == 426
+    tailscale_http = client.get(
+        "/api/mobile/health",
+        environ_overrides={"REMOTE_ADDR": "100.64.0.25"},
+    )
+    assert tailscale_http.status_code != 426
+    loopback_http = client.get(
+        "/api/mobile/health",
+        environ_overrides={"REMOTE_ADDR": "127.0.0.1"},
+    )
+    assert loopback_http.status_code != 426
 
     # 2. Pure-static web/ SPA routes contain zero Jinja tags and serve modular ES6 files
     r_index = client.get("/")
@@ -422,8 +439,6 @@ def run_tests():
             bourgeois_politics=-100,
             mature_content=-80,
             small_web=70,
-            add_boost_concepts=["worker cooperatives", "Linux audio"],
-            add_dampen_concepts=["crypto hype"],
         )
     assert "[Feed Profile Updated]" in tool_out
 
@@ -432,8 +447,8 @@ def run_tests():
     assert fp_after_tool["sliders"]["bourgeoisPolitics"] == -100
     assert fp_after_tool["sliders"]["matureContent"] == -80
     assert fp_after_tool["sliders"]["smallWeb"] == 70
-    assert fp_after_tool["boostConcepts"] == ["worker cooperatives", "Linux audio"]
-    assert fp_after_tool["dampenConcepts"] == ["crypto hype"]
+    assert "boostConcepts" not in fp_after_tool
+    assert "dampenConcepts" not in fp_after_tool
     assert fp_after_tool["updatedAt"] > 0
 
     mh_after_tune = client.get("/api/mobile/health").get_json()
@@ -443,8 +458,6 @@ def run_tests():
         "/api/feed_profile",
         json={
             "sliders": {"longform": 65, "commercial": -50},
-            "boostConcepts": ["botanical art"],
-            "dampenConcepts": [],
             "discoveryChannels": ["cooperatives", "mutual aid"],
             "discoveryInstances": ["https://kolektiva.social/", "fosstodon.org"],
         },

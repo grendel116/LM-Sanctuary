@@ -15,7 +15,7 @@ LM-Sanctuary is a unified sovereign client and local companion built on human-in
 3. **Coding & Autonomous Action**: Read, write, audit, and execute code directly on your local drive with human-in-the-loop approval.
 
 ### Sovereign Workspace
-100% Local-First workspace and social client. Your chats, memories, local caches, credentials, and model weights stay on your own hardware, where local models and native clients do the work without cloud telemetry.
+100% Local-First workspace and social client. Your chats, memories, local caches, credentials, and model weights stay on your own hardware. Social account credentials and saved post drafts can sync through the Sanctuary server, encrypted at rest; any client that can reach that server can retrieve them.
 
 > [!NOTE]
 > **The Sanctuary Ethos**:
@@ -36,7 +36,7 @@ Here is what the LM-Sanctuary workspace looks like:
 * **Unified `Bluesky` & `Threads` Bridges**: Optional AT Protocol (`Bluesky`) and Meta `Threads` bridges fan out posts and multi-part threads concurrently (auto-splitting at `300` graphemes for Bluesky and `500` characters for Mastodon and Threads), forward media and link embeds, synchronize post edits (in-place on Mastodon, delete-and-republish across bridges) and deletions with automatic retry queuing, and include a `.zip` archive importer to migrate Threads following and mutuals onto the Fediverse.
 * **Aggregated Cross-Platform Activity**: Unified `Activity` view merging Mastodon, Bluesky, and Threads notifications with grouped likes and reposts, cross-network engagement totals, unread nav indicator, and persistent notification deletion.
 * **Transparent Local Feed Tuning**: Declarative local feed sliders and optional local CPU semantic concept anchors (`web/core/feedRanker.js`, `sanctuary/utils/semantic_scorer.py`, `tune_feed_algorithm`) stored in `sanctuary/variables/feed_profile.json`—zero opaque remote ranking.
-* **Strict Credential Isolation (Zero AI Social Dispatch)**: Timeline caches and client state live locally on the client (Capacitor Android `SQLiteOpenHelper` + `AndroidKeyStore`, or browser/WebView2 IndexedDB `sanctuary_pwa_db` + Web Crypto `AES-GCM` vault). AI Programs (`sanctuary/`) hold zero social credentials and zero social publishing or timeline-reading tools; cross-over is strictly user-initiated via **Share-to-Fediverse** on your chat bubbles, **Share-to-Program** on feed posts, and optional token-free public Mastodon profile snapshots. See [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) for the module map.
+* **Social Credential Storage & Zero AI Social Dispatch**: Social credentials stay in the client vault (Capacitor Android `AndroidKeyStore`, or secure browser/WebView2 IndexedDB `AES-GCM`). When connected, clients sync credentials, saved post drafts, and cross-post IDs to the Sanctuary server without app credentials; these records are encrypted at rest. The social sync API is unauthenticated, so any client that can reach it can retrieve synced credentials, drafts, and post IDs. When older cross-post IDs are missing, the client can recover unique matches by comparing exact post text and close timestamps across connected accounts. Tailscale HTTP browsers keep synced tokens in memory and reload them from the server. Remote LAN clients require HTTPS; HTTP is allowed on localhost or over Tailscale's encrypted tunnel. AI Programs do not receive those credentials or social publishing/timeline tools. See [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) for the module map.
 
 ---
 
@@ -142,6 +142,8 @@ On first launch, `setup_env.py` automatically:
    * Frontend unit tests: `npm test`
    * Backend node tests: `.venv/Scripts/python.exe __tests__/backend/test_sanctuary_node.py`
    * Social bridge backend tests: `.venv/Scripts/python.exe __tests__/backend/test_social_bridge.py`
+   * Social account vault tests: `.venv/Scripts/python.exe __tests__/backend/test_social_account_vault.py`
+   * Session data encryption tests: `.venv/Scripts/python.exe __tests__/backend/test_session_data_encryption.py`
    * Capacitor Android verification / sync: `npm run build:android`
 
 

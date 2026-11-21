@@ -40,6 +40,7 @@ from utils.utils import (
     is_real_user_msg,
     strip_story,
 )
+from utils.session_data import read_session_data, write_session_data
 
 # Load environment configuration directly
 for _candidate_env in (project_root.parent / ".env", project_root / ".env"):
@@ -806,8 +807,7 @@ class BaseProgramRunner:
                 active_file = os.path.join(programs_dir, active, "sessions", f"{safe_id}.json")
                 if os.path.exists(active_file):
                     try:
-                        with open(active_file, "r", encoding="utf-8") as f:
-                            sdata = json.load(f)
+                        sdata = read_session_data(active_file)
                         gm = sdata.get("group_meta")
                         if gm and gm.get("host_id"):
                             if gm["host_id"] != active:
@@ -821,8 +821,7 @@ class BaseProgramRunner:
                     cand = os.path.join(programs_dir, prog_name, "sessions", f"{safe_id}.json")
                     if os.path.exists(cand):
                         try:
-                            with open(cand, "r", encoding="utf-8") as f:
-                                sdata = json.load(f)
+                            sdata = read_session_data(cand)
                             gm = sdata.get("group_meta")
                             if gm and gm.get("host_id"):
                                 self.sessions_group_meta[session_id] = gm
@@ -1085,8 +1084,7 @@ class BaseProgramRunner:
             path = self._get_session_path(src_session_id)
             if os.path.exists(path):
                 try:
-                    with open(path, "r", encoding="utf-8") as f:
-                        data = json.load(f)
+                    data = read_session_data(path)
                     history = data.get("messages", data) if isinstance(data, dict) else data
                 except Exception:
                     pass
@@ -1334,8 +1332,7 @@ class OpenSourceRunner(BaseProgramRunner):
                         data["group_meta"] = self.sessions_group_meta[session_id]
                     elif os.path.exists(target_path):
                         try:
-                            with open(target_path, "r", encoding="utf-8") as ef:
-                                existing = json.load(ef)
+                            existing = read_session_data(target_path)
                             if isinstance(existing, dict) and existing.get("group_meta"):
                                 self.sessions_group_meta[session_id] = existing["group_meta"]
                                 data["group_meta"] = existing["group_meta"]
@@ -1343,11 +1340,7 @@ class OpenSourceRunner(BaseProgramRunner):
                             pass
 
                     os.makedirs(sessions_dir, exist_ok=True)
-                    temp_path = target_path + ".tmp"
-                    with open(temp_path, "w", encoding="utf-8") as f:
-                        json.dump(data, f, indent=2, ensure_ascii=False)
-                    
-                    os.replace(temp_path, target_path)
+                    write_session_data(target_path, data)
 
                     safe_id = "".join(c for c in session_id if c.isalnum() or c in "-_")
                     if safe_id.startswith("group_") and session_id in self.sessions_group_meta:
@@ -1387,8 +1380,7 @@ class OpenSourceRunner(BaseProgramRunner):
                     return
 
                 try:
-                    with open(path, "r", encoding="utf-8") as f:
-                        data = json.load(f)
+                    data = read_session_data(path)
 
                     if isinstance(data, dict):
                         messages = data.get("messages", [])
@@ -2320,8 +2312,7 @@ class OpenSourceRunner(BaseProgramRunner):
                                 if not os.path.isfile(fpath) or os.path.abspath(fpath) in loaded_paths:
                                     continue
                                 try:
-                                    with open(fpath, "r", encoding="utf-8") as sf:
-                                        sdata = json.load(sf)
+                                    sdata = read_session_data(fpath)
                                     modified = False
 
                                     if isinstance(sdata, dict):
@@ -2360,10 +2351,7 @@ class OpenSourceRunner(BaseProgramRunner):
                                                     modified = True
 
                                     if modified:
-                                        temp_path = fpath + ".tmp"
-                                        with open(temp_path, "w", encoding="utf-8") as sf:
-                                            json.dump(sdata, sf, indent=2, ensure_ascii=False)
-                                        os.replace(temp_path, fpath)
+                                        write_session_data(fpath, sdata)
                                 except Exception as ex:
                                     print(f"[rename/edit] Failed updating session file {fpath}: {ex}")
 

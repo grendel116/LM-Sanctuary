@@ -3,10 +3,18 @@ import {
   MASTODON_MAX_CHARS,
   THREADS_MAX_CHARS,
 } from '../constants/endpoints.js';
-import { storeDelete, storeGetAll, storePut } from '../storage/nativeStore.js';
+import {
+  deleteSanctuarySocialDraft,
+  fetchSanctuarySocialDrafts,
+  saveSanctuarySocialDraft,
+} from '../queries/sanctuary.js';
+import { connectionStore } from './sanctuary/connection.js';
+import { kvGet, kvSet, storeDelete, storeGetAll, storePut } from '../storage/nativeStore.js';
 import { createStore } from './store.js';
 
 const MAX_DRAFT_MEDIA_BYTES = 8 * 1024 * 1024;
+const SERVER_DRAFT_DELETIONS_KEY = 'social_draft_deletions_v1';
+let serverDraftSyncPromise = null;
 
 function createInitialComposeState() {
   return {
@@ -255,12 +263,72 @@ function dataUrlToBlob(dataUrl, fallbackMime = 'image/png') {
 /**
  * List all saved post drafts from native SQLite storage (`drafts`), newest first.
  */
-export async function listComposeDrafts() {
+export async function listLocalComposeDrafts() {
   const rows = await storeGetAll('drafts');
   return (Array.isArray(rows) ? rows : [])
     .map((entry) => entry?.value)
     .filter((d) => d && typeof d === 'object' && d.id)
     .sort((a, b) => Number(b.updatedAt || 0) - Number(a.updatedAt || 0));
+}
+
+export async function syncComposeDraftsWithServer() {
+  if (serverDraftSyncPromise) return serverDraftSyncPromise;
+  const nodeUrl = connectionStore.get().nodeUrl;
+  if (!nodeUrl) return false;
+
+  serverDraftSyncPromise = (async () => {
+    const pending = await kvGet(SERVER_DRAFT_DELETIONS_KEY, []);
+    for (const draftId of Array.isArray(pending) ? pending : []) {
+      await deleteSanctuarySocialDraft(String(draftId), { nodeUrl });
+    }
+    await kvSet(SERVER_DRAFT_DELETIONS_KEY, []);
+
+    const response = await fetchSanctuarySocialDrafts({ nodeUrl });
+    const remoteDrafts = Array.isArray(response?.drafts) ? response.drafts : [];
+    const deletedIds = new Set(
+      Array.isArray(response?.deletedIds) ? response.deletedIds.map(String) : []
+    );
+    const localDrafts = await listLocalComposeDrafts();
+    for (const draftId of deletedIds) {
+      await storeDelete('drafts', draftId);
+    }
+
+    const remoteById = new Map(
+      remoteDrafts.filter((draft) => draft?.id).map((draft) => [draft.id, draft])
+    );
+    const localIds = new Set(localDrafts.map((draft) => draft.id));
+
+    for (const localDraft of localDrafts) {
+      if (deletedIds.has(String(localDraft.id))) continue;
+      const remoteDraft = remoteById.get(localDraft.id);
+      if (!remoteDraft || Number(localDraft.updatedAt || 0) > Number(remoteDraft.updatedAt || 0)) {
+        const saved = await saveSanctuarySocialDraft(localDraft.id, localDraft, { nodeUrl });
+        if (saved?.draft) {
+          await storePut('drafts', saved.draft.id, saved.draft);
+        }
+      } else {
+        await storePut('drafts', remoteDraft.id, remoteDraft);
+      }
+    }
+
+    for (const remoteDraft of remoteDrafts) {
+      if (remoteDraft?.id && !localIds.has(remoteDraft.id)) {
+        await storePut('drafts', remoteDraft.id, remoteDraft);
+      }
+    }
+    return true;
+  })().finally(() => {
+    serverDraftSyncPromise = null;
+  });
+  return serverDraftSyncPromise;
+}
+
+/**
+ * List saved drafts after merging with any drafts on the configured Sanctuary server.
+ */
+export async function listComposeDrafts() {
+  await syncComposeDraftsWithServer();
+  return listLocalComposeDrafts();
 }
 
 let lastDraftTimestamp = 0;
@@ -320,6 +388,11 @@ export async function saveCurrentComposeDraft() {
   };
   await storePut('drafts', draft.id, draft);
   composeStore.set({ activeDraftId: draft.id });
+  try {
+    await syncComposeDraftsWithServer();
+  } catch (err) {
+    throw new Error(`Draft saved locally, but server sync failed: ${err?.message || 'Unknown error'}`);
+  }
   return draft;
 }
 
@@ -387,6 +460,13 @@ export async function deleteComposeDraft(draftId) {
   await storeDelete('drafts', String(draftId));
   if (composeStore.get().activeDraftId === draftId) {
     composeStore.set({ activeDraftId: null });
+  }
+  if (connectionStore.get().nodeUrl) {
+    const pending = await kvGet(SERVER_DRAFT_DELETIONS_KEY, []);
+    const next = Array.isArray(pending) ? pending.map(String) : [];
+    if (!next.includes(String(draftId))) next.push(String(draftId));
+    await kvSet(SERVER_DRAFT_DELETIONS_KEY, next);
+    await syncComposeDraftsWithServer();
   }
 }
 

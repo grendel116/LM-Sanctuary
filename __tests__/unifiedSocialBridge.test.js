@@ -1895,9 +1895,6 @@ test('applyKeywordFilters enforces word boundaries & link cards, and Feed tab lo
     }
     if (u.includes('app.bsky.feed.getFeed')) {
       assert.equal(u.includes('whats-hot'), false, 'Default Feed must never call Bluesky whats-hot');
-      if (!u.includes('aaagjqttv5lhi') && !u.includes('aaagd5qfrout4') && !u.includes('aaadx3mkuxx7i')) {
-        return new Response(JSON.stringify({ feed: [] }), { status: 200, headers: { 'content-type': 'application/json' } });
-      }
       return new Response(
         JSON.stringify({
           feed: [
@@ -1973,7 +1970,7 @@ test('applyKeywordFilters enforces word boundaries & link cards, and Feed tab lo
   }
 });
 
-test('rankFeedItems preserves chronological parity when default and enforces all 10 balances plus concept anchors', () => {
+test('rankFeedItems preserves chronological parity when default and enforces all 10 feed balances', () => {
   const baseMs = Date.parse('2026-11-19T12:00:00.000Z');
   const isoAgo = (mins) => new Date(baseMs - mins * 60_000).toISOString();
 
@@ -2070,13 +2067,10 @@ test('rankFeedItems preserves chronological parity when default and enforces all
         bourgeoisPolitics: -100,
         matureContent: -100,
       },
-      boostConcepts: ['worker cooperative', 'mutual aid'],
-      dampenConcepts: ['promo code'],
     },
     {
       nowMs: baseMs,
       interactedAuthors: { 'mastodon:pal@mastodon.social': 5 },
-      semanticScores: { 'mastodon:deep_coop': 0.92 },
     }
   );
 
@@ -2131,7 +2125,7 @@ test('rankFeedItems preserves chronological parity when default and enforces all
   assert.notEqual(diverse[1].author.handle, 'flood@mastodon.social');
 });
 
-test('openFeedTuningModal renders 10 sliders, syncs ARIA/CSS vars, edits concept chips, and pushes to Sanctuary /api/feed_profile', async () => {
+test('openFeedTuningModal renders 10 sliders, syncs ARIA/CSS vars, edits discovery sources, and pushes to Sanctuary /api/feed_profile', async () => {
   const dom = installMockDom();
   const prevFetch = globalThis.fetch;
   const savedBodies = [];
@@ -2174,17 +2168,10 @@ test('openFeedTuningModal renders 10 sliders, syncs ARIA/CSS vars, edits concept
     assert.equal(commSlider.getAttribute('aria-valuetext'), 'Commercial: -100 (Hide)');
     assert.equal(commSlider.style.getPropertyValue('--control-value'), '-100');
 
-    // Add Boost concept chip & verify sync PUT reached Sanctuary
-    const boostInput = dlg.querySelector('#feed-boost-concept-input');
-    boostInput.value = 'union organizing';
-    boostInput.closest('form').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
-    await new Promise((r) => setTimeout(r, 25));
-
-    assert.deepEqual(feedStore.get().tuning.boostConcepts, ['union organizing']);
-    assert.ok(dlg.textContent.includes('union organizing'));
-    assert.ok(savedBodies.length >= 2);
+    assert.equal(dlg.querySelector('#feed-boost-concept-input'), null);
+    assert.equal(dlg.textContent.includes('Semantic Concept Anchors'), false);
+    assert.ok(savedBodies.length >= 1);
     assert.equal(savedBodies.at(-1).sliders.commercial, -100);
-    assert.deepEqual(savedBodies.at(-1).boostConcepts, ['union organizing']);
 
     // Add Discovery Channel & Instance chips and verify PUT payload + removal
     const chanInput = dlg.querySelector('#feed-channel-input');
@@ -2213,8 +2200,6 @@ test('openFeedTuningModal renders 10 sliders, syncs ARIA/CSS vars, edits concept
             updatedAt: Date.now(),
             updatedBy: 'user',
             sliders: body.sliders,
-            boostConcepts: body.boostConcepts,
-            dampenConcepts: body.dampenConcepts,
           }),
           { status: 200, headers: { 'content-type': 'application/json' } }
         );
@@ -4067,8 +4052,6 @@ test('Sovereign Sanctuary Feed harvester replaces whats-hot with topic/instance 
       sliders: { recencyHalfLifeHours: 10, smallWeb: 80, bourgeoisPolitics: -100, commercial: -100 },
       discoveryChannels: ['cooperatives'],
       discoveryInstances: ['kolektiva.social'],
-      boostConcepts: ['class struggle', 'worker cooperatives'],
-      dampenConcepts: ['Democrats', 'Republicans', 'neoliberal capitalism'],
     }, { syncRemote: false });
 
     // Direct harvester verification
@@ -6518,24 +6501,20 @@ test('Account mute and block persist across Feed harvests, AuthorSheet, Settings
 
 test('Default Sanctuary discovery sources, Lemmy v3 post harvesting, and auth-gated Mastodon trends fallback work cleanly', async () => {
   assert.deepEqual([...DEFAULT_SANCTUARY_CHANNELS], [
-    'council communism',
-    'left communism',
-    'workers councils',
-    'historical materialism',
-    'pannekoek',
-    'at://did:plc:b3mupbm5prwiusw43fy7dgwb/app.bsky.feed.generator/aaadx3mkuxx7i',
+    'news',
+    'technology',
+    'science',
+    'culture',
+    'music',
   ]);
   assert.deepEqual([...DEFAULT_SANCTUARY_INSTANCES], [
-    'kolektiva.social',
-    'social.coop',
-    'union.place',
-    'todon.eu',
-    'todon.nl',
-    'babka.social',
+    'mastodon.social',
+    'mastodon.online',
+    'mstdn.social',
+    'mas.to',
+    'infosec.exchange',
+    'lemmy.world',
     'lemmy.ml',
-    'hexbear.net',
-    'lemmygrad.ml',
-    'lemmy.dbzer0.com',
   ]);
   assert.equal(conceptToHashtag('workers councils'), 'workerscouncils');
   assert.equal(conceptToHashtag('worker councils'), 'workerscouncils');

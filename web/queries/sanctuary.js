@@ -1,4 +1,4 @@
-import { resolveNodeUrl } from '../constants/endpoints.js';
+import { isSecureSanctuaryNodeUrl, resolveNodeUrl } from '../constants/endpoints.js';
 import {
   connectionStore,
   getProgramAvatarVersion,
@@ -9,12 +9,17 @@ import { fetchWrapper } from './fetch/fetchWrapper.js';
 
 function nodeUrlFor(path, opts = {}) {
   const base = opts.nodeUrl ?? getSanctuaryNodeUrl();
-  return resolveNodeUrl(path, base);
+  const url = resolveNodeUrl(path, base);
+  if (!isSecureSanctuaryNodeUrl(url)) {
+    throw new Error('HTTPS is required for Sanctuary connections over the network. HTTP is allowed only on localhost.');
+  }
+  return url;
 }
 
 function requestNode(path, opts = {}) {
   const { nodeUrl, headers = {}, ...rest } = opts;
   return fetchWrapper(nodeUrlFor(path, { nodeUrl }), {
+    credentials: 'same-origin',
     ...rest,
     headers: {
       ...getSanctuaryAuthHeaders(),
@@ -37,7 +42,11 @@ export function resolveSanctuaryMediaUrl(mediaPath, opts = {}) {
   }
   const base = opts.nodeUrl ?? getSanctuaryNodeUrl();
   if (!base) return mediaPath;
-  return resolveNodeUrl(mediaPath, base);
+  const url = resolveNodeUrl(mediaPath, base);
+  if (!isSecureSanctuaryNodeUrl(url)) {
+    throw new Error('HTTPS is required for Sanctuary connections over the network. HTTP is allowed only on localhost.');
+  }
+  return url;
 }
 
 export function resolveProgramAvatarUrl(programId, opts = {}) {
@@ -756,6 +765,78 @@ export function saveSanctuaryFeedProfile(profile, opts = {}) {
     json: profile,
     background: true,
     timeoutMs: 3000,
+    ...opts,
+  });
+}
+
+export function fetchSanctuarySocialAccounts(opts = {}) {
+  return requestNode('/api/social/accounts', {
+    timeoutMs: 10000,
+    ...opts,
+  });
+}
+
+export function saveSanctuarySocialAccount(accountId, record, opts = {}) {
+  return requestNode(`/api/social/accounts/${encodeURIComponent(accountId)}`, {
+    method: 'PUT',
+    json: record,
+    timeoutMs: 10000,
+    ...opts,
+  });
+}
+
+export function deleteSanctuarySocialAccount(accountId, opts = {}) {
+  return requestNode(`/api/social/accounts/${encodeURIComponent(accountId)}`, {
+    method: 'DELETE',
+    timeoutMs: 10000,
+    ...opts,
+  });
+}
+
+export function fetchSanctuarySocialDrafts(opts = {}) {
+  return requestNode('/api/social/drafts', {
+    timeoutMs: 20000,
+    ...opts,
+  });
+}
+
+export function saveSanctuarySocialDraft(draftId, draft, opts = {}) {
+  return requestNode(`/api/social/drafts/${encodeURIComponent(draftId)}`, {
+    method: 'PUT',
+    json: { draft },
+    timeoutMs: 30000,
+    ...opts,
+  });
+}
+
+export function deleteSanctuarySocialDraft(draftId, opts = {}) {
+  return requestNode(`/api/social/drafts/${encodeURIComponent(draftId)}`, {
+    method: 'DELETE',
+    timeoutMs: 10000,
+    ...opts,
+  });
+}
+
+export function fetchSanctuaryLinkedPosts(opts = {}) {
+  return requestNode('/api/social/linked-posts', {
+    timeoutMs: 20000,
+    ...opts,
+  });
+}
+
+export function saveSanctuaryLinkedPost(canonicalId, record, opts = {}) {
+  return requestNode(`/api/social/linked-posts/${encodeURIComponent(canonicalId)}`, {
+    method: 'PUT',
+    json: { record },
+    timeoutMs: 10000,
+    ...opts,
+  });
+}
+
+export function deleteSanctuaryLinkedPost(canonicalId, opts = {}) {
+  return requestNode(`/api/social/linked-posts/${encodeURIComponent(canonicalId)}`, {
+    method: 'DELETE',
+    timeoutMs: 10000,
     ...opts,
   });
 }

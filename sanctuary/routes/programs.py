@@ -23,6 +23,7 @@ from runners.program import (
     set_active_program,
     set_active_session,
 )
+from utils.session_data import read_session_data, write_session_data
 
 programs_bp = Blueprint("programs_bp", __name__)
 
@@ -70,8 +71,7 @@ def _derive_session_entry(
 
     if not loaded_from_mem and os.path.exists(fpath):
         try:
-            with open(fpath, 'r', encoding='utf-8') as sf:
-                raw = json.load(sf)
+            raw = read_session_data(fpath)
             if isinstance(raw, dict):
                 messages = raw.get('messages') if isinstance(raw.get('messages'), list) else []
                 memory_state = raw.get('memory_state') if isinstance(raw.get('memory_state'), dict) else {}
@@ -186,8 +186,7 @@ def list_sessions():
                     if session_name.startswith('group_'):
                         fpath = os.path.join(sessions_dir, file)
                         try:
-                            with open(fpath, 'r', encoding='utf-8') as sf:
-                                sdata = json.load(sf)
+                            sdata = read_session_data(fpath)
                             gm = sdata.get('group_meta')
                             if not gm or not gm.get('is_group') or not gm.get('host_id') or gm.get('host_id') != target_program or not gm.get('guest_ids'):
                                 try:
@@ -303,8 +302,7 @@ def rename_session_route():
                 sdata = {}
                 if os.path.exists(fpath):
                     try:
-                        with open(fpath, 'r', encoding='utf-8') as sf:
-                            loaded = json.load(sf)
+                        loaded = read_session_data(fpath)
                         if isinstance(loaded, dict):
                             sdata = loaded
                         elif isinstance(loaded, list):
@@ -319,10 +317,7 @@ def rename_session_route():
                     mem['title'] = clean_title
                 else:
                     mem.pop('title', None)
-                tmp_path = fpath + '.tmp'
-                with open(tmp_path, 'w', encoding='utf-8') as sf:
-                    json.dump(sdata, sf, indent=2, ensure_ascii=False)
-                os.replace(tmp_path, fpath)
+                write_session_data(fpath, sdata)
 
         return jsonify({
             'status': 'success',
@@ -721,8 +716,7 @@ def delete_program():
                         fpath = os.path.join(other_sessions, fname)
                         sid = os.path.splitext(fname)[0]
                         try:
-                            with open(fpath, 'r', encoding='utf-8') as sf:
-                                sdata = json.load(sf)
+                            sdata = read_session_data(fpath)
                             gm = sdata.get('group_meta', {})
                             if gm.get('host_id') == program_id or not gm.get('host_id'):
                                 to_remove.add(sid)
@@ -736,8 +730,7 @@ def delete_program():
                                     os.remove(fpath)
                                 else:
                                     sdata['group_meta'] = gm
-                                    with open(fpath, 'w', encoding='utf-8') as sf:
-                                        json.dump(sdata, sf, indent=2, ensure_ascii=False)
+                                    write_session_data(fpath, sdata)
                         except RuntimeError:
                             raise
                         except Exception as ex:

@@ -8,10 +8,16 @@ import {
   initSanctuaryConnection,
   onSanctuaryEvent,
   resetConnectionStoreForTests,
+  setSanctuaryBasicAuth,
   setSanctuaryNodeUrl,
   stopSanctuaryConnection,
 } from '../web/state/sanctuary/connection.js';
-import { resetMemoryStorageForTests } from '../web/storage/kvStorage.js';
+import {
+  kvGet,
+  kvSet,
+  loadVaultSecret,
+  resetMemoryStorageForTests,
+} from '../web/storage/kvStorage.js';
 
 test('initSanctuaryConnection stays completely dormant with zero network calls on standalone installs', async () => {
   resetMemoryStorageForTests();
@@ -63,7 +69,7 @@ test('connectionStore emits sanctuary:online and sanctuary:offline across node r
   };
 
   try {
-    const onlineState = await setSanctuaryNodeUrl('http://100.64.0.10:5000', {
+    const onlineState = await setSanctuaryNodeUrl('https://100.64.0.10:5000', {
       pollIntervalMs: 0,
       fetchImpl: mockFetch,
     });
@@ -92,4 +98,78 @@ test('connectionStore emits sanctuary:online and sanctuary:offline across node r
     offOffline();
     stopSanctuaryConnection();
   }
+});
+
+test('network Sanctuary connections reject ordinary LAN HTTP before sending requests', async () => {
+  resetMemoryStorageForTests();
+  resetConnectionStoreForTests();
+  let fetchCalls = 0;
+
+  await assert.rejects(
+    () => setSanctuaryNodeUrl('http://192.168.1.10:5000', {
+      pollIntervalMs: 0,
+      fetchImpl: async () => {
+        fetchCalls += 1;
+        throw new Error('HTTP request should not be sent');
+      },
+    }),
+    /HTTPS is required/
+  );
+  assert.equal(fetchCalls, 0);
+
+  await kvSet('sanctuary_node_url', 'http://192.168.1.10:5000');
+  const savedState = await initSanctuaryConnection({
+    pollIntervalMs: 0,
+    fetchImpl: async () => {
+      fetchCalls += 1;
+      throw new Error('HTTP request should not be sent');
+    },
+  });
+  assert.equal(savedState.mode, 'offline');
+  assert.equal(savedState.nodeUrl, '');
+  assert.match(savedState.error, /HTTPS is required/);
+  assert.equal(fetchCalls, 0);
+});
+
+test('Sanctuary Basic Auth is encrypted in the local vault and legacy plaintext migrates', async () => {
+  resetMemoryStorageForTests();
+  resetConnectionStoreForTests();
+
+  const username = 'sanctuary-user';
+  const password = 'sanctuary-password';
+  const authHeader = `Basic ${btoa(`${username}:${password}`)}`;
+  await setSanctuaryBasicAuth(username, password);
+  assert.equal(connectionStore.get().authHeaders.Authorization, authHeader);
+  assert.equal(await kvGet('sanctuary_auth_header', ''), '');
+  assert.deepEqual(await loadVaultSecret('sanctuary_server_basic_auth'), {
+    authorization: authHeader,
+  });
+
+  await kvSet('sanctuary_node_url', 'http://127.0.0.1:5000');
+  await kvSet('sanctuary_auth_header', authHeader);
+  const mockFetch = async (url, options = {}) => {
+    assert.equal(new Headers(options.headers).get('Authorization'), authHeader);
+    if (url.endsWith('/api/mobile/health')) {
+      return new Response(JSON.stringify(mockMobileHealthOnline), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+    if (url.endsWith('/api/config')) {
+      return new Response(JSON.stringify(mockRuntimeConfig), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+    throw new Error(`Unexpected URL ${url}`);
+  };
+  await initSanctuaryConnection({
+    pollIntervalMs: 0,
+    fetchImpl: mockFetch,
+  });
+  assert.equal(await kvGet('sanctuary_auth_header', ''), '');
+  assert.deepEqual(await loadVaultSecret('sanctuary_server_basic_auth'), {
+    authorization: authHeader,
+  });
+  stopSanctuaryConnection();
 });

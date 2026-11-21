@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "test": "node --test __tests__/*.test.js",
-    "test:backend": "python __tests__/backend/test_sanctuary_node.py && python __tests__/backend/test_social_bridge.py",
+    "test:backend": "python __tests__/backend/test_sanctuary_node.py && python __tests__/backend/test_social_bridge.py && python __tests__/backend/test_social_account_vault.py && python __tests__/backend/test_social_draft_vault.py && python __tests__/backend/test_social_linked_post_vault.py && python __tests__/backend/test_session_data_encryption.py",
     "build:android": "node scripts/buildAndroid.js"
   },
   "devDependencies": {

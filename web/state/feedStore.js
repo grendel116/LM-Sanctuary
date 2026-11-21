@@ -107,10 +107,13 @@ export function setStreamLoading(loading, error = null) {
   feedStore.set({ loading: Boolean(loading), error });
 }
 
-export function setStreamItems(streamName, items, nextCursor = null) {
+export function setStreamItems(streamName, items, nextCursor = null, options = {}) {
   const prev = feedStore.get();
   const prevGen = prev.streams[streamName]?.generation || 0;
   const deduped = mergeChronologicalPosts([], items);
+  const shuffleSeed = typeof options?.shuffleSeed === 'string' || typeof options?.shuffleSeed === 'number'
+    ? String(options.shuffleSeed)
+    : '';
   feedStore.set({
     streams: {
       ...prev.streams,
@@ -119,6 +122,7 @@ export function setStreamItems(streamName, items, nextCursor = null) {
         nextCursor,
         updatedAt: Date.now(),
         generation: prevGen + 1,
+        shuffleSeed,
       },
     },
     loading: false,
@@ -140,6 +144,7 @@ export function appendStreamItems(streamName, items, nextCursor = null) {
         nextCursor,
         updatedAt: Date.now(),
         generation: bucket.generation || 0,
+        shuffleSeed: bucket.shuffleSeed || '',
       },
     },
     loading: false,
@@ -787,16 +792,11 @@ export async function updateFeedTuning(patchOrProfile, { syncRemote = true, upda
       ...(cur.sliders || {}),
       ...(candidate.sliders && typeof candidate.sliders === 'object' ? candidate.sliders : {}),
     },
-    boostConcepts: candidate.boostConcepts !== undefined ? candidate.boostConcepts : cur.boostConcepts,
-    dampenConcepts: candidate.dampenConcepts !== undefined ? candidate.dampenConcepts : cur.dampenConcepts,
     discoveryChannels: candidate.discoveryChannels !== undefined ? candidate.discoveryChannels : cur.discoveryChannels,
     discoveryInstances: candidate.discoveryInstances !== undefined ? candidate.discoveryInstances : cur.discoveryInstances,
   });
 
-  feedStore.set({
-    tuning: merged,
-    ...(merged.boostConcepts.length === 0 && merged.dampenConcepts.length === 0 ? { semanticScores: {} } : {}),
-  });
+  feedStore.set({ tuning: merged, semanticScores: {} });
   await storePut('kv', FEED_TUNING_KV_KEY, merged).catch(() => {});
 
   if (syncRemote && connectionStore.get().mode === 'online' && connectionStore.get().nodeUrl) {

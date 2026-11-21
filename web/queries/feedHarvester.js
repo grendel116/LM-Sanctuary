@@ -38,25 +38,21 @@ export const BSKY_WHATS_HOT_URI = 'at://did:plc:z72i7hdynmk6r22z27h6tvur/app.bsk
 const DEFAULT_PUBLIC_MASTO_HOST = 'https://mastodon.social';
 
 export const DEFAULT_SANCTUARY_CHANNELS = Object.freeze([
-  'council communism',
-  'left communism',
-  'workers councils',
-  'historical materialism',
-  'pannekoek',
-  'at://did:plc:b3mupbm5prwiusw43fy7dgwb/app.bsky.feed.generator/aaadx3mkuxx7i',
+  'news',
+  'technology',
+  'science',
+  'culture',
+  'music',
 ]);
 
 export const DEFAULT_SANCTUARY_INSTANCES = Object.freeze([
-  'kolektiva.social',
-  'social.coop',
-  'union.place',
-  'todon.eu',
-  'todon.nl',
-  'babka.social',
+  'mastodon.social',
+  'mastodon.online',
+  'mstdn.social',
+  'mas.to',
+  'infosec.exchange',
+  'lemmy.world',
   'lemmy.ml',
-  'hexbear.net',
-  'lemmygrad.ml',
-  'lemmy.dbzer0.com',
 ]);
 
 const MEGA_FIREHOSE_HOSTS = new Set(['mastodon.social', 'mastodon.online', 'mas.to']);
@@ -258,7 +254,7 @@ export function resolveDiscoverySources(rawTuning, fediAuth = null) {
   const tuning = normalizeFeedTuning(rawTuning);
   const channelOut = [];
   const seenCh = new Set();
-  for (const entry of [...tuning.discoveryChannels, ...tuning.boostConcepts]) {
+  for (const entry of tuning.discoveryChannels) {
     const clean = String(entry || '').trim();
     const low = clean.toLowerCase();
     if (!clean || seenCh.has(low)) continue;

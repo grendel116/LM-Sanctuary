@@ -73,6 +73,8 @@ import state as st
 st.base_dir = TMP_SANCTUARY
 st.project_root = Path(TMPDIR)
 st.env_path = Path(TMPDIR) / ".env"
+from utils import social_vault
+social_vault.DATA_DIR = TMP_SANCTUARY / "data" / "social_vault"
 
 import app as app_mod
 from utils.link_preview import extract_first_https_url, fetch_link_preview, parse_video_embed
@@ -85,6 +87,12 @@ def test_route_surface() -> None:
         rule.rule for rule in app_mod.app.url_map.iter_rules() if rule.rule.startswith("/api/social")
     }
     assert social_rules == {
+        "/api/social/accounts",
+        "/api/social/accounts/<account_id>",
+        "/api/social/drafts",
+        "/api/social/drafts/<draft_id>",
+        "/api/social/linked-posts",
+        "/api/social/linked-posts/<canonical_id>",
         "/api/social/link-preview",
         "/api/social/translate",
         "/api/social/feed/semantic-score",

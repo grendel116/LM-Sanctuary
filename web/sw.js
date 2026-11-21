@@ -1,4 +1,4 @@
-export const CACHE_NAME = 'sanctuary-shell-v59';
+export const CACHE_NAME = 'sanctuary-shell-v64';
 
 export const APP_SHELL_ASSETS = [
   './',

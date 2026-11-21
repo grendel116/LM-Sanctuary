@@ -21,7 +21,6 @@ import {
   fetchKeywordFilters,
   fetchListAccounts,
   fetchLists,
-  fetchSemanticFeedScores,
   likeUnified,
   pinUnified,
   removeAccountFromMastodonList,
@@ -50,10 +49,8 @@ import {
   recordBehavioralSignal,
   removePostAcrossStreams,
   setActiveStream,
-  setSemanticScores,
   setStreamItems,
   setStreamLoading,
-  setTasteScores,
   setUserLists,
 } from '../state/feedStore.js';
 import { connectionStore } from '../state/sanctuary/connection.js';
@@ -143,8 +140,6 @@ function computeTuningSig(tuning) {
   const t = tuning || {};
   return JSON.stringify([
     t.sliders || {},
-    t.boostConcepts || [],
-    t.dampenConcepts || [],
     t.discoveryChannels || [],
     t.discoveryInstances || [],
   ]);
@@ -155,7 +150,6 @@ function computeHarvestSourceSig(tuning) {
   return JSON.stringify([
     t.discoveryChannels || [],
     t.discoveryInstances || [],
-    t.boostConcepts || [],
   ]);
 }
 
@@ -248,8 +242,9 @@ export function mountFeedScreen(containerEl, {
   let inFlightRefresh = false;
   let loadingOlder = false;
   let appendError = '';
+  let refreshStartedAt = 0;
+  let showRefreshSpinner = false;
   let lastListOptionsSig = '';
-  let lastSemanticSig = '';
   let sentinelIntersecting = false;
   let lastAutoCursorSig = '';
   let autoCheckTimer = null;
@@ -341,7 +336,7 @@ export function mountFeedScreen(containerEl, {
   feedRefreshBtn.title = 'Refresh feed';
   feedRefreshBtn.innerHTML = FEED_REFRESH_SVG;
   feedRefreshBtn.addEventListener('click', () => {
-    void loadStream(false);
+    void loadStream(false, { showSpinner: true });
   });
 
   tabsRow.append(feedRefreshBtn);
@@ -349,7 +344,7 @@ export function mountFeedScreen(containerEl, {
   function syncRefreshButton() {
     if (destroyed) return;
     feedRefreshBtn.disabled = inFlightRefresh;
-    feedRefreshBtn.classList.toggle('is-spinning', inFlightRefresh);
+    feedRefreshBtn.classList.toggle('is-spinning', inFlightRefresh && showRefreshSpinner);
   }
 
   const listFilterBar = doc.createElement('div');
@@ -752,7 +747,7 @@ export function mountFeedScreen(containerEl, {
     void loadStream(false);
   });
 
-  async function loadStream(append = false) {
+  async function loadStream(append = false, { showSpinner = false } = {}) {
     if (destroyed) return;
     const state = feedStore.get();
     const streamName = ALLOWED_STREAMS.has(state.activeStream) ? state.activeStream : 'feed';
@@ -763,6 +758,8 @@ export function mountFeedScreen(containerEl, {
     } else {
       requestEpoch += 1;
       inFlightRefresh = true;
+      showRefreshSpinner = showSpinner;
+      refreshStartedAt = showSpinner ? Date.now() : 0;
       loadingOlder = false;
       appendError = '';
       lastAutoCursorSig = '';
@@ -918,34 +915,12 @@ export function mountFeedScreen(containerEl, {
         ? harvestedItems
         : mergeChronologicalPosts([], harvestedItems);
 
-      const boostC = latestState.tuning?.boostConcepts || [];
-      const dampenC = latestState.tuning?.dampenConcepts || [];
-      const tasteMem = latestState.tasteMemory || { positive: [], negative: [] };
-      if (
-        nextItems.length > 0 &&
-        (boostC.length > 0 || dampenC.length > 0 || (tasteMem.positive?.length || 0) > 0 || (tasteMem.negative?.length || 0) > 0)
-      ) {
-        const semRes = await fetchSemanticFeedScores({
-          items: nextItems,
-          boostConcepts: boostC,
-          dampenConcepts: dampenC,
-          positiveExamples: tasteMem.positive || [],
-          negativeExamples: tasteMem.negative || [],
-        }).catch(() => ({ scores: {}, tasteScores: {} }));
-        if (destroyed || epoch !== requestEpoch) return;
-        const freshState = feedStore.get();
-        if (semRes?.scores && Object.keys(semRes.scores).length > 0) {
-          setSemanticScores({ ...(freshState.semanticScores || {}), ...semRes.scores });
-        }
-        if (semRes?.tasteScores && Object.keys(semRes.tasteScores).length > 0) {
-          setTasteScores({ ...(freshState.tasteScores || {}), ...semRes.tasteScores });
-        }
-      }
-
       if (append) {
         appendStreamItems('feed', nextItems, nextCursor);
       } else {
-        setStreamItems('feed', nextItems, nextCursor);
+        setStreamItems('feed', nextItems, nextCursor, {
+          shuffleSeed: `${Date.now()}:${Math.random().toString(36).slice(2)}`,
+        });
       }
       await persistStreamCache('feed');
       scheduleMetricsEnrichment(nextItems, () => destroyed || epoch !== requestEpoch);
@@ -961,9 +936,26 @@ export function mountFeedScreen(containerEl, {
     } finally {
       if (epoch === requestEpoch) {
         if (append) loadingOlder = false;
-        else inFlightRefresh = false;
-        syncRefreshButton();
-        syncInfiniteFooter();
+        else {
+          if (showSpinner && refreshStartedAt > 0) {
+            const elapsed = Date.now() - refreshStartedAt;
+            const remaining = Math.max(0, 550 - elapsed);
+            if (remaining > 0) {
+              await new Promise((resolve) => setTimeout(resolve, remaining));
+            }
+          }
+          if (epoch === requestEpoch) {
+            inFlightRefresh = false;
+            syncRefreshButton();
+            syncInfiniteFooter();
+          }
+        }
+        if (!append) {
+          clearTimeout(autoCheckTimer);
+        } else {
+          syncRefreshButton();
+          syncInfiniteFooter();
+        }
         clearTimeout(autoCheckTimer);
         autoCheckTimer = setTimeout(() => {
           if (destroyed || epoch !== requestEpoch) return;
@@ -1129,6 +1121,7 @@ export function mountFeedScreen(containerEl, {
     if (!order || order.generation !== gen || (order.tuningSig !== tuningSig && state.tuning?.updatedBy !== 'feedback')) {
       const ranked = rankFeedItems(rawItems, state.tuning, {
         nowMs: bucket.updatedAt || Date.now(),
+        shuffleSeed: isFeedStream ? (bucket.shuffleSeed || '') : '',
         streamMode: streamName,
         interactedAuthors: state.interactedAuthors,
         implicitAuthors: isFeedStream ? state.implicitAuthors : undefined,
@@ -1174,6 +1167,7 @@ export function mountFeedScreen(containerEl, {
       if (appendedItems.length > 0) {
         const rankedAppended = rankFeedItems(appendedItems, state.tuning, {
           nowMs: bucket.updatedAt || Date.now(),
+          shuffleSeed: '',
           streamMode: streamName,
           interactedAuthors: state.interactedAuthors,
           implicitAuthors: isFeedStream ? state.implicitAuthors : undefined,
@@ -1366,37 +1360,6 @@ export function mountFeedScreen(containerEl, {
       return;
     }
 
-    const boostConcepts = state.tuning?.boostConcepts || [];
-    const dampenConcepts = state.tuning?.dampenConcepts || [];
-    const tasteMem = state.tasteMemory || { positive: [], negative: [] };
-    const hasTasteExamples =
-      streamName === 'feed' &&
-      ((tasteMem.positive?.length || 0) > 0 || (tasteMem.negative?.length || 0) > 0);
-    if ((boostConcepts.length > 0 || dampenConcepts.length > 0 || hasTasteExamples) && (bucket.items?.length || 0) > 0) {
-      const filteredForSem = applyKeywordFilters(bucket.items, state.filters || [], state.moderatedActors || []);
-      const semSig = `${streamName}::${bucket.generation || 0}::${filteredForSem.length}::${boostConcepts.join('\u001f')}||${dampenConcepts.join('\u001f')}`;
-      if (semSig !== lastSemanticSig && filteredForSem.length > 0) {
-        lastSemanticSig = semSig;
-        void fetchSemanticFeedScores({
-          items: filteredForSem,
-          boostConcepts,
-          dampenConcepts,
-          positiveExamples: streamName === 'feed' ? tasteMem.positive || [] : [],
-          negativeExamples: streamName === 'feed' ? tasteMem.negative || [] : [],
-        })
-          .then((semRes) => {
-            if (destroyed || !semRes) return;
-            const curState = feedStore.get();
-            if (semRes.scores && Object.keys(semRes.scores).length > 0) {
-              setSemanticScores({ ...(curState.semanticScores || {}), ...semRes.scores });
-            }
-            if (semRes.tasteScores && Object.keys(semRes.tasteScores).length > 0) {
-              setTasteScores({ ...(curState.tasteScores || {}), ...semRes.tasteScores });
-            }
-          })
-          .catch(() => {});
-      }
-    }
     const visibleItems = resolveStableOrderedItems(streamName, bucket, state);
     const showSanctuary = conn.mode === 'online' || conn.programs.length > 0;
     reconcilePostList(visibleItems, {

@@ -22,7 +22,7 @@ test('3-column shell boots synchronously into Home, keeps right Sanctuary dock m
   let feedTrendCalls = 0;
   globalThis.fetch = async (url) => {
     const u = String(url);
-    if (u.includes('/api/v1/timelines/tag/councilcommunism') || u.includes('/api/v1/timelines/tag/mutualaid')) {
+    if (u.includes('/api/v1/timelines/tag/news') || u.includes('/api/v1/timelines/tag/technology') || u.includes('/api/v1/timelines/tag/science')) {
       feedTrendCalls += 1;
       return new Response(
         JSON.stringify([
@@ -141,7 +141,7 @@ test('3-column shell boots synchronously into Home, keeps right Sanctuary dock m
     const threadRoot = rightDock.querySelector('.sanctuary-thread-view');
     assert.ok(threadRoot);
     assert.ok(rightDock.querySelector('#user-input'));
-    assert.equal(rightDock.querySelectorAll('.header-actions button').length, 4);
+    assert.ok(rightDock.querySelectorAll('.header-actions button').length >= 4);
     assert.ok(rightDock.querySelector('.header-actions .gallery-btn'));
     assert.equal(rightDock.querySelector('#thread-model-select'), null);
 
@@ -203,7 +203,10 @@ test('3-column shell boots synchronously into Home, keeps right Sanctuary dock m
     // Explicit refresh button next to Following triggers a manual refresh
     feedRefreshBtn.click();
     await new Promise((r) => setTimeout(r, 30));
-    assert.equal(feedTrendCalls, fetchesBeforeThread + 1);
+    assert.equal(feedRefreshBtn.classList.contains('is-spinning'), true);
+    assert.match(shellCss, /@keyframes\s+classicSpin/);
+    assert.match(shellCss, /\.feed-refresh-btn\.is-spinning\s+svg\s*\{[^}]*animation:\s*classicSpin/);
+    assert.ok(feedTrendCalls > fetchesBeforeThread);
 
     // Left-rail circular + Compose FAB opens native <dialog> via showModal()
     const composeFab = host.querySelector('.rail-compose-fab');

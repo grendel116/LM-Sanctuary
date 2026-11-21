@@ -595,7 +595,7 @@ export function openSettingsModal({
     urlGrp.className = 'input-group';
     const urlLbl = doc.createElement('label');
     urlLbl.setAttribute('for', 'node-url-input');
-    urlLbl.textContent = 'Node URL (LAN, Tailscale CGNAT, or HTTPS)';
+    urlLbl.textContent = 'Node URL (HTTPS, Tailscale, or localhost)';
     const urlIn = doc.createElement('input');
     urlIn.type = 'text';
     urlIn.id = 'node-url-input';
@@ -606,6 +606,9 @@ export function openSettingsModal({
     urlIn.setAttribute('autocapitalize', 'none');
     urlIn.setAttribute('spellcheck', 'false');
     urlGrp.append(urlLbl, urlIn);
+    const transportNote = doc.createElement('p');
+    transportNote.className = 'classic-card-subtext';
+    transportNote.textContent = 'Use HTTPS for LAN access. HTTP is allowed on localhost or through Tailscale. Social accounts sync from the server without an app credential; Tailscale HTTP browsers keep tokens in memory and reload them from the server vault.';
 
     const authGrid = doc.createElement('div');
     authGrid.className = 'classic-two-col';
@@ -645,10 +648,10 @@ export function openSettingsModal({
     testBtn.addEventListener('click', async () => {
       testBtn.disabled = true;
       try {
+        await setSanctuaryNodeUrl(urlIn.value.trim());
         if (uIn.value.trim() || pIn.value) {
           await setSanctuaryBasicAuth(uIn.value.trim(), pIn.value);
         }
-        await setSanctuaryNodeUrl(urlIn.value.trim());
         await checkSanctuaryHealth();
         await loadNodeData();
         syncNodeSection();
@@ -664,8 +667,8 @@ export function openSettingsModal({
     discBtn.className = 'edit-btn edit-cancel-btn';
     discBtn.textContent = 'Disconnect';
     discBtn.addEventListener('click', async () => {
-      await setSanctuaryNodeUrl('');
       await setSanctuaryBasicAuth('', '');
+      await setSanctuaryNodeUrl('');
       urlIn.value = '';
       syncNodeSection();
     });
@@ -681,7 +684,7 @@ export function openSettingsModal({
     });
 
     nodeActions.append(testBtn, discBtn, flushBtn);
-    nodeBlock.append(nodeHead, statusLine, urlGrp, authGrid, nodeActions);
+    nodeBlock.append(nodeHead, statusLine, urlGrp, transportNote, authGrid, nodeActions);
 
     card.append(foldersBlock, progBlock, searchBlock, nodeBlock);
     nodeStatusRefs = { badge, statusLine, flushBtn };

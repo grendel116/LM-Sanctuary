@@ -28,7 +28,11 @@ from routes.programs import programs_bp
 from routes.system import system_bp
 from routes.voice import voice_bp
 from runners.program import get_active_program, get_active_user
+from routes.social_accounts import social_accounts_bp
 from routes.social_bridge import social_bridge_bp
+from routes.social_drafts import social_drafts_bp
+from routes.social_linked_posts import social_linked_posts_bp
+from utils.session_data import migrate_session_files
 
 _TAILSCALE_CGNAT = ipaddress.ip_network("100.64.0.0/10")
 
@@ -75,17 +79,45 @@ app.register_blueprint(knowledge_bp)
 app.register_blueprint(programs_bp)
 app.register_blueprint(system_bp)
 app.register_blueprint(social_bridge_bp)
+app.register_blueprint(social_accounts_bp)
+app.register_blueprint(social_drafts_bp)
+app.register_blueprint(social_linked_posts_bp)
+
+migrated_sessions, session_migration_errors = migrate_session_files(
+    os.path.join(st.base_dir, "core", "programs")
+)
+if migrated_sessions:
+    print(f"[security] Encrypted {migrated_sessions} existing session file(s) at rest.")
+for migration_error in session_migration_errors:
+    print(f"[security] Could not encrypt an existing session file: {migration_error}")
 
 st.start_background_services()
 
 
 @app.before_request
 def before_request_guard():
+    if not request.is_secure and not _allows_cleartext_request():
+        return jsonify({
+            "error": "HTTPS is required for network access; HTTP is allowed only on localhost or over Tailscale."
+        }), 426
     if request.method == "OPTIONS":
         if is_allowed_cors_origin(request.headers.get("Origin", "")):
             return make_response("", 204)
         return None
     return check_program_change()
+
+
+def _allows_cleartext_request() -> bool:
+    try:
+        address = ipaddress.ip_address(request.remote_addr or "")
+    except ValueError:
+        return False
+    if address.is_loopback:
+        return True
+    if address.version == 6 and address.ipv4_mapped:
+        address = address.ipv4_mapped
+    return bool(address.version == 4 and address in _TAILSCALE_CGNAT)
+
 
 def check_program_change():
     skip_prefixes = (

@@ -1649,10 +1649,24 @@ export function mountProfileScreen(containerEl, {
   }
 
   let prevProfileRetrySig = (authStore.get().retryQueue || []).map((r) => `${r.id}:${r.lastError || ''}`).join('|');
+  let prevPrimaryUserId = getPrimaryAccount()?.userId || '';
   const unsubAuth = authStore.subscribe((nextState) => {
     if (destroyed) return;
     renderHero();
     renderRetryBanner();
+    const nextPrimaryUserId = getPrimaryAccount()?.userId || '';
+    if (nextPrimaryUserId && nextPrimaryUserId !== prevPrimaryUserId) {
+      prevPrimaryUserId = nextPrimaryUserId;
+      void loadOwnPosts();
+    } else if (!nextPrimaryUserId) {
+      prevPrimaryUserId = '';
+      loadPostsEpoch += 1;
+      ownItems = [];
+      ownItemsByTab.clear();
+      loadingPosts = false;
+      postError = '';
+      renderPosts();
+    }
     const nextRetrySig = (nextState?.retryQueue || []).map((r) => `${r.id}:${r.lastError || ''}`).join('|');
     if (nextRetrySig !== prevProfileRetrySig) {
       prevProfileRetrySig = nextRetrySig;

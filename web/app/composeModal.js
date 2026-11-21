@@ -20,6 +20,7 @@ import {
   deleteComposeDraft,
   dismissComposeLinkCard,
   listComposeDrafts,
+  listLocalComposeDrafts,
   loadComposeDraft,
   removeMediaAttachment,
   removeThreadItem,
@@ -648,7 +649,11 @@ export function mountComposeModal(hostEl, { onPublished } = {}) {
       delBtn.textContent = '×';
       delBtn.addEventListener('click', async () => {
         delBtn.disabled = true;
-        await deleteComposeDraft(draft.id).catch(() => {});
+        try {
+          await deleteComposeDraft(draft.id);
+        } catch (err) {
+          statusLine.textContent = `Draft deleted on this device, but server sync failed: ${err?.message || 'Unknown error'}`;
+        }
         await refreshDraftsList();
       });
 
@@ -658,7 +663,13 @@ export function mountComposeModal(hostEl, { onPublished } = {}) {
   }
 
   async function refreshDraftsList() {
-    draftsList = await listComposeDrafts().catch(() => []);
+    try {
+      draftsList = await listComposeDrafts();
+      statusLine.textContent = '';
+    } catch (err) {
+      draftsList = await listLocalComposeDrafts();
+      statusLine.textContent = `Showing device drafts; server sync failed: ${err?.message || 'Unknown error'}`;
+    }
     renderDraftsView();
   }
 
@@ -825,8 +836,13 @@ export function mountComposeModal(hostEl, { onPublished } = {}) {
         ),
       });
       const warnMsg = errors.length > 0 ? errors.join('\n\n') : '';
+      let draftSyncWarning = '';
       if (consumedDraftId) {
-        await deleteComposeDraft(consumedDraftId).catch(() => {});
+        try {
+          await deleteComposeDraft(consumedDraftId);
+        } catch (err) {
+          draftSyncWarning = `The post was published, but draft deletion did not sync: ${err?.message || 'Unknown error'}`;
+        }
         await refreshDraftsList();
       }
       if (!s.replyTo && Array.isArray(results) && results.length > 0) {
@@ -835,8 +851,8 @@ export function mountComposeModal(hostEl, { onPublished } = {}) {
       resetCompose();
       modal.close();
       await onPublished?.(results);
-      if (warnMsg) {
-        showAlert('Bridge Sync Warning', warnMsg);
+      if (warnMsg || draftSyncWarning) {
+        showAlert('Bridge Sync Warning', [warnMsg, draftSyncWarning].filter(Boolean).join('\n\n'));
       }
     } catch (err) {
       composeStore.set({ submitting: false, error: err?.message || 'Publish failed' });

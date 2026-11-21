@@ -5,6 +5,7 @@ import {
   classifyAddressSpace,
   detectDefaultNodeUrl,
   isAllowedNodeUrl,
+  isSecureSanctuaryNodeUrl,
   isAllowedSocialUrl,
   normalizeInstanceUrl,
   normalizeNodeUrl,
@@ -56,6 +57,15 @@ test('isAllowedNodeUrl permits loopback, RFC1918, Tailscale CGNAT (100.64.0.0/10
   }
 
   assert.throws(() => classifyAddressSpace('data:text/html,hi'), TypeError);
+});
+
+test('network Sanctuary URLs require HTTPS except localhost and Tailscale', () => {
+  assert.equal(isSecureSanctuaryNodeUrl('https://100.64.0.10:5000'), true);
+  assert.equal(isSecureSanctuaryNodeUrl('http://127.0.0.1:5000'), true);
+  assert.equal(isSecureSanctuaryNodeUrl('http://100.64.0.10:5000'), true);
+  assert.equal(isSecureSanctuaryNodeUrl('http://sanctuary.tail1234.ts.net:5000'), true);
+  assert.equal(isSecureSanctuaryNodeUrl('http://192.168.1.10:5000'), false);
+  assert.equal(isSecureSanctuaryNodeUrl('http://sanctuary.local:5000'), false);
 });
 
 test('isAllowedSocialUrl and normalizeInstanceUrl enforce public https:// origins only', () => {
