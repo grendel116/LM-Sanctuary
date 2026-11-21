@@ -43,3 +43,4 @@ opencv-python-headless
 piexif
 dill
 matplotlib
+google-antigravity

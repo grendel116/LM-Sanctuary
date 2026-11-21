@@ -10,33 +10,37 @@
   - `web/components/ui/` — Shared primitives (`Button.js`, `Pill.js`, `Card.js`, `ModalShell.js`, `SwipeSheet.js`, `index.js`)
   - `web/components/` — Social primitives (`PostCard.js`, `ContentWarning.js`, `MediaAttachment.js`, `OfflineNotice.js`, `PullToRefresh.js`, `SearchInput.js`, `FediverseShareButton.js`)
   - `web/components/sanctuary/` — Classic obsidian-and-glass companion modules (`SanctuaryDialog.js`, `UserModal.js`, `ProgramModals.js`, `SettingsModal.js`, `KnowledgeModal.js`, `QuestModal.js`, `MessageRow.js`, `PortraitGrid.js`, `ToolApprovalCard.js`, `MoodHeart.js`, `VoiceCallOverlay.js`)
-  - `web/queries/` — Protocol clients (`fediverse.js`, `bluesky.js`, `threads.js`, `sanctuary.js`) built atop `web/queries/fetch/{FetchError.js, fetchWrapper.js}` with one merged `AbortController` (`AbortSignal.any([controller.signal, AbortSignal.timeout(ms)])`)
+  - `web/queries/` — Protocol clients (`fediverse.js`, `bluesky.js`, `threads.js`, `socialClient.js`, `sanctuary.js`) built atop `web/queries/fetch/{FetchError.js, fetchWrapper.js}` with one merged `AbortController` (`AbortSignal.any([controller.signal, AbortSignal.timeout(ms)])`)
   - `web/state/` — Reactive store (`store.js`), social slices (`authStore.js`, `feedStore.js`, `composeStore.js`), and companion slices (`web/state/sanctuary/{types.js, connection.js, outboxModel.js, sessionModel.js}`)
-  - `web/storage/kvStorage.js` — 8-store IndexedDB (`sanctuary_pwa_db`) + non-extractable 256-bit Web Crypto `AES-GCM` vault for social credentials + Node test memory fallback
+  - `web/storage/nativeStore.js` (re-exported by `web/storage/kvStorage.js`) — Three-backend local store: Capacitor Android (`SanctuaryNativeStorePlugin`: SQLiteOpenHelper + `AndroidKeyStore`), Browser / Desktop WebView2 (IndexedDB `sanctuary_pwa_db` + non-extractable Web Crypto `AES-GCM` `social_vault`), and Node test in-memory fallback
   - `web/constants/` — Transport rules (`endpoints.js`) and scoped/root Program palettes (`theme.js`)
   - `web/assets/` — `css/`, `img/`, and `vendor/`
 - **`sanctuary/` — Self-Contained Local AI Node:**
-  - `sanctuary/app.py`, `sanctuary/state.py`, `sanctuary/desktop.py`, `sanctuary/setup_env.py`
-  - `sanctuary/routes/` — Flask Blueprints (`health.py`, `chat.py`, `media.py`, `programs.py`, `knowledge.py`, `voice.py`, `system.py`)
+  - `sanctuary/app.py`, `sanctuary/state.py`, `sanctuary/desktop.py` (launches pywebview with `private_mode=False` and persistent `webview_data/` profile), `sanctuary/setup_env.py`
+  - `sanctuary/routes/` — Flask Blueprints (`health.py`, `chat.py`, `media.py`, `programs.py`, `knowledge.py`, `voice.py`, `system.py`, `social_bridge.py`)
   - `sanctuary/{core, runners, tools, adapters, models, utils, variables, templates/splash.html}`
 - **Packaging, Scripts, Tests & Docs:**
   - `capacitor.config.ts`, `android/app/src/main/res/xml/network_security_config.xml`
   - `scripts/buildAndroid.js`
-  - `__tests__/` (`node --test __tests__/*.test.js` + `__tests__/backend/test_sanctuary_node.py`)
+  - `__tests__/` (`node --test __tests__/*.test.js` + `__tests__/backend/test_sanctuary_node.py` + `__tests__/backend/test_social_bridge.py`)
   - `docs/ARCHITECTURE.md`
 
-## 2. 3-Column Shell, Organic Publishing & Client-Side Vault
+## 2. 3-Column Shell, Single Social Stack & Client-Side Vault
 
 1. **Instant Boot & Persistent Companion Dock**:
    - `web/app/_layout.js` boots directly into the shell without waiting on `sanctuary/`.
    - Desktop renders a 68px left icon rail (`Home`, `Search`, `Messages`, `Activity`, `User`, `Settings`, and bottom `+` Compose), a hairline center social column (`feed.js` with inline `"What's new?"` bar, `search.js`, `messages.js` with `Direct | Programs`, `activity.js`), and a permanently mounted right Sanctuary dock (`programThread.js`) so social browsing never interrupts AI turns, media streaming, or voice calls.
    - Mobile displays a 5-tab bottom bar (`Home`, `Search`, `Messages`, `Activity`, `Sanctuary`) with compact top-bar triggers for `User`, `Settings`, and `+` Compose.
-2. **Protocols & Organic Composer**:
-   - **ActivityPub (`Mastodon`, `Pixelfed`, `GoToSocial`, `Akkoma`)** via OAuth2 + REST is the primary social layer.
-   - **AT Protocol (`Bluesky`)** and **Headless Threads Publishing (`graph.threads.net`)** are signed in under **User -> Accounts** (`UserModal.js`); top-level posts from `composeModal.js` or `feed.js`'s inline bar publish organically across all signed-in accounts without per-post toggles, while replies target the post's origin network.
-3. **Zero AI Social Dispatch**:
-   - `sanctuary/` holds zero social credentials, zero social adapters, and zero AI social-posting or timeline-reading tools.
-   - OAuth tokens and app passwords stay exclusively inside the browser/WebView `AES-GCM` `social_vault` in `web/storage/kvStorage.js`.
+2. **Protocols & Organic Composer (Single Source of Truth in `web/`)**:
+   - All social protocols (**ActivityPub** via OAuth2 + REST, **AT Protocol** for `Bluesky`, and **Threads Graph API** for `Threads`) and social state live exclusively in `web/` so the Capacitor APK and static webapp run standalone with zero desktop dependency.
+   - Top-level posts from `composeModal.js` or `feed.js`'s inline bar publish organically across all signed-in accounts without per-post toggles, while replies target the post's origin network.
+3. **Zero AI Social Dispatch & Stateless 4-Endpoint Bridge**:
+   - `sanctuary/` holds zero social credentials, zero social protocol adapters, and zero AI social-posting or timeline-reading tools.
+   - OAuth tokens and app passwords stay exclusively on the client: inside `AndroidKeyStore` on Capacitor Android, or encrypted inside the `social_vault` store of IndexedDB (`sanctuary_pwa_db`) via a non-extractable Web Crypto `AES-GCM` key in browsers and desktop WebView2 (`webview_data/`).
+   - When `connectionStore.get().mode === 'online'`, `web/queries/sanctuary.js` (`requestSocialBridge` / `requestThreadsProxy`) may call the four stateless endpoints in `sanctuary/routes/social_bridge.py` (`POST /api/social/link-preview`, `POST /api/social/translate`, `POST /api/social/feed/semantic-score`, and `POST /api/social/threads-proxy` strictly pinned to `https://graph.threads.net` for browser CORS bypass; Capacitor Android uses `CapacitorHttp` directly), always falling back silently on failure or offline mode.
+4. **Known Storage & Hosting Limitations**:
+   - Browser/WebView2 IndexedDB is origin-scoped: if desktop port `5000` is occupied at startup and `desktop.py` picks a different port, previously stored accounts will appear absent until port `5000` is used again.
+   - A publicly hosted `https://` webapp requires any remote Sanctuary node origin to be reachable over `https://` and explicitly listed in `SANCTUARY_ALLOWED_ORIGINS`.
 
 ## 3. User-Bubble Share-to-Fediverse Flow
 

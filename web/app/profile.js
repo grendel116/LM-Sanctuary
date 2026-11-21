@@ -7,6 +7,7 @@ import { createClassicModalDialog, showAlert, showConfirm } from '../components/
 import { createLoadingState } from '../components/ui/index.js';
 import { DEFAULT_AVATAR_DATA_URI } from '../constants/avatars.js';
 import { MASTODON_MAX_CHARS } from '../constants/endpoints.js';
+import { formatApiErrorMessage } from '../queries/fetch/fetchWrapper.js';
 import {
   cleanMastodonMediaUrl,
   decodeHtmlEntities,
@@ -18,20 +19,21 @@ import {
 } from '../queries/fediverse.js';
 import {
   deleteUnified,
+  dismissBridgeRetry,
   editUnified,
-  enrichUnifiedItemsMetrics,
   fetchAuthorWithRelationship,
   fetchOwnStatuses,
   likeUnified,
   pinUnified,
   repostUnified,
+  runBridgeRetry,
   syncConnectedBlueskyProfile,
   syncRecentUserPostsToSanctuary,
   updateMastodonProfileCredentials,
 } from '../queries/socialClient.js';
 import { authStore, getAuthenticatedAccount, upsertSocialAccount } from '../state/authStore.js';
 import { computeRemainingCounts, prefillReply } from '../state/composeStore.js';
-import { mutatePostAcrossStreams, removePostAcrossStreams } from '../state/feedStore.js';
+import { applyPostInterestFeedback, mutatePostAcrossStreams, removePostAcrossStreams } from '../state/feedStore.js';
 import { connectionStore } from '../state/sanctuary/connection.js';
 import { summarizeAccountIdentity, syncAutoHeight } from './composeModal.js';
 
@@ -39,8 +41,17 @@ const PROFILE_TABS = [
   ['posts', 'Posts'],
   ['replies', 'Replies'],
   ['media', 'Media'],
-  ['pinned', 'Pinned'],
+  ['boosts', 'Boosts'],
 ];
+
+function sortOwnPostsPinnedFirst(items = []) {
+  return [...items].sort((a, b) => {
+    const aPin = Boolean(a?._meta?.mastodon?.pinned) ? 1 : 0;
+    const bPin = Boolean(b?._meta?.mastodon?.pinned) ? 1 : 0;
+    if (aPin !== bPin) return bPin - aPin;
+    return (Date.parse(b?.date_published || '') || 0) - (Date.parse(a?.date_published || '') || 0);
+  });
+}
 
 const LANGUAGE_OPTIONS = [
   ['en', 'English (en)'],
@@ -919,6 +930,12 @@ export function openEditPostDialog(post, { onSaved } = {}) {
 
   let replaceCheckbox = null;
   let replaceLabel = null;
+  let bskyCheckbox = null;
+  let bskyLabel = null;
+  let threadsCheckbox = null;
+  let threadsLabel = null;
+  let bridgeHintEl = null;
+
   if (canReplaceBridges) {
     replaceCheckbox = doc.createElement('input');
     replaceCheckbox.type = 'checkbox';
@@ -937,9 +954,48 @@ export function openEditPostDialog(post, { onSaved } = {}) {
     const lblText = doc.createElement('span');
     lblText.textContent = 'Update bridges';
     replaceLabel.append(dot, lblText);
-
-    replaceCheckbox.addEventListener('change', () => updateComposerMetrics());
     footerLeft.append(replaceCheckbox, replaceLabel);
+
+    const makeSubBridgeToggle = (id, name, labelText) => {
+      const cb = doc.createElement('input');
+      cb.type = 'checkbox';
+      cb.id = id;
+      cb.name = name;
+      cb.className = 'visually-hidden';
+      cb.checked = true;
+      const lbl = doc.createElement('label');
+      lbl.setAttribute('for', id);
+      lbl.className = 'compose-bridge-toggle-pill is-active';
+      const subDot = doc.createElement('span');
+      subDot.className = 'compose-bridge-toggle-dot';
+      subDot.setAttribute('aria-hidden', 'true');
+      const txt = doc.createElement('span');
+      txt.textContent = labelText;
+      lbl.append(subDot, txt);
+      footerLeft.append(cb, lbl);
+      return [cb, lbl];
+    };
+
+    if (hasBsky && hasThreads) {
+      [bskyCheckbox, bskyLabel] = makeSubBridgeToggle('edit-post-replace-bluesky', 'replace_bluesky', 'Bluesky');
+      [threadsCheckbox, threadsLabel] = makeSubBridgeToggle('edit-post-replace-threads', 'replace_threads', 'Threads');
+    }
+
+    bridgeHintEl = doc.createElement('span');
+    bridgeHintEl.className = 'compose-edit-bridge-hint';
+    footerLeft.appendChild(bridgeHintEl);
+
+    replaceCheckbox.addEventListener('change', () => {
+      if (bskyCheckbox) bskyCheckbox.checked = replaceCheckbox.checked;
+      if (threadsCheckbox) threadsCheckbox.checked = replaceCheckbox.checked;
+      updateComposerMetrics();
+    });
+    const syncMaster = () => {
+      replaceCheckbox.checked = Boolean(bskyCheckbox?.checked || threadsCheckbox?.checked);
+      updateComposerMetrics();
+    };
+    bskyCheckbox?.addEventListener('change', syncMaster);
+    threadsCheckbox?.addEventListener('change', syncMaster);
   }
 
   const statusEl = doc.createElement('p');
@@ -957,15 +1013,22 @@ export function openEditPostDialog(post, { onSaved } = {}) {
 
   function updateComposerMetrics() {
     syncAutoHeight(ta, 68, 340);
-    const replaceActive = Boolean(replaceCheckbox?.checked);
-    if (replaceLabel) {
-      replaceLabel.classList.toggle('is-active', replaceActive);
+    const masterActive = Boolean(replaceCheckbox?.checked);
+    const doBsky = hasBsky && Boolean(bskyCheckbox ? bskyCheckbox.checked : masterActive);
+    const doThreads = hasThreads && Boolean(threadsCheckbox ? threadsCheckbox.checked : masterActive);
+    const anyBridge = doBsky || doThreads;
+
+    if (replaceLabel) replaceLabel.classList.toggle('is-active', masterActive);
+    if (bskyLabel) bskyLabel.classList.toggle('is-active', doBsky);
+    if (threadsLabel) threadsLabel.classList.toggle('is-active', doThreads);
+    if (bridgeHintEl) {
+      bridgeHintEl.textContent = anyBridge ? 'Deletes & reposts checked bridges' : 'In-place Fediverse edit';
     }
 
     if (visibility === 'direct') {
       destEl.textContent = 'Direct message';
-    } else if (canReplaceBridges && replaceActive) {
-      destEl.textContent = ['Fediverse', hasBsky ? 'Bluesky' : '', hasThreads ? 'Threads' : '']
+    } else if (canReplaceBridges && anyBridge) {
+      destEl.textContent = ['Fediverse', doBsky ? 'Bluesky' : '', doThreads ? 'Threads' : '']
         .filter(Boolean)
         .join(' · ');
     } else {
@@ -974,7 +1037,7 @@ export function openEditPostDialog(post, { onSaved } = {}) {
 
     const counts = computeRemainingCounts(
       { text: ta.value, spoilerText: spoiler },
-      { isBlueskyConnected: replaceActive && hasBsky, isThreadsConnected: replaceActive && hasThreads }
+      { isBlueskyConnected: doBsky, isThreadsConnected: doThreads }
     );
     const remaining = counts.tightestRemaining;
     countsEl.textContent = String(remaining);
@@ -997,9 +1060,14 @@ export function openEditPostDialog(post, { onSaved } = {}) {
     statusEl.textContent = '';
     updateComposerMetrics();
     try {
+      const masterActive = Boolean(replaceCheckbox?.checked);
+      const doBsky = hasBsky && Boolean(bskyCheckbox ? bskyCheckbox.checked : masterActive);
+      const doThreads = hasThreads && Boolean(threadsCheckbox ? threadsCheckbox.checked : masterActive);
       const sid = post?._meta?.mastodon?.statusId || post?.id;
       const updated = await editUnified(sid, ta.value, spoiler, {
-        replaceBridges: Boolean(replaceCheckbox?.checked),
+        replaceBridges: doBsky || doThreads,
+        replaceBluesky: doBsky,
+        replaceThreads: doThreads,
       });
       const warnings = Array.isArray(updated?._bridgeWarnings) ? updated._bridgeWarnings : [];
       modal.close();
@@ -1024,7 +1092,7 @@ export function openEditPostDialog(post, { onSaved } = {}) {
 
 /**
  * Center-column User Profile Page: public preview, native profile editing,
- * Accounts & Bridges entry, and Posts / Replies / Media / Pinned management.
+ * Accounts & Bridges entry, and Posts / Replies / Media / Boosts management.
  */
 export function mountProfileScreen(containerEl, {
   onOpenAccounts,
@@ -1065,12 +1133,54 @@ export function mountProfileScreen(containerEl, {
 
   const tabsRow = doc.createElement('div');
   tabsRow.className = 'stage-tabs profile-sub-tabs';
+  tabsRow.setAttribute('role', 'tablist');
+  tabsRow.setAttribute('focusgroup', 'tablist nomemory');
+  tabsRow.setAttribute('aria-label', 'Profile sections');
+
+  const retryBannerEl = doc.createElement('div');
+  retryBannerEl.className = 'bridge-retry-banner';
+  retryBannerEl.hidden = true;
 
   const postsList = doc.createElement('div');
   postsList.className = 'profile-posts-list';
+  postsList.setAttribute('role', 'tabpanel');
+  postsList.setAttribute('aria-labelledby', `profile-tab-${activeSubTab}`);
 
-  root.append(header, heroHost, tabsRow, postsList);
+  root.append(header, heroHost, tabsRow, retryBannerEl, postsList);
   containerEl.appendChild(root);
+
+  function renderRetryBanner() {
+    if (destroyed) return;
+    const retries = Array.isArray(authStore.get().retryQueue) ? authStore.get().retryQueue : [];
+    if (retries.length === 0) {
+      retryBannerEl.hidden = true;
+      retryBannerEl.replaceChildren();
+      return;
+    }
+    retryBannerEl.hidden = false;
+    retryBannerEl.replaceChildren();
+    const firstRetry = retries[0];
+    const msg = doc.createElement('span');
+    msg.className = 'bridge-retry-msg';
+    msg.textContent = `${firstRetry.protocol} bridge sync paused (${retries.length}): ${formatApiErrorMessage(firstRetry.lastError, 'temporary error')}`;
+    const retryBtn = doc.createElement('button');
+    retryBtn.type = 'button';
+    retryBtn.className = 'btn-sleek-pill';
+    retryBtn.textContent = 'Retry';
+    retryBtn.addEventListener('click', () => {
+      retryBtn.disabled = true;
+      void runBridgeRetry(firstRetry.id)
+        .then(() => loadOwnPosts())
+        .catch((err) => showAlert('Bridge Retry Failed', formatApiErrorMessage(err?.message, 'Retry failed.')))
+        .finally(() => { retryBtn.disabled = false; });
+    });
+    const dismissBtn = doc.createElement('button');
+    dismissBtn.type = 'button';
+    dismissBtn.className = 'edit-btn';
+    dismissBtn.textContent = 'Dismiss';
+    dismissBtn.addEventListener('click', () => void dismissBridgeRetry(firstRetry.id));
+    retryBannerEl.append(msg, retryBtn, dismissBtn);
+  }
 
   function getPrimaryAccount() {
     const s = authStore.get();
@@ -1164,6 +1274,17 @@ export function mountProfileScreen(containerEl, {
     await Promise.all(tasks);
   }
 
+  let loadPostsEpoch = 0;
+  const ownItemsByTab = new Map();
+
+  function getCachedTabItems(tab = activeSubTab) {
+    return ownItemsByTab.get(tab) || [];
+  }
+
+  function syncActiveTabCache() {
+    ownItemsByTab.set(activeSubTab, [...ownItems]);
+  }
+
   async function loadOwnPosts() {
     if (destroyed) return;
     const primary = getPrimaryAccount();
@@ -1172,24 +1293,37 @@ export function mountProfileScreen(containerEl, {
       renderPosts();
       return;
     }
-    loadingPosts = true;
+    const tab = activeSubTab;
+    const epoch = ++loadPostsEpoch;
+    const cached = getCachedTabItems(tab);
+    ownItems = cached;
+    loadingPosts = cached.length === 0;
     postError = '';
     renderPosts();
     try {
-      ownItems = await fetchOwnStatuses(primary.userId, {
-        tab: activeSubTab,
+      const fetched = await fetchOwnStatuses(primary.userId, {
+        tab,
         instanceUrl: primary.instanceUrl || 'https://mastodon.social',
+        includeBridges: true,
       });
-      ownItems = await enrichUnifiedItemsMetrics(ownItems);
-      if (activeSubTab === 'posts') {
+      if (destroyed) return;
+      ownItemsByTab.set(tab, fetched);
+      if (epoch !== loadPostsEpoch || activeSubTab !== tab) return;
+      ownItems = fetched;
+      if (tab === 'posts') {
         void syncRecentUserPostsToSanctuary({ preloadedItems: ownItems }).catch(() => {});
       }
     } catch (err) {
-      postError = err?.message || 'Unable to load posts.';
-      ownItems = [];
+      if (destroyed || epoch !== loadPostsEpoch || activeSubTab !== tab) return;
+      if (cached.length === 0) {
+        postError = err?.message || 'Unable to load posts.';
+        ownItems = [];
+      }
     } finally {
-      loadingPosts = false;
-      if (!destroyed) renderPosts();
+      if (!destroyed && epoch === loadPostsEpoch && activeSubTab === tab) {
+        loadingPosts = false;
+        renderPosts();
+      }
     }
   }
 
@@ -1354,33 +1488,58 @@ export function mountProfileScreen(containerEl, {
     heroHost.appendChild(card);
   }
 
+  const subTabButtons = PROFILE_TABS.map(([id, label], idx) => {
+    const btn = doc.createElement('button');
+    btn.type = 'button';
+    btn.id = `profile-tab-${id}`;
+    btn.setAttribute('role', 'tab');
+    const labelEl = doc.createElement('span');
+    labelEl.className = 'stage-tab-label';
+    labelEl.textContent = label;
+    btn.appendChild(labelEl);
+    btn.addEventListener('click', () => {
+      activeSubTab = id;
+      renderSubTabs();
+      btn.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
+      void loadOwnPosts();
+    });
+    btn.addEventListener('keydown', (e) => {
+      let nextIdx = -1;
+      if (e.key === 'ArrowRight') nextIdx = (idx + 1) % PROFILE_TABS.length;
+      else if (e.key === 'ArrowLeft') nextIdx = (idx - 1 + PROFILE_TABS.length) % PROFILE_TABS.length;
+      else if (e.key === 'Home') nextIdx = 0;
+      else if (e.key === 'End') nextIdx = PROFILE_TABS.length - 1;
+      if (nextIdx >= 0) {
+        e.preventDefault();
+        const targetTab = subTabButtons[nextIdx]?.btn;
+        targetTab?.focus?.();
+        targetTab?.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
+      }
+    });
+    return { id, btn };
+  });
+  tabsRow.replaceChildren(...subTabButtons.map((t) => t.btn));
+
   function renderSubTabs() {
-    tabsRow.replaceChildren(
-      ...PROFILE_TABS.map(([id, label]) => {
-        const btn = doc.createElement('button');
-        btn.type = 'button';
-        btn.className = `stage-tab-btn${activeSubTab === id ? ' active' : ''}`;
-        const labelEl = doc.createElement('span');
-        labelEl.className = 'stage-tab-label';
-        labelEl.textContent = label;
-        btn.appendChild(labelEl);
-        btn.addEventListener('click', () => {
-          activeSubTab = id;
-          renderSubTabs();
-          void loadOwnPosts();
-        });
-        return btn;
-      })
-    );
+    postsList.setAttribute('aria-labelledby', `profile-tab-${activeSubTab}`);
+    for (const { id, btn } of subTabButtons) {
+      const isSelected = activeSubTab === id;
+      btn.setAttribute('aria-selected', isSelected ? 'true' : 'false');
+      btn.tabIndex = isSelected ? 0 : -1;
+      btn.toggleAttribute?.('focusgroupstart', isSelected);
+      btn.classList.toggle('active', isSelected);
+      btn.classList.add('stage-tab-btn');
+    }
   }
 
   function renderPosts() {
     if (destroyed) return;
     postsList.replaceChildren();
+    postsList.removeAttribute('tabindex');
     if (!getPrimaryAccount()) return;
 
     if (loadingPosts && ownItems.length === 0) {
-      postsList.appendChild(createLoadingState('Loading posts…'));
+      postsList.appendChild(createLoadingState(`Loading ${activeSubTab}…`));
       return;
     }
 
@@ -1390,6 +1549,7 @@ export function mountProfileScreen(containerEl, {
     }
 
     if (ownItems.length === 0) {
+      postsList.tabIndex = 0;
       const empty = doc.createElement('p');
       empty.className = 'empty-state';
       empty.textContent = `No ${activeSubTab} yet.`;
@@ -1405,31 +1565,60 @@ export function mountProfileScreen(containerEl, {
           onToggleLike: async (p) => {
             const updated = await likeUnified(p);
             ownItems = ownItems.map((it) => (it.id === updated.id ? updated : it));
+            syncActiveTabCache();
             renderPosts();
           },
           onToggleRepost: async (p) => {
             const updated = await repostUnified(p);
-            ownItems = ownItems.map((it) => (it.id === updated.id ? updated : it));
+            mutatePostAcrossStreams(updated.id, () => updated);
+            const stillBoosted = Boolean(updated?._meta?.mastodon?.reblogged || updated?._meta?.bluesky?.repostUri);
+            ownItems = activeSubTab === 'boosts' && !stillBoosted
+              ? ownItems.filter((it) => it.id !== updated.id)
+              : ownItems.map((it) => (it.id === updated.id ? updated : it));
+            syncActiveTabCache();
             renderPosts();
           },
           onOpenThread: onOpenPostThread,
           onAskSanctuary,
           onSelectAuthor,
+          onInterested: async (p) => {
+            const updated = await applyPostInterestFeedback(p, 'interested');
+            if (updated && !destroyed) {
+              ownItems = ownItems.map((it) => (it.id === updated.id ? updated : it));
+              syncActiveTabCache();
+              renderPosts();
+            }
+          },
+          onNotInterested: async (p) => {
+            await applyPostInterestFeedback(p, 'not_interested');
+            if (!destroyed) {
+              ownItems = ownItems.filter((it) => it.id !== p.id);
+              syncActiveTabCache();
+              renderPosts();
+            }
+          },
           onEditPost: (p) => {
             openEditPostDialog(p, {
               onSaved: (updated) => {
                 ownItems = ownItems.map((it) => (it.id === updated.id ? updated : it));
+                syncActiveTabCache();
                 mutatePostAcrossStreams(updated.id, () => updated);
                 renderPosts();
               },
             });
           },
+          onRetryBridge: (retryEntry) => {
+            void runBridgeRetry(retryEntry.id)
+              .then(() => loadOwnPosts())
+              .catch((err) => showAlert('Bridge Retry Failed', formatApiErrorMessage(err?.message, 'Retry failed.')));
+          },
           onTogglePin: async (p) => {
             const pinnedNow = Boolean(p._meta?.mastodon?.pinned);
             const updated = await pinUnified(p, pinnedNow);
-            ownItems = activeSubTab === 'pinned' && pinnedNow
-              ? ownItems.filter((it) => it.id !== updated.id)
-              : ownItems.map((it) => (it.id === updated.id ? updated : it));
+            const nextList = ownItems.map((it) => (it.id === updated.id ? updated : it));
+            ownItems = activeSubTab === 'posts' ? sortOwnPostsPinnedFirst(nextList) : nextList;
+            syncActiveTabCache();
+            mutatePostAcrossStreams(updated.id, () => updated);
             renderPosts();
           },
           onDeletePost: (p) => {
@@ -1441,6 +1630,7 @@ export function mountProfileScreen(containerEl, {
               async () => {
                 const res = await deleteUnified(p);
                 ownItems = ownItems.filter((it) => it.id !== p.id);
+                syncActiveTabCache();
                 removePostAcrossStreams(p.id);
                 if (activeSubTab === 'posts') {
                   void syncRecentUserPostsToSanctuary({ preloadedItems: ownItems }).catch(() => {});
@@ -1458,14 +1648,27 @@ export function mountProfileScreen(containerEl, {
     }
   }
 
-  const unsubAuth = authStore.subscribe(() => {
-    if (!destroyed) renderHero();
+  let prevProfileRetrySig = (authStore.get().retryQueue || []).map((r) => `${r.id}:${r.lastError || ''}`).join('|');
+  const unsubAuth = authStore.subscribe((nextState) => {
+    if (destroyed) return;
+    renderHero();
+    renderRetryBanner();
+    const nextRetrySig = (nextState?.retryQueue || []).map((r) => `${r.id}:${r.lastError || ''}`).join('|');
+    if (nextRetrySig !== prevProfileRetrySig) {
+      prevProfileRetrySig = nextRetrySig;
+      renderPosts();
+    }
   });
 
   renderHero();
   renderSubTabs();
+  renderRetryBanner();
+  const hadPrimaryUserId = Boolean(getPrimaryAccount()?.userId);
+  if (hadPrimaryUserId) {
+    void loadOwnPosts();
+  }
   void refreshProfileFromServer().then(() => {
-    if (!destroyed) return loadOwnPosts();
+    if (!destroyed && !hadPrimaryUserId) return loadOwnPosts();
   });
 
   return {

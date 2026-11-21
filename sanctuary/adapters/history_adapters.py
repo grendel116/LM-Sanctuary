@@ -125,7 +125,7 @@ class OsHistoryAdapter:
                 if isinstance(last.get("content"), str) and len(last["content"]) > 1500:
                     over = sum(kept_lengths) - available
                     keep_chars = max(1500, len(last["content"]) - over)
-                    last["content"] = last["content"][:keep_chars] + "\n... [output truncated to fit context; use read_symbol or a narrower range]"
+                    last["content"] = last["content"][:keep_chars] + "\n... [output truncated to fit context]"
 
         final_messages = [{"role": "system", "content": system_content.strip()}]
         final_messages.extend(kept)
@@ -295,20 +295,6 @@ class OsHistoryAdapter:
             in_tool_loop=in_tool_loop,
         )
 
-        # A one-line note while a review job is unfinished lets a new turn resume it; it rides at the very end so only the tail misses the cache.
-        try:
-            from tools.codejob import get_job_block
-            plan_block = get_job_block(self.session_id)
-            if plan_block and msgs:
-                last = msgs[-1]
-                if last.get("role") == "user" and isinstance(last.get("content"), str):
-                    last["content"] = f"{last['content']}\n\n{plan_block}"
-                elif last.get("role") == "user" and isinstance(last.get("content"), list):
-                    last["content"].append({"type": "text", "text": f"\n\n{plan_block}"})
-                else:
-                    msgs.append({"role": "user", "content": plan_block})
-        except Exception as pe:
-            print(f"[review job] Injection error: {pe}")
         return msgs
 
     def _build_post_injection(

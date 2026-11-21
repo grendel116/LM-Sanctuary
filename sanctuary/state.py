@@ -461,10 +461,19 @@ def authenticate():
     )
 
 
-def cancel_session_image_work(session_id):
+def cancel_session_work(session_id):
+    from tools import antigravity_job, tools as tools_mod
     from utils import image_cancellation
+
     cancelled_sessions.add(session_id)
-    return image_cancellation.cancel(session_ids={session_id})
+    tools_mod.cancel_pending_tool_confirmations(session_id)
+    ag_cancelled = antigravity_job.cancel_antigravity_jobs(session_id)
+    img_cancelled = image_cancellation.cancel(session_ids={session_id})
+    return bool(ag_cancelled or img_cancelled)
+
+
+def cancel_session_image_work(session_id):
+    return cancel_session_work(session_id)
 
 
 def cancel_message_image_work(session_id, message_id):

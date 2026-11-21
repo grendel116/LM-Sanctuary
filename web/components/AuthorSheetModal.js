@@ -1,4 +1,5 @@
 import { DEFAULT_AVATAR_DATA_URI } from '../constants/avatars.js';
+import { canonicalizeActorHandle, isUnifiedItemModerated } from '../core/schema/unifiedItem.js';
 import {
   cleanMastodonMediaUrl,
   renderProfileLinksAndFields,
@@ -18,9 +19,11 @@ import {
   toggleMuteAuthor,
 } from '../queries/socialClient.js';
 import { authStore } from '../state/authStore.js';
+import { removeActivityByActor } from '../state/activityStore.js';
 import { prefillReply } from '../state/composeStore.js';
-import { mutatePostAcrossStreams, removePostAcrossStreams } from '../state/feedStore.js';
+import { feedStore, mutatePostAcrossStreams, removePostAcrossStreams } from '../state/feedStore.js';
 import { connectionStore } from '../state/sanctuary/connection.js';
+import { getLocalModeratedAccounts } from '../storage/nativeStore.js';
 import { openFollowGraphModal } from './FollowGraphModal.js';
 import { createPostCard } from './PostCard.js';
 import { createClassicModalDialog, showAlert, showConfirm } from './sanctuary/SanctuaryDialog.js';
@@ -105,6 +108,7 @@ export function openAuthorSheetModal({
   let lists = [];
   let memberListIds = new Set();
   let recentPosts = [];
+  let localModState = { blocks: [], mutes: [] };
   let loadingDetails = true;
   let actionError = '';
   let closed = false;
@@ -193,6 +197,30 @@ export function openAuthorSheetModal({
     }
     hero.appendChild(topRow);
 
+    const isAuthorModeratedInList = (listKey) => {
+      const cleanAcct = String(profile.acct || '').trim().replace(/^@/, '').toLowerCase();
+      const cleanId = String(profile.id || '').trim().toLowerCase();
+      const canon = cleanAcct ? canonicalizeActorHandle(cleanAcct, protocol) : '';
+      const rows = Array.isArray(localModState?.[listKey]) ? localModState[listKey] : [];
+      if (rows.some((r) => {
+        const rp = r?.protocol === 'fediverse' ? 'mastodon' : String(r?.protocol || 'threads').toLowerCase();
+        if (rp !== protocol) return false;
+        const rc = String(r?.canonicalActor || '').toLowerCase();
+        const ra = String(r?.acct || '').replace(/^@/, '').toLowerCase();
+        const ri = String(r?.id || '').toLowerCase();
+        return Boolean((canon && rc === canon) || (cleanAcct && ra === cleanAcct) || (cleanId && ri === cleanId));
+      })) {
+        return true;
+      }
+      if (listKey === 'mutes') {
+        const modSet = new Set((feedStore.get().moderatedActors || []).map((x) => String(x || '').toLowerCase()));
+        return Boolean((canon && modSet.has(canon)) || (cleanId && (modSet.has(cleanId) || modSet.has(`${protocol}:${cleanId}`))));
+      }
+      return false;
+    };
+    const isMutedNow = Boolean(rel?.muting || isAuthorModeratedInList('mutes'));
+    const isBlockedNow = Boolean(rel?.blocking || isAuthorModeratedInList('blocks'));
+
     const badges = doc.createElement('div');
     badges.className = 'profile-badges-row';
     if (profile.locked) {
@@ -213,13 +241,13 @@ export function openAuthorSheetModal({
       b.textContent = 'Follows you';
       badges.appendChild(b);
     }
-    if (rel?.muting) {
+    if (isMutedNow) {
       const b = doc.createElement('span');
       b.className = 'status-badge status-offline';
       b.textContent = 'Muted';
       badges.appendChild(b);
     }
-    if (rel?.blocking) {
+    if (isBlockedNow) {
       const b = doc.createElement('span');
       b.className = 'status-badge status-offline';
       b.textContent = 'Blocked';
@@ -243,117 +271,212 @@ export function openAuthorSheetModal({
       }
     }
 
-    const stats = doc.createElement('div');
-    stats.className = 'profile-stats-row';
-    if (!statsLoaded && loadingDetails) {
-      const loadingLbl = doc.createElement('span');
-      loadingLbl.textContent = 'Loading profile…';
-      stats.appendChild(loadingLbl);
-    } else if (protocol === 'threads') {
-      if (Number(profile.statusesCount || 0) > 0) {
-        const postsLbl = doc.createElement('span');
-        postsLbl.textContent = `${Number(profile.statusesCount).toLocaleString()} Posts`;
-        stats.appendChild(postsLbl);
-      }
-      if (Number(profile.followersCount || 0) > 0) {
-        const followersLbl = doc.createElement('span');
-        followersLbl.textContent = `${Number(profile.followersCount).toLocaleString()} Followers`;
-        stats.appendChild(followersLbl);
+    if (statsLoaded || !loadingDetails) {
+      const stats = doc.createElement('div');
+      stats.className = 'profile-stats-row';
+      if (protocol === 'threads') {
+        if (Number(profile.statusesCount || 0) > 0) {
+          const postsLbl = doc.createElement('span');
+          postsLbl.textContent = `${Number(profile.statusesCount).toLocaleString()} Posts`;
+          stats.appendChild(postsLbl);
+        }
+        if (Number(profile.followersCount || 0) > 0) {
+          const followersLbl = doc.createElement('span');
+          followersLbl.textContent = `${Number(profile.followersCount).toLocaleString()} Followers`;
+          stats.appendChild(followersLbl);
+        } else {
+          const protoLbl = doc.createElement('span');
+          protoLbl.textContent = profile.federatedMastodonId ? 'Federated Threads account' : 'Threads account';
+          stats.appendChild(protoLbl);
+        }
       } else {
-        const protoLbl = doc.createElement('span');
-        protoLbl.textContent = profile.federatedMastodonId ? 'Federated Threads account' : 'Threads account';
-        stats.appendChild(protoLbl);
+        const postsLbl = doc.createElement('span');
+        postsLbl.textContent = `${Number(profile.statusesCount ?? 0).toLocaleString()} Posts`;
+        const followingBtn = doc.createElement('button');
+        followingBtn.type = 'button';
+        followingBtn.className = 'profile-stat-btn';
+        followingBtn.textContent = `${Number(profile.followingCount ?? 0).toLocaleString()} Following`;
+        followingBtn.addEventListener('click', () => {
+          openFollowGraphModal({
+            accountId: profile.id || profile.acct,
+            acct: profile.acct,
+            displayName: profile.displayName || profile.acct,
+            instanceUrl: protocol === 'mastodon' ? instanceUrl : 'https://bsky.app',
+            protocol,
+            initialTab: 'following',
+            onSelectAuthor: (nextAuthor) => openAuthorSheetModal({
+              author: nextAuthor,
+              instanceUrl,
+              onReply,
+              onOpenPostThread,
+              onAskSanctuary,
+            }),
+          });
+        });
+
+        const followersBtn = doc.createElement('button');
+        followersBtn.type = 'button';
+        followersBtn.className = 'profile-stat-btn';
+        followersBtn.textContent = `${Number(profile.followersCount ?? 0).toLocaleString()} Followers`;
+        followersBtn.addEventListener('click', () => {
+          openFollowGraphModal({
+            accountId: profile.id || profile.acct,
+            acct: profile.acct,
+            displayName: profile.displayName || profile.acct,
+            instanceUrl: protocol === 'mastodon' ? instanceUrl : 'https://bsky.app',
+            protocol,
+            initialTab: 'followers',
+            onSelectAuthor: (nextAuthor) => openAuthorSheetModal({
+              author: nextAuthor,
+              instanceUrl,
+              onReply,
+              onOpenPostThread,
+              onAskSanctuary,
+            }),
+          });
+        });
+
+        stats.append(postsLbl, followingBtn, followersBtn);
       }
-    } else {
-      const postsLbl = doc.createElement('span');
-      postsLbl.textContent = `${Number(profile.statusesCount ?? 0).toLocaleString()} Posts`;
-      const followingBtn = doc.createElement('button');
-      followingBtn.type = 'button';
-      followingBtn.className = 'profile-stat-btn';
-      followingBtn.textContent = `${Number(profile.followingCount ?? 0).toLocaleString()} Following`;
-      followingBtn.addEventListener('click', () => {
-        openFollowGraphModal({
-          accountId: profile.id || profile.acct,
-          acct: profile.acct,
-          displayName: profile.displayName || profile.acct,
-          instanceUrl: protocol === 'mastodon' ? instanceUrl : 'https://bsky.app',
-          protocol,
-          initialTab: 'following',
-          onSelectAuthor: (nextAuthor) => openAuthorSheetModal({
-            author: nextAuthor,
-            instanceUrl,
-            onReply,
-            onOpenPostThread,
-            onAskSanctuary,
-          }),
-        });
-      });
-
-      const followersBtn = doc.createElement('button');
-      followersBtn.type = 'button';
-      followersBtn.className = 'profile-stat-btn';
-      followersBtn.textContent = `${Number(profile.followersCount ?? 0).toLocaleString()} Followers`;
-      followersBtn.addEventListener('click', () => {
-        openFollowGraphModal({
-          accountId: profile.id || profile.acct,
-          acct: profile.acct,
-          displayName: profile.displayName || profile.acct,
-          instanceUrl: protocol === 'mastodon' ? instanceUrl : 'https://bsky.app',
-          protocol,
-          initialTab: 'followers',
-          onSelectAuthor: (nextAuthor) => openAuthorSheetModal({
-            author: nextAuthor,
-            instanceUrl,
-            onReply,
-            onOpenPostThread,
-            onAskSanctuary,
-          }),
-        });
-      });
-
-      stats.append(postsLbl, followingBtn, followersBtn);
+      hero.appendChild(stats);
     }
-    hero.appendChild(stats);
 
     const authSnapshot = authStore.get();
+    const cleanThrHandle = String(profile.acct || profile.username || '').trim().replace(/^@/, '').split('@')[0].toLowerCase();
+    const isThrMuted = protocol === 'threads' && Boolean(
+      rel?.muting || (localModState.mutes || []).some((r) => String(r?.username || '').toLowerCase() === cleanThrHandle)
+    );
+    const isThrBlocked = protocol === 'threads' && Boolean(
+      rel?.blocking || (localModState.blocks || []).some((r) => String(r?.username || '').toLowerCase() === cleanThrHandle)
+    );
     const canInteract = protocol === 'bluesky'
       ? Boolean(authSnapshot.isBlueskyConnected)
       : (protocol === 'threads'
-        ? Boolean(authSnapshot.isMastodonConnected && profile.federatedMastodonId)
+        ? Boolean(cleanThrHandle || (authSnapshot.isMastodonConnected && profile.federatedMastodonId))
         : Boolean(authSnapshot.isMastodonConnected));
 
     const actionsRow = doc.createElement('div');
     actionsRow.className = 'author-sheet-actions';
 
-    if (canInteract) {
-      const actionTargetId = protocol === 'threads' && profile.federatedMastodonId
-        ? profile.federatedMastodonId
-        : profile.id;
+    const actionTargetId = protocol === 'threads' && profile.federatedMastodonId
+      ? profile.federatedMastodonId
+      : (profile.id || profile.acct);
+    const canModerateRemote = Boolean(actionTargetId || profile.acct);
+
+    if (canInteract && protocol === 'threads') {
+      if (authSnapshot.isMastodonConnected && profile.federatedMastodonId) {
+        const followBtn = doc.createElement('button');
+        followBtn.type = 'button';
+        followBtn.className = `btn-sleek-pill ${rel?.following ? 'is-active' : ''}`;
+        followBtn.disabled = busy;
+        followBtn.textContent = rel?.following ? 'Following' : (rel?.requested ? 'Requested' : 'Follow');
+        followBtn.addEventListener('click', () =>
+          void runGraphAction(
+            () => toggleFollowAuthor(profile.federatedMastodonId, Boolean(rel?.following), { protocol: 'mastodon' }),
+            'Unable to update follow status.'
+          )
+        );
+        actionsRow.appendChild(followBtn);
+      }
+      const muteBtn = doc.createElement('button');
+      muteBtn.type = 'button';
+      muteBtn.className = 'edit-btn edit-cancel-btn';
+      muteBtn.disabled = busy;
+      muteBtn.textContent = isThrMuted ? 'Unmute' : 'Mute';
+      muteBtn.addEventListener('click', () =>
+        void runGraphAction(
+          async () => {
+            const res = await toggleMuteAuthor(cleanThrHandle || profile.id, isThrMuted, {
+              protocol: 'threads',
+              acct: cleanThrHandle,
+              displayName: profile.displayName || cleanThrHandle,
+            });
+            localModState = await getLocalModeratedAccounts().catch(() => localModState);
+            if (!isThrMuted) {
+              removeActivityByActor(profile, 'threads');
+              removePostAcrossStreams((it) => isUnifiedItemModerated(it, feedStore.get().moderatedActors) || it?.author?.handle === profile.acct || it?.author?.id === profile.id);
+            }
+            return res;
+          },
+          'Unable to update mute status.'
+        )
+      );
+      const blockBtn = doc.createElement('button');
+      blockBtn.type = 'button';
+      blockBtn.className = 'edit-btn edit-cancel-btn';
+      blockBtn.disabled = busy;
+      blockBtn.textContent = isThrBlocked ? 'Unblock' : 'Block';
+      blockBtn.addEventListener('click', () =>
+        void runGraphAction(
+          async () => {
+            const res = await toggleBlockAuthor(cleanThrHandle || profile.id, isThrBlocked, {
+              protocol: 'threads',
+              acct: cleanThrHandle,
+              displayName: profile.displayName || cleanThrHandle,
+            });
+            localModState = await getLocalModeratedAccounts().catch(() => localModState);
+            if (!isThrBlocked) {
+              removeActivityByActor(profile, 'threads');
+              removePostAcrossStreams((it) => isUnifiedItemModerated(it, feedStore.get().moderatedActors) || it?.author?.handle === profile.acct || it?.author?.id === profile.id);
+            }
+            return res;
+          },
+          'Unable to update block status.'
+        )
+      );
+      actionsRow.append(muteBtn, blockBtn);
+      if (!(authSnapshot.isMastodonConnected && profile.federatedMastodonId)) {
+        const hint = doc.createElement('span');
+        hint.className = 'classic-card-subtext';
+        hint.textContent = 'Follows are managed on Threads.';
+        actionsRow.appendChild(hint);
+      }
+    } else if (canInteract || canModerateRemote) {
       const actionOpts = {
         protocol: protocol === 'threads' ? 'mastodon' : protocol,
+        acct: profile.acct || '',
+        displayName: profile.displayName || profile.acct || '',
+        instanceUrl,
         followUri: rel?.followUri || null,
         blockUri: rel?.blockUri || null,
       };
-      const followBtn = doc.createElement('button');
-      followBtn.type = 'button';
-      followBtn.className = `btn-sleek-pill ${rel?.following ? 'is-active' : ''}`;
-      followBtn.disabled = busy;
-      followBtn.textContent = rel?.following ? 'Following' : (rel?.requested ? 'Requested' : 'Follow');
-      followBtn.addEventListener('click', () =>
-        void runGraphAction(
-          () => toggleFollowAuthor(actionTargetId, Boolean(rel?.following), actionOpts),
-          'Unable to update follow status.'
-        )
-      );
+      if (canInteract) {
+        const followBtn = doc.createElement('button');
+        followBtn.type = 'button';
+        followBtn.className = `btn-sleek-pill ${rel?.following ? 'is-active' : ''}`;
+        followBtn.disabled = busy;
+        followBtn.textContent = rel?.following ? 'Following' : (rel?.requested ? 'Requested' : 'Follow');
+        followBtn.addEventListener('click', () =>
+          void runGraphAction(
+            () => toggleFollowAuthor(actionTargetId, Boolean(rel?.following), actionOpts),
+            'Unable to update follow status.'
+          )
+        );
+        actionsRow.appendChild(followBtn);
+      }
 
       const muteBtn = doc.createElement('button');
       muteBtn.type = 'button';
       muteBtn.className = 'edit-btn edit-cancel-btn';
       muteBtn.disabled = busy;
-      muteBtn.textContent = rel?.muting ? 'Unmute' : 'Mute';
+      muteBtn.textContent = isMutedNow ? 'Unmute' : 'Mute';
       muteBtn.addEventListener('click', () =>
         void runGraphAction(
-          () => toggleMuteAuthor(actionTargetId, Boolean(rel?.muting), actionOpts),
+          async () => {
+            const wasMuted = isMutedNow;
+            const res = await toggleMuteAuthor(actionTargetId, wasMuted, actionOpts);
+            localModState = await getLocalModeratedAccounts().catch(() => localModState);
+            if (!wasMuted) {
+              removeActivityByActor(profile, actionOpts.protocol);
+              removePostAcrossStreams(
+                (it) =>
+                  isUnifiedItemModerated(it, feedStore.get().moderatedActors)
+                  || it?.author?.handle === profile.acct
+                  || (profile.id && it?.author?.id === profile.id)
+              );
+            }
+            return res;
+          },
           'Unable to update mute status.'
         )
       );
@@ -362,15 +485,37 @@ export function openAuthorSheetModal({
       blockBtn.type = 'button';
       blockBtn.className = 'edit-btn edit-cancel-btn';
       blockBtn.disabled = busy;
-      blockBtn.textContent = rel?.blocking ? 'Unblock' : 'Block';
+      blockBtn.textContent = isBlockedNow ? 'Unblock' : 'Block';
       blockBtn.addEventListener('click', () =>
         void runGraphAction(
-          () => toggleBlockAuthor(actionTargetId, Boolean(rel?.blocking), actionOpts),
+          async () => {
+            const wasBlocked = isBlockedNow;
+            const res = await toggleBlockAuthor(actionTargetId, wasBlocked, actionOpts);
+            localModState = await getLocalModeratedAccounts().catch(() => localModState);
+            if (!wasBlocked) {
+              removeActivityByActor(profile, actionOpts.protocol);
+              removePostAcrossStreams(
+                (it) =>
+                  isUnifiedItemModerated(it, feedStore.get().moderatedActors)
+                  || it?.author?.handle === profile.acct
+                  || (profile.id && it?.author?.id === profile.id)
+              );
+            }
+            return res;
+          },
           'Unable to update block status.'
         )
       );
 
-      actionsRow.append(followBtn, muteBtn, blockBtn);
+      actionsRow.append(muteBtn, blockBtn);
+      if (!canInteract) {
+        const hint = doc.createElement('span');
+        hint.className = 'classic-card-subtext';
+        hint.textContent = protocol === 'threads'
+          ? 'Follows are managed on Threads.'
+          : `Connect ${protocol === 'bluesky' ? 'Bluesky' : 'Mastodon'} under Profile → Accounts & Bridges to follow (Mute/Block saved locally).`;
+        actionsRow.appendChild(hint);
+      }
     } else {
       const hint = doc.createElement('span');
       hint.className = 'classic-card-subtext';
@@ -427,7 +572,7 @@ export function openAuthorSheetModal({
     recentSection.appendChild(secHeader);
 
     if (loadingDetails && recentPosts.length === 0) {
-      recentSection.appendChild(createLoadingState('Loading profile & recent posts…', { compact: true }));
+      recentSection.appendChild(createLoadingState('Loading profile & recent posts…', { doc, compact: true }));
     } else if (recentPosts.length === 0) {
       const empty = doc.createElement('p');
       empty.className = 'empty-state';
@@ -550,7 +695,7 @@ export function openAuthorSheetModal({
       heading.textContent = profile.displayName || `@${profile.acct}`;
 
       const statusInstanceUrl = detail?.resolvedInstanceUrl || (protocol === 'mastodon' ? instanceUrl : (protocol === 'threads' ? 'https://www.threads.net' : 'https://bsky.app'));
-      const [statuses, userLists] = await Promise.all([
+      const [statuses, userLists, freshLocalMod] = await Promise.all([
         fetchOwnStatuses(profile.id || profile.acct, {
           tab: 'posts',
           instanceUrl: statusInstanceUrl,
@@ -561,10 +706,12 @@ export function openAuthorSheetModal({
         protocol === 'mastodon' && authStore.get().isMastodonConnected
           ? fetchLists().catch(() => [])
           : Promise.resolve([]),
+        getLocalModeratedAccounts().catch(() => ({ blocks: [], mutes: [] })),
       ]);
       if (closed) return;
       lists = Array.isArray(userLists) ? userLists : [];
       recentPosts = Array.isArray(statuses) ? statuses.slice(0, 10) : [];
+      localModState = freshLocalMod;
       if (!detail?.profile && recentPosts.length === 0 && fetchErrorMsg) {
         actionError = fetchErrorMsg;
       }

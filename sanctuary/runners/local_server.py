@@ -722,6 +722,8 @@ def get_loaded_model_name():
     """Returns the filename of the active or configured GGUF model."""
     target = _current_model or os.getenv("LOCAL_MODEL_NAME", "")
     if target:
+        if target.strip().lower().endswith(".gguf"):
+            return os.path.basename(target.strip())
         resolved = resolve_model_path(target)
         return os.path.basename(resolved or target)
     downloaded = list_local_models()
@@ -735,6 +737,7 @@ def resolve_model_path(model_key):
     user_profile = os.environ.get("USERPROFILE") or os.path.expanduser("~")
     paths = [
         os.path.join(BASE_DIR, "models", model_key),
+        os.path.join(BASE_DIR, "models", "llm", model_key),
         os.path.join(user_profile, ".lmstudio", "models", model_key),
         model_key
     ]

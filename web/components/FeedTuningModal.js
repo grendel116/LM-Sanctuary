@@ -5,7 +5,7 @@ import {
   isDefaultFeedTuning,
   normalizeFeedTuning,
 } from '../core/feedRanker.js';
-import { feedStore, updateFeedTuning } from '../state/feedStore.js';
+import { clearLearnedTasteMemory, feedStore, updateFeedTuning } from '../state/feedStore.js';
 import { createClassicModalDialog } from './sanctuary/SanctuaryDialog.js';
 
 const TUNE_MODAL_SVG = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--primary-accent)" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="6" x2="20" y2="6"></line><circle cx="9" cy="6" r="2.2" fill="var(--bg-color, #121214)"></circle><line x1="4" y1="12" x2="20" y2="12"></line><circle cx="15" cy="12" r="2.2" fill="var(--bg-color, #121214)"></circle><line x1="4" y1="18" x2="20" y2="18"></line><circle cx="8" cy="18" r="2.2" fill="var(--bg-color, #121214)"></circle></svg>`;
@@ -69,7 +69,7 @@ export function openFeedTuningModal() {
 
   const desc = doc.createElement('p');
   desc.className = 'classic-modal-desc';
-  desc.textContent = 'Re-rank your feed locally across structure, media depth, and content balances—or ask any Sanctuary Program to adjust these weights for you.';
+  desc.textContent = 'Select discovery sources, local ranking weights, and concept anchors.';
 
   const scrollBody = doc.createElement('div');
   scrollBody.className = 'classic-modal-scroll-body';
@@ -87,12 +87,101 @@ export function openFeedTuningModal() {
     btn.addEventListener('click', () => {
       clearTimeout(saveTimer);
       lastLocalEditAt = Date.now();
-      void updateFeedTuning({ sliders: preset.sliders });
+      void updateFeedTuning(
+        { sliders: preset.sliders },
+        { updatedBy: preset.id === 'chronological' ? 'preset:chronological' : 'user' }
+      );
     });
     presetButtons.set(preset.id, btn);
     presetBar.appendChild(btn);
   }
   scrollBody.appendChild(presetBar);
+
+  function createChipListEditor({
+    titleText,
+    placeholder,
+    btnLabel,
+    inputId,
+    datasetAttr,
+    datasetVal,
+    onAdd,
+  }) {
+    const wrap = doc.createElement('div');
+    wrap.className = 'feed-concept-group';
+
+    const lbl = doc.createElement('label');
+    lbl.setAttribute('for', inputId);
+    lbl.className = 'feed-concept-heading';
+    lbl.textContent = titleText;
+
+    const form = doc.createElement('form');
+    form.className = 'list-create-row feed-concept-form';
+    const input = doc.createElement('input');
+    input.type = 'text';
+    input.id = inputId;
+    input.className = 'onboarding-input';
+    input.placeholder = placeholder;
+    const addBtn = doc.createElement('button');
+    addBtn.type = 'submit';
+    addBtn.className = 'btn-sleek-pill';
+    addBtn.textContent = btnLabel;
+    form.append(input, addBtn);
+
+    const chipsWrap = doc.createElement('div');
+    chipsWrap.className = 'moderation-filter-chips feed-concept-chips';
+    chipsWrap.dataset[datasetAttr] = datasetVal;
+
+    form.addEventListener('submit', (e) => {
+      e.preventDefault();
+      const raw = input.value.replace(/\s+/g, ' ').trim();
+      if (!raw) return;
+      input.value = '';
+      lastLocalEditAt = Date.now();
+      onAdd(raw);
+    });
+
+    wrap.append(lbl, form, chipsWrap);
+    return { wrap, chipsWrap };
+  }
+
+  // Sovereign Discovery Sources (Channels & Instances)
+  const sourcesSection = doc.createElement('div');
+  sourcesSection.className = 'classic-section-divider feed-tuning-section';
+  const srcHeading = doc.createElement('h4');
+  srcHeading.className = 'modal-sub-header';
+  srcHeading.textContent = 'Discovery Sources';
+  const srcSub = doc.createElement('p');
+  srcSub.className = 'classic-card-subtext';
+  srcSub.textContent = 'Topic hashtags, community ATProto feeds, and independent Fediverse instances fetched directly for the Feed stream.';
+
+  const channelEditor = createChipListEditor({
+    titleText: 'Topic Channels & ATProto Feeds',
+    placeholder: 'e.g. cooperatives, mutual aid, linux, at://...',
+    btnLabel: '+ Channel',
+    inputId: 'feed-channel-input',
+    datasetAttr: 'sourceKind',
+    datasetVal: 'channels',
+    onAdd: (val) => {
+      const cur = normalizeFeedTuning(feedStore.get().tuning);
+      void updateFeedTuning({ discoveryChannels: [...cur.discoveryChannels, val] });
+    },
+  });
+
+  const instanceEditor = createChipListEditor({
+    titleText: 'Independent Instances',
+    placeholder: 'e.g. kolektiva.social, fosstodon.org...',
+    btnLabel: '+ Instance',
+    inputId: 'feed-instance-input',
+    datasetAttr: 'sourceKind',
+    datasetVal: 'instances',
+    onAdd: (val) => {
+      const cur = normalizeFeedTuning(feedStore.get().tuning);
+      void updateFeedTuning({ discoveryInstances: [...cur.discoveryInstances, val] });
+    },
+  });
+
+  sourcesSection.append(srcHeading, srcSub, channelEditor.wrap, instanceEditor.wrap);
+  scrollBody.appendChild(sourcesSection);
 
   // Grouped Sliders
   const sliderRefs = new Map();
@@ -188,72 +277,57 @@ export function openFeedTuningModal() {
   cSub.className = 'classic-card-subtext';
   cSub.textContent = 'Nudge topics up or down using local semantic matching and concept embeddings.';
 
-  function createConceptEditor({ kind, titleText, placeholder, btnLabel, inputId }) {
-    const wrap = doc.createElement('div');
-    wrap.className = 'feed-concept-group';
-
-    const lbl = doc.createElement('label');
-    lbl.setAttribute('for', inputId);
-    lbl.className = 'feed-concept-heading';
-    lbl.textContent = titleText;
-
-    const form = doc.createElement('form');
-    form.className = 'list-create-row feed-concept-form';
-    const input = doc.createElement('input');
-    input.type = 'text';
-    input.id = inputId;
-    input.className = 'onboarding-input';
-    input.placeholder = placeholder;
-    const addBtn = doc.createElement('button');
-    addBtn.type = 'submit';
-    addBtn.className = 'btn-sleek-pill';
-    addBtn.textContent = btnLabel;
-    form.append(input, addBtn);
-
-    const chipsWrap = doc.createElement('div');
-    chipsWrap.className = 'moderation-filter-chips feed-concept-chips';
-    chipsWrap.dataset.conceptKind = kind;
-
-    form.addEventListener('submit', (e) => {
-      e.preventDefault();
-      const phrase = input.value.replace(/\s+/g, ' ').trim();
-      if (!phrase) return;
-      input.value = '';
-      lastLocalEditAt = Date.now();
-      const cur = normalizeFeedTuning(feedStore.get().tuning);
-      const low = phrase.toLowerCase();
-      if (kind === 'boost') {
-        const nextBoost = [...cur.boostConcepts.filter((c) => c.toLowerCase() !== low), phrase];
-        const nextDampen = cur.dampenConcepts.filter((c) => c.toLowerCase() !== low);
-        void updateFeedTuning({ boostConcepts: nextBoost, dampenConcepts: nextDampen });
-      } else {
-        const nextDampen = [...cur.dampenConcepts.filter((c) => c.toLowerCase() !== low), phrase];
-        const nextBoost = cur.boostConcepts.filter((c) => c.toLowerCase() !== low);
-        void updateFeedTuning({ boostConcepts: nextBoost, dampenConcepts: nextDampen });
-      }
-    });
-
-    wrap.append(lbl, form, chipsWrap);
-    return { wrap, chipsWrap };
-  }
-
-  const boostEditor = createConceptEditor({
-    kind: 'boost',
+  const boostEditor = createChipListEditor({
     titleText: 'More Like This (Boost)',
     placeholder: 'e.g. worker cooperatives, Linux audio, mutual aid...',
     btnLabel: '+ Boost',
     inputId: 'feed-boost-concept-input',
+    datasetAttr: 'conceptKind',
+    datasetVal: 'boost',
+    onAdd: (phrase) => {
+      const cur = normalizeFeedTuning(feedStore.get().tuning);
+      const low = phrase.toLowerCase();
+      const nextBoost = [...cur.boostConcepts.filter((c) => c.toLowerCase() !== low), phrase];
+      const nextDampen = cur.dampenConcepts.filter((c) => c.toLowerCase() !== low);
+      void updateFeedTuning({ boostConcepts: nextBoost, dampenConcepts: nextDampen });
+    },
   });
-  const dampenEditor = createConceptEditor({
-    kind: 'dampen',
+  const dampenEditor = createChipListEditor({
     titleText: 'Less Like This (Dampen)',
     placeholder: 'e.g. crypto hype, billionaire drama, outrage bait...',
     btnLabel: '- Dampen',
     inputId: 'feed-dampen-concept-input',
+    datasetAttr: 'conceptKind',
+    datasetVal: 'dampen',
+    onAdd: (phrase) => {
+      const cur = normalizeFeedTuning(feedStore.get().tuning);
+      const low = phrase.toLowerCase();
+      const nextDampen = [...cur.dampenConcepts.filter((c) => c.toLowerCase() !== low), phrase];
+      const nextBoost = cur.boostConcepts.filter((c) => c.toLowerCase() !== low);
+      void updateFeedTuning({ boostConcepts: nextBoost, dampenConcepts: nextDampen });
+    },
   });
 
   conceptsSection.append(ch, cSub, boostEditor.wrap, dampenEditor.wrap);
   scrollBody.appendChild(conceptsSection);
+
+  // Learned local personal taste memory section
+  const tasteSection = doc.createElement('div');
+  tasteSection.className = 'feed-tuning-concepts-section';
+  const th = doc.createElement('h4');
+  th.className = 'modal-sub-header';
+  th.textContent = 'Learned Taste Memory';
+  const tasteSummaryEl = doc.createElement('p');
+  tasteSummaryEl.className = 'classic-card-subtext';
+  const clearTasteBtn = doc.createElement('button');
+  clearTasteBtn.type = 'button';
+  clearTasteBtn.className = 'edit-btn';
+  clearTasteBtn.textContent = 'Reset Learned Taste';
+  clearTasteBtn.addEventListener('click', () => {
+    void clearLearnedTasteMemory();
+  });
+  tasteSection.append(th, tasteSummaryEl, clearTasteBtn);
+  scrollBody.appendChild(tasteSection);
 
   // Footer actions
   const footer = doc.createElement('div');
@@ -269,6 +343,8 @@ export function openFeedTuningModal() {
       sliders: FEED_TUNING_PRESETS[0].sliders,
       boostConcepts: [],
       dampenConcepts: [],
+      discoveryChannels: [],
+      discoveryInstances: [],
     });
   });
 
@@ -281,42 +357,36 @@ export function openFeedTuningModal() {
 
   modal.card.append(heading, desc, scrollBody, footer);
 
-  function renderChips(chipsWrap, list, kind) {
+  function renderChipList(chipsWrap, list, { emptyText, chipClass, ariaPrefix, onRemove }) {
     chipsWrap.replaceChildren();
     if (!Array.isArray(list) || list.length === 0) {
       const empty = doc.createElement('span');
       empty.className = 'classic-card-subtext';
-      empty.textContent = kind === 'boost' ? 'No boosted concepts yet.' : 'No dampened concepts yet.';
+      empty.textContent = emptyText;
       chipsWrap.appendChild(empty);
       return;
     }
-    for (const concept of list) {
+    for (const entry of list) {
       const chip = doc.createElement('div');
-      chip.className = `moderation-filter-chip feed-concept-chip feed-concept-${kind}`;
+      chip.className = `moderation-filter-chip feed-concept-chip ${chipClass}`;
       const lbl = doc.createElement('span');
       lbl.className = 'moderation-filter-chip-label';
-      lbl.textContent = concept;
+      lbl.textContent = entry;
       const rmBtn = doc.createElement('button');
       rmBtn.type = 'button';
       rmBtn.className = 'moderation-filter-chip-remove';
-      rmBtn.setAttribute('aria-label', `Remove ${kind} concept ${concept}`);
+      rmBtn.setAttribute('aria-label', `${ariaPrefix} ${entry}`);
       rmBtn.textContent = '×';
       rmBtn.addEventListener('click', () => {
         lastLocalEditAt = Date.now();
-        const cur = normalizeFeedTuning(feedStore.get().tuning);
-        const low = concept.toLowerCase();
-        if (kind === 'boost') {
-          void updateFeedTuning({ boostConcepts: cur.boostConcepts.filter((c) => c.toLowerCase() !== low) });
-        } else {
-          void updateFeedTuning({ dampenConcepts: cur.dampenConcepts.filter((c) => c.toLowerCase() !== low) });
-        }
+        onRemove(entry);
       });
       chip.append(lbl, rmBtn);
       chipsWrap.appendChild(chip);
     }
   }
 
-  let lastConceptSig = '';
+  let lastChipSig = '';
   function syncFromStore() {
     if (closed) return;
     const tuning = normalizeFeedTuning(feedStore.get().tuning);
@@ -332,13 +402,62 @@ export function openFeedTuningModal() {
         btn.classList.toggle('is-active', slidersMatchPreset(tuning.sliders, preset.sliders));
       }
     }
+    const st = feedStore.get();
+    const posCount = Array.isArray(st.tasteMemory?.positive) ? st.tasteMemory.positive.length : 0;
+    const negCount = Array.isArray(st.tasteMemory?.negative) ? st.tasteMemory.negative.length : 0;
+    const impCount = st.implicitAuthors ? Object.keys(st.implicitAuthors).length : 0;
+    tasteSummaryEl.textContent = `${posCount} liked/read · ${negCount} skipped/dismissed (stored locally)`;
+    clearTasteBtn.disabled = posCount === 0 && negCount === 0 && impCount === 0;
     resetBtn.disabled = isDefaultFeedTuning(tuning);
 
-    const nextSig = `${tuning.boostConcepts.join('\u001f')}||${tuning.dampenConcepts.join('\u001f')}`;
-    if (nextSig !== lastConceptSig) {
-      lastConceptSig = nextSig;
-      renderChips(boostEditor.chipsWrap, tuning.boostConcepts, 'boost');
-      renderChips(dampenEditor.chipsWrap, tuning.dampenConcepts, 'dampen');
+    const nextSig = JSON.stringify([
+      tuning.discoveryChannels,
+      tuning.discoveryInstances,
+      tuning.boostConcepts,
+      tuning.dampenConcepts,
+    ]);
+    if (nextSig !== lastChipSig) {
+      lastChipSig = nextSig;
+      renderChipList(channelEditor.chipsWrap, tuning.discoveryChannels, {
+        emptyText: 'Using Boost concepts & Sanctuary defaults.',
+        chipClass: 'feed-source-chip',
+        ariaPrefix: 'Remove channel',
+        onRemove: (entry) => {
+          const cur = normalizeFeedTuning(feedStore.get().tuning);
+          const low = entry.toLowerCase();
+          void updateFeedTuning({ discoveryChannels: cur.discoveryChannels.filter((c) => c.toLowerCase() !== low) });
+        },
+      });
+      renderChipList(instanceEditor.chipsWrap, tuning.discoveryInstances, {
+        emptyText: 'Default: kolektiva.social, social.coop, union.place, todon.eu, todon.nl, babka.social, lemmy.ml, hexbear.net, lemmygrad.ml, lemmy.dbzer0.com',
+        chipClass: 'feed-source-chip',
+        ariaPrefix: 'Remove instance',
+        onRemove: (entry) => {
+          const cur = normalizeFeedTuning(feedStore.get().tuning);
+          const low = entry.toLowerCase();
+          void updateFeedTuning({ discoveryInstances: cur.discoveryInstances.filter((c) => c.toLowerCase() !== low) });
+        },
+      });
+      renderChipList(boostEditor.chipsWrap, tuning.boostConcepts, {
+        emptyText: 'No boosted concepts yet.',
+        chipClass: 'feed-concept-boost',
+        ariaPrefix: 'Remove boost concept',
+        onRemove: (entry) => {
+          const cur = normalizeFeedTuning(feedStore.get().tuning);
+          const low = entry.toLowerCase();
+          void updateFeedTuning({ boostConcepts: cur.boostConcepts.filter((c) => c.toLowerCase() !== low) });
+        },
+      });
+      renderChipList(dampenEditor.chipsWrap, tuning.dampenConcepts, {
+        emptyText: 'No dampened concepts yet.',
+        chipClass: 'feed-concept-dampen',
+        ariaPrefix: 'Remove dampen concept',
+        onRemove: (entry) => {
+          const cur = normalizeFeedTuning(feedStore.get().tuning);
+          const low = entry.toLowerCase();
+          void updateFeedTuning({ dampenConcepts: cur.dampenConcepts.filter((c) => c.toLowerCase() !== low) });
+        },
+      });
     }
   }
 

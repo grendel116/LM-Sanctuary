@@ -15,6 +15,7 @@ import {
   runBridgeRetry,
   startThreadsOAuthFlow,
 } from '../../queries/socialClient.js';
+import { formatApiErrorMessage } from '../../queries/fetch/fetchWrapper.js';
 import { cleanThreadsAuthCode } from '../../queries/threads.js';
 import {
   authStore,
@@ -47,19 +48,6 @@ function openExternalAuthorizeUrl(authorizeUrl) {
   if (typeof win.pywebview?.api?.open_external === 'function') {
     return Promise.resolve(win.pywebview.api.open_external(authorizeUrl))
       .then((opened) => (opened === false ? win.open?.(authorizeUrl, '_blank', 'noopener,noreferrer') : true))
-      .catch(() => win.open?.(authorizeUrl, '_blank', 'noopener,noreferrer'));
-  }
-  if (win.chrome?.webview && typeof globalThis.fetch === 'function') {
-    return globalThis.fetch('/api/social/open-external', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url: authorizeUrl }),
-    })
-      .then((r) => (r.ok ? r.json() : null))
-      .then((d) => {
-        if (!d?.opened) return win.open?.(authorizeUrl, '_blank', 'noopener,noreferrer');
-        return true;
-      })
       .catch(() => win.open?.(authorizeUrl, '_blank', 'noopener,noreferrer'));
   }
   if (typeof win.open === 'function') {
@@ -105,7 +93,7 @@ export function openThreadsSetupModal({ onConnected } = {}) {
   statusEl.hidden = true;
 
   function setStatus(msg) {
-    const clean = String(msg || '').trim();
+    const clean = formatApiErrorMessage(msg);
     statusEl.textContent = clean;
     statusEl.hidden = !clean;
   }
@@ -359,7 +347,7 @@ export function openUserModal({
   modal.card.append(heading, feedbackEl, bodyHost);
 
   function setStatus(msg) {
-    const clean = String(msg || '').trim();
+    const clean = formatApiErrorMessage(msg);
     feedbackEl.textContent = clean;
     feedbackEl.hidden = !clean;
   }
@@ -453,8 +441,8 @@ export function openUserModal({
         title.className = 'account-connected-name';
         title.textContent = `${r.protocol} ${r.operation}`;
         const sub = doc.createElement('span');
-        sub.className = 'classic-card-subtext';
-        sub.textContent = r.lastError || 'Temporary rate limit';
+        sub.className = 'classic-card-subtext retry-error-subtext';
+        sub.textContent = formatApiErrorMessage(r.lastError, 'Temporary rate limit');
         info.append(title, sub);
         metaWrap.appendChild(info);
 

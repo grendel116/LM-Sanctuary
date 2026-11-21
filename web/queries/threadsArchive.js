@@ -197,17 +197,6 @@ export function buildMastodonImportCsv(_kind, accounts = []) {
   return `${lines.join('\n')}\n`;
 }
 
-function getBackendOriginIfAvailable() {
-  if (globalThis.Capacitor?.Plugins?.SanctuaryNativeStore) return '';
-  if (typeof globalThis.process?.versions?.node === 'string' && !globalThis.__SANCTUARY_FORCE_HTTP_STORE__) {
-    return '';
-  }
-  const loc = globalThis.location;
-  if (!loc || !loc.origin || loc.origin === 'null') return '';
-  if (loc.protocol !== 'http:' && loc.protocol !== 'https:') return '';
-  return loc.origin.replace(/\/+$/, '');
-}
-
 async function resolveStrictFederatedThreadsAccount({ instanceUrl, accessToken, username }) {
   const handle = normalizeHandle(username);
   if (!handle) return null;
@@ -237,15 +226,6 @@ async function resolveStrictFederatedThreadsAccount({ instanceUrl, accessToken, 
 }
 
 export async function getThreadsImportState() {
-  const origin = getBackendOriginIfAvailable();
-  if (origin && typeof globalThis.fetch === 'function') {
-    try {
-      const res = await globalThis.fetch(`${origin}/api/social/threads/import-state`);
-      if (res.ok) return res.json();
-    } catch {
-      // Fallback to local KV storage
-    }
-  }
   const archive = await kvGet('threads_import_archive_v1', null);
   const summary = archive?.counts
     ? {
@@ -262,19 +242,6 @@ export async function getThreadsImportState() {
 
 export async function parseThreadsArchiveFile(file) {
   if (!file) throw new Error('Select a Threads export .zip file first.');
-  const origin = getBackendOriginIfAvailable();
-  if (origin && typeof globalThis.FormData === 'function' && typeof globalThis.fetch === 'function') {
-    const form = new globalThis.FormData();
-    form.append('file', file, file.name || 'threads-export.zip');
-    const res = await globalThis.fetch(`${origin}/api/social/threads/import-parse`, {
-      method: 'POST',
-      body: form,
-    });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(data?.error || `Import parse failed (${res.status})`);
-    return data;
-  }
-
   const ab = await file.arrayBuffer();
   const parsed = await parseThreadsArchiveBuffer(ab, file.name || 'threads-export.zip');
   await kvSet('threads_import_archive_v1', parsed);
@@ -291,18 +258,6 @@ export async function downloadThreadsArchiveCsv(kind) {
   if (cleanKind !== 'mutuals' && cleanKind !== 'following') {
     throw new Error('Only mutuals and following CSV exports are supported.');
   }
-  const origin = getBackendOriginIfAvailable();
-  if (origin && globalThis.location && typeof globalThis.document?.createElement === 'function') {
-    const doc = globalThis.document;
-    const a = doc.createElement('a');
-    a.href = `${origin}/api/social/threads/import-csv/${encodeURIComponent(cleanKind)}`;
-    a.download = `mastodon_threads_${cleanKind}.csv`;
-    doc.body?.appendChild(a);
-    a.click();
-    a.remove();
-    return { filename: a.download };
-  }
-
   const archive = await kvGet('threads_import_archive_v1', null);
   if (!archive || !Array.isArray(archive[cleanKind])) {
     throw new Error('No imported Threads archive found.');
@@ -329,21 +284,6 @@ export async function startThreadsArchiveSync({
   delayMs = 1100,
 } = {}) {
   const scope = followScope === 'following' ? 'following' : 'mutuals';
-  const origin = getBackendOriginIfAvailable();
-  if (origin && typeof globalThis.fetch === 'function') {
-    const res = await globalThis.fetch(`${origin}/api/social/threads/import-sync`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        followScope: scope,
-        delaySec: Math.max(0, Number(delayMs) / 1000),
-      }),
-    });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(data?.error || `Sync failed (${res.status})`);
-    return data.job || clientJobState;
-  }
-
   const archive = await kvGet('threads_import_archive_v1', null);
   if (!archive) throw new Error('Import a Threads data export ZIP first.');
 
@@ -420,12 +360,6 @@ export async function startThreadsArchiveSync({
 }
 
 export async function cancelThreadsArchiveSync() {
-  const origin = getBackendOriginIfAvailable();
-  if (origin && typeof globalThis.fetch === 'function') {
-    const res = await globalThis.fetch(`${origin}/api/social/threads/import-cancel`, { method: 'POST' });
-    const data = await res.json().catch(() => ({}));
-    if (res.ok && data?.job) return data.job;
-  }
   clientJobCancelled = true;
   if (clientJobState.status === 'running') {
     clientJobState = { ...clientJobState, status: 'cancelled', finishedAt: Date.now() };

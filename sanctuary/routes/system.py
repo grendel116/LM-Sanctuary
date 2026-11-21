@@ -76,6 +76,7 @@ def project_settings():
         "folders": [default_folder],
         "security_preset": "ask_always",
         "artifact_review_policy": "ask_always",
+        "gemini_api_key": os.getenv("GEMINI_API_KEY", "").strip(),
         "search_engine": "web_crawling",
         "searxng_url": "",
         "tts_voice": "af_heart"
@@ -113,6 +114,15 @@ def project_settings():
                 if settings.get("search_engine") not in ("web_crawling", "wikipedia"):
                     settings["search_engine"] = "web_crawling"
                     dirty = True
+
+                saved_key = str(settings.get("gemini_api_key") or "").strip()
+                env_key = os.getenv("GEMINI_API_KEY", "").strip()
+                if saved_key:
+                    os.environ["GEMINI_API_KEY"] = saved_key
+                elif env_key:
+                    settings["gemini_api_key"] = env_key
+                    dirty = True
+
                 if dirty:
                     with open(settings_path, "w", encoding="utf-8") as f:
                         json.dump(settings, f, indent=2)
@@ -155,21 +165,38 @@ def project_settings():
                         settings = json.load(f)
                 except Exception:
                     pass
+
+            if "gemini_api_key" in data:
+                gemini_api_key = str(data.get("gemini_api_key") or "").strip()
+            else:
+                gemini_api_key = str(settings.get("gemini_api_key") or "").strip()
             
             settings.update({
                 "folders": cleaned_folders,
                 "security_preset": security_preset,
                 "artifact_review_policy": artifact_review_policy,
+                "gemini_api_key": gemini_api_key,
                 "search_engine": search_engine,
                 "searxng_url": searxng_url,
                 "tts_voice": tts_voice
             })
             
-            # Keep environment variable in sync
+            # Keep environment variables and cached settings in sync
             os.environ["TTS_VOICE"] = tts_voice
+            if gemini_api_key:
+                os.environ["GEMINI_API_KEY"] = gemini_api_key
+            elif "gemini_api_key" in data:
+                os.environ.pop("GEMINI_API_KEY", None)
             
             with open(settings_path, "w", encoding="utf-8") as f:
                 json.dump(settings, f, indent=2, ensure_ascii=False)
+            try:
+                import runners.program as rp
+
+                rp._settings_cache = None
+                rp._settings_mtime = 0.0
+            except Exception:
+                pass
             return jsonify({"status": "success", "settings": settings})
         except Exception as e:
             print(f"Error saving project settings: {e}")

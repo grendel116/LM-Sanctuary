@@ -66,6 +66,20 @@ test('reconcileChat is idempotent, deduplicates IDs, preserves busy/transient ro
     assert.ok(chat.querySelector('[data-msg-id="prgm_1"] .message.editing'));
     assert.ok(chat.querySelector('[data-msg-id="notice_1"]'));
     assert.equal(chat.querySelectorAll(LIVE_ROW_SELECTOR).length, 3);
+
+    // Once editing class is removed, reconcileChat must rebuild a row with stale edit-textarea even if contentHash matches
+    progBubble.classList.remove('editing');
+    const staleTa = doc.createElement('textarea');
+    staleTa.className = 'edit-textarea';
+    progBubble.replaceChildren(staleTa);
+
+    const rebuilt = reconcileChat(chat, [
+      { id: 'usr_1', role: 'user', text: 'First draft', timestamp: 100, queued: false },
+      { id: 'prgm_1', role: 'program', sender_id: 'sebile', text: 'Changed on disk', timestamp: 102 },
+    ]);
+    assert.equal(rebuilt.changed, true);
+    assert.equal(chat.querySelector('[data-msg-id="prgm_1"] .edit-textarea'), null);
+    assert.ok(chat.querySelector('[data-msg-id="prgm_1"] .message-text'));
   } finally {
     dom.restore();
   }
@@ -191,10 +205,13 @@ test('renderLiveToolLogs preserves open state of card across polling ticks', () 
     renderLiveToolLogs(bubble, [
       { id: 'live_1', name: 'web_search', args: { query: 'skyrim shaders' }, status: 'completed', duration: 1.4, response: 'Res 1' },
       { id: 'live_2', name: 'read_webpage', args: { url: 'https://example.com/a' }, status: 'running' },
+      { id: 'live_3', name: 'antigravity:run_command', args: { CommandLine: 'pytest' }, status: 'cancelled', duration: 0.4 },
     ]);
 
     assert.equal(bubble.querySelector('details.antigravity-logs-card').open, true);
-    assert.equal(card.querySelector('.ag-timer-text')?.textContent, 'Working... · 2 tool calls');
+    assert.equal(card.querySelector('.ag-timer-text')?.textContent, 'Working... · 3 tool calls');
+    const actions = Array.from(bubble.querySelectorAll('.ag-log-action')).map((el) => el.textContent);
+    assert.ok(actions.includes('Stopped'));
   } finally {
     dom.restore();
   }

@@ -1,4 +1,4 @@
-import { applyKeywordFilters } from '../core/schema/unifiedItem.js';
+import { applyKeywordFilters, canonicalizeActorHandle } from '../core/schema/unifiedItem.js';
 import {
   clearUnifiedNotifications,
   dismissUnifiedNotifications,
@@ -175,27 +175,98 @@ function pickPrimaryGroupItem(items, kind) {
   })[0];
 }
 
+function findCachedPostByCanonicalOrMasto(canonKey, mastoId) {
+  const streams = feedStore.get()?.streams || {};
+  const targetCanon = String(canonKey || '');
+  const targetSid = String(mastoId || '');
+  for (const bucket of Object.values(streams)) {
+    for (const post of bucket?.items || []) {
+      const pSid = String(post?._meta?.mastodon?.statusId || '');
+      if ((targetCanon && post?.id === targetCanon) || (targetSid && pSid === targetSid)) {
+        return post;
+      }
+    }
+  }
+  return null;
+}
+
 function buildThreadTargetItem(primaryItem, kind) {
   if (!primaryItem) return null;
-  if (kind === 'reply' || kind === 'mention' || kind === 'quote') {
-    return primaryItem;
-  }
-  const linkedMastoId = primaryItem._meta?.linkedIds?.mastodonStatusId;
-  if (isSyntheticThreadsInsightItem(primaryItem) && linkedMastoId) {
+  const nm = primaryItem._meta?.notification || {};
+  const linked = nm.linkedIds || primaryItem._meta?.linkedIds || null;
+  const canonKey = String(nm.canonicalPostKey || '');
+  const linkedMastoId = String(
+    linked?.mastodonStatusId
+    || (canonKey.startsWith('mastodon:') ? canonKey.slice('mastodon:'.length) : '')
+    || ''
+  );
+
+  if (linkedMastoId) {
+    const cached = findCachedPostByCanonicalOrMasto(canonKey || `mastodon:${linkedMastoId}`, linkedMastoId);
+    const focusMeta = (kind === 'reply' || kind === 'mention' || kind === 'quote')
+      ? { focusReplyId: primaryItem.id }
+      : {};
+    if (cached) {
+      return {
+        ...cached,
+        _meta: {
+          ...(cached._meta || {}),
+          linkedIds: linked || cached._meta?.linkedIds,
+          mastodon: {
+            ...(cached._meta?.mastodon || {}),
+            statusId: linkedMastoId,
+          },
+          ...focusMeta,
+        },
+      };
+    }
     return {
       ...primaryItem,
-      id: `mastodon:${linkedMastoId}`,
+      id: canonKey || `mastodon:${linkedMastoId}`,
       protocol: 'mastodon',
+      ...(kind === 'reply' || kind === 'mention' || kind === 'quote'
+        ? {
+            content_text: nm.targetPost?.text || '',
+            content_html: '',
+            author: { id: '', name: 'Post', handle: '' },
+            attachments: [],
+          }
+        : {}),
       _meta: {
         ...primaryItem._meta,
+        linkedIds: linked || primaryItem._meta?.linkedIds,
         mastodon: {
           ...(primaryItem._meta?.mastodon || {}),
-          statusId: String(linkedMastoId),
+          statusId: linkedMastoId,
         },
+        ...focusMeta,
       },
     };
   }
-  return primaryItem;
+
+  if (primaryItem.protocol === 'threads' && primaryItem._meta?.threads?.parentPostId) {
+    const parentPid = String(primaryItem._meta.threads.parentPostId);
+    return {
+      id: `threads:${parentPid}`,
+      protocol: 'threads',
+      url: `https://www.threads.net/post/${parentPid}`,
+      content_text: '',
+      content_html: '',
+      date_published: primaryItem.date_published || '',
+      author: { id: '', name: 'Post', handle: '' },
+      attachments: [],
+      metrics: { likes: 0, replies: 0, reposts: 0 },
+      _meta: {
+        threads: { postId: parentPid },
+        focusReplyId: primaryItem.id,
+      },
+    };
+  }
+
+  if (kind === 'reply' || kind === 'mention' || kind === 'quote') {
+    return primaryItem;
+  }
+  return nm.targetPost || primaryItem;
 }
 
 function extractThumbUrl(item) {
@@ -532,7 +603,7 @@ export async function refreshActivityNotifications({ limit = 40, markSeen = fals
     activityStore.set({ loading: true, error: null });
   }
   try {
-    void hydrateCachedModeration().catch(() => {});
+    await hydrateCachedModeration().catch(() => {});
     const { items: rawItems = [], warnings = [] } = await fetchUnifiedNotifications({ limit });
     const filtered = applyKeywordFilters(rawItems, [], feedStore.get().moderatedActors || []);
     const state = activityStore.get();
@@ -582,6 +653,29 @@ export async function dismissActivityGroup(group) {
     ids: group.notificationIds || [],
     mastodonNotifIds: group.mastodonNotifIds || [],
     threadsWatermarks: group.threadsWatermarks || {},
+  });
+}
+
+export function removeActivityByActor(actor, protocol = 'threads') {
+  const handle = String(actor?.handle || actor?.acct || actor?.username || '').trim().replace(/^@/, '').toLowerCase();
+  const aid = String(actor?.id || '').trim().toLowerCase();
+  const canon = handle ? canonicalizeActorHandle(handle, protocol) : '';
+  if (!handle && !aid && !canon) return;
+  const cur = activityStore.get();
+  const nextItems = (cur.items || []).filter((it) => {
+    const itActor = it?._meta?.notification?.actor || it?.author || {};
+    const itProto = String(it?.protocol || 'mastodon').toLowerCase();
+    const itHandle = String(itActor.handle || '').trim().replace(/^@/, '').toLowerCase();
+    const itId = String(itActor.id || '').trim().toLowerCase();
+    const itCanon = itHandle ? canonicalizeActorHandle(itHandle, itProto) : '';
+    if (canon && itCanon && canon === itCanon) return false;
+    if (handle && itHandle && handle === itHandle) return false;
+    if (aid && itId && aid === itId) return false;
+    return true;
+  });
+  activityStore.set({
+    items: nextItems,
+    hasUnread: computeUnreadFromItems(nextItems, cur.lastSeenTs, cur.seenThreadsMetrics),
   });
 }
 

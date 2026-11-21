@@ -22,7 +22,7 @@ test('3-column shell boots synchronously into Home, keeps right Sanctuary dock m
   let feedTrendCalls = 0;
   globalThis.fetch = async (url) => {
     const u = String(url);
-    if (u.includes('/api/v1/trends/statuses')) {
+    if (u.includes('/api/v1/timelines/tag/councilcommunism') || u.includes('/api/v1/timelines/tag/mutualaid')) {
       feedTrendCalls += 1;
       return new Response(
         JSON.stringify([
@@ -36,6 +36,13 @@ test('3-column shell boots synchronously into Home, keeps right Sanctuary dock m
         ]),
         { status: 200, headers: { 'content-type': 'application/json' } }
       );
+    }
+    if (u.includes('app.bsky.feed.getFeed')) {
+      assert.equal(u.includes('whats-hot'), false);
+      return new Response(JSON.stringify({ feed: [], cursor: null }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
     }
     if (u.includes('/api/v1/statuses/trend_1/context')) {
       return new Response(JSON.stringify({ ancestors: [], descendants: [] }), {
@@ -123,6 +130,10 @@ test('3-column shell boots synchronously into Home, keeps right Sanctuary dock m
     const shellCss = fs.readFileSync(SHELL_CSS_PATH, 'utf8');
     assert.equal(shellCss.includes('.primary-tab-btn[aria-current="page"]::after'), false);
     assert.match(shellCss, /\.mobile-compose-fab\s*\{[^}]*inline-size:\s*36px;[^}]*border-radius:\s*50%;/s);
+    assert.match(shellCss, /html,\s*body\s*\{[^}]*overflow:\s*hidden;/s);
+    assert.match(shellCss, /\.app-shell-frame\s*\{[^}]*position:\s*relative;/s);
+    assert.match(shellCss, /\.center-column-wrap\s*\{[^}]*position:\s*relative;/s);
+    assert.match(shellCss, /\.sanctuary-right-dock\s*\{[^}]*position:\s*relative;/s);
 
     // Right Sanctuary dock mounts once with #user-input, 4 header actions (Voice Call, Image Gallery, Quest Log, Memory), and a collapsible toggle
     const rightDock = host.querySelector('.sanctuary-right-dock');

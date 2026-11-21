@@ -9,9 +9,69 @@ import {
 import { plainTextToHtml } from '../core/schema/unifiedItem.js';
 import { FetchError } from './fetch/FetchError.js';
 import { fetchWrapper } from './fetch/fetchWrapper.js';
+import { requestThreadsProxy } from './sanctuary.js';
+
+function extractThreadsProxyError(body, status) {
+  if (body && typeof body === 'object') {
+    if (body.error && typeof body.error === 'object') {
+      const msg = body.error.error_user_msg || body.error.message;
+      if (msg) return String(msg).trim();
+    }
+    if (typeof body.error === 'string' && body.error) return body.error;
+    if (typeof body.error_message === 'string' && body.error_message) return body.error_message;
+    if (typeof body.message === 'string' && body.message) return body.message;
+  }
+  if (typeof body === 'string' && body.trim()) return body.trim();
+  return `HTTP ${status}`;
+}
+
+async function threadsFetch(url, options = {}) {
+  const isNative = Boolean(globalThis.Capacitor?.isNativePlatform?.());
+  if (typeof options.fetchImpl !== 'function' && !isNative) {
+    const method = String(options.method || 'GET').toUpperCase();
+    const body = options.body instanceof URLSearchParams
+      ? options.body.toString()
+      : (typeof options.body === 'string' ? options.body : '');
+    const relayed = await requestThreadsProxy({
+      url: String(url),
+      method,
+      body,
+      ...(options.timeoutMs ? { timeoutMs: options.timeoutMs } : {}),
+    });
+    if (relayed && typeof relayed.status === 'number') {
+      if (relayed.status >= 200 && relayed.status < 300) {
+        return relayed.body;
+      }
+      throw new FetchError(extractThreadsProxyError(relayed.body, relayed.status), {
+        status: relayed.status,
+        url: String(url),
+        body: relayed.body,
+      });
+    }
+  }
+  return fetchWrapper(url, options);
+}
 
 const THREADS_DELETE_PERM_MSG =
   "Threads token lacks 'threads_delete' permission. Enable threads_delete under Use Cases → Permissions in your Meta App and update your token.";
+const THREADS_MANAGE_REPLIES_PERM_MSG =
+  "Threads token lacks 'threads_manage_replies' permission. Enable threads_manage_replies under Use Cases → Permissions in your Meta App and update your token.";
+const THREADS_TRANSIENT_LAG_RE = /2207027|4279009|cannot be found|does not exist|not ready|processing|"is_transient":\s*true/i;
+
+function isTransientThreadsLag(err) {
+  if (!(err instanceof FetchError)) return false;
+  if (err.status >= 500) return true;
+  const rawErr = `${err.message || ''} ${JSON.stringify(err.body || '')}`;
+  return THREADS_TRANSIENT_LAG_RE.test(rawErr);
+}
+
+function extractThreadsErrorMessage(err, fallback = 'Threads request failed') {
+  const errObj = err?.body?.error && typeof err.body.error === 'object' ? err.body.error : null;
+  if (errObj?.error_user_msg || errObj?.message) {
+    return String(errObj.error_user_msg || errObj.message).trim();
+  }
+  return err?.message || fallback;
+}
 
 export const THREADS_POST_FIELDS =
   'id,media_product_type,media_type,media_url,thumbnail_url,permalink,username,text,timestamp,shortcode,is_quote_post,alt_text,link_attachment_url,topic_tag,replied_to,root_post,children{id,media_type,media_url,thumbnail_url,alt_text}';
@@ -76,7 +136,7 @@ export async function exchangeThreadsOAuthCode({
     redirect_uri: String(redirectUri || '').trim(),
     code: cleaned,
   });
-  return fetchWrapper(`${THREADS_TOKEN_BASE}/oauth/access_token`, {
+  return threadsFetch(`${THREADS_TOKEN_BASE}/oauth/access_token`, {
     method: 'POST',
     body: params,
     fetchImpl,
@@ -93,7 +153,7 @@ export async function exchangeThreadsLongLivedToken({
     client_secret: String(clientSecret || '').trim(),
     access_token: String(accessToken || '').trim(),
   });
-  return fetchWrapper(`${THREADS_TOKEN_BASE}/access_token?${qs.toString()}`, { fetchImpl });
+  return threadsFetch(`${THREADS_TOKEN_BASE}/access_token?${qs.toString()}`, { fetchImpl });
 }
 
 export async function refreshThreadsLongLivedToken({ accessToken, fetchImpl }) {
@@ -101,7 +161,7 @@ export async function refreshThreadsLongLivedToken({ accessToken, fetchImpl }) {
     grant_type: 'th_refresh_token',
     access_token: String(accessToken || '').trim(),
   });
-  return fetchWrapper(`${THREADS_TOKEN_BASE}/refresh_access_token?${qs.toString()}`, { fetchImpl });
+  return threadsFetch(`${THREADS_TOKEN_BASE}/refresh_access_token?${qs.toString()}`, { fetchImpl });
 }
 
 export function sanitizeThreadsTopicTag(tag) {
@@ -203,6 +263,7 @@ export async function createThreadsContainer({
   topicTag = '',
   quotePostId = '',
   replyControl = '',
+  pollDelayMs = 600,
   fetchImpl,
 }) {
   const params = new URLSearchParams({
@@ -231,27 +292,51 @@ export async function createThreadsContainer({
     params.set('children', children.join(','));
   }
 
-  return fetchWrapper(`${THREADS_GRAPH_BASE}/${encodeURIComponent(userId)}/threads`, {
-    method: 'POST',
-    body: params,
-    fetchImpl,
-  });
+  const endpoint = `${THREADS_GRAPH_BASE}/${encodeURIComponent(userId)}/threads`;
+  const maxAttempts = replyToId ? 4 : 2;
+  let lastErr = null;
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    try {
+      return await threadsFetch(endpoint, {
+        method: 'POST',
+        body: params,
+        fetchImpl,
+      });
+    } catch (err) {
+      lastErr = err;
+      if (attempt + 1 < maxAttempts && isTransientThreadsLag(err)) {
+        if (pollDelayMs > 0) await sleep(pollDelayMs * (1 + attempt * 0.75));
+        continue;
+      }
+      throw new Error(extractThreadsErrorMessage(err, 'Threads container creation failed'));
+    }
+  }
+  throw new Error(extractThreadsErrorMessage(lastErr, 'Threads container creation failed'));
 }
 
 export async function getThreadsContainerStatus({ containerId, accessToken, fetchImpl }) {
   const url = `${THREADS_GRAPH_BASE}/${encodeURIComponent(containerId)}?fields=id,status,error_message&access_token=${encodeURIComponent(accessToken)}`;
-  return fetchWrapper(url, { fetchImpl });
+  return threadsFetch(url, { fetchImpl });
 }
 
 export async function waitThreadsContainerReady({
   containerId,
   accessToken,
-  pollDelayMs = 1000,
+  pollDelayMs = 800,
   maxPolls = 15,
   fetchImpl,
 }) {
   for (let i = 0; i < maxPolls; i += 1) {
-    const info = await getThreadsContainerStatus({ containerId, accessToken, fetchImpl });
+    let info;
+    try {
+      info = await getThreadsContainerStatus({ containerId, accessToken, fetchImpl });
+    } catch (err) {
+      if (isTransientThreadsLag(err)) {
+        if (pollDelayMs > 0) await sleep(pollDelayMs);
+        continue;
+      }
+      throw err;
+    }
     if (!info?.status || info.status === 'FINISHED' || info.status === 'PUBLISHED') {
       return info;
     }
@@ -266,10 +351,10 @@ export async function waitThreadsContainerReady({
 /**
  * Step 2: Publish a created Threads container.
  */
-export async function publishThreadsContainer({ userId, accessToken, creationId, pollDelayMs = 500, fetchImpl }) {
+export async function publishThreadsContainer({ userId, accessToken, creationId, pollDelayMs = 800, fetchImpl }) {
   const endpoint = `${THREADS_GRAPH_BASE}/${encodeURIComponent(userId)}/threads_publish`;
   const runPublish = () =>
-    fetchWrapper(endpoint, {
+    threadsFetch(endpoint, {
       method: 'POST',
       body: new URLSearchParams({
         creation_id: creationId,
@@ -277,24 +362,36 @@ export async function publishThreadsContainer({ userId, accessToken, creationId,
       }),
       fetchImpl,
     });
-  try {
-    return await runPublish();
-  } catch (err) {
-    if (err instanceof FetchError && err.status >= 400) {
-      const rawErr = `${err.message || ''} ${JSON.stringify(err.body || '')}`.toLowerCase();
-      if (/2207027|4279009|not ready|processing/.test(rawErr)) {
+  const maxAttempts = 5;
+  let lastErr = null;
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    try {
+      return await runPublish();
+    } catch (err) {
+      lastErr = err;
+      if (attempt + 1 < maxAttempts && isTransientThreadsLag(err)) {
+        const waitMs = pollDelayMs > 0 ? Math.round(pollDelayMs * (1 + attempt * 0.75)) : 0;
+        const t0 = Date.now();
         await waitThreadsContainerReady({
           containerId: creationId,
           accessToken,
-          pollDelayMs,
-          maxPolls: 10,
+          pollDelayMs: waitMs,
+          maxPolls: 6,
           fetchImpl,
         });
-        return await runPublish();
+        const elapsed = Date.now() - t0;
+        if (waitMs > 0 && elapsed < waitMs * 0.5) {
+          await sleep(waitMs);
+        }
+        continue;
       }
+      if (err instanceof FetchError) {
+        throw new Error(extractThreadsErrorMessage(err, 'Threads publish failed'));
+      }
+      throw err;
     }
-    throw err;
   }
+  throw new Error(extractThreadsErrorMessage(lastErr, 'Threads publish failed'));
 }
 
 /**
@@ -327,6 +424,7 @@ export async function publishThreadsPost({
       topicTag,
       quotePostId,
       replyControl,
+      pollDelayMs,
       fetchImpl,
     });
     return publishThreadsContainer({
@@ -356,6 +454,7 @@ export async function publishThreadsPost({
       topicTag,
       quotePostId,
       replyControl,
+      pollDelayMs,
       fetchImpl,
     });
     await waitThreadsContainerReady({
@@ -388,6 +487,7 @@ export async function publishThreadsPost({
       ...(isVideo ? { videoUrl: resolvedUrl } : { imageUrl: resolvedUrl }),
       altText: att?.altText || att?.description || '',
       isCarouselItem: true,
+      pollDelayMs,
       fetchImpl,
     });
     await waitThreadsContainerReady({
@@ -409,6 +509,7 @@ export async function publishThreadsPost({
     topicTag,
     quotePostId,
     replyControl,
+    pollDelayMs,
     fetchImpl,
   });
   return publishThreadsContainer({
@@ -491,7 +592,7 @@ export function normalizeThreadsPostRecord(raw = {}, authorProfile = {}) {
  */
 export async function verifyThreadsCredentials({ accessToken, fetchImpl }) {
   const url = `${THREADS_GRAPH_BASE}/me?fields=id,username,name,threads_profile_picture_url,threads_biography,is_verified&access_token=${encodeURIComponent(accessToken)}`;
-  return fetchWrapper(url, { fetchImpl });
+  return threadsFetch(url, { fetchImpl });
 }
 
 /**
@@ -499,12 +600,20 @@ export async function verifyThreadsCredentials({ accessToken, fetchImpl }) {
  */
 export async function getOwnThreadsPosts({ userId, accessToken, limit = 20, fetchImpl }) {
   const url = `${THREADS_GRAPH_BASE}/${encodeURIComponent(userId)}/threads?fields=${encodeURIComponent(THREADS_POST_FIELDS)}&limit=${limit}&access_token=${encodeURIComponent(accessToken)}`;
-  return fetchWrapper(url, { fetchImpl });
+  return threadsFetch(url, { fetchImpl });
 }
 
 export async function getThreadsPost({ postId, accessToken, fetchImpl }) {
   const url = `${THREADS_GRAPH_BASE}/${encodeURIComponent(postId)}?fields=${encodeURIComponent(THREADS_POST_FIELDS)}&access_token=${encodeURIComponent(accessToken)}`;
-  return fetchWrapper(url, { fetchImpl });
+  try {
+    return await threadsFetch(url, { fetchImpl });
+  } catch (err) {
+    if (err instanceof FetchError && err.status >= 400 && err.status !== 404) {
+      const fallbackUrl = `${THREADS_GRAPH_BASE}/${encodeURIComponent(postId)}?fields=${encodeURIComponent(THREADS_REPLY_FIELDS)}&access_token=${encodeURIComponent(accessToken)}`;
+      return threadsFetch(fallbackUrl, { fetchImpl });
+    }
+    throw err;
+  }
 }
 
 /**
@@ -512,7 +621,7 @@ export async function getThreadsPost({ postId, accessToken, fetchImpl }) {
  */
 export async function getThreadsPostReplies({ postId, accessToken, fetchImpl }) {
   const url = `${THREADS_GRAPH_BASE}/${encodeURIComponent(postId)}/replies?fields=${encodeURIComponent(THREADS_REPLY_FIELDS)}&access_token=${encodeURIComponent(accessToken)}`;
-  return fetchWrapper(url, { fetchImpl });
+  return threadsFetch(url, { fetchImpl });
 }
 
 const threadsInsightsCache = new Map();
@@ -542,7 +651,7 @@ export async function getThreadsPostInsights({ postId, accessToken, fetchImpl } 
 
   const url = `${THREADS_GRAPH_BASE}/${encodeURIComponent(cleanId)}/insights?metric=likes,replies,reposts,quotes&access_token=${encodeURIComponent(accessToken)}`;
   try {
-    const body = await fetchWrapper(url, { fetchImpl, background: true, timeoutMs: 5000 });
+    const body = await threadsFetch(url, { fetchImpl, background: true, timeoutMs: 5000 });
     const rows = Array.isArray(body?.data) ? body.data : [];
     let likes = 0;
     let replies = 0;
@@ -574,12 +683,12 @@ export async function getThreadsPostInsights({ postId, accessToken, fetchImpl } 
  */
 export async function getThreadsConversation({ postId, accessToken, reverse = false, fetchImpl }) {
   const url = `${THREADS_GRAPH_BASE}/${encodeURIComponent(postId)}/conversation?fields=${encodeURIComponent(THREADS_REPLY_FIELDS)}&reverse=${reverse ? 'true' : 'false'}&access_token=${encodeURIComponent(accessToken)}`;
-  return fetchWrapper(url, { fetchImpl });
+  return threadsFetch(url, { fetchImpl });
 }
 
 export async function getThreadsMentions({ accessToken, limit = 20, fetchImpl }) {
   const url = `${THREADS_GRAPH_BASE}/me/mentions?fields=${encodeURIComponent(THREADS_POST_FIELDS)}&limit=${limit}&access_token=${encodeURIComponent(accessToken)}`;
-  return fetchWrapper(url, { fetchImpl });
+  return threadsFetch(url, { fetchImpl });
 }
 
 export async function searchThreadsKeyword({
@@ -588,6 +697,7 @@ export async function searchThreadsKeyword({
   searchMode = 'KEYWORD',
   limit = 15,
   accessToken,
+  timeoutMs,
   fetchImpl,
 }) {
   const qs = new URLSearchParams({
@@ -598,7 +708,10 @@ export async function searchThreadsKeyword({
     limit: String(limit),
     access_token: accessToken,
   });
-  return fetchWrapper(`${THREADS_GRAPH_BASE}/keyword_search?${qs.toString()}`, { fetchImpl });
+  return threadsFetch(`${THREADS_GRAPH_BASE}/keyword_search?${qs.toString()}`, {
+    ...(timeoutMs ? { timeoutMs } : {}),
+    fetchImpl,
+  });
 }
 
 export async function lookupThreadsProfile({ username, accessToken, fetchImpl }) {
@@ -608,7 +721,38 @@ export async function lookupThreadsProfile({ username, accessToken, fetchImpl })
     fields: 'username,name,profile_picture_url,biography,follower_count,is_verified',
     access_token: accessToken,
   });
-  return fetchWrapper(`${THREADS_GRAPH_BASE}/profile_lookup?${qs.toString()}`, { fetchImpl });
+  return threadsFetch(`${THREADS_GRAPH_BASE}/profile_lookup?${qs.toString()}`, { fetchImpl });
+}
+
+export async function manageThreadsReply({ replyId, accessToken, hide = true, fetchImpl }) {
+  const cleanId = String(replyId || '').replace(/^threads:(?:notif:)?/, '').trim();
+  if (!cleanId) return { success: false };
+  const url = `${THREADS_GRAPH_BASE}/${encodeURIComponent(cleanId)}/manage_reply`;
+  try {
+    return await threadsFetch(url, {
+      method: 'POST',
+      body: new URLSearchParams({
+        hide: hide ? 'true' : 'false',
+        access_token: accessToken,
+      }),
+      fetchImpl,
+    });
+  } catch (err) {
+    if (err instanceof FetchError) {
+      if (err.status === 404) return { success: true };
+      const errObj = err.body?.error && typeof err.body.error === 'object' ? err.body.error : {};
+      const code = Number(errObj.code);
+      const subcode = Number(errObj.error_subcode);
+      if (err.status === 403 || code === 10 || code === 200) {
+        throw new Error(THREADS_MANAGE_REPLIES_PERM_MSG);
+      }
+      if (err.status === 400 && code === 100 && subcode === 33) {
+        return { success: true };
+      }
+      throw new Error(extractThreadsErrorMessage(err, 'Threads manage_reply failed'));
+    }
+    throw err;
+  }
 }
 
 export async function deleteThreadsPost({ postId, accessToken, fetchImpl }) {
@@ -616,7 +760,7 @@ export async function deleteThreadsPost({ postId, accessToken, fetchImpl }) {
   if (!cleanId) return { success: false };
   const url = `${THREADS_GRAPH_BASE}/${encodeURIComponent(cleanId)}?access_token=${encodeURIComponent(accessToken)}`;
   try {
-    return await fetchWrapper(url, { method: 'DELETE', fetchImpl });
+    return await threadsFetch(url, { method: 'DELETE', fetchImpl });
   } catch (err) {
     if (err instanceof FetchError) {
       if (err.status === 404) return { success: true };

@@ -1,4 +1,5 @@
 import { createOfflineNotice } from '../components/OfflineNotice.js';
+import { createLoadingState } from '../components/ui/index.js';
 import { DEFAULT_AVATAR_DATA_URI } from '../constants/avatars.js';
 import {
   openImportProgramModal,
@@ -451,12 +452,14 @@ export function mountMessagesScreen(containerEl, {
 
     const streamEl = doc.createElement('div');
     streamEl.className = 'human-dm-messages';
-    const loadingEl = doc.createElement('p');
-    loadingEl.className = 'empty-state';
-    loadingEl.textContent = convo.rawConvo || convo.network === 'bluesky'
-      ? 'Loading messages...'
-      : `Send a direct Fediverse mention to @${String(convo.handle || '').replace(/^@/, '')}.`;
-    streamEl.appendChild(loadingEl);
+    if (convo.rawConvo || convo.network === 'bluesky') {
+      streamEl.appendChild(createLoadingState('Loading messages…', { doc, compact: true }));
+    } else {
+      const promptEl = doc.createElement('p');
+      promptEl.className = 'empty-state';
+      promptEl.textContent = `Send a direct Fediverse mention to @${String(convo.handle || '').replace(/^@/, '')}.`;
+      streamEl.appendChild(promptEl);
+    }
 
     const replyForm = doc.createElement('form');
     replyForm.className = 'sanctuary-input-area human-dm-reply-form';
@@ -555,7 +558,7 @@ export function mountMessagesScreen(containerEl, {
             inReplyToId: convo.rawConvo?.lastStatus?.id || null,
           });
           input.value = '';
-          if (streamEl.querySelector('.empty-state')) streamEl.replaceChildren();
+          if (streamEl.querySelector('.empty-state, .loading-state-card')) streamEl.replaceChildren();
           const sent = doc.createElement('div');
           sent.className = 'human-dm-bubble is-me';
           sent.textContent = text;
@@ -1032,10 +1035,12 @@ export function mountMessagesScreen(containerEl, {
             onAction: () => onOpenAccounts?.(),
           })
         );
+      } else if (dmLoading) {
+        rowsHost.appendChild(createLoadingState('Loading direct messages…', { doc, compact: true }));
       } else {
         const emptyDm = doc.createElement('p');
         emptyDm.className = 'empty-state';
-        emptyDm.textContent = dmLoading ? 'Loading direct messages…' : 'No direct messages yet.';
+        emptyDm.textContent = 'No direct messages yet.';
         rowsHost.appendChild(emptyDm);
       }
     }

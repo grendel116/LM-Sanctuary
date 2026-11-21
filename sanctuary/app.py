@@ -28,7 +28,7 @@ from routes.programs import programs_bp
 from routes.system import system_bp
 from routes.voice import voice_bp
 from runners.program import get_active_program, get_active_user
-from social.routes import social_bp
+from routes.social_bridge import social_bridge_bp
 
 _TAILSCALE_CGNAT = ipaddress.ip_network("100.64.0.0/10")
 
@@ -74,7 +74,7 @@ app.register_blueprint(voice_bp)
 app.register_blueprint(knowledge_bp)
 app.register_blueprint(programs_bp)
 app.register_blueprint(system_bp)
-app.register_blueprint(social_bp)
+app.register_blueprint(social_bridge_bp)
 
 st.start_background_services()
 
@@ -91,6 +91,10 @@ def check_program_change():
     skip_prefixes = (
         "/api/health",
         "/api/mobile/health",
+        "/api/session_tool_calls",
+        "/pending_tool_call",
+        "/api/generation_status",
+        "/api/events/",
         "/api/social/",
         "/assets/",
         "/app/",
@@ -135,7 +139,19 @@ def check_program_change():
 
 @app.after_request
 def apply_response_headers(response):
-    if request.path.startswith("/static/") or request.path in ("/", "/index.html", "/sw.js", "/manifest.json"):
+    no_cache_prefixes = (
+        "/static/",
+        "/assets/",
+        "/app/",
+        "/components/",
+        "/queries/",
+        "/state/",
+        "/core/",
+        "/adapters/",
+        "/constants/",
+        "/storage/",
+    )
+    if request.path.startswith(no_cache_prefixes) or request.path in ("/", "/index.html", "/sw.js", "/manifest.json"):
         response.headers["Cache-Control"] = "no-cache, must-revalidate, max-age=0"
         response.headers["Pragma"] = "no-cache"
         response.headers["Expires"] = "0"

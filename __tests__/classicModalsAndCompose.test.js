@@ -267,6 +267,17 @@ test('UserModal and SettingsModal use classic native <dialog> without ARIA dialo
     await new Promise((r) => setTimeout(r, 20));
     assert.ok(settingsDialog.textContent.includes('/tmp/ws'));
     assert.ok(settingsDialog.querySelector('#node-url-input'));
+    const apiKeyInput = settingsDialog.querySelector('#project-gemini-api-key');
+    assert.ok(apiKeyInput);
+    assert.equal(apiKeyInput.type, 'password');
+    apiKeyInput.value = 'AIza_test_saved_key';
+    apiKeyInput.dispatchEvent(new Event('change'));
+    await new Promise((r) => setTimeout(r, 20));
+    assert.ok(
+      savedBodies.some(
+        (b) => b.url.includes('/api/project_settings') && JSON.parse(b.body).gemini_api_key === 'AIza_test_saved_key'
+      )
+    );
     settingsDialog.close();
 
     await new Promise((r) => setTimeout(r, 15));
@@ -463,19 +474,22 @@ test('Feed & Following render two clean tabs and avoid unauthenticated home time
   globalThis.fetch = async (url) => {
     const u = String(url);
     calledUrls.push(u);
-    if (u.includes('/api/v1/trends/statuses')) {
+    if (u.includes('/api/v1/timelines/tag/councilcommunism') || u.includes('/api/v1/timelines/tag/mutualaid')) {
       return new Response(
         JSON.stringify([
           {
             id: 'trend_1',
             content: '<p>Trending open post</p>',
             created_at: new Date().toISOString(),
-            account: { id: 'u1', acct: 'alice@mastodon.social', display_name: 'Alice', avatar: '' },
+            account: { id: 'u1', acct: 'alice@kolektiva.social', display_name: 'Alice', avatar: '' },
             media_attachments: [],
           },
         ]),
         { status: 200, headers: { 'content-type': 'application/json' } }
       );
+    }
+    if (u.includes('/api/v1/timelines/tag/') || u.includes('/api/v1/timelines/public')) {
+      return new Response('[]', { status: 200, headers: { 'content-type': 'application/json' } });
     }
     if (u.includes('app.bsky.feed.getFeed')) {
       return new Response(JSON.stringify({ feed: [], cursor: null }), {
@@ -506,6 +520,7 @@ test('Feed & Following render two clean tabs and avoid unauthenticated home time
     const tabBtns = host.querySelectorAll('.feed-stream-tabs .stage-tab-btn');
     assert.equal(tabBtns.length, 2);
     assert.ok(host.textContent.includes('Trending open post'));
+    assert.equal(calledUrls.some((u) => u.includes('whats-hot') || u.includes('/trends/statuses')), false);
 
     calledUrls.length = 0;
     tabBtns[1].click();
@@ -1179,7 +1194,7 @@ test('feed infinite scroll, DOM stability across health/token updates, and singl
   }
 });
 
-test('Multi-image PostCard renders accessible carousel and opens social images in shared classic lightbox viewer', async () => {
+test('Single, 2-up pair, and 3+ image PostCards preserve full aspect ratio height, uniform sizing, and carousel navigation', async () => {
   const dom = installMockDom();
   const prevFetch = globalThis.fetch;
   const fetchedUrls = [];
@@ -1189,6 +1204,193 @@ test('Multi-image PostCard renders accessible carousel and opens social images i
   };
 
   try {
+    // 1. Single portrait image preserves full aspect ratio without carousel or cover crop
+    const singleCard = createPostCard({
+      id: 'mastodon:single_portrait',
+      protocol: 'mastodon',
+      content_html: '<p>Full portrait art</p>',
+      content_text: 'Full portrait art',
+      date_published: '2026-11-19T01:00:00Z',
+      author: { id: 'a1', name: 'Painter', handle: 'painter@mastodon.social' },
+      attachments: [
+        { type: 'image', url: 'https://cdn.example/full-portrait.jpg', previewUrl: 'https://cdn.example/small-portrait.jpg', description: 'Portrait painting', width: 900, height: 1200 },
+      ],
+    });
+    const singleWrap = singleCard.querySelector('.post-media-single');
+    assert.ok(singleWrap);
+    assert.equal(singleCard.querySelector('.post-media-carousel'), null);
+    assert.equal(singleWrap.dataset.hasRatio, 'true');
+    assert.equal(singleWrap.dataset.portrait, 'true');
+    assert.equal(singleWrap.style.getPropertyValue('--media-ratio'), '0.7500');
+    assert.equal(singleWrap.style.getPropertyValue('--media-aspect'), '900 / 1200');
+    const singleImg = singleWrap.querySelector('img.post-media-item');
+    assert.equal(singleImg.src, 'https://cdn.example/full-portrait.jpg');
+    assert.equal(singleImg.getAttribute('width'), '900');
+    assert.equal(singleImg.getAttribute('height'), '1200');
+
+    // Landscape and square single images do not set data-portrait
+    for (const [label, w, h] of [
+      ['landscape', 1600, 900],
+      ['square', 1000, 1000],
+    ]) {
+      const nonPortraitCard = createPostCard({
+        id: `mastodon:single_${label}`,
+        protocol: 'mastodon',
+        content_html: `<p>${label}</p>`,
+        date_published: '2026-11-19T01:05:00Z',
+        author: { id: `a_${label}`, name: 'Shooter', handle: 'shooter@mastodon.social' },
+        attachments: [
+          { type: 'image', url: `https://cdn.example/${label}.jpg`, width: w, height: h },
+        ],
+      });
+      const wrap = nonPortraitCard.querySelector('.post-media-single');
+      assert.equal(wrap.dataset.hasRatio, 'true');
+      assert.equal(wrap.dataset.portrait, undefined, `${label} single image must not set portrait flag`);
+    }
+
+    // Verify shell.css defines uniform 320px feed media cap and 175% single-portrait cap (images + videos) without 16/10 or cover crops
+    const shellCssPath = new URL('../web/assets/css/shell.css', import.meta.url);
+    const fs = await import('node:fs');
+    const shellCss = fs.readFileSync(shellCssPath, 'utf8');
+    assert.ok(shellCss.includes('--feed-media-max-h: 320px;'));
+    assert.ok(shellCss.includes('.post-media-single[data-portrait="true"]:not(.has-audio)'));
+    assert.ok(shellCss.includes('calc(var(--feed-media-max-h, 320px) * 1.75)'));
+    const mediaBlockMatch = shellCss.match(/\.post-media-single\s*\{[\s\S]*?\.post-media-audio\s*\{[^}]*\}/);
+    assert.ok(mediaBlockMatch);
+    assert.equal(mediaBlockMatch[0].includes('aspect-ratio: 16 / 10'), false);
+    assert.equal(mediaBlockMatch[0].includes('object-fit: cover'), false);
+    assert.equal(mediaBlockMatch[0].includes('object-fit: contain'), true);
+    assert.equal(mediaBlockMatch[0].includes('var(--feed-media-max-h, 320px)'), true);
+    const videoRuleMatch = mediaBlockMatch[0].match(/\.post-media-video\s*\{[^}]*\}/);
+    assert.ok(videoRuleMatch);
+    assert.equal(videoRuleMatch[0].includes('inline-size: 100%'), false);
+    const slideItemMatch = mediaBlockMatch[0].match(/\.post-carousel-slide \.post-media-item\s*\{[^}]*\}/);
+    assert.ok(slideItemMatch);
+    assert.equal(slideItemMatch[0].includes('inline-size: auto;'), true);
+    assert.equal(slideItemMatch[0].includes('block-size: 100%;'), true);
+    const slideRuleMatch = mediaBlockMatch[0].match(/\.post-carousel-slide\s*\{[^}]*\}/);
+    assert.ok(slideRuleMatch);
+    assert.equal(slideRuleMatch[0].includes('max-inline-size: 100%'), false);
+
+    // Single portrait video (576 x 1024), landscape video (1280 x 720), dimensionless portrait video, and Shorts embed
+    const portraitVideoCard = createPostCard({
+      id: 'bluesky:at://did:plc:hockey/app.bsky.feed.post/v_portrait',
+      protocol: 'bluesky',
+      content_text: 'Faceoffs vs Possession portrait clip',
+      date_published: '2026-11-20T07:50:00Z',
+      author: { id: 'did:plc:hockey', name: 'Flying Mitts Hockey', handle: 'flyingmittshockey.bsky.social' },
+      attachments: [
+        { type: 'video', mime_type: 'video/mp4', url: 'https://cdn.example/portrait.mp4', width: 576, height: 1024 },
+      ],
+    });
+    const pvWrap = portraitVideoCard.querySelector('.post-media-single.has-video');
+    assert.ok(pvWrap);
+    assert.equal(pvWrap.dataset.hasRatio, 'true');
+    assert.equal(pvWrap.dataset.portrait, 'true');
+    assert.equal(pvWrap.style.getPropertyValue('--media-ratio'), '0.5625');
+    assert.equal(pvWrap.style.getPropertyValue('--media-aspect'), '576 / 1024');
+
+    const landscapeVideoCard = createPostCard({
+      id: 'mastodon:v_landscape',
+      protocol: 'mastodon',
+      content_html: '<p>Landscape clip</p>',
+      date_published: '2026-11-20T07:51:00Z',
+      author: { id: 'a_vid', name: 'Videographer', handle: 'vid@mastodon.social' },
+      attachments: [
+        { type: 'video', mime_type: 'video/mp4', url: 'https://cdn.example/wide.mp4', width: 1280, height: 720 },
+      ],
+    });
+    const lvWrap = landscapeVideoCard.querySelector('.post-media-single.has-video');
+    assert.ok(lvWrap);
+    assert.equal(lvWrap.dataset.hasRatio, 'true');
+    assert.equal(lvWrap.dataset.portrait, undefined);
+
+    const dimlessVideoCard = createPostCard({
+      id: 'mastodon:v_dimless',
+      protocol: 'mastodon',
+      content_html: '<p>Dimensionless clip</p>',
+      date_published: '2026-11-20T07:52:00Z',
+      author: { id: 'a_vid2', name: 'ScannerVideo', handle: 'svid@mastodon.social' },
+      attachments: [
+        { type: 'video', mime_type: 'video/mp4', url: 'https://cdn.example/dimless.mp4' },
+      ],
+    });
+    const dvWrap = dimlessVideoCard.querySelector('.post-media-single.has-video');
+    const dvEl = dvWrap.querySelector('video.post-media-video');
+    assert.equal(dvWrap.dataset.hasRatio, undefined);
+    dvEl.videoWidth = 540;
+    dvEl.videoHeight = 960;
+    dvEl.dispatchEvent(new Event('loadedmetadata'));
+    assert.equal(dvWrap.dataset.hasRatio, 'true');
+    assert.equal(dvWrap.dataset.portrait, 'true');
+    assert.equal(dvWrap.style.getPropertyValue('--media-ratio'), '0.5625');
+    assert.equal(dvWrap.style.getPropertyValue('--media-aspect'), '540 / 960');
+
+    const shortsCard = createPostCard({
+      id: 'bluesky:at://did:plc:hockey/app.bsky.feed.post/shorts1',
+      protocol: 'bluesky',
+      content_text: 'Watch https://www.youtube.com/shorts/EoQR59d45Pw',
+      date_published: '2026-11-20T07:53:00Z',
+      author: { id: 'did:plc:hockey', name: 'Flying Mitts Hockey', handle: 'flyingmittshockey.bsky.social' },
+      attachments: [],
+      _meta: {},
+    });
+    assert.equal(shortsCard.querySelector('.post-embed-card')?.dataset?.portrait, 'true');
+
+    // Dimensionless single image resolves aspect ratio, portrait flag, and data-loaded="true" on load
+    const dimlessCard = createPostCard({
+      id: 'mastodon:dimless_single',
+      protocol: 'mastodon',
+      content_html: '<p>Dimensionless paper scan</p>',
+      content_text: 'Dimensionless paper scan',
+      date_published: '2026-11-19T01:10:00Z',
+      author: { id: 'a1b', name: 'Scanner', handle: 'scanner@mastodon.social' },
+      attachments: [
+        { type: 'image', url: 'https://cdn.example/paper-scan.jpg', description: 'Paper scan' },
+      ],
+    });
+    const dimlessWrap = dimlessCard.querySelector('.post-media-single');
+    const dimlessImg = dimlessWrap.querySelector('img.post-media-item');
+    assert.equal(dimlessWrap.dataset.hasRatio, undefined);
+    dimlessImg.naturalWidth = 650;
+    dimlessImg.naturalHeight = 1000;
+    dimlessImg.dispatchEvent(new Event('load'));
+    assert.equal(dimlessImg.dataset.loaded, 'true');
+    assert.equal(dimlessWrap.dataset.hasRatio, 'true');
+    assert.equal(dimlessWrap.dataset.portrait, 'true');
+    assert.equal(dimlessWrap.style.getPropertyValue('--media-ratio'), '0.6500');
+    assert.equal(dimlessWrap.style.getPropertyValue('--media-aspect'), '650 / 1000');
+
+    // 2. Exactly 2 images render as uniform-height side-by-side pair (not carousel)
+    const pairCard = createPostCard({
+      id: 'mastodon:pair_photos',
+      protocol: 'mastodon',
+      content_html: '<p>Two mixed aspect photos</p>',
+      content_text: 'Two mixed aspect photos',
+      date_published: '2026-11-19T01:30:00Z',
+      author: { id: 'a2', name: 'Shooter', handle: 'shooter@mastodon.social' },
+      attachments: [
+        { type: 'image', url: 'https://cdn.example/pair-1.jpg', previewUrl: 'https://cdn.example/pair-thumb-1.jpg', description: 'Pair one', width: 800, height: 1000 },
+        { type: 'image', url: 'https://cdn.example/pair-2.jpg', previewUrl: 'https://cdn.example/pair-thumb-2.jpg', description: 'Pair two', width: 1200, height: 800 },
+      ],
+    });
+    dom.document.body.appendChild(pairCard);
+    const pairEl = pairCard.querySelector('.post-media-pair.post-media-count-2');
+    assert.ok(pairEl);
+    assert.equal(pairCard.querySelector('.post-media-carousel'), null);
+    assert.equal(pairEl.dataset.hasRatios, 'true');
+    assert.equal(pairEl.style.getPropertyValue('--pair-ratio-sum'), '2.3000');
+    const pairSlots = pairEl.querySelectorAll('.post-media-pair-slot');
+    assert.equal(pairSlots.length, 2);
+    assert.equal(pairSlots[0].style.getPropertyValue('--slot-aspect'), '800 / 1000');
+    assert.equal(pairSlots[1].style.getPropertyValue('--slot-aspect'), '1200 / 800');
+    pairSlots[1].querySelector('.post-media-thumb-btn').click();
+    const pairViewer = dom.document.getElementById('sanctuary-lightbox-dialog');
+    assert.ok(pairViewer && pairViewer.open);
+    assert.equal(pairViewer.querySelector('#modal-img').src, 'https://cdn.example/pair-2.jpg');
+    pairViewer.close();
+
+    // 3. More than two images (>2) render accessible uniform-height scrolling carousel + lightbox
     let threadOpenCount = 0;
     const postCard = createPostCard(
       {
@@ -1203,10 +1405,10 @@ test('Multi-image PostCard renders accessible carousel and opens social images i
           handle: 'michaelwarburton.bsky.social',
         },
         attachments: [
-          { type: 'image', url: 'https://cdn.example/img-1.jpg', previewUrl: 'https://cdn.example/thumb-1.jpg', description: 'First photo' },
-          { type: 'image', url: 'https://cdn.example/img-2.jpg', previewUrl: 'https://cdn.example/thumb-2.jpg', description: 'Second photo' },
-          { type: 'image', url: 'https://cdn.example/img-3.jpg', previewUrl: 'https://cdn.example/thumb-3.jpg', description: 'Third photo' },
-          { type: 'image', url: 'https://cdn.example/img-4.jpg', previewUrl: 'https://cdn.example/thumb-4.jpg', description: 'Fourth photo' },
+          { type: 'image', url: 'https://cdn.example/img-1.jpg', previewUrl: 'https://cdn.example/thumb-1.jpg', description: 'First photo', width: 800, height: 1000 },
+          { type: 'image', url: 'https://cdn.example/img-2.jpg', previewUrl: 'https://cdn.example/thumb-2.jpg', description: 'Second photo', width: 1600, height: 1000 },
+          { type: 'image', url: 'https://cdn.example/img-3.jpg', previewUrl: 'https://cdn.example/thumb-3.jpg', description: 'Third photo', width: 1000, height: 1000 },
+          { type: 'image', url: 'https://cdn.example/img-4.jpg', previewUrl: 'https://cdn.example/thumb-4.jpg', description: 'Fourth photo', width: 900, height: 1200 },
         ],
       },
       { onOpenThread: () => { threadOpenCount += 1; } }
@@ -1220,9 +1422,12 @@ test('Multi-image PostCard renders accessible carousel and opens social images i
     assert.ok(viewport.children[0].classList.contains('post-carousel-controls'));
     const track = carousel.querySelector('.post-carousel-track');
     assert.equal(track.getAttribute('tabindex'), '0');
+    assert.equal(track.style.getPropertyValue('--max-slide-ratio'), '');
     const slides = carousel.querySelectorAll('.post-carousel-slide');
     assert.equal(slides.length, 4);
     assert.equal(slides[1].getAttribute('aria-label'), '2 of 4');
+    assert.equal(slides[0].style.getPropertyValue('--slide-aspect'), '800 / 1000');
+    assert.equal(slides[1].style.getPropertyValue('--slide-aspect'), '1600 / 1000');
 
     const prevBtn = carousel.querySelector('.post-carousel-prev');
     const nextBtn = carousel.querySelector('.post-carousel-next');
@@ -1256,6 +1461,26 @@ test('Multi-image PostCard renders accessible carousel and opens social images i
     assert.equal(counter.textContent, '4 / 4');
     assert.equal(nextBtn.disabled, true);
     assert.equal(dom.document.activeElement, prevBtn);
+
+    // Variable-width slide tracking clamps to maxScroll and resolves end slide on scroll
+    slides[0].offsetLeft = 0;
+    slides[1].offsetLeft = 240;
+    slides[2].offsetLeft = 700;
+    slides[3].offsetLeft = 980;
+    track.clientWidth = 460;
+    track.scrollWidth = 1220;
+    const scrolledLefts = [];
+    track.scrollTo = ({ left }) => {
+      scrolledLefts.push(left);
+      track.scrollLeft = left;
+      track.dispatchEvent(new Event('scrollend'));
+    };
+    dots[0].click();
+    assert.equal(scrolledLefts.at(-1), 0);
+    assert.equal(counter.textContent, '1 / 4');
+    dots[3].click();
+    assert.equal(scrolledLefts.at(-1), 760);
+    assert.equal(counter.textContent, '4 / 4');
 
     // Clicking slide 2 opens classic shared lightbox viewer at full-res img-2 without Sanctuary API calls
     const slide2Btn = slides[1].querySelector('.post-media-thumb-btn');

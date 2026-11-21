@@ -4,11 +4,11 @@ import { openUserModal } from '../components/sanctuary/UserModal.js';
 import { createUserIconSvg } from '../constants/avatars.js';
 import { toUnifiedItem } from '../core/schema/unifiedItem.js';
 import { exchangeOAuthCode, verifyCredentials } from '../queries/fediverse.js';
-import { completeThreadsOAuthFlow, syncRecentUserPostsToSanctuary } from '../queries/socialClient.js';
+import { completeThreadsOAuthFlow, fetchSocialBridgeStatus, syncRecentUserPostsToSanctuary } from '../queries/socialClient.js';
 import { authStore, hydrateAuthStore, upsertSocialAccount } from '../state/authStore.js';
 import { activityStore, hydrateActivityStore, markActivitySeen, refreshActivityNotifications } from '../state/activityStore.js';
 import { openCompose, prefillFromUserBubble } from '../state/composeStore.js';
-import { hydrateFeedTuning } from '../state/feedStore.js';
+import { hydrateCachedModeration, hydrateFeedTuning } from '../state/feedStore.js';
 import { connectionStore, initSanctuaryConnection, onSanctuaryEvent } from '../state/sanctuary/connection.js';
 import { attachOutboxAutoFlush, hydrateOutbox } from '../state/sanctuary/outboxModel.js';
 import { kvDelete, kvGet, kvSet } from '../storage/nativeStore.js';
@@ -649,7 +649,6 @@ export function createAppShell(rootEl, { initialTab = 'home', skipBackgroundInit
 
   let detachOutbox = () => {};
   let activityPollTimer = null;
-  let activityEventSource = null;
   let unsubAuthActivity = () => {};
   let onVisibilityActivityCheck = null;
   const offRecentPostsSync = onSanctuaryEvent('sanctuary:online', () => {
@@ -658,16 +657,20 @@ export function createAppShell(rootEl, { initialTab = 'home', skipBackgroundInit
   const initPromise = skipBackgroundInit
     ? Promise.resolve()
     : (async () => {
-        const savedCollapsed = await kvGet('sanctuary_dock_collapsed', false);
+        const [savedCollapsed] = await Promise.all([
+          kvGet('sanctuary_dock_collapsed', false),
+          hydrateAuthStore(),
+          hydrateActivityStore(),
+          hydrateOutbox(),
+          hydrateFeedTuning(),
+          hydrateCachedModeration().catch(() => {}),
+        ]);
         if (savedCollapsed === true) {
           isSanctuaryCollapsed = true;
           syncSanctuaryCollapseUi();
         }
-        await hydrateAuthStore();
-        await hydrateActivityStore();
         const handledOAuth = await handlePendingOAuthCallback();
-        await hydrateOutbox();
-        await hydrateFeedTuning();
+        void fetchSocialBridgeStatus().catch(() => {});
         detachOutbox = attachOutboxAutoFlush();
         await initSanctuaryConnection();
         void syncRecentUserPostsToSanctuary().catch(() => {});
@@ -715,34 +718,6 @@ export function createAppShell(rootEl, { initialTab = 'home', skipBackgroundInit
 
         const isNativeCapacitor = Boolean(globalThis.Capacitor?.isNativePlatform?.());
         const loc = globalThis.location;
-        if (
-          !isNativeCapacitor
-          && typeof globalThis.EventSource === 'function'
-          && loc?.origin
-          && loc.origin !== 'null'
-          && (loc.protocol === 'http:' || loc.protocol === 'https:')
-        ) {
-          try {
-            activityEventSource = new globalThis.EventSource(`${loc.origin}/api/social/events`);
-            activityEventSource.onmessage = (msgEvent) => {
-              try {
-                const ev = JSON.parse(msgEvent.data);
-                if (ev?.type === 'notification') {
-                  if (activeTab === 'activity') {
-                    void activeScreenHandle?.refresh?.();
-                  } else {
-                    activityStore.set({ hasUnread: true });
-                    void refreshActivityNotifications({ limit: 40, background: true }).catch(() => {});
-                  }
-                }
-              } catch {
-                // Ignore keepalive / malformed SSE frame
-              }
-            };
-          } catch {
-            // Optional SSE stream unavailable
-          }
-        }
         const canRegisterSw =
           !isNativeCapacitor &&
           typeof navigator !== 'undefined' &&
@@ -751,9 +726,21 @@ export function createAppShell(rootEl, { initialTab = 'home', skipBackgroundInit
           (loc.protocol === 'https:' || loc.hostname === 'localhost' || loc.hostname === '127.0.0.1');
 
         if (canRegisterSw) {
-          navigator.serviceWorker.register('./sw.js', { type: 'module' }).catch((err) => {
-            console.warn('Service worker registration failed:', err);
-          });
+          const hadSwController = Boolean(navigator.serviceWorker.controller);
+          let swReloading = false;
+          if (hadSwController && typeof navigator.serviceWorker.addEventListener === 'function') {
+            navigator.serviceWorker.addEventListener('controllerchange', () => {
+              if (swReloading) return;
+              swReloading = true;
+              globalThis.location?.reload?.();
+            });
+          }
+          navigator.serviceWorker
+            .register('./sw.js', { type: 'module', updateViaCache: 'none' })
+            .then((reg) => reg?.update?.()?.catch?.(() => {}))
+            .catch((err) => {
+              console.warn('Service worker registration failed:', err);
+            });
         }
 
         if (globalThis.location?.search) {
@@ -799,22 +786,6 @@ export function createAppShell(rootEl, { initialTab = 'home', skipBackgroundInit
         .catch(() => {
           globalThis.open?.(parsed.href, '_blank', 'noopener,noreferrer');
         });
-    } else if (globalThis.chrome?.webview) {
-      event.preventDefault();
-      fetch('/api/social/open-external', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url: parsed.href }),
-      })
-        .then((res) => (res.ok ? res.json() : null))
-        .then((data) => {
-          if (!data?.opened) {
-            globalThis.open?.(parsed.href, '_blank', 'noopener,noreferrer');
-          }
-        })
-        .catch(() => {
-          globalThis.open?.(parsed.href, '_blank', 'noopener,noreferrer');
-        });
     }
   }
   doc.addEventListener('click', handleExternalLinkClick, true);
@@ -829,7 +800,6 @@ export function createAppShell(rootEl, { initialTab = 'home', skipBackgroundInit
       doc.removeEventListener('click', handleExternalLinkClick, true);
       if (onVisibilityActivityCheck) doc.removeEventListener?.('visibilitychange', onVisibilityActivityCheck);
       if (activityPollTimer) clearInterval(activityPollTimer);
-      activityEventSource?.close?.();
       unsubAuthActivity();
       unsubActivityBadge();
       closePostThread({ restoreScroll: false });

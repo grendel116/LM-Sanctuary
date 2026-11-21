@@ -1,4 +1,4 @@
-export const CACHE_NAME = 'sanctuary-shell-v42';
+export const CACHE_NAME = 'sanctuary-shell-v59';
 
 export const APP_SHELL_ASSETS = [
   './',
@@ -17,6 +17,7 @@ export const APP_SHELL_ASSETS = [
   './constants/endpoints.js',
   './constants/theme.js',
   './core/feedRanker.js',
+  './core/postLanguage.js',
   './core/schema/unifiedItem.js',
   './adapters/base.js',
   './adapters/mastodon/index.js',
@@ -26,6 +27,7 @@ export const APP_SHELL_ASSETS = [
   './storage/kvStorage.js',
   './queries/fetch/FetchError.js',
   './queries/fetch/fetchWrapper.js',
+  './queries/feedHarvester.js',
   './queries/fediverse.js',
   './queries/bluesky.js',
   './queries/threads.js',
@@ -159,7 +161,15 @@ export function shouldBypassSwCache(requestUrl, method = 'GET', selfOrigin = '',
 if (typeof self !== 'undefined' && typeof self.skipWaiting === 'function') {
   self.addEventListener('install', (event) => {
     event.waitUntil(
-      caches.open(CACHE_NAME).then((cache) => cache.addAll(APP_SHELL_ASSETS))
+      caches.open(CACHE_NAME).then((cache) =>
+        Promise.all(
+          APP_SHELL_ASSETS.map(async (assetUrl) => {
+            const res = await fetch(new Request(assetUrl, { cache: 'reload' }));
+            if (!res.ok) throw new Error(`Precache failed for ${assetUrl}: ${res.status}`);
+            await cache.put(assetUrl, res);
+          })
+        )
+      )
     );
     self.skipWaiting();
   });
@@ -187,9 +197,33 @@ if (typeof self !== 'undefined' && typeof self.skipWaiting === 'function') {
       return;
     }
 
+    const host = self.location?.hostname || '';
+    const isLocalHost = host === '127.0.0.1' || host === 'localhost';
+
     event.respondWith(
       (async () => {
         const cache = await caches.open(CACHE_NAME);
+
+        if (isLocalHost) {
+          try {
+            const networkResponse = await fetch(
+              req.mode === 'navigate' ? req : new Request(req, { cache: 'no-cache' })
+            );
+            if (networkResponse && networkResponse.ok && networkResponse.type === 'basic') {
+              cache.put(req, networkResponse.clone());
+            }
+            return networkResponse;
+          } catch (err) {
+            const cachedFallback = await cache.match(req, { ignoreSearch: req.mode === 'navigate' });
+            if (cachedFallback) return cachedFallback;
+            if (req.mode === 'navigate') {
+              const shellFallback = (await cache.match('./index.html')) || (await cache.match('./'));
+              if (shellFallback) return shellFallback;
+            }
+            throw err;
+          }
+        }
+
         const cached = await cache.match(req, { ignoreSearch: req.mode === 'navigate' });
         if (cached) {
           return cached;

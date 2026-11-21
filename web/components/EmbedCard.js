@@ -49,6 +49,7 @@ export function resolvePostEmbedCard(unifiedItem) {
           siteName: String(rawCard.siteName || safe.host),
           provider,
           embedUrl,
+          ...(video?.isPortrait ? { isPortrait: true } : {}),
         };
       }
     }
@@ -70,6 +71,7 @@ export function resolvePostEmbedCard(unifiedItem) {
     siteName: video.provider === 'youtube' ? 'youtube.com' : 'vimeo.com',
     provider: video.provider,
     embedUrl: video.embedUrl,
+    ...(video.isPortrait ? { isPortrait: true } : {}),
   };
 }
 
@@ -94,6 +96,9 @@ export function createEmbedCard(card, { compact = false, onDismiss = null } = {}
   if (embedSrc) {
     const container = doc.createElement('div');
     container.className = `post-link-card post-embed-card${compact ? ' is-compact' : ''}`;
+    if ((card?.isPortrait || video?.isPortrait) && !compact) {
+      container.dataset.portrait = 'true';
+    }
 
     const stage = doc.createElement('div');
     stage.className = 'post-embed-stage';

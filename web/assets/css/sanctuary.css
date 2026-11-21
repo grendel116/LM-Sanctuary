@@ -523,7 +523,6 @@ button, input, select, textarea {
 
 #bottom-sentinel {
     overflow-anchor: auto;
-    scroll-initial-target: nearest;
     block-size: 1px;
     flex-shrink: 0;
 }
@@ -2510,6 +2509,11 @@ button.close-modal {
     max-width: 100% !important;
     box-sizing: border-box;
 }
+.edit-form {
+    display: flex;
+    flex-direction: column;
+    width: 100%;
+}
 .edit-textarea {
     width: 100%;
     min-height: 80px;
@@ -2523,6 +2527,10 @@ button.close-modal {
     resize: vertical;
     box-sizing: border-box;
     outline: none;
+}
+.edit-textarea:focus-visible {
+    outline: 2px solid var(--primary-accent);
+    outline-offset: 2px;
 }
 
 .edit-btn-group {
@@ -2543,6 +2551,10 @@ button.close-modal {
     align-items: center;
     justify-content: center;
 }
+.edit-btn:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+}
 
 .edit-cancel-btn {
     background: transparent;
@@ -2560,7 +2572,7 @@ button.close-modal {
 .edit-save-btn {
     background: #1c1c22;
     border: 1px solid var(--border-color);
-    color: var(--text-muted);
+    color: var(--text-main);
     font-weight: 600;
     box-shadow: 0 4px 10px rgba(0, 0, 0, 0.3);
 }

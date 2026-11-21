@@ -1,5 +1,6 @@
 import { resolveNodeUrl } from '../constants/endpoints.js';
 import {
+  connectionStore,
   getProgramAvatarVersion,
   getSanctuaryAuthHeaders,
   getSanctuaryNodeUrl,
@@ -757,4 +758,38 @@ export function saveSanctuaryFeedProfile(profile, opts = {}) {
     timeoutMs: 3000,
     ...opts,
   });
+}
+
+/**
+ * Call a stateless /api/social/* bridge endpoint on the configured Sanctuary node.
+ * Returns null when the node is offline/dormant or on any error so callers fall back silently.
+ */
+export async function requestSocialBridge(path, payload, { timeoutMs = 8000 } = {}) {
+  if (connectionStore.get().mode !== 'online') return null;
+  try {
+    return await requestNode(`/api/social${path}`, {
+      method: 'POST',
+      json: payload,
+      timeoutMs,
+    });
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Relay a stateless https://graph.threads.net request through the configured Sanctuary node
+ * to bypass browser CORS omissions on Threads API endpoints.
+ */
+export async function requestThreadsProxy({ url, method = 'GET', body = '', timeoutMs = 15000 } = {}) {
+  if (connectionStore.get().mode !== 'online') return null;
+  try {
+    return await requestNode('/api/social/threads-proxy', {
+      method: 'POST',
+      json: { url, method, body },
+      timeoutMs,
+    });
+  } catch {
+    return null;
+  }
 }

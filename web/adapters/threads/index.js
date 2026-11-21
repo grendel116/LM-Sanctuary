@@ -9,6 +9,7 @@ import {
   getThreadsPostInsights,
   getThreadsPostReplies,
   lookupThreadsProfile,
+  manageThreadsReply,
   normalizeThreadsPostRecord,
   publishThreadsPost,
   searchThreadsKeyword,
@@ -80,6 +81,15 @@ export class ThreadsAdapter extends SocialAdapter {
       fetchImpl: this.fetchImpl,
     });
     return true;
+  }
+
+  async manageReply(replyId, { hide = true } = {}) {
+    return manageThreadsReply({
+      replyId,
+      accessToken: this.accessToken,
+      hide,
+      fetchImpl: this.fetchImpl,
+    });
   }
 
   async reply(targetItem, draft, media = [], options = {}) {
@@ -188,6 +198,35 @@ export class ThreadsAdapter extends SocialAdapter {
       const depth = depthById.has(rParent) ? Math.min(depthById.get(rParent) + 1, 3) : 0;
       depthById.set(String(r.id), depth);
       descendants.push({ item: u, depth });
+    }
+
+    const threadNodes = [focal, ...ancestors, ...descendants.map((d) => d.item)].filter(Boolean);
+    const missingHandles = [
+      ...new Set(
+        threadNodes
+          .filter((node) => !node?.author?.avatar_url && node?.author?.handle)
+          .map((node) => String(node.author.handle).replace(/^@/, ''))
+      ),
+    ].slice(0, 8);
+    if (missingHandles.length > 0) {
+      const profiles = await Promise.all(missingHandles.map((h) => this.lookupProfile(h).catch(() => null)));
+      const byHandle = new Map();
+      for (const p of profiles) {
+        if (p?.username || p?.handle) {
+          byHandle.set(String(p.username || p.handle).toLowerCase(), p);
+        }
+      }
+      for (const node of threadNodes) {
+        const key = String(node?.author?.handle || '').replace(/^@/, '').toLowerCase();
+        const p = byHandle.get(key);
+        if (!p) continue;
+        node.author = {
+          ...node.author,
+          name: p.displayName || node.author.name,
+          avatar_url: p.avatar || node.author.avatar_url,
+          url: p.url || node.author.url,
+        };
+      }
     }
 
     if (focal) {

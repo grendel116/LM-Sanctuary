@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "test": "node --test __tests__/*.test.js",
-    "test:backend": "python __tests__/backend/test_sanctuary_node.py",
+    "test:backend": "python __tests__/backend/test_sanctuary_node.py && python __tests__/backend/test_social_bridge.py",
     "build:android": "node scripts/buildAndroid.js"
   },
   "devDependencies": {

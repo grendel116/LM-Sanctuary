@@ -20,16 +20,97 @@ function buildCompositeSignal(callerSignal, timeoutMs) {
   return AbortSignal.any(signals);
 }
 
+const THREADS_REFRESH_TOO_SOON_MSG =
+  '60-day tokens must be at least 24 hours old before refreshing.';
+
+function appendKnownSubcodeHint(detail, subcode) {
+  const clean = String(detail || '').trim();
+  if (Number(subcode) === 5258005 && !/24\s*hours/i.test(clean)) {
+    return clean ? `${clean} ${THREADS_REFRESH_TOO_SOON_MSG}` : THREADS_REFRESH_TOO_SOON_MSG;
+  }
+  return clean;
+}
+
+function extractJsonStringField(rawJson, key) {
+  const re = new RegExp(`"${key}"\\s*:\\s*"((?:\\\\.|[^"\\\\])*)"`, 'i');
+  const match = re.exec(rawJson);
+  if (!match) return '';
+  try {
+    return String(JSON.parse(`"${match[1]}"`)).trim();
+  } catch {
+    return String(match[1] || '').trim();
+  }
+}
+
+/**
+ * Normalize API and bridge error strings by stripping raw embedded JSON/trace IDs
+ * and adding actionable guidance for known platform error codes.
+ *
+ * @param {unknown} raw
+ * @param {string} [fallback]
+ * @returns {string}
+ */
+export function formatApiErrorMessage(raw, fallback = '') {
+  const value = raw instanceof Error ? raw.message : raw;
+  const txt = String(value ?? '').trim();
+  if (!txt) return fallback;
+
+  const jsonIdx = txt.startsWith('{') ? 0 : txt.indexOf('{"');
+  if (jsonIdx < 0) return txt;
+
+  const tail = txt.slice(jsonIdx).trim();
+  let detail = '';
+  let subcode = 0;
+
+  try {
+    const parsed = JSON.parse(tail);
+    if (parsed && typeof parsed === 'object') {
+      const errObj = parsed.error && typeof parsed.error === 'object' ? parsed.error : parsed;
+      subcode = Number(errObj?.error_subcode ?? errObj?.subcode ?? 0);
+      detail = String(
+        errObj?.error_user_msg
+        || errObj?.message
+        || errObj?.error_description
+        || (typeof parsed.error === 'string' ? parsed.error : '')
+        || ''
+      ).trim();
+    }
+  } catch {
+    detail = extractJsonStringField(tail, 'error_user_msg')
+      || extractJsonStringField(tail, 'message')
+      || extractJsonStringField(tail, 'error_description');
+    const subMatch = /"error_subcode"\s*:\s*(\d+)/i.exec(tail);
+    if (subMatch) subcode = Number(subMatch[1]);
+  }
+
+  detail = appendKnownSubcodeHint(detail, subcode);
+  if (!detail) return txt;
+
+  const prefix = txt.slice(0, jsonIdx).trim().replace(/:$/, '').trim();
+  return prefix ? `${prefix}: ${detail}` : detail;
+}
+
 function extractErrorMessage(body, status) {
   if (body && typeof body === 'object') {
-    if (typeof body.error === 'string' && body.error) return body.error;
-    if (body.error && typeof body.error === 'object' && typeof body.error.message === 'string') {
-      return body.error.message;
+    if (typeof body.error === 'string' && body.error) {
+      return formatApiErrorMessage(body.error, `HTTP ${status}`);
     }
-    if (typeof body.message === 'string' && body.message) return body.message;
+    if (body.error && typeof body.error === 'object') {
+      const detail = appendKnownSubcodeHint(
+        body.error.error_user_msg || body.error.message || '',
+        body.error.error_subcode
+      );
+      if (detail) return detail;
+    }
+    if (typeof body.message === 'string' && body.message) {
+      return formatApiErrorMessage(body.message, `HTTP ${status}`);
+    }
+    if (typeof body.error_description === 'string' && body.error_description) {
+      return formatApiErrorMessage(body.error_description, `HTTP ${status}`);
+    }
   }
   if (typeof body === 'string' && body.trim()) {
-    return body.trim();
+    return formatApiErrorMessage(body, `HTTP ${status}`);
   }
   return `HTTP ${status}`;
 }

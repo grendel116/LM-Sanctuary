@@ -445,10 +445,26 @@ def run_tests():
             "sliders": {"longform": 65, "commercial": -50},
             "boostConcepts": ["botanical art"],
             "dampenConcepts": [],
+            "discoveryChannels": ["cooperatives", "mutual aid"],
+            "discoveryInstances": ["https://kolektiva.social/", "fosstodon.org"],
         },
     )
     assert fp_put.status_code == 200
-    assert fp_put.get_json()["sliders"]["longform"] == 65
+    fp_put_json = fp_put.get_json()
+    assert fp_put_json["sliders"]["longform"] == 65
+    assert fp_put_json["discoveryChannels"] == ["cooperatives", "mutual aid"]
+    assert fp_put_json["discoveryInstances"] == ["kolektiva.social", "fosstodon.org"]
+
+    tool_sanctuary = tools_mod.tune_feed_algorithm(
+        preset="sanctuary",
+        add_discovery_channels=["class struggle"],
+        add_discovery_instances=["merveilles.town"],
+    )
+    assert "[Feed Profile Updated]" in tool_sanctuary
+    fp_sanctuary = client.get("/api/feed_profile").get_json()
+    assert fp_sanctuary["sliders"]["smallWeb"] == 80
+    assert "class struggle" in fp_sanctuary["discoveryChannels"]
+    assert "merveilles.town" in fp_sanctuary["discoveryInstances"]
 
     print(f"PHASE_1_BACKEND_VERIFIED (mobile/health={elapsed_ms:.1f}ms, routes={len(rules)})")
 

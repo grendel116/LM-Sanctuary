@@ -37,11 +37,15 @@ test('PWA manifest sets standalone relative scope, #121214 theme, valid icon, an
 });
 
 test('Service Worker APP_SHELL_ASSETS all exist on disk and match modular SPA without legacy monolith', () => {
-  assert.equal(CACHE_NAME, 'sanctuary-shell-v42');
+  assert.equal(CACHE_NAME, 'sanctuary-shell-v59');
+  const swSource = fs.readFileSync(path.join(WEB_DIR, 'sw.js'), 'utf8');
+  assert.equal(swSource.includes("cache: 'reload'"), true);
   assert.ok(APP_SHELL_ASSETS.includes('./'));
   assert.ok(APP_SHELL_ASSETS.includes('./app/_layout.js'));
   assert.ok(APP_SHELL_ASSETS.includes('./state/activityStore.js'));
   assert.ok(APP_SHELL_ASSETS.includes('./core/feedRanker.js'));
+  assert.ok(APP_SHELL_ASSETS.includes('./core/postLanguage.js'));
+  assert.ok(APP_SHELL_ASSETS.includes('./queries/feedHarvester.js'));
   assert.ok(APP_SHELL_ASSETS.includes('./components/EmbedCard.js'));
   assert.ok(APP_SHELL_ASSETS.includes('./components/EmojiPickerPopover.js'));
   assert.ok(APP_SHELL_ASSETS.includes('./components/FeedTuningModal.js'));

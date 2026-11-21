@@ -21,7 +21,6 @@ _VIMEO_ID_RE = re.compile(r"^[0-9]{5,15}$")
 _CACHE_TTL_SEC = 300.0
 _CACHE_MAX_ENTRIES = 256
 _MAX_HTML_BYTES = 96 * 1024
-_MAX_IMAGE_BYTES = 950_000
 
 _cache_lock = threading.Lock()
 _preview_cache: dict[str, tuple[float, dict[str, Any] | None]] = {}
@@ -340,47 +339,3 @@ def fetch_link_preview(url: str, *, http_client: httpx.Client | None = None) -> 
             _preview_cache[clean_url] = (now + _CACHE_TTL_SEC, card)
 
     return card
-
-
-def fetch_public_image_bytes(url: str, *, http_client: httpx.Client | None = None) -> tuple[bytes, str] | None:
-    """Safely fetch bounded thumbnail image bytes for external link cards."""
-    allow_mock = http_client is not None
-    try:
-        current = assert_safe_public_https_url(url, allow_unresolvable_mock=allow_mock)
-    except ValueError:
-        return None
-
-    own_client = http_client is None
-    client = http_client or httpx.Client(timeout=6.0)
-    try:
-        for _ in range(3):
-            with client.stream("GET", current, follow_redirects=False) as res:
-                if res.status_code in (301, 302, 303, 307, 308):
-                    loc = res.headers.get("location") or ""
-                    if not loc:
-                        return None
-                    current = assert_safe_public_https_url(
-                        urljoin(current, loc),
-                        allow_unresolvable_mock=allow_mock,
-                    )
-                    continue
-                if res.status_code >= 400:
-                    return None
-                ctype = (res.headers.get("content-type") or "image/jpeg").split(";")[0].strip().lower()
-                if not ctype.startswith("image/"):
-                    return None
-                chunks: list[bytes] = []
-                total = 0
-                for chunk in res.iter_bytes():
-                    chunks.append(chunk)
-                    total += len(chunk)
-                    if total > _MAX_IMAGE_BYTES:
-                        return None
-                raw = b"".join(chunks)
-                return (raw, ctype) if raw else None
-    except Exception:
-        return None
-    finally:
-        if own_client:
-            client.close()
-    return None

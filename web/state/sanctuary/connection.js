@@ -39,6 +39,7 @@ export const connectionStore = createStore(createInitialConnectionState());
 let pollTimer = null;
 let connectionGeneration = 0;
 let lastAvatarStamp = 0;
+let lastCachedProgramsJson = '';
 
 export function getProgramAvatarVersion(programId = '') {
   const id = String(programId || '').trim();
@@ -128,6 +129,7 @@ export async function setSanctuaryBasicAuth(username, password) {
 
 export function stopSanctuaryConnection() {
   connectionGeneration += 1;
+  lastCachedProgramsJson = '';
   if (pollTimer !== null) {
     clearInterval(pollTimer);
     pollTimer = null;
@@ -148,20 +150,32 @@ export async function checkSanctuaryHealth(options = {}) {
   const healthUrl = resolveNodeUrl('/api/mobile/health', snapshot.nodeUrl);
 
   try {
-    const health = await fetchWrapper(healthUrl, {
-      timeoutMs: 2000,
-      background: true,
+    const reqOpts = {
+      timeoutMs: 8000,
       headers: snapshot.authHeaders,
       locationObj: options.locationObj,
       fetchImpl: options.fetchImpl,
-    });
+    };
+    let health;
+    try {
+      health = await fetchWrapper(healthUrl, reqOpts);
+    } catch {
+      if (gen !== connectionGeneration) {
+        return null;
+      }
+      health = await fetchWrapper(healthUrl, reqOpts);
+    }
     if (gen !== connectionGeneration) {
       return null;
     }
 
     const wasOnline = connectionStore.get().mode === 'online';
     const programs = Array.isArray(health?.programs) ? health.programs : [];
-    await cacheProgramsDirectory(programs);
+    const nextProgramsJson = JSON.stringify(programs);
+    if (nextProgramsJson !== lastCachedProgramsJson) {
+      lastCachedProgramsJson = nextProgramsJson;
+      await cacheProgramsDirectory(programs);
+    }
 
     let runtimeConfig = connectionStore.get().runtimeConfig;
     if (!wasOnline) {

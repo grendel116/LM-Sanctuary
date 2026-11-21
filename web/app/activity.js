@@ -1,7 +1,14 @@
 import { createOfflineNotice } from '../components/OfflineNotice.js';
+import { getPostActionCapabilities } from '../components/PostCard.js';
+import { showAlert, showConfirm } from '../components/sanctuary/SanctuaryDialog.js';
 import { createLoadingState } from '../components/ui/index.js';
 import { DEFAULT_AVATAR_DATA_URI } from '../constants/avatars.js';
-import { toggleFollowAuthor } from '../queries/socialClient.js';
+import {
+  hideReplyUnified,
+  toggleBlockAuthor,
+  toggleFollowAuthor,
+  toggleMuteAuthor,
+} from '../queries/socialClient.js';
 import {
   activityStore,
   clearAllActivity,
@@ -9,9 +16,11 @@ import {
   dismissActivityGroup,
   groupActivityNotifications,
   refreshActivityNotifications,
+  removeActivityByActor,
 } from '../state/activityStore.js';
 import { authStore, getAuthenticatedAccount } from '../state/authStore.js';
 import { prefillReply } from '../state/composeStore.js';
+import { removePostAcrossStreams } from '../state/feedStore.js';
 
 const BADGE_ICONS = {
   like: `<svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>`,
@@ -398,14 +407,30 @@ export function mountActivityScreen(containerEl, {
       subFooter.appendChild(metricsRow);
     }
 
-    if (group.kind === 'reply' || group.kind === 'mention' || group.kind === 'quote') {
+    const authState = authStore.get();
+    const replyCap = getPostActionCapabilities(primaryItem, authState).reply;
+    const canCommentReply = group.kind === 'reply' || group.kind === 'mention' || group.kind === 'quote';
+    const canFollowBack = group.kind === 'follow'
+      && Boolean(actor.id)
+      && ((primaryItem.protocol === 'mastodon' && authState.isMastodonConnected)
+        || (primaryItem.protocol === 'bluesky' && authState.isBlueskyConnected));
+
+    if (canCommentReply) {
       const replyBtn = doc.createElement('button');
       replyBtn.type = 'button';
       replyBtn.className = 'btn-sleek-pill activity-inline-action-btn';
       replyBtn.textContent = 'Reply';
-      replyBtn.addEventListener('click', () => prefillReply(primaryItem));
+      replyBtn.disabled = !replyCap.enabled;
+      if (!replyCap.enabled && replyCap.reason) {
+        replyBtn.title = replyCap.reason;
+        replyBtn.setAttribute('aria-description', replyCap.reason);
+      }
+      replyBtn.addEventListener('click', () => {
+        if (replyBtn.disabled) return;
+        prefillReply(primaryItem);
+      });
       subFooter.appendChild(replyBtn);
-    } else if (group.kind === 'follow' && actor.id && (primaryItem.protocol === 'mastodon' || primaryItem.protocol === 'bluesky')) {
+    } else if (canFollowBack) {
       const followBtn = doc.createElement('button');
       followBtn.type = 'button';
       followBtn.className = 'btn-sleek-pill activity-follow-btn';
@@ -484,11 +509,71 @@ export function mountActivityScreen(containerEl, {
     if (group.kind !== 'follow' && targetItem) {
       addPanelBtn('Open thread', openThread);
     }
-    if (group.kind === 'reply' || group.kind === 'mention' || group.kind === 'quote') {
+    if (canCommentReply && replyCap.enabled) {
       addPanelBtn('Reply', () => prefillReply(primaryItem));
     }
     if (!group.isSyntheticOnly && (actor.id || actor.handle)) {
       addPanelBtn('View profile', () => onSelectAuthor?.(actor, primaryItem));
+    }
+    if (!group.isSyntheticOnly && (actor.id || actor.handle)) {
+      const sep = doc.createElement('hr');
+      sep.className = 'post-context-sep';
+      panel.appendChild(sep);
+      if (group.kind === 'reply' || group.kind === 'mention') {
+        addPanelBtn('Hide comment', () => {
+          void (async () => {
+            const res = await hideReplyUnified(primaryItem);
+            await dismissActivityGroup(group);
+            if (res?.warnings?.length > 0) {
+              showAlert('Comment Hidden Locally', res.warnings.join('\n\n'));
+            }
+          })();
+        }, true);
+      }
+      if (group.actors.length <= 1) {
+        const cleanH = String(actor.handle || '').replace(/^@/, '');
+        const proto = String(primaryItem?.protocol || actor.protocol || 'mastodon').toLowerCase();
+        const displayTarget = cleanH ? `@${cleanH}` : (actor.name || 'account');
+        addPanelBtn(`Mute ${displayTarget}`, () => {
+          showConfirm('Mute Account', `Mute ${displayTarget}?`, async () => {
+            try {
+              await toggleMuteAuthor(actor.id || cleanH, false, {
+                protocol: proto,
+                acct: cleanH,
+                displayName: actor.name || cleanH,
+                instanceUrl: primaryItem?._meta?.mastodon?.instanceUrl || '',
+              });
+              removeActivityByActor(actor, proto);
+              removePostAcrossStreams((it) => it?.author?.handle === actor.handle || (actor.id && it?.author?.id === actor.id));
+            } catch (err) {
+              showAlert('Moderation Error', err?.message || 'Unable to mute account.');
+            }
+          });
+        });
+        addPanelBtn(`Block ${displayTarget}`, () => {
+          const replyPid = proto === 'threads' && group.kind === 'reply' ? (primaryItem?._meta?.threads?.postId || '') : '';
+          const hideNote = replyPid ? ' and hide their comment on Threads' : '';
+          showConfirm('Block Account', `Block ${displayTarget}${hideNote}?`, async () => {
+            try {
+              const res = await toggleBlockAuthor(actor.id || cleanH, false, {
+                protocol: proto,
+                acct: cleanH,
+                displayName: actor.name || cleanH,
+                instanceUrl: primaryItem?._meta?.mastodon?.instanceUrl || '',
+                replyPostId: replyPid,
+              });
+              removeActivityByActor(actor, proto);
+              await dismissActivityGroup(group);
+              removePostAcrossStreams((it) => it?.author?.handle === actor.handle || (actor.id && it?.author?.id === actor.id));
+              if (res?.warnings?.length > 0) {
+                showAlert('Block Warning', res.warnings.join('\n\n'));
+              }
+            } catch (err) {
+              showAlert('Moderation Error', err?.message || 'Unable to block account.');
+            }
+          });
+        }, true);
+      }
     }
     addPanelBtn(
       group.notificationIds.length > 1 ? `Delete notifications (${group.notificationIds.length})` : 'Delete notification',
@@ -553,6 +638,7 @@ export function mountActivityScreen(containerEl, {
     const sig = buildAuthSig(authState);
     if (sig !== prevAuthSig) {
       prevAuthSig = sig;
+      renderFromStore();
       void loadNotifications();
     }
   });

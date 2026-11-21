@@ -407,7 +407,7 @@ export class MockElement extends MockNode {
     this.style = new MockStyle();
     this.value = '';
     this.checked = false;
-    this.disabled = false;
+    this._disabled = false;
     this.hidden = false;
     this.type = '';
     this.scrollTop = 0;
@@ -474,6 +474,16 @@ export class MockElement extends MockNode {
 
   set alt(val) {
     this._attrs.set('alt', String(val));
+  }
+
+  get disabled() {
+    return Boolean(this._disabled);
+  }
+
+  set disabled(val) {
+    this._disabled = Boolean(val);
+    if (this._disabled) this._attrs.set('disabled', '');
+    else this._attrs.delete('disabled');
   }
 
   get title() {
@@ -547,6 +557,7 @@ export class MockElement extends MockNode {
     if (key === 'src') this.src = val;
     if (key === 'alt') this.alt = val;
     if (key === 'hidden') this.hidden = true;
+    if (key === 'disabled') this._disabled = true;
   }
 
   getAttribute(name) {
@@ -564,6 +575,7 @@ export class MockElement extends MockNode {
     this._attrs.delete(key);
     if (key === 'class') this._className = '';
     if (key === 'hidden') this.hidden = false;
+    if (key === 'disabled') this._disabled = false;
   }
 
   matches(selector) {

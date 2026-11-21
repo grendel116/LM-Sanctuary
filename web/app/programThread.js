@@ -9,6 +9,7 @@ import {
   createIdleThoughtRow,
   createSharedPostEmbedCard,
   createTypingIndicatorRow,
+  findLiveRowById,
   formatSharedPostForLlm,
   normalizeSharedPostCard,
   reconcileChat,
@@ -28,6 +29,7 @@ import {
   continueGeneration,
   deleteMessage,
   editTurn,
+  fetchGenerationStatus,
   fetchModels,
   fetchRuntimeConfig,
   generateUserImpersonation,
@@ -85,6 +87,10 @@ export function mountProgramThread(containerEl, {
   let attachedSharedPost = null;
   let generating = false;
   let abortController = null;
+  let activeTurnPromise = null;
+  let activeCancelPromise = null;
+  let reattachedMonitor = null;
+  let turnCounter = 0;
   let activeAudio = null;
   let activeSpeakBtn = null;
   let destroyed = false;
@@ -406,18 +412,159 @@ export function mountProgramThread(containerEl, {
     textarea.disabled = generating;
   }
 
-  function startInlineEdit(msg, bubble) {
+  function stopReattachedMonitor() {
+    if (!reattachedMonitor) return;
+    const active = reattachedMonitor;
+    reattachedMonitor = null;
+    active.stop();
+  }
+
+  function startReattachedMonitor() {
+    if (reattachedMonitor || generating || activeTurnPromise || activeCancelPromise || destroyed) return;
+    let stopped = false;
+    let pollTimer = null;
+    pinnedToBottom = true;
+    setBusy(true);
+    const { row: typingRow, bubble: typingBubble } = createTypingIndicatorRow(currentProgramId, buildRowContext());
+    chatContainer.insertBefore(typingRow, bottomSentinel);
+    scrollToBottom(true);
+    const stopToolMonitor = startTurnToolMonitor({ sessionId: currentSessionId, chatContainer, typingBubble });
+
+    const cleanup = () => {
+      if (stopped) return;
+      stopped = true;
+      if (pollTimer !== null) {
+        clearTimeout(pollTimer);
+        pollTimer = null;
+      }
+      stopToolMonitor();
+      typingRow.remove();
+      if (!activeTurnPromise) {
+        setBusy(false);
+      }
+      if (reattachedMonitor?.stop === cleanup) {
+        reattachedMonitor = null;
+      }
+    };
+
+    const pollStatus = async () => {
+      if (stopped || destroyed) return;
+      try {
+        const res = await fetchGenerationStatus(currentSessionId);
+        if (stopped || destroyed) return;
+        if (!res?.generating) {
+          cleanup();
+          sessionStore.set({ generating: false });
+          await refreshSession().catch(() => {});
+          return;
+        }
+      } catch {
+        // Retry on next interval until backend reports idle or user stops.
+      }
+      if (!stopped && !destroyed) {
+        pollTimer = setTimeout(() => void pollStatus(), 1200);
+        pollTimer?.unref?.();
+      }
+    };
+
+    pollTimer = setTimeout(() => void pollStatus(), 1200);
+    pollTimer?.unref?.();
+    reattachedMonitor = { stop: cleanup };
+  }
+
+  async function stopActiveGeneration() {
+    if (activeCancelPromise) return activeCancelPromise;
+    const turnToWait = activeTurnPromise;
+    const wasReattached = Boolean(reattachedMonitor);
+    stopBtn.disabled = true;
+    const runCancel = async () => {
+      try {
+        await cancelChat(currentSessionId, { timeoutMs: 8000 }).catch(() => null);
+      } finally {
+        if (wasReattached) {
+          stopReattachedMonitor();
+          sessionStore.set({ generating: false });
+        }
+      }
+    };
+    const cancelPromise = runCancel();
+    activeCancelPromise = cancelPromise;
+    abortController?.abort();
+    try {
+      await cancelPromise;
+      if (turnToWait) {
+        await turnToWait.catch(() => null);
+      }
+      if (wasReattached && !destroyed) {
+        await refreshSession().catch(() => {});
+      }
+    } finally {
+      if (activeCancelPromise === cancelPromise) {
+        activeCancelPromise = null;
+      }
+      stopBtn.disabled = false;
+    }
+  }
+
+  async function withTurnMonitor(speakerId, runFn) {
+    stopReattachedMonitor();
+    turnCounter += 1;
+    pinnedToBottom = true;
+    setBusy(true);
+    sessionStore.set({ generating: true });
+    const { row: typingRow, bubble: typingBubble } = createTypingIndicatorRow(speakerId, buildRowContext());
+    chatContainer.insertBefore(typingRow, bottomSentinel);
+    scrollToBottom(true);
+    const stopMonitor = startTurnToolMonitor({ sessionId: currentSessionId, chatContainer, typingBubble });
+    abortController = new AbortController();
+
+    const execute = (async () => {
+      try {
+        return await runFn(abortController.signal, typingRow);
+      } finally {
+        if (activeCancelPromise) {
+          await activeCancelPromise.catch(() => null);
+        }
+        stopMonitor();
+        typingRow.remove();
+        setBusy(false);
+        sessionStore.set({ generating: false });
+        abortController = null;
+        if (activeTurnPromise === execute) {
+          activeTurnPromise = null;
+        }
+      }
+    })();
+
+    activeTurnPromise = execute;
+    return await execute;
+  }
+
+  function startInlineEdit(msg, row, bubble, initialDraftText = null) {
     if (!bubble || bubble.classList.contains('editing')) return;
-    bubble.classList.add('editing');
-    const textDiv = bubble.querySelector('.message-text');
+    const targetRow = row || bubble.closest?.('.message-row') || null;
+    const originalChildren = [...bubble.childNodes];
     const original = msg.shared_post
       ? String(msg.user_note ?? '')
       : (bubble.dataset.rawText ?? msg.text ?? '');
 
+    bubble.classList.add('editing');
+
+    const editForm = doc.createElement('form');
+    editForm.className = 'edit-form';
+    const editInputId = `edit-msg-${String(msg.id || Date.now()).replace(/[^a-zA-Z0-9_-]/g, '_')}`;
+
+    const taLbl = doc.createElement('label');
+    taLbl.setAttribute('for', editInputId);
+    taLbl.className = 'sr-only';
+    taLbl.textContent = msg.role === 'user' ? 'Edit message' : 'Edit response';
+
     const ta = doc.createElement('textarea');
+    ta.id = editInputId;
+    ta.name = 'edited_message';
     ta.className = 'edit-textarea';
     ta.rows = 3;
-    ta.value = original;
+    ta.value = initialDraftText !== null ? String(initialDraftText) : original;
 
     const btnRow = doc.createElement('div');
     btnRow.className = 'edit-btn-group';
@@ -426,44 +573,190 @@ export function mountProgramThread(containerEl, {
     cancelBtn.className = 'edit-btn edit-cancel-btn';
     cancelBtn.textContent = 'Cancel';
     const saveBtn = doc.createElement('button');
-    saveBtn.type = 'button';
+    saveBtn.type = 'submit';
     saveBtn.className = 'edit-btn edit-save-btn';
     saveBtn.textContent = 'Save';
 
     btnRow.append(cancelBtn, saveBtn);
-    bubble.replaceChildren(ta, btnRow);
+    editForm.append(taLbl, ta, btnRow);
+    bubble.replaceChildren(editForm);
 
-    cancelBtn.addEventListener('click', () => {
+    ta.focus?.();
+    ta.setSelectionRange?.(ta.value.length, ta.value.length);
+
+    let saving = false;
+
+    const closeEditor = ({ restoreOriginal = true } = {}) => {
       bubble.classList.remove('editing');
-      void refreshSession();
-    });
-    saveBtn.addEventListener('click', async () => {
+      if (restoreOriginal) {
+        bubble.replaceChildren(...originalChildren);
+        renderSnapshot();
+      } else if (targetRow) {
+        targetRow.dataset.contentHash = '';
+      }
+    };
+
+    const handleCancel = () => {
+      if (saving) return;
+      closeEditor({ restoreOriginal: true });
+    };
+
+    const handleSave = async () => {
+      if (saving) return;
       const nextText = ta.value;
-      saveBtn.disabled = true;
-      try {
-        if (msg.role === 'user') {
-          await editTurn({
-            session_id: currentSessionId,
-            msg_id: msg.id,
-            new_text: nextText,
-            model: selectedModel || undefined,
-          });
-        } else {
+
+      if (msg.role !== 'user') {
+        if (nextText === original) {
+          closeEditor({ restoreOriginal: true });
+          return;
+        }
+        if (connectionStore.get().mode !== 'online') {
+          showAlert('Offline', 'Cannot edit messages while Sanctuary is offline.');
+          return;
+        }
+        saving = true;
+        ta.disabled = true;
+        saveBtn.disabled = true;
+        cancelBtn.disabled = true;
+        try {
           await updateMessageText({
             session_id: currentSessionId,
             msg_id: msg.id,
             new_text: nextText,
           });
+          if (destroyed) return;
+          closeEditor({ restoreOriginal: false });
+          sessionStore.set((prev) => ({
+            messages: (Array.isArray(prev.messages) ? prev.messages : []).map((m) =>
+              m?.id === msg.id ? { ...m, text: nextText } : m
+            ),
+          }));
+          await refreshSession();
+        } catch (err) {
+          showAlert('Update Failed', err?.message || 'Unable to save edited message.');
+        } finally {
+          saving = false;
+          ta.disabled = false;
+          saveBtn.disabled = false;
+          cancelBtn.disabled = false;
         }
-        bubble.classList.remove('editing');
-        await refreshSession();
-      } catch (err) {
-        showAlert('Update Failed', err?.message || 'Unable to save edited message.');
+        return;
+      }
+
+      if (connectionStore.get().mode !== 'online') {
+        showAlert('Offline', 'Cannot save edited prompt while Sanctuary is offline.');
+        return;
+      }
+
+      saving = true;
+      ta.disabled = true;
+      saveBtn.disabled = true;
+      cancelBtn.disabled = true;
+      try {
+        if (generating || reattachedMonitor) {
+          turnCounter += 1;
+          await stopActiveGeneration();
+          if (destroyed) return;
+        }
+
+        const prevMessages = Array.isArray(sessionStore.get().messages) ? sessionStore.get().messages : [];
+        const targetIdx = prevMessages.findIndex((m) => m?.id === msg.id);
+
+        closeEditor({ restoreOriginal: false });
+        if (targetIdx >= 0) {
+          const baseMsg = prevMessages[targetIdx];
+          const updatedUserMsg = {
+            ...baseMsg,
+            ...(baseMsg.shared_post
+              ? {
+                  user_note: nextText,
+                  text: formatSharedPostForLlm(baseMsg.shared_post, nextText),
+                }
+              : { text: nextText }),
+          };
+          sessionStore.set({
+            messages: [...prevMessages.slice(0, targetIdx), updatedUserMsg],
+          });
+        } else {
+          renderSnapshot();
+        }
+
+        const turnGen = turnCounter + 1;
+        try {
+          await withTurnMonitor(currentProgramId, async (signal, typingRow) => {
+            const res = await editTurn(
+              {
+                session_id: currentSessionId,
+                msg_id: msg.id,
+                new_text: nextText,
+                model: selectedModel || undefined,
+              },
+              { signal }
+            );
+            typingRow.remove();
+            if (res?.cancelled) {
+              return;
+            }
+            if (res?.message) {
+              const msgObj = res.message;
+              sessionStore.set((prev) => ({
+                messages: [
+                  ...(Array.isArray(prev.messages) ? prev.messages : []).filter((m) => m?.id !== msgObj.id),
+                  msgObj,
+                ],
+              }));
+              scrollToBottom(false);
+            }
+            if (res?.message?.tool_calls?.some((tc) => tc?.name === 'tune_feed_algorithm')) {
+              void syncFeedTuningFromSanctuary();
+            }
+          });
+          if (!destroyed && turnCounter === turnGen) {
+            await refreshSession();
+          }
+        } catch (err) {
+          if (err?.isAborted || err?.name === 'AbortError') {
+            if (!destroyed && turnCounter === turnGen) {
+              await refreshSession().catch(() => {});
+            }
+            return;
+          }
+          sessionStore.set({ messages: prevMessages });
+          await refreshSession().catch(() => {});
+          showAlert('Update Failed', err?.message || 'Unable to save edited message.');
+          if (!destroyed) {
+            const restoredRow = findLiveRowById(chatContainer, msg.id);
+            const restoredBubble =
+              restoredRow?.querySelector?.('.message:not(.image-message)')
+              || restoredRow?.querySelector?.('.message');
+            if (restoredBubble) {
+              startInlineEdit(msg, restoredRow, restoredBubble, nextText);
+            }
+          }
+        }
       } finally {
-        saveBtn.disabled = false;
+        saving = false;
+      }
+    };
+
+    cancelBtn.addEventListener('click', handleCancel);
+    editForm.addEventListener('submit', (e) => {
+      e.preventDefault();
+      void handleSave();
+    });
+    saveBtn.addEventListener('click', (e) => {
+      e.preventDefault();
+      void handleSave();
+    });
+    ta.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        handleCancel();
+      } else if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+        e.preventDefault();
+        void handleSave();
       }
     });
-    if (textDiv) textDiv.remove();
   }
 
   async function handleSpeak(msg, btn) {
@@ -526,20 +819,34 @@ export function mountProgramThread(containerEl, {
       onOpenGallery: (speakerId, speakerName) => openGallery(speakerId || currentProgramId, speakerName),
       onRefreshHistory: () => refreshSession(),
       onReroll: async (msg) => {
-        setBusy(true);
-        try {
-          await editTurn({
-            session_id: currentSessionId,
-            msg_id: msg.id,
-            new_text: null,
-            model: selectedModel || undefined,
-          });
-          await refreshSession();
-        } finally {
-          setBusy(false);
+        if (generating) return;
+        const turnGen = turnCounter + 1;
+        await withTurnMonitor(msg.sender_id || currentProgramId, async (signal, typingRow) => {
+          try {
+            const res = await editTurn(
+              {
+                session_id: currentSessionId,
+                msg_id: msg.id,
+                new_text: null,
+                model: selectedModel || undefined,
+              },
+              { signal }
+            );
+            if (!signal.aborted) {
+              typingRow.remove();
+              if (res?.message?.tool_calls?.some((tc) => tc?.name === 'tune_feed_algorithm')) {
+                void syncFeedTuningFromSanctuary();
+              }
+            }
+          } catch {
+            // Handled cleanly after cancellation settles
+          }
+        });
+        if (!destroyed && turnCounter === turnGen) {
+          await refreshSession().catch(() => {});
         }
       },
-      onEdit: (msg, _row, bubble) => startInlineEdit(msg, bubble),
+      onEdit: (msg, row, bubble) => startInlineEdit(msg, row, bubble),
       onDelete: async (msg) => {
         await deleteMessage({ session_id: currentSessionId, msg_id: msg.id });
         await refreshSession();
@@ -566,7 +873,9 @@ export function mountProgramThread(containerEl, {
     h1.textContent = `Sanctuary — ${displayName}`;
     syncPlaceholder();
 
-    if (conn.mode === 'online') {
+    if (generating) {
+      statusText.textContent = '';
+    } else if (conn.mode === 'online') {
       statusText.textContent = '';
     } else if (conn.mode === 'offline') {
       statusText.textContent = 'Offline';
@@ -583,7 +892,9 @@ export function mountProgramThread(containerEl, {
       (it) => it.programId === currentProgramId && it.sessionId === currentSessionId
     );
 
-    if (conn.mode === 'offline') {
+    if (generating) {
+      statusHost.replaceChildren();
+    } else if (conn.mode === 'offline') {
       const suffix = outboxForSession.length > 0 ? ` • ${outboxForSession.length} queued` : '';
       statusHost.replaceChildren(
         createOfflineNotice({
@@ -609,6 +920,19 @@ export function mountProgramThread(containerEl, {
     chatContainer.querySelector('#active-thought-bubble')?.remove();
     if (conn.mode === 'online' && summary?.idle_thought && !generating) {
       chatContainer.insertBefore(createIdleThoughtRow(summary.idle_thought, displayName), bottomSentinel);
+    }
+
+    if (
+      state.generating
+      && !generating
+      && !activeTurnPromise
+      && !activeCancelPromise
+      && !reattachedMonitor
+      && conn.mode === 'online'
+      && state.activeSessionId === currentSessionId
+      && state.activeProgramId === currentProgramId
+    ) {
+      startReattachedMonitor();
     }
 
     if (needsInitialScroll) {
@@ -657,6 +981,7 @@ export function mountProgramThread(containerEl, {
   }
 
   function switchProgram(nextProgramId, nextSessionId = 'default', draft = '') {
+    stopReattachedMonitor();
     if (nextProgramId) currentProgramId = nextProgramId;
     if (nextSessionId) currentSessionId = nextSessionId;
     pinnedToBottom = true;
@@ -686,26 +1011,25 @@ export function mountProgramThread(containerEl, {
 
     if (!text && !mediaPath && !sharedPost) {
       if (conn.mode !== 'online' || !chatContainer.querySelector(LIVE_ROW_SELECTOR)) return;
-      pinnedToBottom = true;
-      setBusy(true);
-      const { row: typingRow, bubble: typingBubble } = createTypingIndicatorRow(currentProgramId, buildRowContext());
-      chatContainer.insertBefore(typingRow, bottomSentinel);
-      scrollToBottom(true);
-      const stopMonitor = startTurnToolMonitor({ sessionId: currentSessionId, chatContainer, typingBubble });
-      abortController = new AbortController();
-      try {
-        const contData = await continueGeneration(
-          { session_id: currentSessionId, model: selectedModel || undefined },
-          { signal: abortController.signal }
-        );
-        if (contData?.message?.tool_calls?.some((tc) => tc?.name === 'tune_feed_algorithm')) {
-          void syncFeedTuningFromSanctuary();
+      const turnGen = turnCounter + 1;
+      await withTurnMonitor(currentProgramId, async (signal, typingRow) => {
+        try {
+          const contData = await continueGeneration(
+            { session_id: currentSessionId, model: selectedModel || undefined },
+            { signal }
+          );
+          if (!signal.aborted) {
+            typingRow.remove();
+            if (contData?.message?.tool_calls?.some((tc) => tc?.name === 'tune_feed_algorithm')) {
+              void syncFeedTuningFromSanctuary();
+            }
+          }
+        } catch {
+          // Handled cleanly after cancellation settles
         }
-        await refreshSession();
-      } finally {
-        stopMonitor();
-        typingRow.remove();
-        setBusy(false);
+      });
+      if (!destroyed && turnCounter === turnGen) {
+        await refreshSession().catch(() => {});
       }
       return;
     }
@@ -745,61 +1069,53 @@ export function mountProgramThread(containerEl, {
       ...(sharedPost ? { shared_post: sharedPost, user_note: text } : {}),
     };
 
-    pinnedToBottom = true;
-    setBusy(true);
     sessionStore.set((prev) => ({
       messages: [
         ...(Array.isArray(prev.messages) ? prev.messages : []).filter((m) => m?.id !== userMsgId),
         optimisticUserMsg,
       ],
-      generating: true,
     }));
 
-    const { row: typingRow, bubble: typingBubble } = createTypingIndicatorRow(currentProgramId, buildRowContext());
-    chatContainer.insertBefore(typingRow, bottomSentinel);
-    scrollToBottom(true);
-    const stopMonitor = startTurnToolMonitor({ sessionId: currentSessionId, chatContainer, typingBubble });
-    abortController = new AbortController();
-
-    try {
-      const data = await sendChat(
-        {
-          session_id: currentSessionId,
-          msg_id: userMsgId,
-          message: outboundMessage,
-          image_mime: mime,
-          media_path: mediaPath,
-          model: selectedModel || undefined,
-          ...(sharedPost ? { shared_post: sharedPost, user_note: text } : {}),
-        },
-        { signal: abortController.signal }
-      );
-      typingRow.remove();
-      if (data?.message && !data.cancelled) {
-        const msgObj = data.message;
-        sessionStore.set((prev) => ({
-          messages: [
-            ...(Array.isArray(prev.messages) ? prev.messages : []).filter((m) => m?.id !== msgObj.id),
-            msgObj,
-          ],
-        }));
-        scrollToBottom(false);
+    const turnGen = turnCounter + 1;
+    await withTurnMonitor(currentProgramId, async (signal, typingRow) => {
+      try {
+        const data = await sendChat(
+          {
+            session_id: currentSessionId,
+            msg_id: userMsgId,
+            message: outboundMessage,
+            image_mime: mime,
+            media_path: mediaPath,
+            model: selectedModel || undefined,
+            ...(sharedPost ? { shared_post: sharedPost, user_note: text } : {}),
+          },
+          { signal }
+        );
+        if (!signal.aborted) {
+          typingRow.remove();
+          if (data?.message && !data.cancelled) {
+            const msgObj = data.message;
+            sessionStore.set((prev) => ({
+              messages: [
+                ...(Array.isArray(prev.messages) ? prev.messages : []).filter((m) => m?.id !== msgObj.id),
+                msgObj,
+              ],
+            }));
+            scrollToBottom(false);
+          }
+          if (data?.state) {
+            moodHeart.updateMood(data.state, data.inversion_active, data.inversion_state);
+          }
+          if (data?.message?.tool_calls?.some((tc) => tc?.name === 'tune_feed_algorithm')) {
+            void syncFeedTuningFromSanctuary();
+          }
+        }
+      } catch {
+        // Handled cleanly after cancellation settles
       }
-      if (data?.state) {
-        moodHeart.updateMood(data.state, data.inversion_active, data.inversion_state);
-      }
-      if (data?.message?.tool_calls?.some((tc) => tc?.name === 'tune_feed_algorithm')) {
-        void syncFeedTuningFromSanctuary();
-      }
-      await refreshSession();
-    } catch {
-      typingRow.remove();
+    });
+    if (!destroyed && turnCounter === turnGen) {
       await refreshSession().catch(() => {});
-    } finally {
-      stopMonitor();
-      setBusy(false);
-      sessionStore.set({ generating: false });
-      abortController = null;
     }
   }
 
@@ -813,13 +1129,15 @@ export function mountProgramThread(containerEl, {
   textarea.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
+      if (e.isComposing || e.keyCode === 229) {
+        return;
+      }
       void submitTurn();
     }
   });
 
   stopBtn.addEventListener('click', () => {
-    abortController?.abort();
-    void cancelChat(currentSessionId).catch(() => {});
+    void stopActiveGeneration();
   });
 
   fileInput.addEventListener('change', async () => {
@@ -881,7 +1199,9 @@ export function mountProgramThread(containerEl, {
   const unsubOutbox = outboxStore.subscribe(renderSnapshot);
   const offOnline = onSanctuaryEvent('sanctuary:online', () => {
     void refreshModelsAndConfig();
-    void refreshSession();
+    if (!generating) {
+      void refreshSession();
+    }
   });
 
   void refreshModelsAndConfig();
@@ -908,6 +1228,7 @@ export function mountProgramThread(containerEl, {
     getActiveUser: () => activeUserName,
     destroy() {
       destroyed = true;
+      stopReattachedMonitor();
       abortController?.abort();
       activeAudio?.pause?.();
       chatResizeObserver?.disconnect?.();

@@ -229,7 +229,14 @@ def run_window():
 
     # The icon sets both the title bar and the taskbar button. Blocks until the window closes.
     gui = 'edgechromium' if sys.platform == "win32" else None
-    webview.start(load_app_when_ready, gui=gui, debug=False, icon=APP_ICON_PATH)
+    webview.start(
+        load_app_when_ready,
+        gui=gui,
+        debug=False,
+        icon=APP_ICON_PATH,
+        private_mode=False,
+        storage_path=os.path.join(REPO_ROOT, "webview_data"),
+    )
 
     lifecycle.shutdown()
     # Children are stopped; exit immediately rather than waiting on lingering threads.

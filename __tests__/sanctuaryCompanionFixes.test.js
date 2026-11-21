@@ -372,3 +372,241 @@ test('syncRecentUserPostsToSanctuary deduplicates cross-posts, skips boosts, and
     dom.restore();
   }
 });
+
+test('programThread inline edit Cancel, Escape, and Save restore bubbles reliably without stale editors', async () => {
+  const dom = installMockDom();
+  const prevFetch = globalThis.fetch;
+  resetMemoryStorageForTests();
+  resetAuthStoreForTests();
+  resetOutboxForTests();
+  resetSessionStoreForTests();
+  resetConnectionStoreForTests();
+
+  let serverHistory = [
+    { id: 'usr_1', role: 'user', text: 'Initial prompt', timestamp: 100 },
+    { id: 'prgm_1', role: 'program', sender_id: 'sebile', sender_name: 'Sebile', text: 'Initial reply', timestamp: 101 },
+  ];
+  let updateCalls = 0;
+
+  globalThis.fetch = async (url, init = {}) => {
+    const u = String(url);
+    if (u.includes('/history')) {
+      return jsonResponse({
+        active_program: 'sebile',
+        character_name: 'Sebile',
+        history: serverHistory,
+      });
+    }
+    if (u.endsWith('/update_message') && init.method === 'POST') {
+      updateCalls += 1;
+      const body = JSON.parse(init.body || '{}');
+      serverHistory = serverHistory.map((m) => (m.id === body.msg_id ? { ...m, text: body.new_text.trim() } : m));
+      return jsonResponse({ status: 'success' });
+    }
+    if (u.endsWith('/models')) {
+      return jsonResponse({ models: [{ value: 'local-llm', label: 'Local LLM' }] });
+    }
+    if (u.endsWith('/api/config')) {
+      return jsonResponse({ active_user: 'builder', program_moods: {} });
+    }
+    return jsonResponse({});
+  };
+
+  let ctrl = null;
+  try {
+    connectionStore.set({
+      mode: 'online',
+      nodeUrl: 'http://127.0.0.1:5000',
+      activeProgram: 'sebile',
+      programs: [{ id: 'sebile', name: 'Sebile' }],
+    });
+
+    const host = dom.document.createElement('div');
+    dom.document.body.appendChild(host);
+    ctrl = mountProgramThread(host, { programId: 'sebile', sessionId: 'default' });
+    await new Promise((r) => setTimeout(r, 30));
+
+    // 1. Cancel restores original bubble synchronously even with unchanged history
+    const progRow = host.querySelector('[data-msg-id="prgm_1"]');
+    progRow.querySelector('[aria-label="Edit response"]').click();
+    assert.ok(progRow.querySelector('.message.editing'));
+    const ta1 = progRow.querySelector('.edit-textarea');
+    ta1.value = 'Discarded draft';
+    progRow.querySelector('.edit-cancel-btn').click();
+    assert.equal(progRow.querySelector('.message.editing'), null);
+    assert.equal(progRow.querySelector('.edit-textarea'), null);
+    assert.equal(progRow.querySelector('.message-text').textContent, 'Initial reply');
+    assert.ok(progRow.querySelector('[aria-label="Edit response"]'));
+
+    // 2. Escape cancels inline edit cleanly
+    progRow.querySelector('[aria-label="Edit response"]').click();
+    const ta2 = progRow.querySelector('.edit-textarea');
+    ta2.value = 'Escape discard';
+    ta2.dispatchEvent(Object.assign(new Event('keydown', { bubbles: true, cancelable: true }), { key: 'Escape' }));
+    assert.equal(progRow.querySelector('.edit-textarea'), null);
+    assert.equal(progRow.querySelector('.message-text').textContent, 'Initial reply');
+
+    // 3. Save program edit with unchanged text closes editor without calling /update_message
+    progRow.querySelector('[aria-label="Edit response"]').click();
+    progRow.querySelector('.edit-save-btn').click();
+    await new Promise((r) => setTimeout(r, 20));
+    assert.equal(updateCalls, 0);
+    assert.equal(progRow.querySelector('.edit-textarea'), null);
+    assert.equal(progRow.querySelector('.message-text').textContent, 'Initial reply');
+
+    // 4. Save changed program edit calls /update_message, closes editor, and renders updated text
+    progRow.querySelector('[aria-label="Edit response"]').click();
+    progRow.querySelector('.edit-textarea').value = 'Updated reply text';
+    progRow.querySelector('.edit-save-btn').click();
+    await new Promise((r) => setTimeout(r, 30));
+    assert.equal(updateCalls, 1);
+    const updatedProgRow = host.querySelector('[data-msg-id="prgm_1"]');
+    assert.equal(updatedProgRow.querySelector('.edit-textarea'), null);
+    assert.equal(updatedProgRow.querySelector('.message-text').textContent, 'Updated reply text');
+  } finally {
+    ctrl?.destroy();
+    globalThis.fetch = prevFetch;
+    resetAuthStoreForTests();
+    resetOutboxForTests();
+    resetSessionStoreForTests();
+    resetConnectionStoreForTests();
+    resetMemoryStorageForTests();
+    dom.restore();
+  }
+});
+
+test('programThread closes user edit immediately, stops active turn before saving user edit, and awaits cancel before refreshing on Stop', async () => {
+  const dom = installMockDom();
+  const prevFetch = globalThis.fetch;
+  resetMemoryStorageForTests();
+  resetAuthStoreForTests();
+  resetOutboxForTests();
+  resetSessionStoreForTests();
+  resetConnectionStoreForTests();
+
+  const events = [];
+  let serverHistory = [
+    { id: 'usr_1', role: 'user', text: 'Original prompt', timestamp: 100 },
+    { id: 'prgm_1', role: 'program', sender_id: 'sebile', sender_name: 'Sebile', text: 'Original reply', timestamp: 101 },
+  ];
+  let chatDeferred = createDeferred();
+  let editDeferred = createDeferred();
+  let cancelDeferred = createDeferred();
+  let editBodySeen = null;
+
+  globalThis.fetch = async (url, init = {}) => {
+    const u = String(url);
+    if (u.includes('/history')) {
+      events.push('history');
+      return jsonResponse({
+        active_program: 'sebile',
+        character_name: 'Sebile',
+        history: serverHistory,
+      });
+    }
+    if (u.endsWith('/chat') && init.method === 'POST') {
+      events.push('chat:start');
+      init.signal?.addEventListener?.('abort', () => {
+        chatDeferred.reject(Object.assign(new Error('Aborted'), { name: 'AbortError' }));
+      }, { once: true });
+      const data = await chatDeferred.promise;
+      return jsonResponse(data);
+    }
+    if (u.endsWith('/edit') && init.method === 'POST') {
+      events.push('edit:start');
+      editBodySeen = JSON.parse(init.body || '{}');
+      init.signal?.addEventListener?.('abort', () => {
+        editDeferred.reject(Object.assign(new Error('Aborted'), { name: 'AbortError' }));
+      }, { once: true });
+      const data = await editDeferred.promise;
+      return jsonResponse(data);
+    }
+    if (u.endsWith('/api/cancel_chat') && init.method === 'POST') {
+      events.push('cancel:start');
+      await cancelDeferred.promise;
+      events.push('cancel:done');
+      return jsonResponse({ status: 'success' });
+    }
+    if (u.includes('/api/session_tool_calls')) {
+      return jsonResponse({ call_id: null, tool_calls: [] });
+    }
+    if (u.endsWith('/models')) {
+      return jsonResponse({ models: [{ value: 'local-llm', label: 'Local LLM' }] });
+    }
+    if (u.endsWith('/api/config')) {
+      return jsonResponse({ active_user: 'builder', program_moods: {} });
+    }
+    return jsonResponse({});
+  };
+
+  let ctrl = null;
+  try {
+    connectionStore.set({
+      mode: 'online',
+      nodeUrl: 'http://127.0.0.1:5000',
+      activeProgram: 'sebile',
+      programs: [{ id: 'sebile', name: 'Sebile' }],
+    });
+
+    const host = dom.document.createElement('div');
+    dom.document.body.appendChild(host);
+    ctrl = mountProgramThread(host, { programId: 'sebile', sessionId: 'default' });
+    await new Promise((r) => setTimeout(r, 30));
+
+    // Start an in-flight /chat generation
+    host.querySelector('#user-input').value = 'New ongoing message';
+    host.querySelector('#input-area').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await new Promise((r) => setTimeout(r, 15));
+    assert.ok(host.querySelector('#stop-btn').hidden === false);
+
+    // Edit usr_1 and click Save WHILE /chat is still generating
+    const usrRow = host.querySelector('[data-msg-id="usr_1"]');
+    usrRow.querySelector('[aria-label="Edit message"]').click();
+    assert.ok(usrRow.querySelector('.edit-textarea'));
+    usrRow.querySelector('.edit-textarea').value = 'Edited prompt while busy';
+    usrRow.querySelector('.edit-save-btn').click();
+    await new Promise((r) => setTimeout(r, 15));
+
+    // /api/cancel_chat must be initiated before /edit starts
+    assert.ok(events.includes('cancel:start'));
+    assert.equal(events.includes('edit:start'), false);
+
+    // Finish /api/cancel_chat for the previous turn -> editor closes immediately and /edit begins
+    cancelDeferred.resolve();
+    await new Promise((r) => setTimeout(r, 30));
+
+    assert.equal(editBodySeen?.msg_id, 'usr_1');
+    assert.equal(editBodySeen?.new_text, 'Edited prompt while busy');
+    assert.equal(host.querySelector('.edit-textarea'), null);
+    assert.ok(host.querySelector('[data-msg-id="usr_1"] .message-text').textContent.includes('Edited prompt while busy'));
+    assert.ok(host.querySelector('.typing-row'));
+
+    // Now click #stop-btn while /edit is in flight: /history must NOT fire until /api/cancel_chat completes
+    events.length = 0;
+    cancelDeferred = createDeferred();
+    host.querySelector('#stop-btn').click();
+    await new Promise((r) => setTimeout(r, 25));
+
+    assert.deepEqual(events, ['cancel:start']);
+    assert.equal(host.querySelector('#stop-btn').hidden, false);
+
+    cancelDeferred.resolve();
+    await new Promise((r) => setTimeout(r, 35));
+
+    assert.equal(events[0], 'cancel:start');
+    assert.equal(events[1], 'cancel:done');
+    assert.equal(events[2], 'history');
+    assert.equal(host.querySelector('#stop-btn').hidden, true);
+    assert.equal(host.querySelector('.edit-textarea'), null);
+    assert.equal(host.querySelector('[data-msg-id="usr_1"] .message-text').textContent, 'Original prompt');
+  } finally {
+    ctrl?.destroy();
+    globalThis.fetch = prevFetch;
+    resetAuthStoreForTests();
+    resetOutboxForTests();
+    resetSessionStoreForTests();
+    resetConnectionStoreForTests();
+    resetMemoryStorageForTests();
+    dom.restore();
+  }
+});

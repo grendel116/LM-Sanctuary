@@ -1,19 +1,24 @@
-import { createPostCard } from '../components/PostCard.js';
+import { createPostCard, getPostActionCapabilities } from '../components/PostCard.js';
 import { showAlert, showConfirm } from '../components/sanctuary/SanctuaryDialog.js';
 import { createLoadingState } from '../components/ui/index.js';
 import { DEFAULT_AVATAR_DATA_URI } from '../constants/avatars.js';
-import { toUnifiedItem } from '../core/schema/unifiedItem.js';
+import { canonicalizeActorHandle, toUnifiedItem } from '../core/schema/unifiedItem.js';
 import {
   deleteUnified,
   fetchPostThread,
+  hideReplyUnified,
   likeUnified,
   pinUnified,
   replyUnified,
   repostUnified,
+  runBridgeRetry,
+  toggleBlockAuthor,
+  toggleMuteAuthor,
 } from '../queries/socialClient.js';
+import { removeActivityByActor } from '../state/activityStore.js';
 import { authStore } from '../state/authStore.js';
 import { prefillReply } from '../state/composeStore.js';
-import { mutatePostAcrossStreams, recordAuthorInteraction, removePostAcrossStreams } from '../state/feedStore.js';
+import { mutatePostAcrossStreams, recordAuthorInteraction, removePostAcrossStreams, applyPostInterestFeedback } from '../state/feedStore.js';
 import { openEditPostDialog } from './profile.js';
 
 function pickReplyAvatar(authState, protocol) {
@@ -45,10 +50,43 @@ export function renderPostThreadView(containerEl, {
 
   let destroyed = false;
   let currentFocal = toUnifiedItem(post);
+  const initialFocusReplyId = String(post?._meta?.focusReplyId || '');
+  const normFocusReplyId = initialFocusReplyId.replace(/^threads:notif:/, 'threads:');
+  let didScrollFocusReply = false;
   let ancestors = [];
   let descendants = [];
   const historyStack = [];
   let loadSeq = 0;
+  let sendingReply = false;
+
+  function isOwnThreadFocal() {
+    if (currentFocal?._meta?.linkedIds) return true;
+    const accounts = authStore.get()?.accounts || [];
+    const fHandle = String(currentFocal?.author?.handle || '').replace(/^@/, '').toLowerCase();
+    const fId = String(currentFocal?.author?.id || '');
+    return accounts.some((acc) => {
+      const ah = String(acc.acct || acc.handle || '').replace(/^@/, '').toLowerCase();
+      return (ah && fHandle && ah === fHandle) || (acc.userId && fId && String(acc.userId) === fId);
+    });
+  }
+
+  function purgeAuthorFromThread(u) {
+    const proto = String(u?.protocol || 'mastodon').toLowerCase();
+    const handle = String(u?.author?.handle || '').trim().replace(/^@/, '').toLowerCase();
+    const aid = String(u?.author?.id || '').trim().toLowerCase();
+    const canon = handle ? canonicalizeActorHandle(handle, proto) : '';
+    const matchesItem = (item) => {
+      const ih = String(item?.author?.handle || '').trim().replace(/^@/, '').toLowerCase();
+      const iid = String(item?.author?.id || '').trim().toLowerCase();
+      const ic = ih ? canonicalizeActorHandle(ih, item?.protocol || proto) : '';
+      return Boolean((canon && ic === canon) || (handle && ih === handle) || (aid && iid === aid));
+    };
+    descendants = descendants.filter((d) => !matchesItem(d.item));
+    ancestors = ancestors.filter((a) => !matchesItem(a));
+    renderSections();
+    removePostAcrossStreams(matchesItem);
+    removeActivityByActor(u?.author, proto);
+  }
 
   const wrap = doc.createElement('section');
   wrap.className = 'post-thread-view';
@@ -194,6 +232,80 @@ export function renderPostThreadView(containerEl, {
         applyUpdatedItem(updated);
         mutatePostAcrossStreams(p.id || p.key, () => updated);
       } : null,
+      onRetryBridge: (retryEntry) => {
+        void runBridgeRetry(retryEntry.id)
+          .then(() => loadThreadContext({ silent: true }))
+          .catch((err) => showAlert('Bridge Retry Failed', err?.message || 'Retry failed.'));
+      },
+      onHideReply: !isFocal && isOwnThreadFocal() ? (_raw, u) => {
+        void (async () => {
+          const res = await hideReplyUnified(u, { rootItem: currentFocal });
+          if (destroyed) return;
+          descendants = descendants.filter((d) => d.item.id !== u.id);
+          if (currentFocal?.metrics) {
+            currentFocal = {
+              ...currentFocal,
+              metrics: { ...currentFocal.metrics, replies: Math.max(0, Number(currentFocal.metrics.replies || 0) - 1) },
+            };
+          }
+          renderSections();
+          if (res?.warnings?.length > 0) {
+            showAlert('Comment Hidden Locally', res.warnings.join('\n\n'));
+          }
+        })();
+      } : null,
+      onInterested: async (p) => {
+        const updated = await applyPostInterestFeedback(p, 'interested');
+        if (updated && !destroyed) applyUpdatedItem(updated);
+      },
+      onNotInterested: async (p) => {
+        await applyPostInterestFeedback(p, 'not_interested');
+        if (destroyed || isFocal) return;
+        const targetId = toUnifiedItem(p).id;
+        descendants = descendants.filter((d) => d.item.id !== targetId);
+        ancestors = ancestors.filter((a) => a.id !== targetId);
+        renderSections();
+      },
+      onMuteAuthor: (_raw, u) => {
+        const cleanH = String(u?.author?.handle || '').replace(/^@/, '');
+        if (!u?.author?.id && !cleanH) return;
+        showConfirm('Mute Account', `Mute @${cleanH || u.author.id}?`, async () => {
+          try {
+            await toggleMuteAuthor(u.author.id || cleanH, false, {
+              protocol: u.protocol,
+              acct: cleanH,
+              displayName: u.author.name || cleanH,
+              instanceUrl: u._meta?.mastodon?.instanceUrl || '',
+            });
+            if (!destroyed) purgeAuthorFromThread(u);
+          } catch (err) {
+            showAlert('Moderation Error', err?.message || 'Unable to mute account.');
+          }
+        });
+      },
+      onBlockAuthor: (_raw, u) => {
+        const cleanH = String(u?.author?.handle || '').replace(/^@/, '');
+        if (!u?.author?.id && !cleanH) return;
+        const ownThread = isOwnThreadFocal() || Boolean(u?._meta?.onOwnThread);
+        const hideNote = ownThread && u.protocol === 'threads' ? ' and hide their comment on Threads' : '';
+        showConfirm('Block Account', `Block @${cleanH || u.author.id}${hideNote}?`, async () => {
+          try {
+            const res = await toggleBlockAuthor(u.author.id || cleanH, false, {
+              protocol: u.protocol,
+              acct: cleanH,
+              displayName: u.author.name || cleanH,
+              instanceUrl: u._meta?.mastodon?.instanceUrl || '',
+              replyPostId: ownThread && u.protocol === 'threads' ? (u._meta?.threads?.postId || '') : '',
+            });
+            if (!destroyed) purgeAuthorFromThread(u);
+            if (res?.warnings?.length > 0) {
+              showAlert('Block Warning', res.warnings.join('\n\n'));
+            }
+          } catch (err) {
+            showAlert('Moderation Error', err?.message || 'Unable to block account.');
+          }
+        });
+      },
       onDeletePost: (p) => {
         showConfirm(
           'Delete Post',
@@ -232,9 +344,20 @@ export function renderPostThreadView(containerEl, {
   function renderSections() {
     if (destroyed) return;
     const authState = authStore.get();
+    const replyCap = getPostActionCapabilities(currentFocal, authState).reply;
     replyAvatar.src = pickReplyAvatar(authState, currentFocal.protocol);
     const authorHandle = String(currentFocal.author?.handle || '').replace(/^@/, '');
-    replyInput.placeholder = authorHandle ? `Reply to @${authorHandle}...` : 'Write a reply...';
+    if (!replyCap.enabled) {
+      replyInput.disabled = true;
+      replyBtn.disabled = true;
+      replyInput.placeholder = replyCap.reason || 'Replies unavailable for this post.';
+      replyBtn.title = replyCap.reason || 'Replies unavailable for this post.';
+    } else if (!sendingReply) {
+      replyInput.disabled = false;
+      replyBtn.disabled = false;
+      replyInput.placeholder = authorHandle ? `Reply to @${authorHandle}...` : 'Write a reply...';
+      replyBtn.title = '';
+    }
 
     ancestorsEl.replaceChildren(
       ...ancestors.map((a) => {
@@ -253,9 +376,18 @@ export function renderPostThreadView(containerEl, {
     descendantsEl.replaceChildren(
       ...descendants.map((entry) => {
         const itemWrap = doc.createElement('div');
-        itemWrap.className = 'thread-reply-item';
+        const entryId = String(entry?.item?.id || '');
+        const normEntryId = entryId.replace(/^threads:notif:/, 'threads:');
+        const isHighlighted = Boolean(
+          initialFocusReplyId && (entryId === initialFocusReplyId || normEntryId === normFocusReplyId)
+        );
+        itemWrap.className = `thread-reply-item${isHighlighted ? ' is-highlighted-reply' : ''}`;
         itemWrap.dataset.depth = String(Math.max(0, Math.min(Number(entry.depth || 0), 3)));
         itemWrap.appendChild(createPostCard(toUnifiedItem(entry.item), makeCardOpts({ isFocal: false })));
+        if (isHighlighted && !didScrollFocusReply) {
+          didScrollFocusReply = true;
+          setTimeout(() => itemWrap.scrollIntoView?.({ block: 'nearest' }), 0);
+        }
         return itemWrap;
       })
     );
@@ -303,11 +435,13 @@ export function renderPostThreadView(containerEl, {
 
   replyForm.addEventListener('submit', async (e) => {
     e.preventDefault();
+    if (!getPostActionCapabilities(currentFocal).reply.enabled) return;
     const draft = replyInput.value.trim();
     if (!draft) {
       prefillReply(currentFocal);
       return;
     }
+    sendingReply = true;
     replyBtn.disabled = true;
     replyInput.disabled = true;
     replyStatus.hidden = false;
@@ -345,11 +479,17 @@ export function renderPostThreadView(containerEl, {
         replyStatus.textContent = err?.message || 'Unable to send reply.';
       }
     } finally {
+      sendingReply = false;
       if (!destroyed) {
-        replyBtn.disabled = false;
-        replyInput.disabled = false;
+        const canStillReply = getPostActionCapabilities(currentFocal).reply.enabled;
+        replyBtn.disabled = !canStillReply;
+        replyInput.disabled = !canStillReply;
       }
     }
+  });
+
+  const unsubAuth = authStore.subscribe(() => {
+    if (!destroyed) renderSections();
   });
 
   renderSections();
@@ -360,6 +500,7 @@ export function renderPostThreadView(containerEl, {
     destroy() {
       destroyed = true;
       loadSeq += 1;
+      unsubAuth();
     },
   };
 }

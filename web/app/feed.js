@@ -1,20 +1,16 @@
 import { createOfflineNotice } from '../components/OfflineNotice.js';
-import { createPostCard, syncPostCardReactions } from '../components/PostCard.js';
+import { createPostCard, getPostActionCapabilities, syncPostCardReactions } from '../components/PostCard.js';
 import { attachPullToRefresh } from '../components/PullToRefresh.js';
 import { createClassicModalDialog, showAlert, showConfirm } from '../components/sanctuary/SanctuaryDialog.js';
 import { createLoadingState } from '../components/ui/index.js';
+import { normalizeInstanceUrl } from '../constants/endpoints.js';
 import { DEFAULT_AVATAR_DATA_URI } from '../constants/avatars.js';
 import { rankFeedItems } from '../core/feedRanker.js';
-import { applyKeywordFilters } from '../core/schema/unifiedItem.js';
-import {
-  getBskyCustomFeed,
-  getBskyTimeline,
-} from '../queries/bluesky.js';
-import {
-  getTimeline,
-  getTrendingStatuses,
-  toggleBookmark,
-} from '../queries/fediverse.js';
+import { applyKeywordFilters, isUnifiedItemModerated } from '../core/schema/unifiedItem.js';
+import { getBskyTimeline } from '../queries/bluesky.js';
+import { harvestSanctuaryFeed } from '../queries/feedHarvester.js';
+import { formatApiErrorMessage } from '../queries/fetch/fetchWrapper.js';
+import { getTimeline, searchFediverse, toggleBookmark } from '../queries/fediverse.js';
 import {
   addAccountToMastodonList,
   createMastodonList,
@@ -33,13 +29,14 @@ import {
   runBridgeRetry,
   searchAccountsAndPosts,
   toggleBlockAuthor,
-  toggleFollowAuthor,
   toggleMuteAuthor,
 } from '../queries/socialClient.js';
+import { removeActivityByActor } from '../state/activityStore.js';
 import { authStore, getAuthenticatedAccount, updateAccountTokens } from '../state/authStore.js';
 import { openCompose, prefillReply } from '../state/composeStore.js';
 import {
   appendStreamItems,
+  applyPostInterestFeedback,
   feedStore,
   hydrateCachedFilters,
   hydrateCachedModeration,
@@ -48,20 +45,21 @@ import {
   mergeChronologicalPosts,
   mutatePostAcrossStreams,
   persistStreamCache,
+  reconcileEnrichedStreamItems,
   recordAuthorInteraction,
+  recordBehavioralSignal,
   removePostAcrossStreams,
   setActiveStream,
   setSemanticScores,
   setStreamItems,
   setStreamLoading,
+  setTasteScores,
   setUserLists,
 } from '../state/feedStore.js';
 import { connectionStore } from '../state/sanctuary/connection.js';
 import { publishOrganicPost } from './composeModal.js';
 import { openEditPostDialog } from './profile.js';
 
-const DEFAULT_PUBLIC_INSTANCE = 'https://mastodon.social';
-const BSKY_WHATS_HOT_FEED = 'at://did:plc:z72i7hdynmk6r22z27h6tvur/app.bsky.feed.generator/whats-hot';
 const INFINITE_SCROLL_THRESHOLD_PX = 480;
 const FEED_REFRESH_SVG = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-2.64-6.36L21 8"></path><path d="M21 3v5h-5"></path></svg>`;
 
@@ -95,7 +93,7 @@ function getRetrySig(authState) {
     .join('|');
 }
 
-function computePostStructureSig(post, showSanctuary, hasMasto, hasBsky = false) {
+function computePostStructureSig(post, showSanctuary, hasMasto, hasBsky = false, hasThreads = false, retrySig = '') {
   const key = String(post?.id || post?.key || '');
   const m = post?._meta?.mastodon || {};
   const b = post?._meta?.bluesky || {};
@@ -105,17 +103,22 @@ function computePostStructureSig(post, showSanctuary, hasMasto, hasBsky = false)
   return [
     key,
     post?.content_html || post?.content_text || '',
+    post?.language || '',
     m.spoilerText || post?.spoilerText || '',
     post?._meta?.linkCard?.url || post?.linkCard?.url || '',
     attUrls,
     quoteKey,
     Boolean(m.pinned),
-    linked.blueskyUri || '',
-    linked.threadsPostId || '',
+    linked.mastodonStatusId || m.statusId || '',
+    linked.blueskyUri || b.uri || '',
+    linked.threadsPostId || post?._meta?.threads?.postId || '',
+    post?._meta?.feedFeedback || '',
     m.rebloggedBy?.handle || b.rebloggedBy?.handle || '',
     Boolean(showSanctuary),
     Boolean(hasMasto),
     Boolean(hasBsky),
+    Boolean(hasThreads),
+    retrySig,
   ].join('\u001f');
 }
 
@@ -130,13 +133,30 @@ function computePostReactionSig(post) {
     Boolean(m.favourited || b.likeUri || post?.viewerState?.favourited),
     Boolean(m.reblogged || b.repostUri || post?.viewerState?.reblogged),
     Boolean(m.bookmarked || post?.viewerState?.bookmarked),
+    Boolean(b.replyDisabled),
+    String(m.visibility || 'public'),
     JSON.stringify(post?._meta?.metricsBreakdown || null),
   ].join('\u001f');
 }
 
 function computeTuningSig(tuning) {
   const t = tuning || {};
-  return JSON.stringify([t.sliders || {}, t.boostConcepts || [], t.dampenConcepts || []]);
+  return JSON.stringify([
+    t.sliders || {},
+    t.boostConcepts || [],
+    t.dampenConcepts || [],
+    t.discoveryChannels || [],
+    t.discoveryInstances || [],
+  ]);
+}
+
+function computeHarvestSourceSig(tuning) {
+  const t = tuning || {};
+  return JSON.stringify([
+    t.discoveryChannels || [],
+    t.discoveryInstances || [],
+    t.boostConcepts || [],
+  ]);
 }
 
 function buildOptimisticReactionPost(cur, kind, nextActive) {
@@ -185,18 +205,26 @@ function scheduleMetricsEnrichment(items, isStale) {
   if (!Array.isArray(items) || items.length === 0) return;
   void enrichUnifiedItemsMetrics(items).then((enriched) => {
     if (isStale?.() || !Array.isArray(enriched)) return;
+    const changed = [];
     for (let i = 0; i < enriched.length; i += 1) {
       const next = enriched[i];
       const prev = items[i];
       if (!next?.id || next === prev) continue;
+      const linkedChanged =
+        Boolean(next._meta?.linkedIds) &&
+        JSON.stringify(next._meta.linkedIds) !== JSON.stringify(prev?._meta?.linkedIds || null);
       if (
         next.metrics?.likes !== prev?.metrics?.likes ||
         next.metrics?.replies !== prev?.metrics?.replies ||
         next.metrics?.reposts !== prev?.metrics?.reposts ||
-        Boolean(next._meta?.metricsBreakdown) !== Boolean(prev?._meta?.metricsBreakdown)
+        Boolean(next._meta?.metricsBreakdown) !== Boolean(prev?._meta?.metricsBreakdown) ||
+        linkedChanged
       ) {
-        mutatePostAcrossStreams(next.id, () => next);
+        changed.push(next);
       }
+    }
+    if (changed.length > 0) {
+      reconcileEnrichedStreamItems(changed);
     }
   }).catch(() => {});
 }
@@ -225,15 +253,51 @@ export function mountFeedScreen(containerEl, {
   let sentinelIntersecting = false;
   let lastAutoCursorSig = '';
   let autoCheckTimer = null;
+  let sourceRefreshTimer = null;
+  let prefsHydrated = false;
+  let lastHarvestSourceSig = computeHarvestSourceSig(feedStore.get().tuning);
 
   const cardCache = new Map();
   const streamOrders = new Map();
   const pendingReactions = new Set();
+  const cardObservation = new Map();
+  const dwelledIds = new Set();
+  const skippedIds = new Set();
+  let dwellObserver = null;
+
+  function stopCardDwellObservation(cardEl) {
+    if (!cardEl) return;
+    const obs = cardObservation.get(cardEl);
+    if (obs) {
+      clearTimeout(obs.dwellTimer);
+      cardObservation.delete(cardEl);
+    }
+    dwellObserver?.unobserve?.(cardEl);
+  }
+
+  function startCardDwellObservation(cardEl, post, streamName) {
+    if (!cardEl || !dwellObserver) return;
+    const postKey = String(post?.id || post?.key || '').trim();
+    if (!postKey) return;
+    const prev = cardObservation.get(cardEl);
+    if (prev && prev.postKey === postKey && prev.streamName === streamName) return;
+    if (prev) clearTimeout(prev.dwellTimer);
+    cardObservation.set(cardEl, {
+      post,
+      postKey,
+      streamName,
+      enteredAt: 0,
+      dwellTimer: 0,
+    });
+    dwellObserver.observe(cardEl);
+  }
   const prefsHydrationPromise = Promise.allSettled([
     hydrateFeedTuning(),
     hydrateCachedModeration(),
     hydrateCachedFilters(),
   ]).finally(() => {
+    prefsHydrated = true;
+    lastHarvestSourceSig = computeHarvestSourceSig(feedStore.get().tuning);
     if (!destroyed) void fetchKeywordFilters().catch(() => {});
   });
 
@@ -407,6 +471,7 @@ export function mountFeedScreen(containerEl, {
 
   async function handleLike(post) {
     const cur = resolvePostInActiveBucket(post) || post;
+    if (!getPostActionCapabilities(cur).like.enabled) return;
     const postKey = String(cur?.id || cur?.key || '');
     const lockKey = `like:${postKey}`;
     if (!postKey || pendingReactions.has(lockKey)) return;
@@ -422,6 +487,7 @@ export function mountFeedScreen(containerEl, {
       }
       if (!wasLiked) {
         void recordAuthorInteraction(cur, cur?.protocol, 1);
+        void recordBehavioralSignal(cur, 'like');
       }
     } catch {
       if (!destroyed) {
@@ -434,6 +500,7 @@ export function mountFeedScreen(containerEl, {
 
   async function handleRepost(post) {
     const cur = resolvePostInActiveBucket(post) || post;
+    if (!getPostActionCapabilities(cur).repost.enabled) return;
     const postKey = String(cur?.id || cur?.key || '');
     const lockKey = `repost:${postKey}`;
     if (!postKey || pendingReactions.has(lockKey)) return;
@@ -445,6 +512,10 @@ export function mountFeedScreen(containerEl, {
       const updated = await repostUnified(cur, wasReposted);
       if (!destroyed && updated) {
         mutatePostAcrossStreams(postKey, () => updated);
+      }
+      if (!wasReposted) {
+        void recordAuthorInteraction(cur, cur?.protocol, 1.5);
+        void recordBehavioralSignal(cur, 'repost');
       }
     } catch {
       if (!destroyed) {
@@ -463,11 +534,32 @@ export function mountFeedScreen(containerEl, {
     const fedi = await getAuthenticatedAccount('fediverse');
     if (!fedi) return;
     pendingReactions.add(lockKey);
-    const sid = cur._meta?.mastodon?.statusId || cur.id;
+    let sid = cur._meta?.mastodon?.statusId || cur.id;
     const bookmarked = Boolean(cur._meta?.mastodon?.bookmarked || cur.viewerState?.bookmarked);
     const optimistic = buildOptimisticReactionPost(cur, 'bookmark', !bookmarked);
     mutatePostAcrossStreams(postKey, () => optimistic);
     try {
+      try {
+        const homeOrigin = normalizeInstanceUrl(fedi.meta.instanceUrl);
+        const itemOrigin = cur._meta?.mastodon?.instanceUrl
+          ? normalizeInstanceUrl(cur._meta.mastodon.instanceUrl)
+          : homeOrigin;
+        if (itemOrigin !== homeOrigin && cur.url) {
+          const searchRes = await searchFediverse({
+            instanceUrl: homeOrigin,
+            accessToken: fedi.secrets.accessToken,
+            query: cur.url,
+            type: 'statuses',
+            resolve: true,
+            limit: 1,
+          }).catch(() => null);
+          if (searchRes?.statuses?.[0]?.id) {
+            sid = searchRes.statuses[0].id;
+          }
+        }
+      } catch {
+        // Ignore malformed instance URLs and fall back to statusId
+      }
       const updated = await toggleBookmark({
         instanceUrl: fedi.meta.instanceUrl,
         accessToken: fedi.secrets.accessToken,
@@ -477,6 +569,7 @@ export function mountFeedScreen(containerEl, {
       if (destroyed) return;
       if (!bookmarked) {
         void recordAuthorInteraction(cur, 'mastodon', 1);
+        void recordBehavioralSignal(cur, 'bookmark');
       }
       mutatePostAcrossStreams(postKey, () => updated);
     } catch {
@@ -653,66 +746,11 @@ export function mountFeedScreen(containerEl, {
     modal.open();
   }
 
-  function openAuthorListPicker(author) {
-    const accountId = author?.id;
-    const lists = feedStore.get().lists || [];
-    if (!accountId || lists.length === 0) {
-      showAlert('Lists', 'Create a Mastodon list first under Following → Manage Lists.');
-      return;
-    }
-    const modal = createClassicModalDialog({
-      id: 'pick-author-list-dialog',
-      maxWidth: '400px',
-      onClose: () => modal.dialog.remove(),
-    });
-    const heading = doc.createElement('h3');
-    heading.id = modal.titleId;
-    heading.className = 'classic-modal-title';
-    heading.textContent = `Add @${String(author.handle || author.acct || '').replace(/^@/, '')} to List`;
-    const stack = doc.createElement('div');
-    stack.className = 'classic-cards-stack';
-    for (const l of lists) {
-      const btn = doc.createElement('button');
-      btn.type = 'button';
-      btn.className = 'onboarding-btn';
-      btn.textContent = `+ ${l.title}`;
-      btn.addEventListener('click', async () => {
-        await addAccountToMastodonList(l.id, accountId);
-        modal.close();
-      });
-      stack.appendChild(btn);
-    }
-    modal.card.append(heading, stack);
-    modal.open();
-  }
-
   manageListsBtn.addEventListener('click', () => openManageListsModal());
   listSelect.addEventListener('change', () => {
     selectedListId = listSelect.value || '';
     void loadStream(false);
   });
-
-  async function fetchFediverseFeed(fediAuth, curCursor, append) {
-    if (fediAuth && (!append || curCursor.fedi)) {
-      try {
-        const res = await getTimeline({
-          instanceUrl: fediAuth.meta.instanceUrl,
-          accessToken: fediAuth.secrets.accessToken,
-          stream: 'federated',
-          maxId: append ? (curCursor.fedi || '') : '',
-        });
-        return { items: res.items, nextFedi: res.nextCursor, nextOffset: null };
-      } catch {
-        if (append) throw new Error('Unable to load older Fediverse posts.');
-        // Fall through on initial load to trending statuses if federated timeline is restricted
-      }
-    }
-    const tr = await getTrendingStatuses({
-      instanceUrl: fediAuth ? fediAuth.meta.instanceUrl : DEFAULT_PUBLIC_INSTANCE,
-      offset: append ? (curCursor.fediOffset || 0) : 0,
-    });
-    return { items: tr.items, nextFedi: null, nextOffset: tr.nextOffset };
-  }
 
   async function loadStream(append = false) {
     if (destroyed) return;
@@ -752,9 +790,10 @@ export function mountFeedScreen(containerEl, {
     }
 
     try {
-      const [fediAuth, bskyAuth] = await Promise.all([
+      const [fediAuth, bskyAuth, threadsAuth] = await Promise.all([
         getAuthenticatedAccount('fediverse'),
         getAuthenticatedAccount('bluesky'),
+        streamName === 'feed' ? getAuthenticatedAccount('threads') : Promise.resolve(null),
       ]);
       if (destroyed || epoch !== requestEpoch) return;
 
@@ -856,86 +895,53 @@ export function mountFeedScreen(containerEl, {
         return;
       }
 
-      // 'feed' stream: Open social web discovery (Mastodon public/trending + Bluesky What's Hot)
-      const wantFedi = !append || Boolean(curCursor.fedi) || curCursor.fediOffset != null;
-      const wantBsky = !append || Boolean(curCursor.bsky);
-      if (append && !wantFedi && !wantBsky) {
-        appendStreamItems('feed', [], null);
-        return;
-      }
-
-      const [fediResult, bskyResult] = await Promise.allSettled([
-        wantFedi ? fetchFediverseFeed(fediAuth, curCursor, append) : Promise.resolve({ skipped: true }),
-        wantBsky
-          ? getBskyCustomFeed({
-              feed: BSKY_WHATS_HOT_FEED,
-              cursor: append ? (curCursor.bsky || '') : '',
-              ...(bskyAuth
-                ? {
-                    serviceUrl: bskyAuth.meta.serviceUrl,
-                    accessJwt: bskyAuth.secrets.accessJwt,
-                    refreshJwt: bskyAuth.secrets.refreshJwt,
-                    onSessionRefreshed: (tok) => updateAccountTokens(bskyAuth.meta.id, tok),
-                  }
-                : {}),
-            })
-          : Promise.resolve({ skipped: true }),
-      ]);
+      // 'feed' stream: Blended Following + 2nd-degree graph + Sovereign discovery + pre-paint MiniLM taste
+      const latestState = feedStore.get();
+      lastHarvestSourceSig = computeHarvestSourceSig(latestState.tuning);
+      const harvested = await harvestSanctuaryFeed({
+        fediAuth,
+        bskyAuth,
+        threadsAuth,
+        tuning: latestState.tuning,
+        interactedAuthors: latestState.interactedAuthors,
+        implicitAuthors: latestState.implicitAuthors,
+        tasteMemory: latestState.tasteMemory,
+        moderatedActors: latestState.moderatedActors,
+        cursor: append ? curCursor : null,
+        append,
+      });
       if (destroyed || epoch !== requestEpoch) return;
 
-      const combinedItems = [];
-      let nextFedi = null;
-      let nextOffset = null;
-      let nextBsky = null;
-      let anySucceeded = false;
-      let firstError = '';
-
-      if (fediResult.status === 'fulfilled') {
-        if (!fediResult.value?.skipped) {
-          anySucceeded = true;
-          combinedItems.push(...(fediResult.value.items || []));
-          nextFedi = fediResult.value.nextFedi || null;
-          nextOffset = fediResult.value.nextOffset ?? null;
-        }
-      } else {
-        firstError = fediResult.reason?.message || 'Unable to load Fediverse feed.';
-        if (append) {
-          nextFedi = curCursor.fedi || null;
-          nextOffset = curCursor.fediOffset ?? null;
-        }
-      }
-
-      if (bskyResult.status === 'fulfilled') {
-        if (!bskyResult.value?.skipped) {
-          anySucceeded = true;
-          combinedItems.push(...(bskyResult.value.items || []));
-          nextBsky = bskyResult.value.nextCursor || null;
-        }
-      } else {
-        if (!firstError) firstError = bskyResult.reason?.message || 'Unable to load Bluesky feed.';
-        if (append) nextBsky = curCursor.bsky || null;
-      }
-
-      if (!anySucceeded) {
-        if (append) {
-          appendError = firstError || 'Unable to load older posts.';
-          return;
-        }
-        if ((feedStore.get().streams.feed?.items?.length || 0) === 0) {
-          setStreamLoading(false, firstError || 'Unable to load feed.');
-        } else {
-          setStreamLoading(false, null);
-        }
-        return;
-      }
-
-      const nextCursor = (nextFedi || nextOffset !== null || nextBsky)
-        ? { fedi: nextFedi, fediOffset: nextOffset, bsky: nextBsky }
-        : null;
-
+      const harvestedItems = Array.isArray(harvested?.items) ? harvested.items : [];
+      const nextCursor = harvested?.nextCursor || null;
       const nextItems = append
-        ? combinedItems
-        : mergeChronologicalPosts([], combinedItems);
+        ? harvestedItems
+        : mergeChronologicalPosts([], harvestedItems);
+
+      const boostC = latestState.tuning?.boostConcepts || [];
+      const dampenC = latestState.tuning?.dampenConcepts || [];
+      const tasteMem = latestState.tasteMemory || { positive: [], negative: [] };
+      if (
+        nextItems.length > 0 &&
+        (boostC.length > 0 || dampenC.length > 0 || (tasteMem.positive?.length || 0) > 0 || (tasteMem.negative?.length || 0) > 0)
+      ) {
+        const semRes = await fetchSemanticFeedScores({
+          items: nextItems,
+          boostConcepts: boostC,
+          dampenConcepts: dampenC,
+          positiveExamples: tasteMem.positive || [],
+          negativeExamples: tasteMem.negative || [],
+        }).catch(() => ({ scores: {}, tasteScores: {} }));
+        if (destroyed || epoch !== requestEpoch) return;
+        const freshState = feedStore.get();
+        if (semRes?.scores && Object.keys(semRes.scores).length > 0) {
+          setSemanticScores({ ...(freshState.semanticScores || {}), ...semRes.scores });
+        }
+        if (semRes?.tasteScores && Object.keys(semRes.tasteScores).length > 0) {
+          setTasteScores({ ...(freshState.tasteScores || {}), ...semRes.tasteScores });
+        }
+      }
+
       if (append) {
         appendStreamItems('feed', nextItems, nextCursor);
       } else {
@@ -974,26 +980,42 @@ export function mountFeedScreen(containerEl, {
     }
   }
 
-  function buildCardForPost(key, initialPost, showSanctuary, hasMasto, hasBsky) {
+  function buildCardForPost(key, initialPost, showSanctuary, hasMasto, hasBsky, hasThreads) {
     const getLivePost = () => cardCache.get(key)?.post || initialPost;
-    const postProto = initialPost?.protocol || (initialPost?.network === 'bluesky' ? 'bluesky' : 'mastodon');
-    const canActProto = postProto === 'bluesky' ? hasBsky : hasMasto;
+    const postProto = initialPost?.protocol || (initialPost?.network === 'bluesky' ? 'bluesky' : initialPost?.network === 'threads' ? 'threads' : 'mastodon');
+    const canModerateProto = Boolean(initialPost?.author?.id || initialPost?.author?.handle);
     return createPostCard(initialPost, {
-      onReply: () => prefillReply(getLivePost()),
+      onReply: () => {
+        const p = getLivePost();
+        void recordAuthorInteraction(p, p?.protocol, 1.8);
+        void recordBehavioralSignal(p, 'reply');
+        prefillReply(p);
+      },
       onToggleLike: () => void handleLike(getLivePost()),
       onToggleRepost: () => void handleRepost(getLivePost()),
       onToggleBookmark: () => void handleBookmark(getLivePost()),
       onOpenThread: onOpenPostThread
-        ? (target) => onOpenPostThread(target && target !== initialPost ? target : getLivePost())
+        ? (target) => {
+            const resolved = target && target !== initialPost ? target : getLivePost();
+            void recordBehavioralSignal(resolved, 'open_thread');
+            onOpenPostThread(resolved);
+          }
         : undefined,
       onAskSanctuary: onAskSanctuary
         ? () => {
             const p = getLivePost();
             void recordAuthorInteraction(p, p?.protocol, 1.5);
+            void recordBehavioralSignal(p, 'share_sanctuary');
             onAskSanctuary(p);
           }
         : undefined,
-      onSelectAuthor,
+      onSelectAuthor: onSelectAuthor
+        ? (author, item) => {
+            const p = item || getLivePost();
+            void recordBehavioralSignal(p, 'profile_click');
+            onSelectAuthor(author, p);
+          }
+        : undefined,
       onEditPost: hasMasto && postProto === 'mastodon' ? () => {
         const p = getLivePost();
         openEditPostDialog(p, {
@@ -1005,13 +1027,24 @@ export function mountFeedScreen(containerEl, {
         const updated = await pinUnified(p, Boolean(p._meta?.mastodon?.pinned));
         if (updated) mutatePostAcrossStreams(p.id || p.key, () => updated);
       } : null,
+      onRetryBridge: (retryEntry) => {
+        void runBridgeRetry(retryEntry.id).catch((err) => {
+          showAlert('Bridge Retry Failed', err?.message || 'Unable to retry bridge sync.');
+        });
+      },
       onDeletePost: () => {
         const p = getLivePost();
+        const linked = p._meta?.linkedIds || {};
+        const targets = [
+          p.protocol === 'mastodon' || linked.mastodonStatusId ? 'Mastodon' : '',
+          linked.blueskyUri || p.protocol === 'bluesky' ? 'Bluesky' : '',
+          linked.threadsPostId || p.protocol === 'threads' ? 'Threads' : '',
+        ].filter(Boolean);
         showConfirm(
           'Delete Post',
-          p._meta?.linkedIds?.blueskyUri || p._meta?.linkedIds?.threadsPostId
-            ? 'Delete this post from Mastodon and all linked bridges?'
-            : 'Delete this post?',
+          targets.length > 1
+            ? `Delete this post from ${targets.join(', ')}?`
+            : `Delete this ${targets[0] || ''} post?`,
           async () => {
             const res = await deleteUnified(p);
             removePostAcrossStreams(p.id || p.key);
@@ -1021,23 +1054,54 @@ export function mountFeedScreen(containerEl, {
           }
         );
       },
-      onFollowAuthor: canActProto ? (_raw, u) => {
-        if (!u?.author?.id) return;
-        void toggleFollowAuthor(u.author.id, false, { protocol: u.protocol });
-      } : null,
-      onManageAuthorLists: hasMasto && postProto === 'mastodon' ? (_raw, u) => openAuthorListPicker(u?.author) : null,
-      onMuteAuthor: canActProto ? (_raw, u) => {
-        if (!u?.author?.id) return;
-        showConfirm('Mute Account', `Mute @${String(u.author.handle || '').replace(/^@/, '')}?`, async () => {
-          await toggleMuteAuthor(u.author.id, false, { protocol: u.protocol });
-          removePostAcrossStreams((item) => item?.author?.id === u.author.id);
+      onInterested: () => void applyPostInterestFeedback(getLivePost(), 'interested'),
+      onNotInterested: () => void applyPostInterestFeedback(getLivePost(), 'not_interested'),
+      onMuteAuthor: canModerateProto ? (_raw, u) => {
+        const cleanH = String(u?.author?.handle || '').replace(/^@/, '');
+        if (!u?.author?.id && !cleanH) return;
+        showConfirm('Mute Account', `Mute @${cleanH || u.author.id}?`, async () => {
+          try {
+            await toggleMuteAuthor(u.author.id || cleanH, false, {
+              protocol: u.protocol,
+              acct: cleanH,
+              displayName: u.author.name || cleanH,
+              instanceUrl: u._meta?.mastodon?.instanceUrl || '',
+            });
+            const modActors = feedStore.get().moderatedActors || [];
+            removeActivityByActor(u.author, u.protocol);
+            removePostAcrossStreams(
+              (item) =>
+                isUnifiedItemModerated(item, modActors)
+                || item?.author?.handle === u.author.handle
+                || (u.author.id && item?.author?.id === u.author.id)
+            );
+          } catch (err) {
+            showAlert('Moderation Error', formatApiErrorMessage(err?.message, 'Unable to mute account.'));
+          }
         });
       } : null,
-      onBlockAuthor: canActProto ? (_raw, u) => {
-        if (!u?.author?.id) return;
-        showConfirm('Block Account', `Block @${String(u.author.handle || '').replace(/^@/, '')}?`, async () => {
-          await toggleBlockAuthor(u.author.id, false, { protocol: u.protocol });
-          removePostAcrossStreams((item) => item?.author?.id === u.author.id);
+      onBlockAuthor: canModerateProto ? (_raw, u) => {
+        const cleanH = String(u?.author?.handle || '').replace(/^@/, '');
+        if (!u?.author?.id && !cleanH) return;
+        showConfirm('Block Account', `Block @${cleanH || u.author.id}?`, async () => {
+          try {
+            await toggleBlockAuthor(u.author.id || cleanH, false, {
+              protocol: u.protocol,
+              acct: cleanH,
+              displayName: u.author.name || cleanH,
+              instanceUrl: u._meta?.mastodon?.instanceUrl || '',
+            });
+            const modActors = feedStore.get().moderatedActors || [];
+            removeActivityByActor(u.author, u.protocol);
+            removePostAcrossStreams(
+              (item) =>
+                isUnifiedItemModerated(item, modActors)
+                || item?.author?.handle === u.author.handle
+                || (u.author.id && item?.author?.id === u.author.id)
+            );
+          } catch (err) {
+            showAlert('Moderation Error', formatApiErrorMessage(err?.message, 'Unable to block account.'));
+          }
         });
       } : null,
       showSanctuaryAction: showSanctuary,
@@ -1060,11 +1124,17 @@ export function mountFeedScreen(containerEl, {
     const tuningSig = computeTuningSig(state.tuning);
     let order = streamOrders.get(streamName);
 
-    if (!order || order.generation !== gen || order.tuningSig !== tuningSig) {
+    const isFeedStream = streamName === 'feed';
+
+    if (!order || order.generation !== gen || (order.tuningSig !== tuningSig && state.tuning?.updatedBy !== 'feedback')) {
       const ranked = rankFeedItems(rawItems, state.tuning, {
         nowMs: bucket.updatedAt || Date.now(),
+        streamMode: streamName,
         interactedAuthors: state.interactedAuthors,
+        implicitAuthors: isFeedStream ? state.implicitAuthors : undefined,
         semanticScores: state.semanticScores,
+        tasteScores: isFeedStream ? state.tasteScores : undefined,
+        tasteMemory: isFeedStream ? state.tasteMemory : undefined,
       });
       order = {
         generation: gen,
@@ -1074,6 +1144,7 @@ export function mountFeedScreen(containerEl, {
       };
       streamOrders.set(streamName, order);
     } else {
+      order.tuningSig = tuningSig;
       order.orderedIds = order.orderedIds.filter((id) => byId.has(id));
       let leadCount = 0;
       while (leadCount < rawItems.length) {
@@ -1103,8 +1174,12 @@ export function mountFeedScreen(containerEl, {
       if (appendedItems.length > 0) {
         const rankedAppended = rankFeedItems(appendedItems, state.tuning, {
           nowMs: bucket.updatedAt || Date.now(),
+          streamMode: streamName,
           interactedAuthors: state.interactedAuthors,
+          implicitAuthors: isFeedStream ? state.implicitAuthors : undefined,
           semanticScores: state.semanticScores,
+          tasteScores: isFeedStream ? state.tasteScores : undefined,
+          tasteMemory: isFeedStream ? state.tasteMemory : undefined,
         });
         for (const p of rankedAppended) {
           const id = String(p?.id || p?.key || '');
@@ -1113,12 +1188,19 @@ export function mountFeedScreen(containerEl, {
       }
     }
 
-    const ordered = order.orderedIds.map((id) => byId.get(id)).filter(Boolean);
+    const dismissed = new Set(state.dismissedPostIds || []);
+    const ordered = order.orderedIds
+      .filter((id) => !dismissed.has(id))
+      .map((id) => byId.get(id))
+      .filter(Boolean);
     return applyKeywordFilters(ordered, state.filters || [], state.moderatedActors || []);
   }
 
-  function reconcilePostList(visibleItems, { showSanctuary, hasMasto, hasBsky, isLoading, errorMsg }) {
+  function reconcilePostList(visibleItems, { streamName = 'feed', showSanctuary, hasMasto, hasBsky, hasThreads = false, retrySig = '', isLoading, errorMsg }) {
     if (visibleItems.length === 0) {
+      for (const entry of cardCache.values()) {
+        stopCardDwellObservation(entry.card);
+      }
       cardCache.clear();
       if (errorMsg) {
         listEl.replaceChildren(createOfflineNotice({ variant: 'error', message: errorMsg }));
@@ -1148,6 +1230,7 @@ export function mountFeedScreen(containerEl, {
 
     for (const [cachedKey, entry] of [...cardCache.entries()]) {
       if (!activeKeys.has(cachedKey)) {
+        stopCardDwellObservation(entry.card);
         entry.card.remove();
         cardCache.delete(cachedKey);
       }
@@ -1159,12 +1242,13 @@ export function mountFeedScreen(containerEl, {
 
     for (let idx = 0; idx < keyedEntries.length; idx += 1) {
       const { post, key } = keyedEntries[idx];
-      const structSig = computePostStructureSig(post, showSanctuary, hasMasto, hasBsky);
+      const structSig = computePostStructureSig(post, showSanctuary, hasMasto, hasBsky, hasThreads, retrySig);
       const reactSig = computePostReactionSig(post);
       const existing = cardCache.get(key);
       let cardEl = existing?.card || null;
       if (!existing || existing.structSig !== structSig) {
-        const nextCard = buildCardForPost(key, post, showSanctuary, hasMasto, hasBsky);
+        if (existing?.card) stopCardDwellObservation(existing.card);
+        const nextCard = buildCardForPost(key, post, showSanctuary, hasMasto, hasBsky, hasThreads);
         if (existing?.card && existing.card.parentNode === listEl) {
           listEl.replaceChild(nextCard, existing.card);
         }
@@ -1184,6 +1268,11 @@ export function mountFeedScreen(containerEl, {
         } else {
           listEl.insertBefore(cardEl, currentAtIdx);
         }
+      }
+      if (streamName === 'feed') {
+        startCardDwellObservation(cardEl, post, streamName);
+      } else {
+        stopCardDwellObservation(cardEl);
       }
     }
   }
@@ -1211,12 +1300,17 @@ export function mountFeedScreen(containerEl, {
       const firstRetry = retries[0];
       const msg = doc.createElement('span');
       msg.className = 'bridge-retry-msg';
-      msg.textContent = `${firstRetry.protocol} bridge sync paused (${retries.length}): ${firstRetry.lastError || 'temporary error'}`;
+      msg.textContent = `${firstRetry.protocol} bridge sync paused (${retries.length}): ${formatApiErrorMessage(firstRetry.lastError, 'temporary error')}`;
       const retryBtn = doc.createElement('button');
       retryBtn.type = 'button';
       retryBtn.className = 'btn-sleek-pill';
       retryBtn.textContent = 'Retry';
-      retryBtn.addEventListener('click', () => void runBridgeRetry(firstRetry.id));
+      retryBtn.addEventListener('click', () => {
+        retryBtn.disabled = true;
+        void runBridgeRetry(firstRetry.id)
+          .catch((err) => showAlert('Bridge Retry Failed', formatApiErrorMessage(err?.message, 'Retry failed.')))
+          .finally(() => { retryBtn.disabled = false; });
+      });
       const dismissBtn = doc.createElement('button');
       dismissBtn.type = 'button';
       dismissBtn.className = 'edit-btn';
@@ -1230,6 +1324,7 @@ export function mountFeedScreen(containerEl, {
 
     const hasMasto = authState.accounts.some((a) => a.platform === 'fediverse');
     const hasBsky = authState.accounts.some((a) => a.platform === 'bluesky');
+    const hasThreads = authState.accounts.some((a) => a.platform === 'threads');
     listFilterBar.hidden = !(streamName === 'following' && hasMasto);
     if (!listFilterBar.hidden) {
       const curLists = state.lists || [];
@@ -1273,15 +1368,30 @@ export function mountFeedScreen(containerEl, {
 
     const boostConcepts = state.tuning?.boostConcepts || [];
     const dampenConcepts = state.tuning?.dampenConcepts || [];
-    if ((boostConcepts.length > 0 || dampenConcepts.length > 0) && (bucket.items?.length || 0) > 0) {
+    const tasteMem = state.tasteMemory || { positive: [], negative: [] };
+    const hasTasteExamples =
+      streamName === 'feed' &&
+      ((tasteMem.positive?.length || 0) > 0 || (tasteMem.negative?.length || 0) > 0);
+    if ((boostConcepts.length > 0 || dampenConcepts.length > 0 || hasTasteExamples) && (bucket.items?.length || 0) > 0) {
       const filteredForSem = applyKeywordFilters(bucket.items, state.filters || [], state.moderatedActors || []);
       const semSig = `${streamName}::${bucket.generation || 0}::${filteredForSem.length}::${boostConcepts.join('\u001f')}||${dampenConcepts.join('\u001f')}`;
       if (semSig !== lastSemanticSig && filteredForSem.length > 0) {
         lastSemanticSig = semSig;
-        void fetchSemanticFeedScores({ items: filteredForSem, boostConcepts, dampenConcepts })
-          .then((scores) => {
-            if (!destroyed && scores && Object.keys(scores).length > 0) {
-              setSemanticScores(scores);
+        void fetchSemanticFeedScores({
+          items: filteredForSem,
+          boostConcepts,
+          dampenConcepts,
+          positiveExamples: streamName === 'feed' ? tasteMem.positive || [] : [],
+          negativeExamples: streamName === 'feed' ? tasteMem.negative || [] : [],
+        })
+          .then((semRes) => {
+            if (destroyed || !semRes) return;
+            const curState = feedStore.get();
+            if (semRes.scores && Object.keys(semRes.scores).length > 0) {
+              setSemanticScores({ ...(curState.semanticScores || {}), ...semRes.scores });
+            }
+            if (semRes.tasteScores && Object.keys(semRes.tasteScores).length > 0) {
+              setTasteScores({ ...(curState.tasteScores || {}), ...semRes.tasteScores });
             }
           })
           .catch(() => {});
@@ -1290,9 +1400,12 @@ export function mountFeedScreen(containerEl, {
     const visibleItems = resolveStableOrderedItems(streamName, bucket, state);
     const showSanctuary = conn.mode === 'online' || conn.programs.length > 0;
     reconcilePostList(visibleItems, {
+      streamName,
       showSanctuary,
       hasMasto,
       hasBsky,
+      hasThreads,
+      retrySig: getRetrySig(authState),
       isLoading: Boolean(state.loading),
       errorMsg: state.error,
     });
@@ -1337,6 +1450,9 @@ export function mountFeedScreen(containerEl, {
   }
   scrollTarget.addEventListener('scroll', handleScroll, { passive: true });
 
+  const DWELL_THRESHOLD_MS = 2800;
+  const FAST_SKIP_MIN_MS = 180;
+  const FAST_SKIP_MAX_MS = 750;
   let intersectionObserver = null;
   if (typeof globalThis.IntersectionObserver === 'function') {
     intersectionObserver = new globalThis.IntersectionObserver(
@@ -1353,13 +1469,80 @@ export function mountFeedScreen(containerEl, {
       { root: scrollRoot, rootMargin: `0px 0px ${INFINITE_SCROLL_THRESHOLD_PX}px 0px` }
     );
     intersectionObserver.observe(sentinelEl);
+
+    dwellObserver = new globalThis.IntersectionObserver(
+      (entries) => {
+        if (destroyed) return;
+        const activeName = feedStore.get().activeStream || 'feed';
+        if (activeName !== 'feed') return;
+        const now = Date.now();
+        for (const entry of entries) {
+          const obs = cardObservation.get(entry.target);
+          if (!obs || obs.streamName !== 'feed') continue;
+          const ratio = entry.intersectionRatio ?? 1;
+          const visible =
+            Boolean(entry.isIntersecting) &&
+            (Number(ratio) >= 0.5 || Number(entry.intersectionRect?.height || 0) >= 260);
+          if (visible) {
+            if (!obs.enteredAt) obs.enteredAt = now;
+            if (!obs.dwellTimer && !dwelledIds.has(obs.postKey)) {
+              obs.dwellTimer = setTimeout(() => {
+                obs.dwellTimer = 0;
+                if (destroyed || dwelledIds.has(obs.postKey)) return;
+                dwelledIds.add(obs.postKey);
+                recordBehavioralSignal(obs.post, 'dwell');
+              }, DWELL_THRESHOLD_MS);
+            }
+          } else {
+            if (obs.dwellTimer) {
+              clearTimeout(obs.dwellTimer);
+              obs.dwellTimer = 0;
+            }
+            if (obs.enteredAt) {
+              const duration = now - obs.enteredAt;
+              obs.enteredAt = 0;
+              const rootTop = Number(entry.rootBounds?.top ?? 0);
+              const rectTop = entry.boundingClientRect?.top;
+              const exitedAbove = typeof rectTop === 'number' && rectTop < rootTop;
+              if (
+                exitedAbove &&
+                !dwelledIds.has(obs.postKey) &&
+                !skippedIds.has(obs.postKey) &&
+                duration >= FAST_SKIP_MIN_MS &&
+                duration <= FAST_SKIP_MAX_MS
+              ) {
+                skippedIds.add(obs.postKey);
+                recordBehavioralSignal(obs.post, 'scroll_past');
+              }
+            }
+          }
+        }
+      },
+      { root: scrollRoot, threshold: [0, 0.35, 0.55] }
+    );
   }
 
   let prevSocialIdsSig = getSocialIdsSig(authStore.get());
   let prevAccountsUiSig = getAccountsUiSig(authStore.get());
   let prevRetrySig = getRetrySig(authStore.get());
 
-  const unsubFeed = feedStore.subscribe(render);
+  const unsubFeed = feedStore.subscribe((nextState) => {
+    render();
+    if (!prefsHydrated || destroyed) return;
+    const activeName = ALLOWED_STREAMS.has(nextState?.activeStream) ? nextState.activeStream : 'feed';
+    const nextSourceSig = computeHarvestSourceSig(nextState?.tuning);
+    if (activeName === 'feed' && nextSourceSig !== lastHarvestSourceSig) {
+      lastHarvestSourceSig = nextSourceSig;
+      if (!inFlightRefresh) {
+        clearTimeout(sourceRefreshTimer);
+        sourceRefreshTimer = setTimeout(() => {
+          if (!destroyed && !inFlightRefresh) {
+            void loadStream(false);
+          }
+        }, 300);
+      }
+    }
+  });
   const unsubConn = connectionStore.select(
     (s) => s.mode === 'online' || s.programs.length > 0,
     () => render()
@@ -1403,9 +1586,17 @@ export function mountFeedScreen(containerEl, {
       destroyed = true;
       requestEpoch += 1;
       clearTimeout(autoCheckTimer);
+      clearTimeout(sourceRefreshTimer);
       detachPull();
       scrollTarget.removeEventListener('scroll', handleScroll);
       intersectionObserver?.disconnect();
+      for (const obs of cardObservation.values()) {
+        clearTimeout(obs.dwellTimer);
+      }
+      cardObservation.clear();
+      dwelledIds.clear();
+      skippedIds.clear();
+      dwellObserver?.disconnect();
       cardCache.clear();
       streamOrders.clear();
       pendingReactions.clear();

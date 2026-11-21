@@ -237,27 +237,26 @@ test('normalizeBskyPost and PostCard convert UTF-8 record.facets and external li
   }
 });
 
-test('createAppShell capture external link handler opens links under WebView2 and falls back to window.open when open-external fails', async () => {
+test('createAppShell capture external link handler uses pywebview.api.open_external and falls back to window.open when it returns false', async () => {
   const dom = installMockDom();
-  const prevFetch = globalThis.fetch;
-  const prevChrome = globalThis.chrome;
+  const prevPywebview = globalThis.pywebview;
   const prevOpen = globalThis.open;
   const openedFallback = [];
-  const bridgePosts = [];
+  const pywebviewCalls = [];
   let app = null;
+  let pywebviewReturn = true;
 
-  globalThis.chrome = { webview: {} };
+  globalThis.pywebview = {
+    api: {
+      open_external: async (url) => {
+        pywebviewCalls.push(url);
+        return pywebviewReturn;
+      },
+    },
+  };
   globalThis.open = (url, target, features) => {
     openedFallback.push({ url, target, features });
     return null;
-  };
-  globalThis.fetch = async (url, init) => {
-    const u = String(url);
-    if (u.includes('/api/social/open-external')) {
-      bridgePosts.push({ url: u, body: JSON.parse(init?.body || '{}') });
-      return new Response('Not Found', { status: 404 });
-    }
-    return new Response('[]', { status: 200, headers: { 'content-type': 'application/json' } });
   };
 
   try {
@@ -292,16 +291,19 @@ test('createAppShell capture external link handler opens links under WebView2 an
 
     link.click();
     await new Promise((r) => setTimeout(r, 20));
+    assert.deepEqual(pywebviewCalls, ['https://example.org/watch']);
+    assert.equal(openedFallback.length, 0);
 
-    assert.equal(bridgePosts.length, 1);
-    assert.equal(bridgePosts[0].body.url, 'https://example.org/watch');
+    pywebviewReturn = false;
+    link.click();
+    await new Promise((r) => setTimeout(r, 20));
+    assert.deepEqual(pywebviewCalls, ['https://example.org/watch', 'https://example.org/watch']);
     assert.equal(openedFallback.length, 1);
     assert.equal(openedFallback[0].url, 'https://example.org/watch');
     assert.equal(openedFallback[0].target, '_blank');
   } finally {
     app?.destroy();
-    globalThis.fetch = prevFetch;
-    globalThis.chrome = prevChrome;
+    globalThis.pywebview = prevPywebview;
     globalThis.open = prevOpen;
     dom.restore();
   }

@@ -442,6 +442,7 @@ def edit():
     existing_sp = None
     next_note = None
     with st.runner._lock:
+        st.runner._ensure_session_loaded(session_id)
         for m in st.runner.sessions_history.get(session_id, []):
             if isinstance(m, dict) and m.get('id') == msg_id and isinstance(m.get('shared_post'), dict):
                 existing_sp = dict(m['shared_post'])
@@ -797,16 +798,17 @@ def get_pending_tool_call():
 @chat_bp.route('/api/cancel_chat', methods=['POST'])
 @st.requires_auth
 def cancel_chat():
-    session_id = request.json.get('session_id', 'default')
+    payload = request.get_json(silent=True) or {}
+    session_id = payload.get('session_id', 'default')
     print(f"[CANCEL] Session cancellation requested: {session_id}", flush=True)
     try:
-        st.cancel_session_image_work(session_id)
+        st.cancel_session_work(session_id)
     except Exception as exc:
-        print(f"[CANCEL] Failed to stop image generation: {exc}", flush=True)
-        return jsonify({'error': f'Failed to stop image generation: {exc}'}), 500
+        print(f"[CANCEL] Failed to stop session work: {exc}", flush=True)
+        return jsonify({'error': f'Failed to stop session work: {exc}'}), 500
     if st.runner is not None and hasattr(st.runner, 'wait_session_idle'):
         try:
-            st.run_async(st.runner.wait_session_idle(session_id, timeout=1.5))
+            st.run_async(st.runner.wait_session_idle(session_id, timeout=3.0))
         except Exception as exc:
             print(f"[CANCEL] Wait for session idle failed for {session_id}: {exc}", flush=True)
     if st.runner is not None and hasattr(st.runner, 'clear_generating'):

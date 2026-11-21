@@ -1,16 +1,19 @@
 import { createPostCard } from '../components/PostCard.js';
+import { showConfirm } from '../components/sanctuary/SanctuaryDialog.js';
 import { createLoadingState } from '../components/ui/index.js';
 import { DEFAULT_AVATAR_DATA_URI } from '../constants/avatars.js';
-import { searchBskyActors, searchBskyPosts } from '../queries/bluesky.js';
 import { fetchProgramJournals } from '../queries/sanctuary.js';
 import {
   likeUnified,
   repostUnified,
   searchAccountsAndPosts,
+  toggleBlockAuthor,
   toggleFollowAuthor,
+  toggleMuteAuthor,
 } from '../queries/socialClient.js';
-import { authStore, getAuthenticatedAccount, updateAccountTokens } from '../state/authStore.js';
+import { authStore } from '../state/authStore.js';
 import { prefillReply } from '../state/composeStore.js';
+import { applyPostInterestFeedback, removePostAcrossStreams } from '../state/feedStore.js';
 import { connectionStore } from '../state/sanctuary/connection.js';
 import { getCachedJournalsAndQuests } from '../storage/nativeStore.js';
 
@@ -28,6 +31,7 @@ export function mountSearchScreen(containerEl, {
 
   let destroyed = false;
   let lastQuery = '';
+  let searchEpoch = 0;
   let results = { accounts: [], posts: [], hashtags: [], journals: [], error: '' };
 
   const root = doc.createElement('section');
@@ -77,70 +81,50 @@ export function mountSearchScreen(containerEl, {
 
   async function runSearch(query) {
     if (destroyed) return;
+    const epoch = ++searchEpoch;
     results = { accounts: [], posts: [], hashtags: [], journals: [], error: '' };
     resultsEl.replaceChildren(createLoadingState('Searching Mastodon, Bluesky & journals…'));
 
     try {
-      const bskyAuth = await getAuthenticatedAccount('bluesky').catch(() => null);
-      const bskySearchOpts = bskyAuth
-        ? {
-            query,
-            serviceUrl: bskyAuth.meta.serviceUrl,
-            accessJwt: bskyAuth.secrets.accessJwt,
-            refreshJwt: bskyAuth.secrets.refreshJwt,
-            onSessionRefreshed: (tok) => updateAccountTokens(bskyAuth.meta.id, tok),
-          }
-        : { query };
-
-      const [fediData, bskyActors, bskyPosts] = await Promise.all([
-        searchAccountsAndPosts(query).catch(() => ({ accounts: [], statuses: [], hashtags: [] })),
-        searchBskyActors(bskySearchOpts).catch(() => ({ actors: [] })),
-        searchBskyPosts({ query }).catch(() => ({ items: [] })),
-      ]);
-
-      if (destroyed) return;
-
-      results.accounts.push(...(fediData.accounts || []));
-      results.posts.push(...(fediData.statuses || []));
-      results.hashtags.push(...(fediData.hashtags || []));
-
-      for (const actor of bskyActors?.actors || []) {
-        results.accounts.push({
-          id: actor.did,
-          acct: actor.handle,
-          displayName: actor.displayName || actor.handle,
-          avatar: actor.avatar || '',
-          url: `https://bsky.app/profile/${actor.handle}`,
-          network: 'bluesky',
-          viewer: actor.viewer || null,
-        });
-      }
-      results.posts.push(...(bskyPosts?.items || []));
-
       const conn = connectionStore.get();
       const progs = conn.programs || [];
       const lowerQ = query.toLowerCase();
-      for (const prog of progs) {
-        let jData = null;
-        if (conn.mode === 'online') {
-          jData = await fetchProgramJournals(prog.id, 'default').catch(() => null);
-        }
-        if (!jData) {
-          jData = await getCachedJournalsAndQuests(prog.id, 'default');
-        }
-        if (destroyed) return;
-        for (const entry of jData?.journals || []) {
-          const text = `${entry.topic || ''} ${entry.content || entry.summary || ''}`;
-          if (text.toLowerCase().includes(lowerQ)) {
-            results.journals.push({ programName: prog.name || prog.id, ...entry });
-          }
-        }
-      }
+
+      const [socialData, journalChunks] = await Promise.all([
+        searchAccountsAndPosts(query).catch(() => ({ accounts: [], statuses: [], hashtags: [] })),
+        Promise.all(
+          progs.map(async (prog) => {
+            let jData = null;
+            if (conn.mode === 'online') {
+              jData = await fetchProgramJournals(prog.id, 'default').catch(() => null);
+            }
+            if (!jData) {
+              jData = await getCachedJournalsAndQuests(prog.id, 'default');
+            }
+            const hits = [];
+            for (const entry of jData?.journals || []) {
+              const text = `${entry.topic || ''} ${entry.content || entry.summary || ''}`;
+              if (text.toLowerCase().includes(lowerQ)) {
+                hits.push({ programName: prog.name || prog.id, ...entry });
+              }
+            }
+            return hits;
+          })
+        ),
+      ]);
+
+      if (destroyed || epoch !== searchEpoch) return;
+
+      results.accounts.push(...(socialData.accounts || []));
+      results.posts.push(...(socialData.statuses || []));
+      results.hashtags.push(...(socialData.hashtags || []));
+      results.journals.push(...journalChunks.flat());
     } catch (err) {
+      if (destroyed || epoch !== searchEpoch) return;
       results.error = err?.message || 'Search failed';
     }
 
-    if (!destroyed) renderResults();
+    if (!destroyed && epoch === searchEpoch) renderResults();
   }
 
   function renderResults() {
@@ -289,12 +273,67 @@ export function mountSearchScreen(containerEl, {
       h2.textContent = 'Posts';
       box.appendChild(h2);
       const showSanctuary = connectionStore.get().mode === 'online' || connectionStore.get().programs.length > 0;
+      const matchPost = (it, target, updated) =>
+        it === target || (it?.id && (it.id === target?.id || it.id === updated?.id));
+      const canModSearchPost = (p) => Boolean(p?.author?.id || p?.author?.handle);
+      const promptSearchModeration = (kind, u) => {
+        const cleanH = String(u?.author?.handle || '').replace(/^@/, '');
+        if (!u?.author?.id && !cleanH) return;
+        const isBlock = kind === 'block';
+        showConfirm(isBlock ? 'Block Account' : 'Mute Account', `${isBlock ? 'Block' : 'Mute'} @${cleanH || u.author.id}?`, async () => {
+          try {
+            const fn = isBlock ? toggleBlockAuthor : toggleMuteAuthor;
+            await fn(u.author.id || cleanH, false, {
+              protocol: u.protocol,
+              acct: cleanH,
+              displayName: u.author.name || cleanH,
+              instanceUrl: u._meta?.mastodon?.instanceUrl || '',
+            });
+            removePostAcrossStreams((item) => item?.author?.handle === u.author.handle || (u.author.id && item?.author?.id === u.author.id));
+            if (!destroyed) {
+              results.posts = results.posts.filter((it) => it?.author?.handle !== u.author.handle && (!u.author.id || it?.author?.id !== u.author.id));
+              renderResults();
+            }
+          } catch (err) {
+            showAlert('Moderation Error', err?.message || `Unable to ${isBlock ? 'block' : 'mute'} account.`);
+          }
+        });
+      };
       for (const post of results.posts) {
+        const canMod = canModSearchPost(post);
         box.appendChild(
           createPostCard(post, {
             onReply: (p) => prefillReply(p),
-            onToggleLike: (p) => void likeUnified(p),
-            onToggleRepost: (p) => void repostUnified(p),
+            onToggleLike: async (p) => {
+              const updated = await likeUnified(p);
+              if (updated && !destroyed) {
+                results.posts = results.posts.map((it) => (matchPost(it, p, updated) ? updated : it));
+                renderResults();
+              }
+            },
+            onToggleRepost: async (p) => {
+              const updated = await repostUnified(p);
+              if (updated && !destroyed) {
+                results.posts = results.posts.map((it) => (matchPost(it, p, updated) ? updated : it));
+                renderResults();
+              }
+            },
+            onInterested: async (p) => {
+              const updated = await applyPostInterestFeedback(p, 'interested');
+              if (updated && !destroyed) {
+                results.posts = results.posts.map((it) => (matchPost(it, p, updated) ? updated : it));
+                renderResults();
+              }
+            },
+            onNotInterested: async (p) => {
+              await applyPostInterestFeedback(p, 'not_interested');
+              if (!destroyed) {
+                results.posts = results.posts.filter((it) => !matchPost(it, p, null));
+                renderResults();
+              }
+            },
+            onMuteAuthor: canMod ? (_raw, u) => promptSearchModeration('mute', u) : null,
+            onBlockAuthor: canMod ? (_raw, u) => promptSearchModeration('block', u) : null,
             onSelectAuthor,
             onOpenThread: onOpenPostThread,
             onAskSanctuary,
@@ -327,11 +366,16 @@ export function mountSearchScreen(containerEl, {
     }
   }
 
+  const unsubAuth = authStore.subscribe(() => {
+    if (!destroyed) renderResults();
+  });
+
   renderResults();
 
   return {
     destroy() {
       destroyed = true;
+      unsubAuth();
     },
   };
 }

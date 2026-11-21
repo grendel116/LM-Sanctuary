@@ -640,6 +640,7 @@ function formatToolLogDescriptor(tool, { live = false } = {}) {
 
   if (live) {
     if (tool.status === 'failed') action = 'Failed';
+    else if (tool.status === 'cancelled') action = 'Stopped';
     if (tool.duration) suffix = `${suffix} (${tool.duration}s)`.trimStart();
     else if (!tool.status || tool.status === 'running') suffix = `${suffix} (running)`.trimStart();
   }
@@ -1261,8 +1262,9 @@ export function reconcileChat(chatContainer, history, ctx = {}) {
   for (const msg of messages) {
     let row = msg.id ? rowsById.get(msg.id) : null;
     const isRowBusy = Boolean(row && (row.querySelector('.image-loading-overlay') || row.querySelector('.message.editing')));
+    const hasStaleEditor = Boolean(row && !isRowBusy && row.querySelector('.edit-textarea, .edit-form'));
 
-    if (row && !isRowBusy && row.dataset.contentHash !== computeContentHash(msg)) {
+    if (row && !isRowBusy && (hasStaleEditor || row.dataset.contentHash !== computeContentHash(msg))) {
       const fresh = buildMessageRow(msg, ctx);
       if (fresh) {
         chatContainer.replaceChild(fresh, row);

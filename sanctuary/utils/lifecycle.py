@@ -101,6 +101,13 @@ def shutdown():
             return
         _shutdown_done = True
 
+    try:
+        from tools import antigravity_job
+
+        antigravity_job.cancel_all_antigravity_jobs(grace=0.3, timeout=1.5)
+    except Exception:
+        pass
+
     _terminate_children()
 
 

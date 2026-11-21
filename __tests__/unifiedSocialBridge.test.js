@@ -1,15 +1,21 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
 
 import { installMockDom } from '../__mocks__/mockDom.js';
+import { detectPostLanguageInfo } from '../web/core/postLanguage.js';
 import {
   applyKeywordFilters,
   canonicalizeActorHandle,
+  canonicalizeUrlForDedupe,
+  deduplicateAppendItems,
   deduplicateUnifiedItems,
   toUnifiedItem,
 } from '../web/core/schema/unifiedItem.js';
 import {
   addKeywordFilter,
+  clearTranslationCacheForTests,
   deleteUnified,
   editUnified,
   enrichUnifiedItemsMetrics,
@@ -17,16 +23,26 @@ import {
   fetchFollowConnections,
   fetchModerationAccounts,
   fetchOwnStatuses,
+  fetchPostThread,
   fetchUnifiedNotifications,
+  hideReplyUnified,
+  likeUnified,
   normalizeAccountRecord,
   pinUnified,
   publishUnified,
   removeFollowerAccount,
   removeModeratedAccount,
   replyUnified,
+  repostUnified,
+  resetModerationCacheForTests,
+  searchAccountsAndPosts,
+  toggleBlockAuthor,
+  translateUnifiedPost,
 } from '../web/queries/socialClient.js';
-import { cleanMastodonMediaUrl, renderProfileLinksAndFields } from '../web/queries/fediverse.js';
+import { cleanMastodonMediaUrl, getLemmyLocalPosts, normalizeMastodonStatus, renderProfileLinksAndFields } from '../web/queries/fediverse.js';
+import { normalizeBskyPost } from '../web/queries/bluesky.js';
 import { createAppShell } from '../web/app/_layout.js';
+import { mountActivityScreen } from '../web/app/activity.js';
 import { mountComposeModal, publishOrganicPost } from '../web/app/composeModal.js';
 import { mountFeedScreen } from '../web/app/feed.js';
 import { renderPostThreadView } from '../web/app/postThread.js';
@@ -34,13 +50,32 @@ import { mountProfileScreen, openEditMastodonProfileModal, openEditPostDialog } 
 import { composeStore, resetCompose } from '../web/state/composeStore.js';
 import { mountSearchScreen } from '../web/app/search.js';
 import { openAuthorSheetModal } from '../web/components/AuthorSheetModal.js';
-import { createPostCard } from '../web/components/PostCard.js';
+import { createPostCard, getPostActionCapabilities, resolvePostBadgeProtocols, syncPostCardReactions } from '../web/components/PostCard.js';
 import { openFeedTuningModal } from '../web/components/FeedTuningModal.js';
 import { openFollowGraphModal } from '../web/components/FollowGraphModal.js';
 import { openThreadsImportModal } from '../web/components/ThreadsImportModal.js';
 import { openSettingsModal } from '../web/components/sanctuary/SettingsModal.js';
 import { openUserModal } from '../web/components/sanctuary/UserModal.js';
-import { FEED_TUNING_PRESETS, isDefaultFeedTuning, rankFeedItems } from '../web/core/feedRanker.js';
+import { createLoadingState, updateLoadingStateLabel } from '../web/components/ui/index.js';
+import {
+  DEFAULT_FEED_TUNING,
+  FEED_TUNING_PRESETS,
+  computeFeedbackSliderNudge,
+  extractLearnedTasteTopics,
+  isDefaultFeedTuning,
+  normalizeFeedTuning,
+  rankFeedItems,
+  scoreConversationVelocity,
+  scorePersonalTasteLexical,
+} from '../web/core/feedRanker.js';
+import {
+  DEFAULT_SANCTUARY_CHANNELS,
+  DEFAULT_SANCTUARY_INSTANCES,
+  clearHarvesterCacheForTests,
+  conceptToHashtag,
+  fetchDiscoveryInstanceTimeline,
+  harvestSanctuaryFeed,
+} from '../web/queries/feedHarvester.js';
 import { clearLinkPreviewCacheForTests, extractFirstHttpsUrl, parseVideoEmbedInfo } from '../web/queries/linkPreview.js';
 import { cleanThreadsAuthCode, clearThreadsInsightsCacheForTests, publishThreadsPost } from '../web/queries/threads.js';
 import {
@@ -50,19 +85,32 @@ import {
   parseThreadsArchiveBuffer,
   startThreadsArchiveSync,
 } from '../web/queries/threadsArchive.js';
-import { refreshActivityNotifications, resetActivityStoreForTests } from '../web/state/activityStore.js';
-import { authStore, resetAuthStoreForTests, upsertSocialAccount } from '../web/state/authStore.js';
+import {
+  activityStore,
+  groupActivityNotifications,
+  refreshActivityNotifications,
+  resetActivityStoreForTests,
+} from '../web/state/activityStore.js';
+import { authStore, getAuthenticatedAccount, resetAuthStoreForTests, upsertSocialAccount } from '../web/state/authStore.js';
 import { connectionStore, resetConnectionStoreForTests } from '../web/state/sanctuary/connection.js';
 import {
   appendStreamItems,
+  clearLearnedTasteMemory,
   feedStore,
   hydrateCachedModeration,
+  hydrateFeedTuning,
+  persistStreamCache,
+  reconcileEnrichedStreamItems,
   recordAuthorInteraction,
+  recordBehavioralSignal,
   resetFeedStoreForTests,
+  setFilterRules,
   setStreamItems,
+  setTasteScores,
   updateFeedTuning,
 } from '../web/state/feedStore.js';
 import {
+  enqueueLocalRetry,
   resetMemoryStorageForTests,
   findLocalLinkedPostGroup,
   saveLocalLinkedPost,
@@ -1075,34 +1123,12 @@ test('2-tab Profile Editor syncs links/bio to Bluesky, renders compact link chip
   }
 });
 
-test('Bluesky author data falls back to native XRPC when desktop host lacks Bluesky profile route and upgrades Bridgy handles', async () => {
+test('Bluesky author data resolves via native XRPC and upgrades Bridgy handles', async () => {
   const dom = installMockDom();
   const prevFetch = globalThis.fetch;
-  const prevForceHttp = globalThis.__SANCTUARY_FORCE_HTTP_STORE__;
-  const prevLoc = globalThis.location;
-  globalThis.__SANCTUARY_FORCE_HTTP_STORE__ = true;
-  globalThis.location = { origin: 'http://127.0.0.1:5000', protocol: 'http:', hostname: '127.0.0.1', port: '5000' };
 
   globalThis.fetch = async (url) => {
     const u = String(url);
-    if (u.startsWith('http://127.0.0.1:5000/api/social/storage/kv')) {
-      return new Response(JSON.stringify({ found: false, value: null }), { status: 200, headers: { 'content-type': 'application/json' } });
-    }
-    if (u.startsWith('http://127.0.0.1:5000/api/social/storage/secret')) {
-      return new Response(JSON.stringify({ secret: { accessJwt: 'b_jwt', refreshJwt: 'b_ref' } }), { status: 200, headers: { 'content-type': 'application/json' } });
-    }
-    if (u.startsWith('http://127.0.0.1:5000/api/social/accounts/did%3Aplc%3Arural/profile')) {
-      return new Response(
-        JSON.stringify({ error: 'Mastodon API 404 (/api/v1/accounts/did:plc:rural): Record not found' }),
-        { status: 400, headers: { 'content-type': 'application/json' } }
-      );
-    }
-    if (u.startsWith('http://127.0.0.1:5000/api/social/accounts/did%3Aplc%3Arural/statuses')) {
-      return new Response(
-        JSON.stringify({ error: 'Mastodon API 404 (/api/v1/accounts/did:plc:rural/statuses)' }),
-        { status: 400, headers: { 'content-type': 'application/json' } }
-      );
-    }
     if (u.includes('/xrpc/app.bsky.graph.getFollows')) {
       return new Response(JSON.stringify({ follows: [] }), { status: 200, headers: { 'content-type': 'application/json' } });
     }
@@ -1175,7 +1201,6 @@ test('Bluesky author data falls back to native XRPC when desktop host lacks Blue
     assert.equal(posts[0].content_text, 'Morning bird watch');
 
     // Bridgy Fed @bsky.brid.gy author opens native Bluesky lookup cleanly
-    globalThis.__SANCTUARY_FORCE_HTTP_STORE__ = false;
     const sheet = openAuthorSheetModal({
       author: { id: 'masto_bridged_99', handle: 'ruralanarchy.bsky.social@bsky.brid.gy', name: 'Rural Anarchy' },
     });
@@ -1184,8 +1209,6 @@ test('Bluesky author data falls back to native XRPC when desktop host lacks Blue
     assert.ok(sheet.dialog.textContent.includes('Morning bird watch'));
     sheet.close();
   } finally {
-    globalThis.__SANCTUARY_FORCE_HTTP_STORE__ = prevForceHttp;
-    globalThis.location = prevLoc;
     globalThis.fetch = prevFetch;
     dom.restore();
   }
@@ -1194,9 +1217,7 @@ test('Bluesky author data falls back to native XRPC when desktop host lacks Blue
 test('Centralized Connections modal merges Mastodon & Bluesky with Bridgy dedupe, falls back to public.api.bsky.app on 401, and Own Profile sums counts', async () => {
   const dom = installMockDom();
   const prevFetch = globalThis.fetch;
-  const prevForceHttp = globalThis.__SANCTUARY_FORCE_HTTP_STORE__;
   const prevLoc = globalThis.location;
-  globalThis.__SANCTUARY_FORCE_HTTP_STORE__ = false;
   globalThis.location = { origin: 'http://127.0.0.1:5000', protocol: 'http:', hostname: '127.0.0.1', port: '5000' };
 
   globalThis.fetch = async (url, init = {}) => {
@@ -1383,7 +1404,6 @@ test('Centralized Connections modal merges Mastodon & Bluesky with Bridgy dedupe
   } finally {
     graphModal?.close();
     profileCtrl?.destroy();
-    globalThis.__SANCTUARY_FORCE_HTTP_STORE__ = prevForceHttp;
     globalThis.location = prevLoc;
     globalThis.fetch = prevFetch;
     dom.restore();
@@ -1393,9 +1413,7 @@ test('Centralized Connections modal merges Mastodon & Bluesky with Bridgy dedupe
 test('renderPostThreadView loads Bluesky replies with public fallback, preserves nested reply root refs, and supports inline replies', async () => {
   const dom = installMockDom();
   const prevFetch = globalThis.fetch;
-  const prevForceHttp = globalThis.__SANCTUARY_FORCE_HTTP_STORE__;
   const prevLoc = globalThis.location;
-  globalThis.__SANCTUARY_FORCE_HTTP_STORE__ = false;
   globalThis.location = { origin: 'http://127.0.0.1:5000', protocol: 'http:', hostname: '127.0.0.1', port: '5000' };
 
   const createdRecords = [];
@@ -1582,7 +1600,6 @@ test('renderPostThreadView loads Bluesky replies with public fallback, preserves
   } finally {
     threadCtrl?.destroy();
     resetCompose();
-    globalThis.__SANCTUARY_FORCE_HTTP_STORE__ = prevForceHttp;
     globalThis.location = prevLoc;
     globalThis.fetch = prevFetch;
     dom.restore();
@@ -1873,10 +1890,14 @@ test('applyKeywordFilters enforces word boundaries & link cards, and Feed tab lo
         { status: 200, headers: { 'content-type': 'application/json' } }
       );
     }
-    if (u.includes('/api/v1/timelines/public')) {
+    if (u.includes('/api/v1/timelines/public') || u.includes('/api/v1/timelines/tag/')) {
       return new Response('[]', { status: 200, headers: { 'content-type': 'application/json' } });
     }
     if (u.includes('app.bsky.feed.getFeed')) {
+      assert.equal(u.includes('whats-hot'), false, 'Default Feed must never call Bluesky whats-hot');
+      if (!u.includes('aaagjqttv5lhi') && !u.includes('aaagd5qfrout4') && !u.includes('aaadx3mkuxx7i')) {
+        return new Response(JSON.stringify({ feed: [] }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
       return new Response(
         JSON.stringify({
           feed: [
@@ -2164,6 +2185,50 @@ test('openFeedTuningModal renders 10 sliders, syncs ARIA/CSS vars, edits concept
     assert.ok(savedBodies.length >= 2);
     assert.equal(savedBodies.at(-1).sliders.commercial, -100);
     assert.deepEqual(savedBodies.at(-1).boostConcepts, ['union organizing']);
+
+    // Add Discovery Channel & Instance chips and verify PUT payload + removal
+    const chanInput = dlg.querySelector('#feed-channel-input');
+    chanInput.value = 'cooperatives';
+    chanInput.closest('form').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await new Promise((r) => setTimeout(r, 25));
+
+    const instInput = dlg.querySelector('#feed-instance-input');
+    instInput.value = 'https://kolektiva.social/';
+    instInput.closest('form').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await new Promise((r) => setTimeout(r, 25));
+
+    assert.deepEqual(feedStore.get().tuning.discoveryChannels, ['cooperatives']);
+    assert.deepEqual(feedStore.get().tuning.discoveryInstances, ['kolektiva.social']);
+    assert.deepEqual(savedBodies.at(-1).discoveryChannels, ['cooperatives']);
+    assert.deepEqual(savedBodies.at(-1).discoveryInstances, ['kolektiva.social']);
+
+    // Non-clobbering check when remote legacy /api/feed_profile omits discoveryChannels/discoveryInstances
+    globalThis.fetch = async (url, init = {}) => {
+      const u = String(url);
+      if (u.includes('/api/feed_profile') && init.method === 'PUT') {
+        const body = JSON.parse(init.body || '{}');
+        return new Response(
+          JSON.stringify({
+            version: 1,
+            updatedAt: Date.now(),
+            updatedBy: 'user',
+            sliders: body.sliders,
+            boostConcepts: body.boostConcepts,
+            dampenConcepts: body.dampenConcepts,
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } }
+        );
+      }
+      return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
+    };
+    await updateFeedTuning({ sliders: { smallWeb: 80 } });
+    assert.deepEqual(feedStore.get().tuning.discoveryChannels, ['cooperatives']);
+    assert.deepEqual(feedStore.get().tuning.discoveryInstances, ['kolektiva.social']);
+
+    // Remove channel chip cleanly
+    dlg.querySelector('button[aria-label="Remove channel cooperatives"]').click();
+    await new Promise((r) => setTimeout(r, 25));
+    assert.deepEqual(feedStore.get().tuning.discoveryChannels, []);
 
     // Preset click updates Small Web & Bourgeois Politics
     assert.ok(FEED_TUNING_PRESETS.length >= 5);
@@ -3474,6 +3539,3204 @@ test('Bridge resilience: Threads 403 permission warning, 400 subcode 33 idempote
   } finally {
     resetMemoryStorageForTests();
     resetAuthStoreForTests();
+    globalThis.fetch = prevFetch;
+  }
+});
+
+test('Threads 4279009 container lag recovery, unified cross-platform thread replies, Threads comment hide/block, and per-bridge edit controls', async () => {
+  // 1. publishThreadsPost survives transient 400 error_subcode 4279009 on container status, publish, and reply_to_id creation
+  let lagStatusHits = 0;
+  let lagPubHits = 0;
+  let lagReplyCreateHits = 0;
+  const lagFetch = async (url, init = {}) => {
+    const u = String(url);
+    const method = (init.method || 'GET').toUpperCase();
+    if (u.endsWith('/th_u/threads') && method === 'POST') {
+      const bodyStr = init.body?.toString?.() || '';
+      if (bodyStr.includes('reply_to_id=th_root_1') && lagReplyCreateHits === 0) {
+        lagReplyCreateHits += 1;
+        return new Response(
+          JSON.stringify({
+            error: {
+              message: 'The requested resource does not exist',
+              code: 24,
+              error_subcode: 4279009,
+              error_user_msg: 'The media with id th_root_1 cannot be found.',
+            },
+          }),
+          { status: 400, headers: { 'content-type': 'application/json' } }
+        );
+      }
+      return new Response(JSON.stringify({ id: bodyStr.includes('reply_to_id=') ? 'c_lag_2' : 'c_lag_1' }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+    if (u.includes('/v1.0/c_lag_1?') && method === 'GET') {
+      lagStatusHits += 1;
+      if (lagStatusHits === 1) {
+        return new Response(
+          JSON.stringify({ error: { message: 'The requested resource does not exist', code: 24, error_subcode: 4279009 } }),
+          { status: 400, headers: { 'content-type': 'application/json' } }
+        );
+      }
+      return new Response(JSON.stringify({ id: 'c_lag_1', status: 'FINISHED' }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+    if (u.endsWith('/th_u/threads_publish') && method === 'POST') {
+      const bodyStr = init.body?.toString?.() || '';
+      if (bodyStr.includes('creation_id=c_lag_1') && lagPubHits === 0) {
+        lagPubHits += 1;
+        return new Response(
+          JSON.stringify({
+            error: {
+              message: 'The requested resource does not exist',
+              code: 24,
+              error_subcode: 4279009,
+              error_user_msg: 'The media with id c_lag_1 cannot be found.',
+            },
+          }),
+          { status: 400, headers: { 'content-type': 'application/json' } }
+        );
+      }
+      return new Response(JSON.stringify({ id: bodyStr.includes('c_lag_2') ? 'th_child_2' : 'th_root_1' }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+    return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
+  };
+
+  const p1 = await publishThreadsPost({ userId: 'th_u', accessToken: 'tok', text: 'Part 1', pollDelayMs: 0, fetchImpl: lagFetch });
+  const p2 = await publishThreadsPost({ userId: 'th_u', accessToken: 'tok', text: 'Part 2', replyToId: p1.id, pollDelayMs: 0, fetchImpl: lagFetch });
+  assert.equal(p1.id, 'th_root_1');
+  assert.equal(p2.id, 'th_child_2');
+
+  // 2. fetchPostThread merges Mastodon + Bluesky + Threads replies, notification targets root post, hide/block purges comments & notifications
+  const dom = installMockDom();
+  const prevFetch = globalThis.fetch;
+  const modCalls = [];
+  let hiddenRepliesState = false;
+
+  globalThis.fetch = async (url, init = {}) => {
+    const u = String(url);
+    const method = (init.method || 'GET').toUpperCase();
+    if (u.includes('/api/v1/statuses/m_uni_1/context')) {
+      return new Response(
+        JSON.stringify({
+          ancestors: [],
+          descendants: [
+            {
+              id: 'm_rep_1',
+              in_reply_to_id: 'm_uni_1',
+              created_at: '2026-11-19T14:01:00.000Z',
+              content: '<p>Mastodon reply</p>',
+              account: { id: 'f1', username: 'fedi_pal', acct: 'fedi_pal@fosstodon.org', display_name: 'Fedi Pal' },
+              media_attachments: [],
+            },
+          ],
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      );
+    }
+    if (u.includes('/api/v1/statuses/m_uni_1') && method === 'PUT') {
+      const parsed = JSON.parse(init.body || '{}');
+      return new Response(
+        JSON.stringify({
+          id: 'm_uni_1',
+          created_at: '2026-11-19T14:00:00.000Z',
+          content: `<p>${parsed.status}</p>`,
+          account: { id: 'u_me', username: 'davy', acct: 'davy@mastodon.social', display_name: 'Davy' },
+          media_attachments: [],
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      );
+    }
+    if (u.includes('/api/v1/statuses/m_uni_1')) {
+      return new Response(
+        JSON.stringify({
+          id: 'm_uni_1',
+          created_at: '2026-11-19T14:00:00.000Z',
+          content: '<p>Root crosspost</p>',
+          account: { id: 'u_me', username: 'davy', acct: 'davy@mastodon.social', display_name: 'Davy' },
+          media_attachments: [],
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      );
+    }
+    if (u.includes('/api/v1/notifications')) {
+      return new Response('[]', { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    if (u.includes('app.bsky.notification.listNotifications')) {
+      return new Response(JSON.stringify({ notifications: [] }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    if (u.includes('app.bsky.feed.getPostThread')) {
+      return new Response(
+        JSON.stringify({
+          thread: {
+            post: {
+              uri: 'at://did:plc:me/app.bsky.feed.post/b_uni_1',
+              cid: 'c_b1',
+              author: { did: 'did:plc:me', handle: 'davy.bsky.social', displayName: 'Davy' },
+              record: { text: 'Root crosspost', createdAt: '2026-11-19T14:00:00.000Z' },
+              likeCount: 2,
+              repostCount: 0,
+              replyCount: 1,
+            },
+            replies: [
+              {
+                post: {
+                  uri: 'at://did:plc:bskyfan/app.bsky.feed.post/b_rep_1',
+                  cid: 'c_br1',
+                  author: { did: 'did:plc:bskyfan', handle: 'bskyfan.bsky.social', displayName: 'Bsky Fan' },
+                  record: { text: 'Bluesky reply', createdAt: '2026-11-19T14:02:00.000Z' },
+                },
+                replies: [],
+              },
+            ],
+          },
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      );
+    }
+    if (u.includes('app.bsky.feed.getPosts')) {
+      return new Response(JSON.stringify({ posts: [{ uri: 'at://did:plc:me/app.bsky.feed.post/b_uni_1', likeCount: 2, repostCount: 0, replyCount: 1 }] }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+    if (u.includes('com.atproto.repo.deleteRecord') || u.includes('com.atproto.repo.createRecord')) {
+      modCalls.push({ kind: 'bsky_op', url: u, method });
+      return new Response(JSON.stringify({ uri: 'at://did:plc:me/app.bsky.feed.post/b_uni_2', cid: 'c_b2' }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+    if (u.includes('graph.threads.net/v1.0/th_uni_1/conversation') || u.includes('graph.threads.net/v1.0/th_uni_1/replies')) {
+      return new Response(
+        JSON.stringify({
+          data: hiddenRepliesState
+            ? []
+            : [
+                {
+                  id: 'th_rep_bad',
+                  username: 'bad_troll',
+                  text: 'Stupid troll comment',
+                  timestamp: '2026-11-19T14:03:00.000Z',
+                  replied_to: { id: 'th_uni_1' },
+                },
+                {
+                  id: 'th_rep_nice',
+                  username: 'nice_pal',
+                  text: 'Great point on Threads',
+                  timestamp: '2026-11-19T14:04:00.000Z',
+                  replied_to: { id: 'th_uni_1' },
+                },
+              ],
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      );
+    }
+    if (u.includes('graph.threads.net/v1.0/th_uni_1/insights')) {
+      return new Response(JSON.stringify({ data: [{ name: 'likes', values: [{ value: 1 }] }, { name: 'replies', values: [{ value: 2 }] }] }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+    if (u.includes('graph.threads.net/v1.0/th_uni_1?')) {
+      return new Response(
+        JSON.stringify({ id: 'th_uni_1', username: 'davy', text: 'Root crosspost', timestamp: '2026-11-19T14:00:00.000Z' }),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      );
+    }
+    if (u.includes('/manage_reply') && method === 'POST') {
+      modCalls.push({ kind: 'manage_reply', url: u, body: init.body?.toString?.() || '' });
+      hiddenRepliesState = true;
+      return new Response(JSON.stringify({ success: true }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    if (u.includes('/api/v1/accounts/lookup') && u.includes('bad_troll')) {
+      return new Response(JSON.stringify({ id: 'fed_bt_1', username: 'bad_troll', acct: 'bad_troll@threads.net' }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+    if (u.includes('/api/v1/accounts/fed_bt_1/block') && method === 'POST') {
+      modCalls.push({ kind: 'masto_block', url: u });
+      return new Response(JSON.stringify({ id: 'fed_bt_1', blocking: true }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    if (u.includes('graph.threads.net/v1.0/th_uni_1') && method === 'DELETE') {
+      modCalls.push({ kind: 'threads_delete', url: u });
+      return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
+  };
+
+  try {
+    resetMemoryStorageForTests();
+    resetAuthStoreForTests();
+    resetFeedStoreForTests();
+    resetActivityStoreForTests();
+
+    await upsertSocialAccount(
+      { id: 'fediverse:davy@mastodon.social', platform: 'fediverse', instanceUrl: 'https://mastodon.social', handle: 'davy', acct: 'davy@mastodon.social', userId: 'u_me' },
+      { accessToken: 'm_tok' }
+    );
+    await upsertSocialAccount(
+      { id: 'bluesky:did:plc:me', platform: 'bluesky', serviceUrl: 'https://bsky.social', did: 'did:plc:me', handle: 'davy.bsky.social' },
+      { accessJwt: 'b_jwt', refreshJwt: 'b_ref' }
+    );
+    await upsertSocialAccount(
+      { id: 'threads:th_u_1', platform: 'threads', userId: 'th_u_1', handle: 'davy', acct: 'davy' },
+      { accessToken: 't_tok' }
+    );
+
+    await saveLocalLinkedPost({
+      canonicalId: 'mastodon:m_uni_1',
+      mastodonStatusId: 'm_uni_1',
+      mastodonInstance: 'https://mastodon.social',
+      blueskyUri: 'at://did:plc:me/app.bsky.feed.post/b_uni_1',
+      blueskyCid: 'c_b1',
+      threadsPostId: 'th_uni_1',
+    });
+
+    const ctx = await fetchPostThread({
+      id: 'mastodon:m_uni_1',
+      protocol: 'mastodon',
+      content_text: 'Root crosspost',
+      _meta: {
+        mastodon: { statusId: 'm_uni_1', instanceUrl: 'https://mastodon.social' },
+        linkedIds: {
+          mastodonStatusId: 'm_uni_1',
+          blueskyUri: 'at://did:plc:me/app.bsky.feed.post/b_uni_1',
+          threadsPostId: 'th_uni_1',
+        },
+      },
+    });
+    const descIds = ctx.descendants.map((d) => d.item.id);
+    assert.ok(descIds.includes('mastodon:m_rep_1'));
+    assert.ok(descIds.includes('bluesky:at://did:plc:bskyfan/app.bsky.feed.post/b_rep_1'));
+    assert.ok(descIds.includes('threads:th_rep_bad'));
+    assert.ok(descIds.includes('threads:th_rep_nice'));
+
+    // Activity reply notification targeting unified Mastodon root post
+    const { items: notifItems } = await fetchUnifiedNotifications({ limit: 20 });
+    const badNotif = notifItems.find((n) => n.id === 'threads:notif:th_rep_bad');
+    assert.ok(badNotif && badNotif._meta.notification.canonicalPostKey === 'mastodon:m_uni_1');
+    const grouped = groupActivityNotifications(notifItems);
+    const badGroup = grouped.find((g) => g.primaryItem?.id === 'threads:notif:th_rep_bad');
+    assert.equal(badGroup.threadTargetItem.id, 'mastodon:m_uni_1');
+    assert.equal(badGroup.threadTargetItem._meta.focusReplyId, 'threads:notif:th_rep_bad');
+
+    // Render postThread view: Hide Comment + Block Account on Threads commenter
+    const threadStage = dom.document.createElement('div');
+    dom.document.body.appendChild(threadStage);
+    const threadCtrl = renderPostThreadView(threadStage, {
+      post: badGroup.threadTargetItem,
+    });
+    await new Promise((r) => setTimeout(r, 30));
+
+    const replyCards = [...threadStage.querySelectorAll('.thread-reply-item .post-card')];
+    const badCard = replyCards.find((c) => c.dataset.postId === 'threads:th_rep_bad');
+    assert.ok(badCard, 'Threads reply card should render inside unified Mastodon thread');
+    const menuItems = [...badCard.querySelectorAll('.post-context-menuitem')].map((b) => b.textContent);
+    assert.ok(menuItems.includes('Hide Comment'));
+    assert.ok(menuItems.includes('Block Account'));
+
+    await toggleBlockAuthor('bad_troll', false, {
+      protocol: 'threads',
+      acct: 'bad_troll',
+      displayName: 'bad_troll',
+      replyPostId: 'th_rep_bad',
+    });
+    assert.ok(modCalls.some((c) => c.kind === 'manage_reply' && c.url.includes('th_rep_bad')));
+    assert.ok(modCalls.some((c) => c.kind === 'masto_block'));
+    assert.ok((feedStore.get().moderatedActors || []).includes('threads:bad_troll'));
+
+    await refreshActivityNotifications({ limit: 20 });
+    assert.equal(
+      (activityStore.get().items || []).some((it) => it?.author?.handle === 'bad_troll'),
+      false
+    );
+
+    const ctxAfter = await fetchPostThread('mastodon:m_uni_1');
+    assert.equal(ctxAfter.descendants.some((d) => d.item.id === 'threads:th_rep_bad'), false);
+    threadCtrl.destroy();
+
+    // Per-bridge toggles in openEditPostDialog: unchecking Threads replaces only Bluesky
+    modCalls.length = 0;
+    const savedSelective = await new Promise((resolve) => {
+      openEditPostDialog(
+        toUnifiedItem({
+          id: 'mastodon:m_uni_1',
+          protocol: 'mastodon',
+          content_text: 'Root crosspost',
+          _meta: {
+            mastodon: { statusId: 'm_uni_1' },
+            linkedIds: {
+              mastodonStatusId: 'm_uni_1',
+              blueskyUri: 'at://did:plc:me/app.bsky.feed.post/b_uni_1',
+              threadsPostId: 'th_uni_1',
+            },
+          },
+        }),
+        { onSaved: resolve }
+      );
+      const dlg = dom.document.getElementById('edit-post-dialog');
+      const bskyCb = dlg.querySelector('#edit-post-replace-bluesky');
+      const thrCb = dlg.querySelector('#edit-post-replace-threads');
+      assert.ok(bskyCb?.checked && thrCb?.checked);
+      thrCb.checked = false;
+      thrCb.dispatchEvent(new Event('change', { bubbles: true }));
+      dlg.querySelector('textarea').value = 'Edited only Mastodon and Bluesky';
+      dlg.querySelector('form').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    });
+    assert.equal(savedSelective.content_text, 'Edited only Mastodon and Bluesky');
+    assert.ok(modCalls.some((c) => c.kind === 'bsky_op' && c.url.includes('createRecord')));
+    assert.equal(modCalls.some((c) => c.kind === 'threads_delete'), false);
+    assert.equal(savedSelective._meta.linkedIds.threadsPostId, 'th_uni_1');
+  } finally {
+    resetMemoryStorageForTests();
+    resetActivityStoreForTests();
+    resetFeedStoreForTests();
+    resetAuthStoreForTests();
+    globalThis.fetch = prevFetch;
+    dom.restore();
+  }
+});
+
+test('Sovereign Sanctuary Feed harvester replaces whats-hot with topic/instance discovery and enforces dialectical anti-hegemonic sieve', async () => {
+  const dom = installMockDom();
+  const prevFetch = globalThis.fetch;
+  clearHarvesterCacheForTests();
+  const fetchedUrls = [];
+  const nowIso = new Date().toISOString();
+
+  globalThis.fetch = async (url) => {
+    const u = String(url);
+    fetchedUrls.push(u);
+
+    if (u.includes('whats-hot') || u.includes('/trends/statuses')) {
+      throw new Error(`Forbidden mainstream algorithmic endpoint called: ${u}`);
+    }
+    if (u.includes('example-coop.social/api/v1/timelines/tag/cooperatives')) {
+      return new Response(
+        JSON.stringify([
+          {
+            id: 'm_marx_1',
+            content: '<p>Democrats, Republicans, and neoliberal capitalism cannot reform away wage-slavery while private owners control the means of production. Build worker cooperatives and class struggle.</p>',
+            created_at: nowIso,
+            account: { id: 'u_coop', username: 'bakery', acct: 'bakery@example-coop.social', display_name: 'Bakery Collective' },
+            favourites_count: 14,
+            reblogs_count: 3,
+            replies_count: 2,
+          },
+          {
+            id: 'm_nyt_1',
+            content: '<p>Must-read column on bipartisan Senate strategy https://www.nytimes.com/story</p>',
+            created_at: nowIso,
+            account: { id: 'u_nyt', username: 'beltway', acct: 'beltway@example-coop.social', display_name: 'Beltway' },
+            card: { url: 'https://www.nytimes.com/2026/11/story.html', title: 'Senate moderates negotiate' },
+            favourites_count: 5,
+            reblogs_count: 1,
+            replies_count: 0,
+          },
+        ]),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      );
+    }
+    if (u.includes('kolektiva.social/api/v1/timelines/public')) {
+      return new Response(
+        JSON.stringify([
+          {
+            id: 'm_kol_1',
+            content: '<p>Mutual aid tool library opened three blocks from the union hall.</p>',
+            created_at: nowIso,
+            account: { id: 'u_k1', username: 'solidarity', acct: 'solidarity@kolektiva.social', display_name: 'Solidarity' },
+            favourites_count: 9,
+            reblogs_count: 2,
+            replies_count: 1,
+          },
+          {
+            id: 'm_psyop_1',
+            content: '<p>Anyone criticizing NATO rules-based international order is just tankies defending authoritarian regimes.</p>',
+            created_at: nowIso,
+            account: { id: 'u_p1', username: 'nafo_guy', acct: 'nafo@kolektiva.social', display_name: 'NAFO' },
+            favourites_count: 40,
+            reblogs_count: 5,
+            replies_count: 0,
+          },
+        ]),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      );
+    }
+    if (u.includes('app.bsky.feed.getFeed')) {
+      return new Response(
+        JSON.stringify({
+          feed: [
+            {
+              post: {
+                uri: 'at://did:plc:b1/app.bsky.feed.post/comm_1',
+                cid: 'c1',
+                author: { did: 'did:plc:b1', handle: 'union.bsky.social', displayName: 'Shop Steward' },
+                record: { text: 'Rank-and-file shop stewards ratified a democratic strike fund.', createdAt: nowIso },
+                likeCount: 18,
+                repostCount: 4,
+                replyCount: 2,
+              },
+            },
+            {
+              post: {
+                uri: 'at://did:plc:b2/app.bsky.feed.post/dunk_1',
+                cid: 'c2',
+                author: { did: 'did:plc:b2', handle: 'dunk.bsky.social', displayName: 'Dunker' },
+                record: {
+                  text: 'Imagine believing this lmao',
+                  createdAt: nowIso,
+                  embed: {
+                    $type: 'app.bsky.embed.record',
+                    record: { uri: 'at://did:plc:other/app.bsky.feed.post/q1', cid: 'cq1' },
+                  },
+                },
+                embed: {
+                  $type: 'app.bsky.embed.record#view',
+                  record: {
+                    $type: 'app.bsky.embed.record#viewRecord',
+                    uri: 'at://did:plc:other/app.bsky.feed.post/q1',
+                    author: { handle: 'other.bsky.social', displayName: 'Other' },
+                    value: { text: 'Original post' },
+                  },
+                },
+                likeCount: 1200,
+                repostCount: 240,
+                replyCount: 45,
+              },
+            },
+          ],
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      );
+    }
+    if (u.includes('app.bsky.feed.searchPosts')) {
+      return new Response(
+        JSON.stringify({
+          posts: [
+            {
+              uri: 'at://did:plc:b3/app.bsky.feed.post/search_1',
+              cid: 'c3',
+              author: { did: 'did:plc:b3', handle: 'praxis.bsky.social', displayName: 'Praxis Notes' },
+              record: { text: 'Historical materialism starts from concrete conditions rather than woke mind virus slogans.', createdAt: nowIso },
+              likeCount: 7,
+              repostCount: 1,
+              replyCount: 0,
+            },
+            {
+              uri: 'at://did:plc:b4/app.bsky.feed.post/search_2',
+              cid: 'c4',
+              author: { did: 'did:plc:b4', handle: 'craft.bsky.social', displayName: 'Coop Foundry' },
+              record: { text: 'Open-source lathe controller firmware released for community maker spaces.', createdAt: nowIso },
+              likeCount: 11,
+              repostCount: 2,
+              replyCount: 1,
+            },
+          ],
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      );
+    }
+    return new Response('[]', { status: 200, headers: { 'content-type': 'application/json' } });
+  };
+
+  let feedCtrl = null;
+  try {
+    resetMemoryStorageForTests();
+    resetAuthStoreForTests();
+    resetConnectionStoreForTests();
+    resetFeedStoreForTests();
+
+    await upsertSocialAccount(
+      { id: 'fediverse:me@example-coop.social', platform: 'fediverse', instanceUrl: 'https://example-coop.social', handle: 'me', acct: 'me@example-coop.social', userId: 'u_me' },
+      { accessToken: 'm_tok' }
+    );
+    await upsertSocialAccount(
+      { id: 'bluesky:did:plc:me', platform: 'bluesky', serviceUrl: 'https://bsky.social', handle: 'me.bsky.social', acct: 'me.bsky.social', did: 'did:plc:me' },
+      { accessJwt: 'b_jwt', refreshJwt: 'b_ref' }
+    );
+    await updateFeedTuning({
+      sliders: { recencyHalfLifeHours: 10, smallWeb: 80, bourgeoisPolitics: -100, commercial: -100 },
+      discoveryChannels: ['cooperatives'],
+      discoveryInstances: ['kolektiva.social'],
+      boostConcepts: ['class struggle', 'worker cooperatives'],
+      dampenConcepts: ['Democrats', 'Republicans', 'neoliberal capitalism'],
+    }, { syncRemote: false });
+
+    // Direct harvester verification
+    const harvested = await harvestSanctuaryFeed({
+      fediAuth: await getAuthenticatedAccount('fediverse'),
+      bskyAuth: await getAuthenticatedAccount('bluesky'),
+      tuning: feedStore.get().tuning,
+    });
+    const harvestedTexts = harvested.items.map((p) => p.content_text);
+    assert.ok(harvestedTexts.some((t) => t.includes('means of production')));
+    assert.ok(harvestedTexts.some((t) => t.includes('Mutual aid tool library')));
+    assert.ok(harvestedTexts.some((t) => t.includes('democratic strike fund')));
+    assert.ok(harvestedTexts.some((t) => t.includes('Open-source lathe controller')));
+    // Strip NYT, NAFO/tankie psyop, reactionary woke mind virus, and viral quote-dunk
+    assert.equal(harvestedTexts.some((t) => t.includes('nytimes') || t.includes('Senate')), false);
+    assert.equal(harvestedTexts.some((t) => t.includes('rules-based')), false);
+    assert.equal(harvestedTexts.some((t) => t.includes('woke mind virus')), false);
+    assert.equal(harvestedTexts.some((t) => t.includes('Imagine believing')), false);
+
+    assert.equal(fetchedUrls.some((u) => u.includes('whats-hot') || u.includes('/trends/statuses')), false);
+    assert.ok(fetchedUrls.some((u) => u.includes('/api/v1/timelines/tag/cooperatives')));
+    assert.ok(fetchedUrls.some((u) => u.includes('kolektiva.social/api/v1/timelines/public')));
+    assert.ok(fetchedUrls.some((u) => u.includes('app.bsky.feed.getFeed')));
+    assert.ok(fetchedUrls.some((u) => u.includes('app.bsky.feed.searchPosts')));
+
+    // Full Feed screen preserves the Marxist critique post even with bourgeoisPolitics: -100 and dampening Democrats/Republicans
+    const host = dom.document.createElement('div');
+    dom.document.body.appendChild(host);
+    feedCtrl = mountFeedScreen(host);
+    await new Promise((r) => setTimeout(r, 60));
+
+    assert.ok(host.textContent.includes('means of production'), 'Marxist critique must pass dialectical exemption and rank cleanly');
+    assert.ok(host.textContent.includes('Mutual aid tool library'));
+    assert.equal(host.textContent.includes('Senate strategy'), false);
+    assert.equal(host.textContent.includes('rules-based'), false);
+  } finally {
+    feedCtrl?.destroy();
+    clearHarvesterCacheForTests();
+    resetMemoryStorageForTests();
+    resetFeedStoreForTests();
+    resetAuthStoreForTests();
+    resetConnectionStoreForTests();
+    globalThis.fetch = prevFetch;
+    dom.restore();
+  }
+});
+
+test('UserModal formats Threads 5258005 refresh errors and shell.css enforces modal text containment', async () => {
+  const dom = installMockDom();
+  const prevFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    const u = String(url);
+    if (u.includes('refresh_access_token')) {
+      return new Response(
+        JSON.stringify({
+          error: {
+            message: 'API access blocked.',
+            code: 200,
+            type: 'OAuthException',
+            error_subcode: 5258005,
+            fbtrace_id: 'A_V9nKjl9qQa06wFPx_F164',
+          },
+        }),
+        { status: 400, headers: { 'content-type': 'application/json' } }
+      );
+    }
+    return new Response(JSON.stringify({}), { status: 200, headers: { 'content-type': 'application/json' } });
+  };
+
+  let modal = null;
+  try {
+    resetMemoryStorageForTests();
+    resetAuthStoreForTests();
+    await upsertSocialAccount(
+      {
+        id: 'threads:th_err_1',
+        platform: 'threads',
+        userId: 'th_err_1',
+        handle: 'davy_threads',
+        acct: 'davy_threads',
+        expiresAt: Date.now() + 59 * 86_400_000,
+      },
+      { accessToken: 'fresh_60d_tok' }
+    );
+    await enqueueLocalRetry({
+      id: 'retry_th_1',
+      protocol: 'threads',
+      operation: 'publish',
+      lastError:
+        'Threads token refresh failed (400): {"error":{"message":"API access blocked.","code":200,"type":"OAuthException","error_subcode":5258005,"fbtrace_id":"A_V9nKjl9qQa06wFPx_F164"}}',
+    });
+
+    modal = openUserModal();
+    await new Promise((r) => setTimeout(r, 20));
+
+    const retrySub = modal.dialog.querySelector('.retry-error-subtext');
+    assert.ok(retrySub);
+    assert.equal(
+      retrySub.textContent,
+      'Threads token refresh failed (400): API access blocked. 60-day tokens must be at least 24 hours old before refreshing.'
+    );
+    assert.equal(retrySub.textContent.includes('fbtrace_id'), false);
+
+    const refreshBtn = modal.dialog.querySelector('.threads-refresh-token-btn');
+    assert.ok(refreshBtn);
+    refreshBtn.click();
+    await new Promise((r) => setTimeout(r, 30));
+
+    const feedback = modal.dialog.querySelector('.user-modal-feedback');
+    assert.ok(feedback);
+    assert.equal(feedback.hidden, false);
+    assert.equal(
+      feedback.textContent,
+      'API access blocked. 60-day tokens must be at least 24 hours old before refreshing.'
+    );
+    assert.equal(feedback.textContent.includes('fbtrace_id'), false);
+    assert.equal(feedback.textContent.includes('{"error"'), false);
+
+    const css = fs.readFileSync(path.resolve(process.cwd(), 'web/assets/css/shell.css'), 'utf8');
+    const modalStatusBlock = css.slice(css.indexOf('.classic-modal-status {'), css.indexOf('.classic-section-label'));
+    assert.ok(modalStatusBlock.includes('overflow-wrap: anywhere;'));
+    const feedbackBlock = css.slice(css.indexOf('.user-modal-feedback {'), css.indexOf('.account-connected-row'));
+    assert.ok(feedbackBlock.includes('overflow-wrap: anywhere;'));
+    assert.ok(feedbackBlock.includes('min-inline-size: 0;'));
+    assert.ok(feedbackBlock.includes('max-inline-size: 100%;'));
+    const retryBannerBlock = css.slice(css.indexOf('.bridge-retry-msg {'), css.indexOf('.search-landmark'));
+    assert.ok(retryBannerBlock.includes('overflow-wrap: break-word;'));
+    assert.ok(retryBannerBlock.includes('min-inline-size: 0;'));
+    const composeStatusBlock = css.slice(css.indexOf('.modal-card.compose-sheet-card p.compose-status-msg {'), css.indexOf('.compose-footer-left'));
+    assert.ok(composeStatusBlock.includes('overflow-wrap: break-word;'));
+  } finally {
+    modal?.close();
+    resetMemoryStorageForTests();
+    resetAuthStoreForTests();
+    globalThis.fetch = prevFetch;
+    dom.restore();
+  }
+});
+
+test('Profile screen replaces Pinned tab with Boosts (merging Mastodon + Bluesky) and pins posts to top of Posts', async () => {
+  const dom = installMockDom();
+  const prevFetch = globalThis.fetch;
+  const calls = [];
+  let p2Pinned = false;
+  let mastoUnboosted = false;
+
+  globalThis.fetch = async (url, init = {}) => {
+    const u = String(url);
+    const method = (init.method || 'GET').toUpperCase();
+    calls.push({ url: u, method, body: init.body });
+
+    if (u.includes('/api/v1/accounts/verify_credentials')) {
+      return new Response(
+        JSON.stringify({
+          id: 'u1',
+          username: 'alice',
+          acct: 'alice',
+          display_name: 'Alice',
+          note: '<p>Worker coop builder</p>',
+          followers_count: 10,
+          following_count: 5,
+          statuses_count: 12,
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      );
+    }
+
+    if (u.includes('/api/v1/statuses/p_own_2/pin')) {
+      p2Pinned = true;
+      return new Response(
+        JSON.stringify({
+          id: 'p_own_2',
+          pinned: true,
+          content: '<p>Latest thought</p>',
+          created_at: '2026-11-20T10:00:00.000Z',
+          account: { id: 'u1', username: 'alice', acct: 'alice@mastodon.social', display_name: 'Alice' },
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      );
+    }
+
+    if (u.includes('/api/v1/statuses/rb_target_1/unreblog')) {
+      mastoUnboosted = true;
+      return new Response(
+        JSON.stringify({
+          id: 'rb_target_1',
+          reblogged: false,
+          reblogs_count: 4,
+          content: '<p>Mastodon Boosted Post</p>',
+          created_at: '2026-11-18T08:00:00.000Z',
+          account: { id: 'other_m1', username: 'comrade', acct: 'comrade@mas.to', display_name: 'Comrade' },
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      );
+    }
+
+    if (u.includes('/api/v1/accounts/u1/statuses')) {
+      const parsed = new URL(u);
+      if (parsed.searchParams.get('pinned') === 'true') {
+        const pinnedRows = [
+          {
+            id: 'p_pin_1',
+            pinned: true,
+            content: '<p>Pinned manifesto</p>',
+            created_at: '2026-11-10T10:00:00.000Z',
+            account: { id: 'u1', username: 'alice', acct: 'alice@mastodon.social', display_name: 'Alice' },
+          },
+        ];
+        if (p2Pinned) {
+          pinnedRows.push({
+            id: 'p_own_2',
+            pinned: true,
+            content: '<p>Latest thought</p>',
+            created_at: '2026-11-20T10:00:00.000Z',
+            account: { id: 'u1', username: 'alice', acct: 'alice@mastodon.social', display_name: 'Alice' },
+          });
+        }
+        return new Response(JSON.stringify(pinnedRows), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      if (parsed.searchParams.get('only_media') === 'true') {
+        return new Response(
+          JSON.stringify([
+            {
+              id: 'p_media_1',
+              content: '<p>Authored photo</p>',
+              created_at: '2026-11-19T12:00:00.000Z',
+              account: { id: 'u1', username: 'alice', acct: 'alice@mastodon.social', display_name: 'Alice' },
+              media_attachments: [{ id: 'm1', type: 'image', url: 'https://cdn.example/own.jpg', preview_url: 'https://cdn.example/own.jpg' }],
+            },
+          ]),
+          { status: 200, headers: { 'content-type': 'application/json' } }
+        );
+      }
+      if (parsed.searchParams.get('exclude_replies') === 'true') {
+        return new Response(
+          JSON.stringify([
+            {
+              id: 'p_own_2',
+              pinned: p2Pinned,
+              content: '<p>Latest thought</p>',
+              created_at: '2026-11-20T10:00:00.000Z',
+              account: { id: 'u1', username: 'alice', acct: 'alice@mastodon.social', display_name: 'Alice' },
+            },
+            {
+              id: 'p_pin_1',
+              pinned: true,
+              content: '<p>Pinned manifesto</p>',
+              created_at: '2026-11-10T10:00:00.000Z',
+              account: { id: 'u1', username: 'alice', acct: 'alice@mastodon.social', display_name: 'Alice' },
+            },
+          ]),
+          { status: 200, headers: { 'content-type': 'application/json' } }
+        );
+      }
+      if (parsed.searchParams.get('exclude_reblogs') === 'true') {
+        return new Response(
+          JSON.stringify([
+            {
+              id: 'p_rep_1',
+              in_reply_to_id: 'other_post_9',
+              content: '<p>Mastodon reply note</p>',
+              created_at: '2026-11-20T08:30:00.000Z',
+              account: { id: 'u1', username: 'alice', acct: 'alice@mastodon.social', display_name: 'Alice' },
+            },
+            {
+              id: 'p_own_2',
+              content: '<p>Latest thought</p>',
+              created_at: '2026-11-20T10:00:00.000Z',
+              account: { id: 'u1', username: 'alice', acct: 'alice@mastodon.social', display_name: 'Alice' },
+            },
+          ]),
+          { status: 200, headers: { 'content-type': 'application/json' } }
+        );
+      }
+      return new Response(
+        JSON.stringify([
+          {
+            id: 'p_own_2',
+            content: '<p>Latest thought</p>',
+            created_at: '2026-11-20T10:00:00.000Z',
+            account: { id: 'u1', username: 'alice', acct: 'alice@mastodon.social', display_name: 'Alice' },
+          },
+          ...(mastoUnboosted
+            ? []
+            : [
+                {
+                  id: 'wrap_m1',
+                  created_at: '2026-11-20T11:30:00.000Z',
+                  account: { id: 'u1', username: 'alice', acct: 'alice@mastodon.social', display_name: 'Alice' },
+                  reblog: {
+                    id: 'rb_target_1',
+                    content: '<p>Mastodon Boosted Post</p>',
+                    created_at: '2026-11-18T08:00:00.000Z',
+                    reblogged: true,
+                    reblogs_count: 5,
+                    account: { id: 'other_m1', username: 'comrade', acct: 'comrade@mas.to', display_name: 'Comrade' },
+                  },
+                },
+              ]),
+        ]),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      );
+    }
+
+    if (u.includes('app.bsky.feed.getAuthorFeed')) {
+      return new Response(
+        JSON.stringify({
+          feed: [
+            {
+              post: {
+                uri: 'at://did:plc:other/app.bsky.feed.post/b1',
+                cid: 'c_b1',
+                record: { text: 'Bluesky Reposted Post', createdAt: '2026-11-19T05:00:00.000Z' },
+                author: { did: 'did:plc:other', handle: 'friend.bsky.social', displayName: 'Friend' },
+                viewer: { repost: 'at://did:plc:self_bsky/app.bsky.feed.repost/rp1' },
+                repostCount: 3,
+              },
+              reason: {
+                by: { did: 'did:plc:self_bsky', handle: 'alice.bsky.social', displayName: 'Alice' },
+                indexedAt: '2026-11-20T12:00:00.000Z',
+                uri: 'at://did:plc:self_bsky/app.bsky.feed.repost/rp1',
+              },
+            },
+            {
+              post: {
+                uri: 'at://did:plc:self_bsky/app.bsky.feed.post/brep1',
+                cid: 'c_rep1',
+                record: {
+                  text: 'Bluesky Reply Note',
+                  createdAt: '2026-11-20T09:00:00.000Z',
+                  reply: { parent: { uri: 'at://did:plc:x/app.bsky.feed.post/p0' } },
+                },
+                author: { did: 'did:plc:self_bsky', handle: 'alice.bsky.social', displayName: 'Alice' },
+              },
+            },
+          ],
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      );
+    }
+
+    if (u.includes('app.bsky.actor.getProfile')) {
+      return new Response(
+        JSON.stringify({ did: 'did:plc:self_bsky', handle: 'alice.bsky.social', followersCount: 2, followsCount: 3 }),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      );
+    }
+
+    return new Response(JSON.stringify({}), { status: 200, headers: { 'content-type': 'application/json' } });
+  };
+
+  let profCtrl = null;
+  try {
+    resetMemoryStorageForTests();
+    resetAuthStoreForTests();
+    await upsertSocialAccount(
+      {
+        id: 'fediverse:alice@mastodon.social',
+        platform: 'fediverse',
+        instanceUrl: 'https://mastodon.social',
+        handle: 'alice',
+        acct: 'alice@mastodon.social',
+        displayName: 'Alice',
+        userId: 'u1',
+      },
+      { accessToken: 'tok_u1' }
+    );
+    await upsertSocialAccount(
+      {
+        id: 'bluesky:did:plc:self_bsky',
+        platform: 'bluesky',
+        serviceUrl: 'https://bsky.social',
+        handle: 'alice.bsky.social',
+        acct: 'alice.bsky.social',
+        did: 'did:plc:self_bsky',
+      },
+      { accessJwt: 'jwt_self', refreshJwt: 'ref_self' }
+    );
+
+    const doc = dom.document;
+    const host = doc.createElement('div');
+    doc.body.appendChild(host);
+    profCtrl = mountProfileScreen(host, {});
+    await new Promise((r) => setTimeout(r, 40));
+
+    // Accessible tablist/tab/tabpanel semantics with Boosts instead of Pinned
+    const tablist = host.querySelector('.profile-sub-tabs');
+    assert.equal(tablist.getAttribute('role'), 'tablist');
+    assert.equal(tablist.getAttribute('focusgroup'), 'tablist nomemory');
+    const tabs = Array.from(tablist.querySelectorAll('[role="tab"]'));
+    assert.deepEqual(tabs.map((t) => t.textContent), ['Posts', 'Replies', 'Media', 'Boosts']);
+    assert.equal(tabs[0].getAttribute('aria-selected'), 'true');
+    assert.equal(tabs[3].getAttribute('aria-selected'), 'false');
+
+    const panel = host.querySelector('.profile-posts-list');
+    assert.equal(panel.getAttribute('role'), 'tabpanel');
+    assert.equal(panel.getAttribute('aria-labelledby'), 'profile-tab-posts');
+
+    // Keyboard arrow navigation moves focus across tabs without auto-fetching
+    tabs[0].focus();
+    tabs[0].dispatchEvent(Object.assign(new Event('keydown', { bubbles: true }), { key: 'ArrowRight' }));
+    assert.equal(doc.activeElement, tabs[1]);
+    tabs[1].dispatchEvent(Object.assign(new Event('keydown', { bubbles: true }), { key: 'End' }));
+    assert.equal(doc.activeElement, tabs[3]);
+
+    // Posts tab places Pinned manifesto first even though Latest thought is newer
+    let cards = Array.from(panel.querySelectorAll('article.post-card'));
+    assert.equal(cards.length, 2);
+    assert.ok(cards[0].textContent.includes('Pinned post'));
+    assert.ok(cards[0].textContent.includes('Pinned manifesto'));
+    assert.ok(cards[1].textContent.includes('Latest thought'));
+
+    // Pinning Latest thought updates card banner live on Posts
+    const pinItemBtn = Array.from(cards[1].querySelectorAll('.post-context-menuitem')).find((b) =>
+      b.textContent.includes('Pin to Profile')
+    );
+    assert.ok(pinItemBtn);
+    pinItemBtn.click();
+    await new Promise((r) => setTimeout(r, 25));
+    cards = Array.from(panel.querySelectorAll('article.post-card'));
+    assert.ok(cards.every((c) => c.textContent.includes('Pinned post')));
+
+    // Replies tab merges Mastodon + Bluesky replies and excludes non-reply posts
+    tabs[1].click();
+    await new Promise((r) => setTimeout(r, 40));
+    assert.equal(tabs[1].getAttribute('aria-selected'), 'true');
+    assert.equal(panel.getAttribute('aria-labelledby'), 'profile-tab-replies');
+    assert.ok(panel.textContent.includes('Bluesky Reply Note'));
+    assert.ok(panel.textContent.includes('Mastodon reply note'));
+    assert.equal(panel.textContent.includes('Latest thought'), false);
+
+    // Media tab shows authored media only
+    tabs[2].click();
+    await new Promise((r) => setTimeout(r, 40));
+    assert.ok(panel.textContent.includes('Authored photo'));
+
+    // Boosts tab merges Bluesky reposts + Mastodon boosts ordered newest-boosted first
+    tabs[3].click();
+    await new Promise((r) => setTimeout(r, 40));
+    assert.equal(panel.getAttribute('aria-labelledby'), 'profile-tab-boosts');
+    const boostCards = Array.from(panel.querySelectorAll('article.post-card'));
+    assert.equal(boostCards.length, 2);
+    assert.ok(boostCards[0].textContent.includes('Bluesky Reposted Post'));
+    assert.ok(boostCards[1].textContent.includes('Mastodon Boosted Post'));
+    assert.equal(panel.textContent.includes('Latest thought'), false);
+
+    // Unboosting Mastodon boost removes it immediately from the Boosts tab
+    boostCards[1].querySelector('.post-action-repost').click();
+    await new Promise((r) => setTimeout(r, 25));
+    assert.ok(calls.some((c) => c.url.includes('/api/v1/statuses/rb_target_1/unreblog')));
+    assert.equal(panel.querySelectorAll('article.post-card').length, 1);
+    assert.equal(panel.textContent.includes('Mastodon Boosted Post'), false);
+    assert.ok(panel.textContent.includes('Bluesky Reposted Post'));
+  } finally {
+    profCtrl?.destroy();
+    resetMemoryStorageForTests();
+    resetAuthStoreForTests();
+    globalThis.fetch = prevFetch;
+    dom.restore();
+  }
+});
+
+test('Unsupported post actions are disabled across Threads, Bluesky, and Mastodon (PostCard, Feed, Thread, Activity, and client guards)', async () => {
+  const dom = installMockDom();
+  const prevFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response('[]', { status: 200, headers: { 'content-type': 'application/json' } });
+
+  let feedCtrl = null;
+  let threadCtrl = null;
+  let actCtrl = null;
+
+  try {
+    resetMemoryStorageForTests();
+    resetAuthStoreForTests();
+    resetFeedStoreForTests();
+    resetActivityStoreForTests();
+    resetConnectionStoreForTests();
+
+    const threadsPost = toUnifiedItem({
+      id: 'threads:th_post_9',
+      protocol: 'threads',
+      content_text: 'Threads post with insights',
+      date_published: '2026-11-20T09:00:00.000Z',
+      author: { id: 'th_other', name: 'Other', handle: 'other_threads' },
+      metrics: { likes: 11, replies: 2, reposts: 3 },
+      _meta: { threads: { postId: 'th_post_9' } },
+    });
+
+    let clicks = 0;
+    let opened = 0;
+    const thrCardDisconn = createPostCard(threadsPost, {
+      onToggleLike: () => { clicks += 1; },
+      onReply: () => { clicks += 1; },
+      onToggleRepost: () => { clicks += 1; },
+      onOpenThread: () => { opened += 1; },
+    });
+    const thrLikeDisconn = thrCardDisconn.querySelector('.post-action-like');
+    const thrReplyDisconn = thrCardDisconn.querySelector('.post-action-reply');
+    const thrRepostDisconn = thrCardDisconn.querySelector('.post-action-repost');
+    assert.equal(thrLikeDisconn.disabled, true);
+    assert.equal(thrLikeDisconn.hasAttribute('disabled'), true);
+    assert.ok(thrLikeDisconn.title.includes('Threads API'));
+    assert.ok(thrLikeDisconn.getAttribute('aria-description')?.includes('Threads API'));
+    assert.equal(thrLikeDisconn.querySelector('.post-action-count').textContent, '11');
+    assert.equal(thrReplyDisconn.disabled, true);
+    assert.ok(thrReplyDisconn.title.includes('Connect Threads bridge'));
+    assert.equal(thrRepostDisconn.disabled, true);
+    assert.ok(thrRepostDisconn.title.includes('Threads API'));
+    assert.equal(thrRepostDisconn.querySelector('.post-action-count').textContent, '3');
+
+    // Clicking disabled action buttons neither invokes callbacks nor triggers onOpenThread
+    thrLikeDisconn.click();
+    thrReplyDisconn.click();
+    thrRepostDisconn.click();
+    assert.equal(clicks, 0);
+    assert.equal(opened, 0);
+
+    // Direct client calls to likeUnified/repostUnified reject Threads cleanly
+    await assert.rejects(() => likeUnified(threadsPost), /Threads API/);
+    await assert.rejects(() => repostUnified(threadsPost), /Threads API/);
+
+    // Connect Threads -> Reply enables (syncPostCardReactions updates live), Like and Boost remain disabled
+    await upsertSocialAccount(
+      { id: 'threads:th_me', platform: 'threads', userId: 'th_me', handle: 'me_threads', acct: 'me_threads' },
+      { accessToken: 't_tok' }
+    );
+    syncPostCardReactions(thrCardDisconn, threadsPost);
+    assert.equal(thrReplyDisconn.disabled, false);
+    assert.equal(thrReplyDisconn.hasAttribute('aria-description'), false);
+    assert.equal(thrLikeDisconn.disabled, true);
+    assert.equal(thrRepostDisconn.disabled, true);
+
+    // Connect Bluesky & Mastodon and mount Feed to verify Follow/Unfollow omitted on Threads and protocol rules apply
+    await upsertSocialAccount(
+      { id: 'fediverse:alice@mastodon.social', platform: 'fediverse', instanceUrl: 'https://mastodon.social', userId: 'm_me', acct: 'alice@mastodon.social', handle: 'alice' },
+      { accessToken: 'm_tok' }
+    );
+    await upsertSocialAccount(
+      { id: 'bluesky:did:plc:me', platform: 'bluesky', serviceUrl: 'https://bsky.social', did: 'did:plc:me', handle: 'me.bsky.social' },
+      { accessJwt: 'b_jwt', refreshJwt: 'b_ref' }
+    );
+
+    const bskyRestrictedPost = toUnifiedItem(normalizeBskyPost({
+      post: {
+        uri: 'at://did:plc:other/app.bsky.feed.post/gated1',
+        cid: 'cid_gated1',
+        author: { did: 'did:plc:other', handle: 'gated.bsky.social', displayName: 'Gated' },
+        record: { text: 'Replies restricted here', createdAt: '2026-11-20T09:10:00.000Z' },
+        likeCount: 5,
+        replyCount: 0,
+        repostCount: 1,
+        viewer: { replyDisabled: true },
+      },
+    }));
+    const mastoDirectPost = toUnifiedItem({
+      id: 'mastodon:m_dm_1',
+      protocol: 'mastodon',
+      content_text: 'Private mention',
+      date_published: '2026-11-20T09:20:00.000Z',
+      author: { id: 'm_other', name: 'Peer', handle: 'peer@mastodon.social' },
+      _meta: { mastodon: { statusId: 'm_dm_1', visibility: 'direct' } },
+    });
+    const mastoForeignPriv = toUnifiedItem({
+      id: 'mastodon:m_priv_foreign',
+      protocol: 'mastodon',
+      content_text: 'Followers only peer',
+      date_published: '2026-11-20T09:21:00.000Z',
+      author: { id: 'm_other', name: 'Peer', handle: 'peer@mastodon.social' },
+      _meta: { mastodon: { statusId: 'm_priv_foreign', visibility: 'private' } },
+    });
+    const mastoOwnPriv = toUnifiedItem({
+      id: 'mastodon:m_priv_own',
+      protocol: 'mastodon',
+      content_text: 'Own followers only',
+      date_published: '2026-11-20T09:22:00.000Z',
+      author: { id: 'm_me', name: 'Alice', handle: 'alice@mastodon.social' },
+      _meta: { mastodon: { statusId: 'm_priv_own', visibility: 'private' } },
+    });
+
+    setStreamItems('feed', [threadsPost, bskyRestrictedPost, mastoDirectPost, mastoForeignPriv, mastoOwnPriv]);
+    const feedHost = dom.document.createElement('div');
+    dom.document.body.appendChild(feedHost);
+    feedCtrl = mountFeedScreen(feedHost);
+
+    const thrFeedCard = feedHost.querySelector('article.post-card[data-post-id="threads:th_post_9"]');
+    assert.ok(thrFeedCard);
+    const thrMenuLabels = [...thrFeedCard.querySelectorAll('.post-context-menuitem')].map((el) => el.textContent);
+    assert.equal(thrMenuLabels.includes('Follow / Unfollow'), false);
+
+    const dmCard = feedHost.querySelector('article.post-card[data-post-id="mastodon:m_dm_1"]');
+    assert.equal(dmCard.querySelector('.post-action-like').disabled, false);
+    assert.equal(dmCard.querySelector('.post-action-reply').disabled, false);
+    assert.equal(dmCard.querySelector('.post-action-repost').disabled, true);
+
+    const foreignPrivCard = feedHost.querySelector('article.post-card[data-post-id="mastodon:m_priv_foreign"]');
+    assert.equal(foreignPrivCard.querySelector('.post-action-repost').disabled, true);
+
+    const ownPrivCard = feedHost.querySelector('article.post-card[data-post-id="mastodon:m_priv_own"]');
+    assert.equal(ownPrivCard.querySelector('.post-action-repost').disabled, false);
+
+    const bskyCard = feedHost.querySelector('article.post-card[data-post-id="bluesky:at://did:plc:other/app.bsky.feed.post/gated1"]');
+    assert.equal(bskyCard.querySelector('.post-action-like').disabled, false);
+    assert.equal(bskyCard.querySelector('.post-action-reply').disabled, true);
+    assert.ok(bskyCard.querySelector('.post-action-reply').title.includes('restricted replies'));
+    assert.equal(bskyCard.querySelector('.post-action-repost').disabled, false);
+
+    // Inline thread reply form mirrors reply capability (disabled on replyDisabled Bluesky & disconnected Threads)
+    const threadHost = dom.document.createElement('div');
+    dom.document.body.appendChild(threadHost);
+    threadCtrl = renderPostThreadView(threadHost, { post: bskyRestrictedPost });
+    assert.equal(threadHost.querySelector('.thread-inline-reply-form .inline-compose-input').disabled, true);
+    assert.equal(threadHost.querySelector('.thread-inline-reply-form .inline-compose-submit').disabled, true);
+    assert.ok(threadHost.querySelector('.thread-inline-reply-form .inline-compose-input').placeholder.includes('restricted replies'));
+    threadCtrl.destroy();
+    threadCtrl = null;
+
+    // Disconnecting all accounts disables disconnected protocol controls across capabilities & Activity rows
+    resetAuthStoreForTests();
+    const disconnBskyCard = createPostCard(toUnifiedItem({
+      id: 'bluesky:at://did:plc:pub/app.bsky.feed.post/p1',
+      protocol: 'bluesky',
+      content_text: 'Public Bluesky post',
+      author: { id: 'did:plc:pub', handle: 'pub.bsky.social' },
+      _meta: { bluesky: { uri: 'at://did:plc:pub/app.bsky.feed.post/p1', cid: 'c1' } },
+    }), { onToggleLike: () => {}, onReply: () => {}, onToggleRepost: () => {} });
+    assert.equal(disconnBskyCard.querySelector('.post-action-like').disabled, true);
+    assert.equal(disconnBskyCard.querySelector('.post-action-reply').disabled, true);
+    assert.equal(disconnBskyCard.querySelector('.post-action-repost').disabled, true);
+
+    activityStore.set({
+      items: [
+        {
+          id: 'threads:notif:rep_disconn',
+          protocol: 'threads',
+          content_text: 'Threads mention while disconnected',
+          date_published: '2026-11-20T09:30:00.000Z',
+          author: { id: 'th_x', name: 'X', handle: 'x_threads' },
+          _meta: { threads: { postId: 'rep_disconn' }, notification: { kind: 'reply' } },
+        },
+      ],
+      loading: false,
+      error: '',
+    });
+    // Add Mastodon only (no Threads) so Activity list renders rows rather than empty onboarding state
+    await upsertSocialAccount(
+      { id: 'fediverse:alice@mastodon.social', platform: 'fediverse', instanceUrl: 'https://mastodon.social', userId: 'm_me', acct: 'alice@mastodon.social' },
+      { accessToken: 'm_tok' }
+    );
+    const actHost = dom.document.createElement('div');
+    dom.document.body.appendChild(actHost);
+    actCtrl = mountActivityScreen(actHost);
+    const actReplyBtn = actHost.querySelector('.activity-inline-action-btn');
+    assert.ok(actReplyBtn);
+    assert.equal(actReplyBtn.disabled, true);
+    assert.ok(actReplyBtn.title.includes('Connect Threads bridge'));
+    assert.equal([...actHost.querySelectorAll('.activity-action-item')].some((b) => b.textContent === 'Reply'), false);
+    assert.equal(getPostActionCapabilities(threadsPost).reply.enabled, false);
+
+    // Connecting Threads updates Activity Reply button live via authStore subscription
+    await upsertSocialAccount(
+      { id: 'threads:th_me2', platform: 'threads', userId: 'th_me2', handle: 'me_threads', acct: 'me_threads' },
+      { accessToken: 't_tok2' }
+    );
+    assert.equal(actHost.querySelector('.activity-inline-action-btn').disabled, false);
+    assert.equal([...actHost.querySelectorAll('.activity-action-item')].some((b) => b.textContent === 'Reply'), true);
+  } finally {
+    feedCtrl?.destroy();
+    threadCtrl?.destroy();
+    actCtrl?.destroy();
+    resetActivityStoreForTests();
+    resetFeedStoreForTests();
+    resetConnectionStoreForTests();
+    resetMemoryStorageForTests();
+    resetAuthStoreForTests();
+    globalThis.fetch = prevFetch;
+    dom.restore();
+  }
+});
+
+test('PostCard context menu shows Interested, Not Interested, Mute Account, and Block Account (omitting View Profile & Follow/Unfollow) with slight algorithm nudges & keyboard nav', async () => {
+  const dom = installMockDom();
+  const prevFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response('[]', { status: 200, headers: { 'content-type': 'application/json' } });
+
+  let feedCtrl = null;
+  let clickedAuthor = null;
+
+  try {
+    resetMemoryStorageForTests();
+    resetAuthStoreForTests();
+    resetFeedStoreForTests();
+    resetConnectionStoreForTests();
+
+    await upsertSocialAccount(
+      { id: 'fediverse:alice@mastodon.social', platform: 'fediverse', instanceUrl: 'https://mastodon.social', userId: 'm_me', acct: 'alice@mastodon.social', handle: 'alice' },
+      { accessToken: 'm_tok' }
+    );
+    await upsertSocialAccount(
+      { id: 'bluesky:did:plc:me', platform: 'bluesky', serviceUrl: 'https://bsky.social', did: 'did:plc:me', handle: 'me.bsky.social' },
+      { accessJwt: 'b_jwt', refreshJwt: 'b_ref' }
+    );
+
+    const post1 = toUnifiedItem({
+      id: 'bluesky:at://did:plc:p1/app.bsky.feed.post/1',
+      protocol: 'bluesky',
+      content_text: 'Long-form notes on decentralized open infrastructure and worker cooperatives across regions.',
+      date_published: '2026-11-20T09:00:00.000Z',
+      author: { id: 'did:plc:p1', name: 'Comrade P1', handle: 'p1.bsky.social' },
+      attachments: [{ url: 'https://cdn.example/diagram.png', type: 'image', mime_type: 'image/png', alt_text: 'Diagram' }],
+      metrics: { likes: 5, replies: 1, reposts: 0 },
+      _meta: { bluesky: { uri: 'at://did:plc:p1/app.bsky.feed.post/1', cid: 'c1' } },
+    });
+    const post2 = toUnifiedItem({
+      id: 'bluesky:at://did:plc:mundowav/app.bsky.feed.post/2',
+      protocol: 'bluesky',
+      content_text: 'Short reactionary outrage rant on cable pundits',
+      date_published: '2026-11-20T09:05:00.000Z',
+      author: { id: 'did:plc:mundowav', name: 'mundowav', handle: 'mundowav.bsky.social' },
+      metrics: { likes: 300, replies: 10, reposts: 50 },
+      _meta: { bluesky: { uri: 'at://did:plc:mundowav/app.bsky.feed.post/2', cid: 'c2' } },
+    });
+    const post3 = toUnifiedItem({
+      id: 'mastodon:m_peer_3',
+      protocol: 'mastodon',
+      content_text: 'Third post for order stability check',
+      date_published: '2026-11-20T08:50:00.000Z',
+      author: { id: 'm_3', name: 'Peer 3', handle: 'peer3@mastodon.social' },
+      _meta: { mastodon: { statusId: 'm_peer_3' } },
+    });
+
+    // Verify computeFeedbackSliderNudge nudges slightly without altering concepts/channels
+    const nudgedUp = computeFeedbackSliderNudge({ recencyHalfLifeHours: 0, reciprocity: 0, media: 0, smallWeb: 0 }, post1, 'interested');
+    assert.equal(nudgedUp.recencyHalfLifeHours, 4);
+    assert.equal(nudgedUp.reciprocity, 10);
+    assert.equal(nudgedUp.media, 5);
+    assert.equal(nudgedUp.smallWeb, 5);
+
+    setStreamItems('feed', [post2, post1, post3]);
+    const feedHost = dom.document.createElement('div');
+    dom.document.body.appendChild(feedHost);
+    feedCtrl = mountFeedScreen(feedHost, {
+      onSelectAuthor: (author) => {
+        clickedAuthor = author;
+      },
+    });
+
+    const p1Card = feedHost.querySelector('article.post-card[data-post-id="bluesky:at://did:plc:p1/app.bsky.feed.post/1"]');
+    assert.ok(p1Card);
+    const menuPanel = p1Card.querySelector('.post-context-menu');
+    assert.equal(menuPanel.getAttribute('focusgroup'), 'menu nomemory');
+    assert.ok(menuPanel.querySelector('hr.post-context-sep'));
+    const labels = [...p1Card.querySelectorAll('.post-context-menuitem')].map((b) => b.textContent);
+    assert.deepEqual(labels, ['Interested', 'Not Interested', 'Mute Account', 'Block Account']);
+    assert.equal(labels.includes('View Profile'), false);
+    assert.equal(labels.includes('Follow / Unfollow'), false);
+    assert.equal(labels.includes('Add / Remove from Lists'), false);
+
+    // Author name click still invokes onSelectAuthor
+    p1Card.querySelector('.post-author-meta').click();
+    assert.equal(clickedAuthor?.handle, 'p1.bsky.social');
+
+    // Keyboard ArrowDown opens menu and focuses first item; Escape closes & restores focus to trigger
+    const moreBtn = p1Card.querySelector('.post-more-btn');
+    moreBtn.focus();
+    moreBtn.dispatchEvent(Object.assign(new Event('keydown', { bubbles: true, cancelable: true }), { key: 'ArrowDown' }));
+    assert.equal(menuPanel.hidden, false);
+    assert.equal(moreBtn.getAttribute('aria-expanded'), 'true');
+    assert.equal(dom.document.activeElement.textContent, 'Interested');
+    menuPanel.dispatchEvent(Object.assign(new Event('keydown', { bubbles: true, cancelable: true }), { key: 'Escape' }));
+    assert.equal(menuPanel.hidden, true);
+    assert.equal(dom.document.activeElement, moreBtn);
+
+    const initialIds = [...feedHost.querySelectorAll('article.post-card')].map((el) => el.dataset.postId);
+
+    // Click Interested on post1 -> boosts affinity (+2.5), nudges sliders, updates label to 'Interested ✓', keeps card order
+    const intBtn = [...p1Card.querySelectorAll('.post-context-menuitem')].find((b) => b.textContent === 'Interested');
+    intBtn.click();
+    await new Promise((r) => setTimeout(r, 25));
+
+    assert.equal(feedStore.get().interactedAuthors['bluesky:p1.bsky.social'], 2.5);
+    assert.equal(feedStore.get().tuning.sliders.reciprocity, 10);
+    assert.equal(feedStore.get().tuning.sliders.media, 5);
+    assert.deepEqual(
+      [...feedHost.querySelectorAll('article.post-card')].map((el) => el.dataset.postId),
+      initialIds,
+      'Interested feedback must not shuffle currently rendered feed cards'
+    );
+    const updatedP1Card = feedHost.querySelector('article.post-card[data-post-id="bluesky:at://did:plc:p1/app.bsky.feed.post/1"]');
+    assert.ok([...updatedP1Card.querySelectorAll('.post-context-menuitem')].some((b) => b.textContent === 'Interested ✓'));
+
+    // Click Not Interested on post2 -> negative affinity (-3), dismisses post2 immediately without shuffling post1/post3
+    const p2Card = feedHost.querySelector('article.post-card[data-post-id="bluesky:at://did:plc:mundowav/app.bsky.feed.post/2"]');
+    const notIntBtn = [...p2Card.querySelectorAll('.post-context-menuitem')].find((b) => b.textContent === 'Not Interested');
+    notIntBtn.click();
+    await new Promise((r) => setTimeout(r, 25));
+
+    assert.equal(feedStore.get().interactedAuthors['bluesky:mundowav.bsky.social'], -3);
+    assert.ok((feedStore.get().dismissedPostIds || []).includes('bluesky:at://did:plc:mundowav/app.bsky.feed.post/2'));
+    assert.equal(
+      feedHost.querySelector('article.post-card[data-post-id="bluesky:at://did:plc:mundowav/app.bsky.feed.post/2"]'),
+      null
+    );
+    assert.deepEqual(
+      [...feedHost.querySelectorAll('article.post-card')].map((el) => el.dataset.postId),
+      ['bluesky:at://did:plc:p1/app.bsky.feed.post/1', 'mastodon:m_peer_3']
+    );
+
+    // Hydrate tuning/dismissed state across reload and confirm dismissed post stays hidden & downvoted author ranks lower
+    const futureMundowav = toUnifiedItem({
+      id: 'bluesky:at://did:plc:mundowav/app.bsky.feed.post/3',
+      protocol: 'bluesky',
+      content_text: 'New post from mundowav',
+      date_published: '2026-11-20T09:10:00.000Z',
+      author: { id: 'did:plc:mundowav', name: 'mundowav', handle: 'mundowav.bsky.social' },
+      _meta: { bluesky: { uri: 'at://did:plc:mundowav/app.bsky.feed.post/3', cid: 'c3' } },
+    });
+    const futureP1 = toUnifiedItem({
+      id: 'bluesky:at://did:plc:p1/app.bsky.feed.post/4',
+      protocol: 'bluesky',
+      content_text: 'Follow-up post from Comrade P1',
+      date_published: '2026-11-20T09:09:00.000Z',
+      author: { id: 'did:plc:p1', name: 'Comrade P1', handle: 'p1.bsky.social' },
+      _meta: { bluesky: { uri: 'at://did:plc:p1/app.bsky.feed.post/4', cid: 'c4' } },
+    });
+    const rankedFuture = rankFeedItems([futureMundowav, futureP1], feedStore.get().tuning, {
+      nowMs: Date.parse('2026-11-20T09:11:00.000Z'),
+      interactedAuthors: feedStore.get().interactedAuthors,
+    });
+    assert.equal(rankedFuture[0].id, futureP1.id);
+
+    // Simulated reload keeps dismissedPostIds & hides post2 even if returned again by stream
+    feedCtrl.destroy();
+    feedCtrl = null;
+    resetFeedStoreForTests();
+    await hydrateFeedTuning();
+    assert.ok((feedStore.get().dismissedPostIds || []).includes('bluesky:at://did:plc:mundowav/app.bsky.feed.post/2'));
+    setStreamItems('feed', [post2, futureP1]);
+    const feedHost2 = dom.document.createElement('div');
+    dom.document.body.appendChild(feedHost2);
+    feedCtrl = mountFeedScreen(feedHost2);
+    assert.equal(
+      feedHost2.querySelector('article.post-card[data-post-id="bluesky:at://did:plc:mundowav/app.bsky.feed.post/2"]'),
+      null
+    );
+    assert.ok(feedHost2.querySelector('article.post-card[data-post-id="bluesky:at://did:plc:p1/app.bsky.feed.post/4"]'));
+  } finally {
+    feedCtrl?.destroy();
+    resetFeedStoreForTests();
+    resetConnectionStoreForTests();
+    resetMemoryStorageForTests();
+    resetAuthStoreForTests();
+    globalThis.fetch = prevFetch;
+    dom.restore();
+  }
+});
+
+test('Unified loading states, instant Settings Moderation rendering + scoped mutations, and deduplicated search', async () => {
+  const dom = installMockDom();
+  const prevFetch = globalThis.fetch;
+  let settingsModal = null;
+  let searchCtrl = null;
+
+  try {
+    resetMemoryStorageForTests();
+    resetAuthStoreForTests();
+    resetFeedStoreForTests();
+    resetConnectionStoreForTests();
+    resetModerationCacheForTests();
+
+    const doc = dom.document;
+    // 1. createLoadingState size/inline variants + updateLoadingStateLabel
+    const compactLoader = createLoadingState('Loading replies…', { doc, size: 'compact' });
+    assert.equal(compactLoader.classList.contains('is-compact'), true);
+    assert.equal(compactLoader.classList.contains('is-inline'), false);
+    const compactSpinner = compactLoader.querySelector('progress.loading-spinner');
+    assert.ok(compactSpinner);
+    assert.equal(compactSpinner.getAttribute('value'), null);
+
+    const inlineLoader = createLoadingState('Indexing…', { doc, inline: true });
+    assert.equal(inlineLoader.classList.contains('is-inline'), true);
+    updateLoadingStateLabel(inlineLoader, 'Scraping URL…');
+    assert.equal(inlineLoader.querySelector('.loading-state-label')?.textContent, 'Scraping URL…');
+    assert.equal(inlineLoader.querySelector('progress.loading-spinner')?.getAttribute('aria-label'), 'Scraping URL…');
+
+    // 2. SettingsModal -> Moderation renders cached Keyword Filters & Feed Algorithm synchronously (0ms)
+    // and keeps Muted/Blocked sections on unified <progress> spinners without blocking or re-fetching on filter edits
+    await upsertSocialAccount(
+      {
+        id: 'fediverse:davy@mastodon.social',
+        platform: 'fediverse',
+        instanceUrl: 'https://mastodon.social',
+        handle: 'davy',
+        acct: 'davy@mastodon.social',
+        displayName: 'Davy',
+        userId: 'u_davy',
+      },
+      { accessToken: 'tok_davy' }
+    );
+    setFilterRules([{ id: 'flt_pre', phrase: 'crypto', title: 'crypto', filter_action: 'hide' }]);
+
+    let mutesCalls = 0;
+    let blocksCalls = 0;
+    let releaseModerationNetwork = null;
+    const modNetworkGate = new Promise((resolve) => {
+      releaseModerationNetwork = resolve;
+    });
+
+    globalThis.fetch = async (url, init = {}) => {
+      const u = String(url);
+      const method = String(init?.method || 'GET').toUpperCase();
+      if (u.includes('/api/v1/mutes')) {
+        mutesCalls += 1;
+        await modNetworkGate;
+        return new Response(JSON.stringify([]), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      if (u.includes('/api/v1/blocks')) {
+        blocksCalls += 1;
+        await modNetworkGate;
+        return new Response(JSON.stringify([]), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      if (u.includes('/api/v2/filters') && method === 'GET') {
+        await modNetworkGate;
+        return new Response(
+          JSON.stringify([{ id: 'flt_pre', title: 'crypto', filter_action: 'hide', keywords: [{ keyword: 'crypto' }] }]),
+          { status: 200, headers: { 'content-type': 'application/json' } }
+        );
+      }
+      if (u.includes('/api/v2/filters') && method === 'POST') {
+        return new Response(
+          JSON.stringify({ id: 'flt_new', title: 'ads', filter_action: 'hide', keywords: [{ keyword: 'ads' }] }),
+          { status: 200, headers: { 'content-type': 'application/json' } }
+        );
+      }
+      if (u.includes('/api/v2/filters/') && method === 'DELETE') {
+        return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
+    };
+
+    settingsModal = openSettingsModal({ initialTab: 'moderation' });
+
+    // Synchronous check BEFORE network promises resolve:
+    assert.equal(settingsModal.dialog.textContent.includes('Loading Moderation Rules'), false);
+    assert.ok(settingsModal.dialog.textContent.includes('Tune Feed...'));
+    const syncChips = settingsModal.dialog.querySelectorAll('.moderation-filter-chip');
+    assert.equal(syncChips.length, 1);
+    assert.equal(syncChips[0].querySelector('.moderation-filter-chip-label')?.textContent, 'crypto');
+    assert.equal(settingsModal.dialog.querySelectorAll('.loading-state-card progress.loading-spinner').length, 2);
+
+    releaseModerationNetwork();
+    await new Promise((r) => setTimeout(r, 35));
+    assert.equal(mutesCalls, 1);
+    assert.equal(blocksCalls, 1);
+    assert.equal(settingsModal.dialog.querySelectorAll('.loading-state-card progress.loading-spinner').length, 0);
+    assert.ok(settingsModal.dialog.textContent.includes('No muted accounts.'));
+    assert.ok(settingsModal.dialog.textContent.includes('No blocked accounts.'));
+
+    // Adding & deleting a keyword filter mutates chips in-place without re-fetching mutes/blocks
+    const phraseIn = settingsModal.dialog.querySelector('#moderation-filter-phrase');
+    phraseIn.value = 'ads';
+    phraseIn.parentNode.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await new Promise((r) => setTimeout(r, 25));
+    assert.equal(settingsModal.dialog.querySelectorAll('.moderation-filter-chip').length, 2);
+    assert.equal(mutesCalls, 1);
+    assert.equal(blocksCalls, 1);
+
+    settingsModal.dialog.querySelector('.moderation-filter-chip-remove').click();
+    await new Promise((r) => setTimeout(r, 25));
+    assert.equal(settingsModal.dialog.querySelectorAll('.moderation-filter-chip').length, 1);
+    assert.equal(mutesCalls, 1);
+    assert.equal(blocksCalls, 1);
+    settingsModal.close();
+    settingsModal = null;
+
+    // 3. mountSearchScreen deduplicates parallel Bluesky actor results without duplicate XRPC search calls
+    resetModerationCacheForTests();
+    let actorSearchCalls = 0;
+    let postSearchCalls = 0;
+    globalThis.fetch = async (url) => {
+      const u = String(url);
+      if (u.includes('app.bsky.actor.searchActors')) {
+        actorSearchCalls += 1;
+        return new Response(
+          JSON.stringify({
+            actors: [
+              { did: 'did:plc:coop', handle: 'coop.bsky.social', displayName: 'Coop Guild', viewer: {} },
+            ],
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } }
+        );
+      }
+      if (u.includes('app.bsky.feed.searchPosts')) {
+        postSearchCalls += 1;
+        return new Response(JSON.stringify({ posts: [] }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      return new Response(JSON.stringify({ accounts: [], statuses: [], hashtags: [] }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    };
+
+    const searchHost = doc.createElement('div');
+    doc.body.appendChild(searchHost);
+    searchCtrl = mountSearchScreen(searchHost, {});
+    const searchIn = searchHost.querySelector('#global-search-input');
+    searchIn.value = 'coop';
+    searchHost.querySelector('.search-bar-form').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await new Promise((r) => setTimeout(r, 35));
+    assert.equal(actorSearchCalls, 1);
+    assert.equal(postSearchCalls, 1);
+    assert.equal(searchHost.querySelectorAll('.search-account-row').length, 1);
+    assert.ok(searchHost.textContent.includes('Coop Guild'));
+  } finally {
+    settingsModal?.close();
+    searchCtrl?.destroy();
+    resetModerationCacheForTests();
+    resetFeedStoreForTests();
+    resetConnectionStoreForTests();
+    resetMemoryStorageForTests();
+    resetAuthStoreForTests();
+    globalThis.fetch = prevFetch;
+    dom.restore();
+  }
+});
+
+test('Sovereign Feed v3 blends Following + 2nd-degree graph + learned taste, ranks multi-signal out of the box, tracks dwell/skip signals without DOM shuffle, and resets learned taste', async () => {
+  const dom = installMockDom();
+  const prevFetch = globalThis.fetch;
+  const prevIO = globalThis.IntersectionObserver;
+  const nowMs = Date.now();
+  const isoMinsAgo = (m) => new Date(nowMs - m * 60_000).toISOString();
+  const fetchedUrls = [];
+  const ioInstances = [];
+
+  class MockIntersectionObserver {
+    constructor(callback, options = {}) {
+      this.callback = callback;
+      this.options = options;
+      this.observed = new Set();
+      ioInstances.push(this);
+    }
+    observe(target) {
+      this.observed.add(target);
+    }
+    unobserve(target) {
+      this.observed.delete(target);
+    }
+    disconnect() {
+      this.observed.clear();
+    }
+    trigger(entries) {
+      this.callback(entries, this);
+    }
+  }
+  globalThis.IntersectionObserver = MockIntersectionObserver;
+
+  globalThis.fetch = async (url) => {
+    const u = String(url);
+    fetchedUrls.push(u);
+
+    if (u.includes('/api/v1/timelines/home')) {
+      return new Response(
+        JSON.stringify([
+          {
+            id: 'fedi_follow_1',
+            uri: 'tag:example-coop.social:fedi_follow_1',
+            url: 'https://example-coop.social/users/ally/statuses/fedi_follow_1',
+            created_at: isoMinsAgo(6),
+            content: '<p>Cooperative foundry machining notes from our followed guild workshop.</p>',
+            favourites_count: 3,
+            reblogs_count: 1,
+            replies_count: 2,
+            account: { id: 'acc_ally', username: 'ally', acct: 'ally@example-coop.social', display_name: 'Ally' },
+          },
+        ]),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      );
+    }
+    if (u.includes('app.bsky.feed.getTimeline')) {
+      return new Response(
+        JSON.stringify({
+          feed: [
+            {
+              post: {
+                uri: 'at://did:plc:peer1/app.bsky.feed.post/bsky_follow_1',
+                cid: 'cid_f1',
+                author: { did: 'did:plc:peer1', handle: 'peer1.bsky.social', displayName: 'Peer One' },
+                record: { text: 'Direct followed report from agroecology watershed restoration crew.', createdAt: isoMinsAgo(8) },
+                likeCount: 6,
+                repostCount: 2,
+                replyCount: 3,
+              },
+            },
+          ],
+          cursor: 'bsky_home_next',
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      );
+    }
+    if (u.includes('app.bsky.feed.getActorLikes')) {
+      return new Response(
+        JSON.stringify({
+          feed: [
+            {
+              post: {
+                uri: 'at://did:plc:friend2/app.bsky.feed.post/second_deg_like_1',
+                cid: 'cid_sd1',
+                author: { did: 'did:plc:friend2', handle: 'friend2.bsky.social', displayName: 'Friend Two' },
+                record: { text: 'Community repair cafe schematic repository and parts catalog released.', createdAt: isoMinsAgo(5) },
+                likeCount: 9,
+                repostCount: 3,
+                replyCount: 4,
+              },
+            },
+          ],
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      );
+    }
+    if (u.includes('app.bsky.feed.getAuthorFeed')) {
+      return new Response(
+        JSON.stringify({
+          feed: [
+            {
+              post: {
+                uri: 'at://did:plc:peer1/app.bsky.feed.post/bsky_follow_1',
+                cid: 'cid_f1',
+                author: { did: 'did:plc:peer1', handle: 'peer1.bsky.social', displayName: 'Peer One' },
+                record: { text: 'Direct followed report from agroecology watershed restoration crew.', createdAt: isoMinsAgo(8) },
+                likeCount: 6,
+                repostCount: 2,
+                replyCount: 3,
+              },
+            },
+          ],
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      );
+    }
+    if (u.includes('/api/v1/accounts/lookup')) {
+      return new Response(
+        JSON.stringify({ id: 'acc_ally', acct: 'ally@example-coop.social', username: 'ally', display_name: 'Ally' }),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      );
+    }
+    if (u.includes('/api/v1/accounts/acc_ally/statuses')) {
+      return new Response('[]', { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    if (u.includes('/api/v1/timelines/tag/')) {
+      return new Response(
+        JSON.stringify([
+          {
+            id: 'fedi_follow_1',
+            uri: 'tag:example-coop.social:fedi_follow_1',
+            url: 'https://example-coop.social/users/ally/statuses/fedi_follow_1',
+            created_at: isoMinsAgo(6),
+            content: '<p>Cooperative foundry machining notes from our followed guild workshop.</p>',
+            favourites_count: 3,
+            reblogs_count: 1,
+            replies_count: 2,
+            account: { id: 'acc_ally', username: 'ally', acct: 'ally@example-coop.social', display_name: 'Ally' },
+          },
+        ]),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      );
+    }
+    if (u.includes('app.bsky.feed.searchPosts')) {
+      return new Response(
+        JSON.stringify({
+          posts: [
+            {
+              uri: 'at://did:plc:disco1/app.bsky.feed.post/taste_disco_1',
+              cid: 'cid_d1',
+              author: { did: 'did:plc:disco1', handle: 'disco1.bsky.social', displayName: 'Agro Guild' },
+              record: { text: 'Practical agroecology soil sensor calibration field logs from cooperative plots.', createdAt: isoMinsAgo(4) },
+              likeCount: 8,
+              repostCount: 1,
+              replyCount: 2,
+            },
+          ],
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      );
+    }
+    return new Response('[]', { status: 200, headers: { 'content-type': 'application/json' } });
+  };
+
+  let feedCtrl = null;
+  let tuningHandle = null;
+  try {
+    resetMemoryStorageForTests();
+    resetAuthStoreForTests();
+    resetConnectionStoreForTests();
+    resetFeedStoreForTests();
+    clearHarvesterCacheForTests();
+
+    // 1. Unauthenticated harvest never touches Following endpoints
+    const unauthHarvest = await harvestSanctuaryFeed({
+      fediAuth: null,
+      bskyAuth: null,
+      tuning: DEFAULT_FEED_TUNING,
+    });
+    assert.ok(Array.isArray(unauthHarvest.items));
+    assert.equal(fetchedUrls.some((u) => u.includes('/api/v1/timelines/home') || u.includes('app.bsky.feed.getTimeline')), false);
+
+    // 2. Authenticated harvest blends Following + 2nd-degree peer graph + learned taste topics
+    fetchedUrls.length = 0;
+    clearHarvesterCacheForTests();
+    await upsertSocialAccount(
+      { id: 'fediverse:me@example-coop.social', platform: 'fediverse', instanceUrl: 'https://example-coop.social', handle: 'me', acct: 'me@example-coop.social', userId: 'u_me' },
+      { accessToken: 'm_tok' }
+    );
+    await upsertSocialAccount(
+      { id: 'bluesky:did:plc:me', platform: 'bluesky', serviceUrl: 'https://bsky.social', handle: 'me.bsky.social', acct: 'me.bsky.social', did: 'did:plc:me' },
+      { accessJwt: 'b_jwt', refreshJwt: 'b_ref' }
+    );
+
+    const tasteTopics = extractLearnedTasteTopics({
+      positive: [
+        { text: 'Agroecology soil sensor field calibration notes', weight: 1.0 },
+        { text: 'Watershed agroecology cooperative bylaws', weight: 0.9 },
+      ],
+      negative: [{ text: 'Sponsored celebrity gossip thread', weight: 1.0 }],
+    });
+    assert.ok(tasteTopics.includes('agroecology'));
+
+    const authHarvest = await harvestSanctuaryFeed({
+      fediAuth: await getAuthenticatedAccount('fediverse'),
+      bskyAuth: await getAuthenticatedAccount('bluesky'),
+      tuning: DEFAULT_FEED_TUNING,
+      interactedAuthors: { 'bluesky:peer1.bsky.social': 3.5 },
+      implicitAuthors: { 'fediverse:ally@example-coop.social': 2.2 },
+      tasteMemory: {
+        positive: [{ text: 'Agroecology soil sensor field calibration notes', weight: 1.0 }],
+        negative: [],
+      },
+    });
+    const byId = new Map(authHarvest.items.map((it) => [it.id, it]));
+    const fediFollow = byId.get('mastodon:fedi_follow_1');
+    const bskyFollow = byId.get('bluesky:at://did:plc:peer1/app.bsky.feed.post/bsky_follow_1');
+    const secondDeg = byId.get('bluesky:at://did:plc:friend2/app.bsky.feed.post/second_deg_like_1');
+    const tasteDisco = byId.get('bluesky:at://did:plc:disco1/app.bsky.feed.post/taste_disco_1');
+
+    assert.ok(fediFollow && fediFollow._meta?.feedSource === 'following', 'Following tag must win priority dedupe over discovery');
+    assert.ok(bskyFollow && bskyFollow._meta?.feedSource === 'following');
+    assert.ok(secondDeg && secondDeg._meta?.feedSource === 'second_degree');
+    assert.ok(tasteDisco, 'Learned taste topic query must yield discovery post');
+    assert.ok(fetchedUrls.some((u) => u.includes('/api/v1/timelines/home')));
+    assert.ok(fetchedUrls.some((u) => u.includes('app.bsky.feed.getTimeline')));
+    assert.ok(fetchedUrls.some((u) => u.includes('app.bsky.feed.getActorLikes')));
+    assert.ok(fetchedUrls.some((u) => u.includes('app.bsky.feed.searchPosts')));
+    assert.equal(fetchedUrls.some((u) => u.includes('whats-hot') || u.includes('/trends/statuses')), false);
+
+    // 3. Multi-signal ranker out of the box vs strict chronological Following & preset
+    const activeThreadPost = toUnifiedItem({
+      id: 'mastodon:vel_high',
+      protocol: 'mastodon',
+      content_text: 'Open-source lathe controller firmware benchmark results and cooperative workshop schematics.',
+      date_published: isoMinsAgo(10),
+      author: { id: 'a_vel', name: 'Lathe Guild', handle: 'lathe@coop.social' },
+      metrics: { likes: 45, replies: 14, reposts: 6 },
+    });
+    const passivePost = toUnifiedItem({
+      id: 'mastodon:vel_low',
+      protocol: 'mastodon',
+      content_text: 'Quick morning coffee photo on the train.',
+      date_published: isoMinsAgo(10),
+      author: { id: 'a_pas', name: 'Train Cam', handle: 'train@masto.social' },
+      metrics: { likes: 45, replies: 0, reposts: 0 },
+    });
+    const ratioedPost = toUnifiedItem({
+      id: 'mastodon:vel_ratio',
+      protocol: 'mastodon',
+      content_text: 'Hot take bait designed purely to farm angry replies.',
+      date_published: isoMinsAgo(10),
+      author: { id: 'a_rat', name: 'Ratio Bait', handle: 'bait@masto.social' },
+      metrics: { likes: 3, replies: 24, reposts: 1 },
+    });
+    assert.ok(scoreConversationVelocity(activeThreadPost, nowMs) > scoreConversationVelocity(passivePost, nowMs));
+    assert.ok(scoreConversationVelocity(ratioedPost, nowMs) < 0, 'Ratioed outrage replies must receive negative velocity');
+
+    const tasteMem = {
+      positive: [{ text: 'lathe controller firmware cooperative workshop', weight: 1.0 }],
+      negative: [{ text: 'sponsored morning commute promo', weight: 1.0 }],
+    };
+    assert.ok(scorePersonalTasteLexical(activeThreadPost, tasteMem) > scorePersonalTasteLexical(passivePost, tasteMem));
+
+    const coldNewer = toUnifiedItem({
+      id: 'bluesky:cold_newer',
+      protocol: 'bluesky',
+      content_text: 'Newest random status update with zero graph or taste match.',
+      date_published: isoMinsAgo(2),
+      author: { id: 'did:plc:cold', handle: 'cold.bsky.social', displayName: 'Cold Account' },
+      metrics: { likes: 0, replies: 0, reposts: 0 },
+    });
+    const tasteMatchOlder = toUnifiedItem({
+      id: 'bluesky:taste_match',
+      protocol: 'bluesky',
+      content_text: 'Open-source lathe controller firmware notes with followed workshop details.',
+      date_published: isoMinsAgo(12),
+      author: { id: 'did:plc:ally', handle: 'ally.bsky.social', displayName: 'Ally Workshop' },
+      metrics: { likes: 6, replies: 5, reposts: 2 },
+      _meta: { feedSource: 'following' },
+    });
+
+    const outOfBoxFeedOrder = rankFeedItems(
+      [coldNewer, tasteMatchOlder],
+      DEFAULT_FEED_TUNING,
+      {
+        nowMs,
+        streamMode: 'feed',
+        implicitAuthors: { 'bluesky:ally.bsky.social': 2.0 },
+        tasteScores: { 'bluesky:taste_match': 0.85, 'bluesky:cold_newer': -0.1 },
+        tasteMemory: tasteMem,
+      }
+    );
+    assert.equal(outOfBoxFeedOrder[0].id, 'bluesky:taste_match', 'Feed stream must use sovereign multi-signal ranking out of the box');
+
+    const presetChronoOrder = rankFeedItems(
+      [tasteMatchOlder, coldNewer],
+      { ...DEFAULT_FEED_TUNING, updatedBy: 'preset:chronological' },
+      {
+        nowMs,
+        streamMode: 'feed',
+        implicitAuthors: { 'bluesky:ally.bsky.social': 2.0 },
+        tasteScores: { 'bluesky:taste_match': 0.85, 'bluesky:cold_newer': -0.1 },
+        tasteMemory: tasteMem,
+      }
+    );
+    assert.equal(presetChronoOrder[0].id, 'bluesky:cold_newer', 'Chronological preset on Feed must stay strictly chronological');
+
+    const followingOrder = rankFeedItems(
+      [coldNewer, tasteMatchOlder],
+      DEFAULT_FEED_TUNING,
+      {
+        nowMs,
+        streamMode: 'following',
+        implicitAuthors: { 'bluesky:ally.bsky.social': 2.0 },
+        tasteScores: { 'bluesky:taste_match': 0.85, 'bluesky:cold_newer': -0.1 },
+        tasteMemory: tasteMem,
+      }
+    );
+    assert.equal(followingOrder[0].id, 'bluesky:cold_newer', 'Following stream must stay strictly chronological by default');
+
+    // 4. Behavioral signals & IntersectionObserver dwell/scroll_past without reshuffling visible DOM
+    recordBehavioralSignal(tasteMatchOlder, 'profile_click');
+    assert.ok((feedStore.get().implicitAuthors['bluesky:ally.bsky.social'] || 0) > 0);
+    assert.deepEqual(feedStore.get().interactedAuthors, {}, 'profile_click must never mutate interactedAuthors');
+
+    setStreamItems('feed', [tasteMatchOlder, coldNewer], null);
+    const host = dom.document.createElement('div');
+    dom.document.body.appendChild(host);
+    feedCtrl = mountFeedScreen(host);
+    await new Promise((r) => setTimeout(r, 30));
+
+    const cards = Array.from(host.querySelectorAll('article.post-card'));
+    assert.equal(cards.length, 2);
+    const initialIds = cards.map((el) => el.dataset.postId);
+    const firstCard = cards[0];
+    const secondCard = cards[1];
+    const dwellIo = ioInstances.find((inst) => inst.observed.has(firstCard));
+    assert.ok(dwellIo, 'mountFeedScreen must attach dwell IntersectionObserver to Feed cards');
+
+    const posBeforeDwell = feedStore.get().tasteMemory?.positive?.length || 0;
+    dwellIo.trigger([{ target: firstCard, isIntersecting: true, intersectionRatio: 0.75, boundingClientRect: { top: 80 }, rootBounds: { top: 0 } }]);
+    await new Promise((r) => setTimeout(r, 2900));
+    assert.ok((feedStore.get().tasteMemory?.positive?.length || 0) > posBeforeDwell, 'Dwell >= 2800ms must record positive taste exemplar');
+
+    // Fast scroll-past on second card (180..750ms exiting above viewport top)
+    const negBeforeSkip = feedStore.get().tasteMemory?.negative?.length || 0;
+    dwellIo.trigger([{ target: secondCard, isIntersecting: true, intersectionRatio: 0.7, boundingClientRect: { top: 120 }, rootBounds: { top: 0 } }]);
+    await new Promise((r) => setTimeout(r, 240));
+    dwellIo.trigger([{ target: secondCard, isIntersecting: false, intersectionRatio: 0, boundingClientRect: { top: -220 }, rootBounds: { top: 0 } }]);
+    assert.ok((feedStore.get().tasteMemory?.negative?.length || 0) > negBeforeSkip, 'Fast upward scroll-past must record negative taste exemplar');
+
+    const cardsAfterSignals = Array.from(host.querySelectorAll('article.post-card'));
+    assert.deepEqual(cardsAfterSignals.map((el) => el.dataset.postId), initialIds, 'Viewport card order must never jump on dwell or scroll-past');
+    assert.ok(cardsAfterSignals[0] === firstCard && cardsAfterSignals[1] === secondCard);
+
+    recordBehavioralSignal(tasteMatchOlder, 'open_thread');
+    const savedImplicit = { ...feedStore.get().implicitAuthors };
+    const savedTaste = {
+      positive: [...(feedStore.get().tasteMemory?.positive || [])],
+      negative: [...(feedStore.get().tasteMemory?.negative || [])],
+    };
+    await new Promise((r) => setTimeout(r, 80));
+    resetFeedStoreForTests();
+    await hydrateFeedTuning();
+    assert.ok((feedStore.get().implicitAuthors['bluesky:ally.bsky.social'] || 0) >= (savedImplicit['bluesky:ally.bsky.social'] || 0));
+    assert.equal(feedStore.get().tasteMemory?.positive?.length, savedTaste.positive.length);
+    assert.equal(feedStore.get().tasteMemory?.negative?.length, savedTaste.negative.length);
+
+    // 5. FeedTuningModal Learned Taste Memory section & Reset Learned Taste button
+    setTasteScores({ 'bluesky:taste_match': 0.85 });
+    tuningHandle = openFeedTuningModal();
+    await new Promise((r) => setTimeout(r, 20));
+    const tuningDlg = dom.document.getElementById('feed-tuning-dialog');
+    assert.ok(tuningDlg && tuningDlg.open);
+    assert.ok(tuningDlg.textContent.includes('Learned Taste Memory'));
+    const resetTasteBtn = Array.from(tuningDlg.querySelectorAll('button')).find((b) =>
+      b.textContent.includes('Reset Learned Taste')
+    );
+    assert.ok(resetTasteBtn, 'Reset Learned Taste button must be present in FeedTuningModal');
+    resetTasteBtn.click();
+    assert.deepEqual(feedStore.get().tasteMemory, { positive: [], negative: [] });
+    assert.deepEqual(feedStore.get().implicitAuthors, {});
+    assert.deepEqual(feedStore.get().tasteScores, {});
+  } finally {
+    tuningHandle?.close();
+    feedCtrl?.destroy();
+    clearHarvesterCacheForTests();
+    resetMemoryStorageForTests();
+    resetFeedStoreForTests();
+    resetAuthStoreForTests();
+    resetConnectionStoreForTests();
+    globalThis.IntersectionObserver = prevIO;
+    globalThis.fetch = prevFetch;
+    dom.restore();
+  }
+});
+
+test('Canonical deduplication collapses own mismatched cross-posts, syndicated dlvr.it URL duplicates, federated ActivityPub URIs, append pages, and post-enrichment linked siblings', async () => {
+  const prevFetch = globalThis.fetch;
+  const nowMs = Date.now();
+  const isoMinsAgo = (m) => new Date(nowMs - m * 60_000).toISOString();
+
+  try {
+    resetMemoryStorageForTests();
+    resetAuthStoreForTests();
+    resetConnectionStoreForTests();
+    resetFeedStoreForTests();
+    clearHarvesterCacheForTests();
+
+    assert.equal(
+      canonicalizeUrlForDedupe('https://www.Jacobin.com/2026/11/ottoman-history/?utm_source=dlvr.it&utm_medium=mastodon#top'),
+      'https://jacobin.com/2026/11/ottoman-history'
+    );
+    assert.equal(
+      canonicalizeUrlForDedupe('nimueblue-share.nimueblue.workers.dev/r/rb-123/?ref=home'),
+      'https://nimueblue-share.nimueblue.workers.dev/r/rb-123'
+    );
+
+    await upsertSocialAccount(
+      {
+        id: 'fediverse:davyrhodes_@mastodon.social',
+        platform: 'fediverse',
+        instanceUrl: 'https://mastodon.social',
+        handle: 'davyrhodes_',
+        acct: 'davyrhodes_@mastodon.social',
+        userId: 'u_davy',
+      },
+      { accessToken: 'm_tok' }
+    );
+    await upsertSocialAccount(
+      {
+        id: 'bluesky:did:plc:davyrhodes',
+        platform: 'bluesky',
+        serviceUrl: 'https://bsky.social',
+        handle: 'davyrhodes.bsky.social',
+        acct: 'davyrhodes.bsky.social',
+        did: 'did:plc:davyrhodes',
+      },
+      { accessJwt: 'b_jwt', refreshJwt: 'b_ref' }
+    );
+
+    const shareUrl = 'https://nimueblue-share.nimueblue.workers.dev/r/rb-5ce4d41f5afb46048402d10e4ce47721';
+    const davyBsky = toUnifiedItem({
+      id: 'bluesky:at://did:plc:davyrhodes/app.bsky.feed.post/space1',
+      protocol: 'bluesky',
+      content_text: shareUrl,
+      content_html: `<p><a href="${shareUrl}">${shareUrl}</a></p>`,
+      date_published: isoMinsAgo(60),
+      author: { id: 'did:plc:davyrhodes', name: 'Davy Rhodes', handle: 'davyrhodes.bsky.social' },
+      metrics: { likes: 2, replies: 0, reposts: 1 },
+      _meta: {
+        bluesky: { uri: 'at://did:plc:davyrhodes/app.bsky.feed.post/space1', cid: 'cid_space1' },
+        linkCard: { url: shareUrl, title: 'KMGP-LP "Space 101.1" Seattle, Washington | NIMUEBLUE' },
+      },
+    });
+    const davyMasto = toUnifiedItem({
+      id: 'mastodon:m_space1',
+      protocol: 'mastodon',
+      content_text: shareUrl,
+      content_html: `<p><a href="${shareUrl}">${shareUrl}</a></p>`,
+      date_published: isoMinsAgo(59),
+      author: { id: 'u_davy', name: 'Davy Rhodes', handle: 'davyrhodes_@mastodon.social' },
+      metrics: { likes: 1, replies: 0, reposts: 0 },
+      _meta: {
+        mastodon: { statusId: 'm_space1', instanceUrl: 'https://mastodon.social', uri: 'https://mastodon.social/users/davyrhodes_/statuses/m_space1' },
+        linkCard: { url: shareUrl, title: 'KMGP-LP "Space 101.1" Seattle, Washington | NIMUEBLUE' },
+      },
+    });
+
+    // Screenshot 2: Syndicated dlvr.it article clones vs distinct human commentary
+    const jacobinTracked = 'https://jacobin.com/2026/11/ottoman-history-capitalism-colonialism-origins?utm_source=dlvr.it&utm_medium=mastodon';
+    const verdantDiscovery = toUnifiedItem({
+      id: 'mastodon:m_verdant',
+      protocol: 'mastodon',
+      content_text: `What the Ottomans Tell Us About Plunder and Capitalism\n${jacobinTracked} #socialism`,
+      date_published: isoMinsAgo(39),
+      author: { id: 'a_verdant', name: 'Verdant Square Network', handle: 'verdantsquare@mastodon.world' },
+      metrics: { likes: 0, replies: 0, reposts: 0 },
+      _meta: {
+        feedSource: 'discovery',
+        mastodon: { statusId: 'm_verdant', instanceUrl: 'https://mastodon.social', uri: 'https://mastodon.world/users/verdantsquare/statuses/1' },
+        linkCard: { url: jacobinTracked, title: 'What the Ottomans Tell Us About Plunder and Capitalism' },
+      },
+    });
+    const natalieFollowing = toUnifiedItem({
+      id: 'mastodon:m_natalie',
+      protocol: 'mastodon',
+      content_text: `What the Ottomans Tell Us About Plunder and Capitalism\n${jacobinTracked} #socialism`,
+      date_published: isoMinsAgo(38),
+      author: { id: 'a_natalie', name: 'Natalie Davis', handle: 'NatalieDavis@journa.host' },
+      metrics: { likes: 4, replies: 1, reposts: 2 },
+      _meta: {
+        feedSource: 'following',
+        mastodon: { statusId: 'm_natalie', instanceUrl: 'https://mastodon.social', uri: 'https://journa.host/users/NatalieDavis/statuses/2' },
+        linkCard: { url: jacobinTracked, title: 'What the Ottomans Tell Us About Plunder and Capitalism' },
+      },
+    });
+    const scholarCommentary = toUnifiedItem({
+      id: 'mastodon:m_scholar',
+      protocol: 'mastodon',
+      content_text: `Important Ottoman agrarian historiography piece, compare with Brenner:\n${jacobinTracked}`,
+      date_published: isoMinsAgo(35),
+      author: { id: 'a_scholar', name: 'History Desk', handle: 'scholar@historians.social' },
+      _meta: {
+        feedSource: 'following',
+        mastodon: { statusId: 'm_scholar', instanceUrl: 'https://mastodon.social', uri: 'https://historians.social/users/scholar/statuses/3' },
+        linkCard: { url: jacobinTracked, title: 'What the Ottomans Tell Us About Plunder and Capitalism' },
+      },
+    });
+
+    // Federated copies with different local IDs sharing ActivityPub URI (even 5 hours apart)
+    const fedOrig = toUnifiedItem({
+      id: 'mastodon:101',
+      protocol: 'mastodon',
+      content_text: 'Original federated dispatch about cooperative energy microgrids.',
+      date_published: isoMinsAgo(300),
+      author: { id: 'a_fed', name: 'Grid Lab', handle: 'grid@journa.host' },
+      _meta: {
+        feedSource: 'following',
+        mastodon: { statusId: '101', instanceUrl: 'https://mastodon.social', uri: 'https://journa.host/users/grid/statuses/555' },
+      },
+    });
+    const fedRemoteBoost = toUnifiedItem({
+      id: 'mastodon:909',
+      protocol: 'mastodon',
+      content_text: 'Original federated dispatch about cooperative energy microgrids.',
+      date_published: isoMinsAgo(10),
+      author: { id: 'a_fed_local', name: 'Grid Lab', handle: 'grid@journa.host' },
+      _meta: {
+        feedSource: 'discovery',
+        mastodon: {
+          statusId: '909',
+          instanceUrl: 'https://kolektiva.social',
+          uri: 'https://journa.host/users/grid/statuses/555',
+          rebloggedBy: { id: 'b1', handle: 'pal@kolektiva.social', name: 'Pal' },
+        },
+      },
+    });
+
+    // 1. setStreamItems('following', ...) deduplicates Davy's cross-post, dlvr.it twin, and federated URI clone
+    setStreamItems('following', [davyBsky, davyMasto, verdantDiscovery, natalieFollowing, scholarCommentary, fedOrig, fedRemoteBoost]);
+    const followingItems = feedStore.get().streams.following.items;
+    const followingIds = followingItems.map((it) => it.id);
+    assert.equal(followingItems.filter((it) => it.content_text.includes('rb-5ce4d41f')).length, 1);
+    const davySurvivor = followingItems.find((it) => it.content_text.includes('rb-5ce4d41f'));
+    assert.equal(davySurvivor.id, 'mastodon:m_space1');
+    assert.equal(davySurvivor._meta.bluesky.uri, 'at://did:plc:davyrhodes/app.bsky.feed.post/space1');
+
+    const jacobinMatches = followingItems.filter((it) => (it._meta?.linkCard?.url || '').includes('ottoman-history'));
+    assert.equal(jacobinMatches.length, 2, 'Syndicated dlvr.it duplicates must collapse to 1 while preserving scholar commentary');
+    const syndicatedWinner = jacobinMatches.find((it) => !it.content_text.includes('historiography'));
+    assert.equal(syndicatedWinner.id, 'mastodon:m_natalie', 'following must beat discovery on syndicated duplicate');
+    assert.equal(syndicatedWinner._meta.mastodon.statusId, 'm_natalie');
+    assert.ok(followingIds.includes('mastodon:101') && !followingIds.includes('mastodon:909'));
+
+    // 2. harvestSanctuaryFeed deduplicates cross-posts via ownAccounts + sieveSovereignCandidates
+    globalThis.fetch = async (url) => {
+      const u = String(url);
+      if (u.includes('/api/v1/timelines/home')) {
+        return new Response(
+          JSON.stringify([
+            {
+              id: 'm_space1',
+              uri: 'https://mastodon.social/users/davyrhodes_/statuses/m_space1',
+              created_at: isoMinsAgo(59),
+              content: `<p><a href="${shareUrl}">${shareUrl}</a></p>`,
+              card: { url: shareUrl, title: 'KMGP-LP "Space 101.1" Seattle, Washington | NIMUEBLUE' },
+              account: { id: 'u_davy', username: 'davyrhodes_', acct: 'davyrhodes_@mastodon.social', display_name: 'Davy Rhodes' },
+            },
+          ]),
+          { status: 200, headers: { 'content-type': 'application/json' } }
+        );
+      }
+      if (u.includes('app.bsky.feed.getTimeline')) {
+        return new Response(
+          JSON.stringify({
+            feed: [
+              {
+                post: {
+                  uri: 'at://did:plc:davyrhodes/app.bsky.feed.post/space1',
+                  cid: 'cid_space1',
+                  author: { did: 'did:plc:davyrhodes', handle: 'davyrhodes.bsky.social', displayName: 'Davy Rhodes' },
+                  record: { text: shareUrl, createdAt: isoMinsAgo(60) },
+                  embed: { $type: 'app.bsky.embed.external#view', external: { uri: shareUrl, title: 'KMGP-LP "Space 101.1" Seattle, Washington | NIMUEBLUE' } },
+                },
+              },
+            ],
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } }
+        );
+      }
+      if (u.includes('/api/v1/timelines/tag/')) {
+        return new Response(
+          JSON.stringify([
+            {
+              id: 'm_verdant',
+              uri: 'https://mastodon.world/users/verdantsquare/statuses/1',
+              created_at: isoMinsAgo(39),
+              content: `<p>What the Ottomans Tell Us About Plunder and Capitalism <a href="${jacobinTracked}">${jacobinTracked}</a> <a class="mention hashtag" href="https://mastodon.world/tags/socialism">#socialism</a></p>`,
+              card: { url: jacobinTracked, title: 'What the Ottomans Tell Us About Plunder and Capitalism' },
+              account: { id: 'a_verdant', username: 'verdantsquare', acct: 'verdantsquare@mastodon.world', display_name: 'Verdant Square Network' },
+            },
+          ]),
+          { status: 200, headers: { 'content-type': 'application/json' } }
+        );
+      }
+      if (u.includes('/api/v1/timelines/public')) {
+        return new Response(
+          JSON.stringify([
+            {
+              id: 'm_natalie',
+              uri: 'https://journa.host/users/NatalieDavis/statuses/2',
+              created_at: isoMinsAgo(38),
+              content: `<p>What the Ottomans Tell Us About Plunder and Capitalism <a href="${jacobinTracked}">${jacobinTracked}</a> <a class="mention hashtag" href="https://journa.host/tags/socialism">#socialism</a></p>`,
+              card: { url: jacobinTracked, title: 'What the Ottomans Tell Us About Plunder and Capitalism' },
+              account: { id: 'a_natalie', username: 'NatalieDavis', acct: 'NatalieDavis@journa.host', display_name: 'Natalie Davis' },
+            },
+          ]),
+          { status: 200, headers: { 'content-type': 'application/json' } }
+        );
+      }
+      return new Response('[]', { status: 200, headers: { 'content-type': 'application/json' } });
+    };
+
+    const harvested = await harvestSanctuaryFeed({
+      fediAuth: await getAuthenticatedAccount('fediverse'),
+      bskyAuth: await getAuthenticatedAccount('bluesky'),
+      tuning: DEFAULT_FEED_TUNING,
+    });
+    assert.equal(harvested.items.filter((it) => it.content_text.includes('rb-5ce4d41f')).length, 1);
+    assert.equal(harvested.items.filter((it) => (it._meta?.linkCard?.url || '').includes('ottoman-history')).length, 1);
+
+    // 3. appendStreamItems drops cross-post/syndicated duplicates of Page 1 without reordering Page 1
+    setStreamItems('feed', [davyMasto, natalieFollowing]);
+    appendStreamItems('feed', [davyBsky, verdantDiscovery, scholarCommentary]);
+    const appendedIds = feedStore.get().streams.feed.items.map((it) => it.id);
+    assert.deepEqual(appendedIds, ['mastodon:m_natalie', 'mastodon:m_space1', 'mastodon:m_scholar']);
+
+    // 4. reconcileEnrichedStreamItems collapses two separate-author/distinct-text items linked via _meta.linkedIds
+    const unlinkedMasto = toUnifiedItem({
+      id: 'mastodon:link_m1',
+      protocol: 'mastodon',
+      content_text: 'Full Mastodon essay body version.',
+      date_published: isoMinsAgo(5),
+      author: { id: 'u_davy', name: 'Davy Rhodes', handle: 'davyrhodes_@mastodon.social' },
+      metrics: { likes: 3, replies: 0, reposts: 0 },
+      _meta: { mastodon: { statusId: 'link_m1', instanceUrl: 'https://mastodon.social' } },
+    });
+    const unlinkedBsky = toUnifiedItem({
+      id: 'bluesky:at://did:plc:davyrhodes/app.bsky.feed.post/link_b1',
+      protocol: 'bluesky',
+      content_text: 'Compact Bluesky phrasing.',
+      date_published: isoMinsAgo(5),
+      author: { id: 'did:plc:davyrhodes', name: 'Davy Rhodes', handle: 'davyrhodes.bsky.social' },
+      metrics: { likes: 5, replies: 1, reposts: 2 },
+      _meta: { bluesky: { uri: 'at://did:plc:davyrhodes/app.bsky.feed.post/link_b1', cid: 'cid_lb1' } },
+    });
+    setStreamItems('feed', [unlinkedBsky, unlinkedMasto]);
+    assert.equal(feedStore.get().streams.feed.items.length, 2);
+
+    reconcileEnrichedStreamItems([
+      {
+        ...unlinkedMasto,
+        metrics: { likes: 8, replies: 1, reposts: 2 },
+        _meta: {
+          ...unlinkedMasto._meta,
+          linkedIds: { mastodonStatusId: 'link_m1', blueskyUri: 'at://did:plc:davyrhodes/app.bsky.feed.post/link_b1' },
+          metricsBreakdown: { mastodon: { likes: 3, replies: 0, reposts: 0 }, bluesky: { likes: 5, replies: 1, reposts: 2 } },
+        },
+      },
+      {
+        ...unlinkedBsky,
+        metrics: { likes: 8, replies: 1, reposts: 2 },
+        _meta: {
+          ...unlinkedBsky._meta,
+          linkedIds: { mastodonStatusId: 'link_m1', blueskyUri: 'at://did:plc:davyrhodes/app.bsky.feed.post/link_b1' },
+          metricsBreakdown: { mastodon: { likes: 3, replies: 0, reposts: 0 }, bluesky: { likes: 5, replies: 1, reposts: 2 } },
+        },
+      },
+    ]);
+    const reconciled = feedStore.get().streams.feed.items;
+    assert.equal(reconciled.length, 1, 'reconcileEnrichedStreamItems must collapse linked siblings in place');
+    assert.equal(reconciled[0].id, 'mastodon:link_m1');
+    assert.equal(reconciled[0].metrics.likes, 8);
+    assert.ok(reconciled[0]._meta.bluesky?.uri);
+
+    // Explicit direct unit check of deduplicateAppendItems preserving target slot order
+    const directAppend = deduplicateAppendItems([unlinkedMasto], [davyBsky]);
+    assert.equal(directAppend.nextExisting[0].id, 'mastodon:link_m1');
+    assert.equal(directAppend.appended.length, 1);
+  } finally {
+    clearHarvesterCacheForTests();
+    resetMemoryStorageForTests();
+    resetFeedStoreForTests();
+    resetAuthStoreForTests();
+    resetConnectionStoreForTests();
+    globalThis.fetch = prevFetch;
+  }
+});
+
+test('PostCard renders Mastodon, Bluesky, and Threads logos instead of protocol text with accessible labels', () => {
+  const dom = installMockDom();
+  try {
+    resetAuthStoreForTests();
+    const tripleLinked = toUnifiedItem({
+      id: 'mastodon:triple_1',
+      protocol: 'mastodon',
+      content_text: 'Cross-posted everywhere cleanly.',
+      date_published: '2026-11-20T10:00:00Z',
+      author: { id: 'u1', name: 'Davy Rhodes', handle: 'davy@mastodon.social' },
+      _meta: {
+        mastodon: { statusId: 'triple_1', instanceUrl: 'https://mastodon.social' },
+        linkedIds: {
+          mastodonStatusId: 'triple_1',
+          blueskyUri: 'at://did:plc:davy/app.bsky.feed.post/1',
+          threadsPostId: 'th_1',
+        },
+      },
+    });
+    const tripleMergedMeta = toUnifiedItem({
+      id: 'bluesky:at://did:plc:davy/app.bsky.feed.post/2',
+      protocol: 'bluesky',
+      content_text: 'Merged cross-platform metadata post.',
+      date_published: '2026-11-20T10:00:00Z',
+      author: { id: 'did:plc:davy', name: 'Davy Rhodes', handle: 'davy.bsky.social' },
+      _meta: {
+        mastodon: { statusId: 'm_merged_2', instanceUrl: 'https://mastodon.social' },
+        bluesky: { uri: 'at://did:plc:davy/app.bsky.feed.post/2', cid: 'c2' },
+        threads: { postId: 'th_merged_2' },
+      },
+    });
+    const doubleLinked = toUnifiedItem({
+      id: 'mastodon:double_1',
+      protocol: 'mastodon',
+      content_text: 'Two networks only.',
+      date_published: '2026-11-20T10:00:00Z',
+      author: { id: 'u1', name: 'Davy Rhodes', handle: 'davy@mastodon.social' },
+      _meta: {
+        mastodon: { statusId: 'double_1', instanceUrl: 'https://mastodon.social' },
+        linkedIds: { mastodonStatusId: 'double_1', blueskyUri: 'at://did:plc:davy/app.bsky.feed.post/3' },
+      },
+    });
+    const singleMasto = toUnifiedItem({
+      id: 'mastodon:single_m',
+      protocol: 'mastodon',
+      content_text: 'Mastodon only.',
+      date_published: '2026-11-20T10:00:00Z',
+      author: { id: 'u2', name: 'M', handle: 'm@mastodon.social' },
+    });
+    const singleBsky = toUnifiedItem({
+      id: 'bluesky:at://did:plc:b/app.bsky.feed.post/4',
+      protocol: 'bluesky',
+      content_text: 'Bluesky only.',
+      date_published: '2026-11-20T10:00:00Z',
+      author: { id: 'did:plc:b', name: 'B', handle: 'b.bsky.social' },
+    });
+    const singleThreads = toUnifiedItem({
+      id: 'threads:th_only_5',
+      protocol: 'threads',
+      content_text: 'Threads only.',
+      date_published: '2026-11-20T10:00:00Z',
+      author: { id: 'th_u', name: 'T', handle: 't@threads.net' },
+    });
+
+    assert.deepEqual(resolvePostBadgeProtocols(tripleLinked), ['mastodon', 'bluesky', 'threads']);
+    assert.deepEqual(resolvePostBadgeProtocols(tripleMergedMeta), ['mastodon', 'bluesky', 'threads']);
+    assert.deepEqual(resolvePostBadgeProtocols(doubleLinked), ['mastodon', 'bluesky']);
+    assert.deepEqual(resolvePostBadgeProtocols(singleMasto), ['mastodon']);
+    assert.deepEqual(resolvePostBadgeProtocols(singleBsky), ['bluesky']);
+    assert.deepEqual(resolvePostBadgeProtocols(singleThreads), ['threads']);
+
+    const card = createPostCard(tripleLinked, {});
+    const badge = card.querySelector('.post-protocol-badge.post-protocol-badge--icons');
+    assert.ok(badge, 'PostCard must render icon-based protocol badge');
+    assert.equal(badge.getAttribute('role'), 'img');
+    assert.equal(badge.getAttribute('aria-label'), 'Mastodon, Bluesky, Threads');
+    assert.equal(badge.title, 'Mastodon · Bluesky · Threads');
+    assert.equal(badge.dataset.protocols, 'mastodon,bluesky,threads');
+    assert.equal(badge.textContent, '', 'Badge must not contain protocol text');
+
+    for (const proto of ['mastodon', 'bluesky', 'threads']) {
+      const logoEl = badge.querySelector(`.post-protocol-logo--${proto}`);
+      assert.ok(logoEl, `Missing ${proto} logo container`);
+      assert.equal(logoEl.getAttribute('aria-hidden'), 'true');
+      assert.ok(
+        logoEl.innerHTML.includes('<svg') &&
+        logoEl.innerHTML.includes('aria-hidden="true"') &&
+        logoEl.innerHTML.includes('</svg>'),
+        `Missing inline SVG markup for ${proto}`
+      );
+    }
+  } finally {
+    resetAuthStoreForTests();
+    dom.restore();
+  }
+});
+
+test('PostCard shows accessible inline translate button only on non-English posts and toggles cached translations cleanly', async () => {
+  const dom = installMockDom();
+  const prevFetch = globalThis.fetch;
+  try {
+    resetAuthStoreForTests();
+    resetConnectionStoreForTests();
+    clearTranslationCacheForTests();
+
+    const mastoNormFr = toUnifiedItem(
+      normalizeMastodonStatus(
+        {
+          id: 'm_fr_9',
+          content: '<p>Bonjour les camarades de la coopérative.</p>',
+          language: 'fr',
+          created_at: '2026-11-20T10:00:00Z',
+          account: { id: 'u_fr', acct: 'claire@mastodon.social', display_name: 'Claire' },
+        },
+        'https://mastodon.social'
+      )
+    );
+    assert.equal(mastoNormFr.language, 'fr');
+
+    const bskyNormEs = toUnifiedItem(
+      normalizeBskyPost({
+        post: {
+          uri: 'at://did:plc:es1/app.bsky.feed.post/1',
+          cid: 'cid_es1',
+          author: { did: 'did:plc:es1', handle: 'diego.bsky.social', displayName: 'Diego' },
+          record: {
+            text: 'La asamblea de trabajadores comienza hoy por la tarde.',
+            langs: ['es'],
+            createdAt: '2026-11-20T10:00:00Z',
+          },
+        },
+      })
+    );
+    assert.equal(bskyNormEs.language, 'es');
+
+    // Language detection cases
+    assert.equal(
+      detectPostLanguageInfo({ content_text: 'Open-source tooling release notes for Linux.', language: 'en' }).shouldOfferTranslate,
+      false
+    );
+    assert.equal(
+      detectPostLanguageInfo({ content_text: 'https://example.org @alice #release 🎉', language: 'fr' }).shouldOfferTranslate,
+      false,
+      'Non-linguistic URL/mention/emoji posts must not offer translation'
+    );
+    assert.equal(
+      detectPostLanguageInfo({
+        content_text: 'The workshop guild decided that this maintenance policy will improve reliability.',
+        language: 'fr',
+      }).shouldOfferTranslate,
+      false,
+      'Mis-tagged pure-English prose must not trigger false translate prompts'
+    );
+
+    const frInfo = detectPostLanguageInfo(mastoNormFr);
+    assert.equal(frInfo.shouldOfferTranslate, true);
+    assert.equal(frInfo.langTag, 'fr');
+    assert.equal(frInfo.languageName, 'French');
+
+    const esInfo = detectPostLanguageInfo(bskyNormEs);
+    assert.equal(esInfo.shouldOfferTranslate, true);
+    assert.equal(esInfo.langTag, 'es');
+    assert.equal(esInfo.languageName, 'Spanish');
+
+    const misTaggedJa = detectPostLanguageInfo({
+      protocol: 'bluesky',
+      content_text: '新しい協力工場の案内を公開しました。',
+      language: 'en',
+    });
+    assert.equal(misTaggedJa.shouldOfferTranslate, true);
+    assert.equal(misTaggedJa.langTag, 'ja');
+    assert.equal(misTaggedJa.languageName, 'Japanese');
+
+    const threadsKo = detectPostLanguageInfo({
+      protocol: 'threads',
+      content_text: '협동조합 회의가 오늘 오후에 열립니다.',
+    });
+    assert.equal(threadsKo.shouldOfferTranslate, true);
+    assert.equal(threadsKo.langTag, 'ko');
+    assert.equal(threadsKo.languageName, 'Korean');
+
+    const threadsUk = detectPostLanguageInfo({
+      protocol: 'threads',
+      content_text: 'Сьогодні відкривається нова громадська майстерня.',
+    });
+    assert.equal(threadsUk.shouldOfferTranslate, true);
+    assert.equal(threadsUk.langTag, 'uk');
+    assert.equal(threadsUk.languageName, 'Ukrainian');
+
+    const untaggedDe = detectPostLanguageInfo({
+      protocol: 'threads',
+      content_text: 'Unsere Genossenschaft arbeitet heute an der neuen Werkstatt.',
+    });
+    assert.equal(untaggedDe.shouldOfferTranslate, true);
+    assert.equal(untaggedDe.langTag, 'de');
+    assert.equal(untaggedDe.languageName, 'German');
+
+    const untaggedEs = detectPostLanguageInfo({
+      protocol: 'threads',
+      content_text: 'Trabajadores de la cooperativa organizan una reunión mañana.',
+    });
+    assert.equal(untaggedEs.shouldOfferTranslate, true);
+    assert.equal(untaggedEs.langTag, 'es');
+
+    // English PostCard omits translate UI completely
+    const englishCard = createPostCard(
+      toUnifiedItem({
+        id: 'mastodon:m_en_1',
+        protocol: 'mastodon',
+        language: 'en',
+        content_text: 'Just another quiet morning debugging CSS layout rules.',
+        date_published: '2026-11-20T10:00:00Z',
+        author: { id: 'u_en', name: 'Sam', handle: 'sam@mastodon.social' },
+      }),
+      {}
+    );
+    assert.equal(englishCard.querySelector('.post-translate-btn'), null);
+    assert.equal(englishCard.querySelector('.post-translate-bar'), null);
+
+    // Non-English PostCard renders accessible inline translate toggle and uses cache on toggle
+    let translateRequests = 0;
+    let openedThreadCount = 0;
+    globalThis.fetch = async (url) => {
+      const u = String(url);
+      if (u.includes('/api/v1/statuses/') && u.includes('/translate')) {
+        return new Response(JSON.stringify({ error: 'Not supported' }), { status: 404 });
+      }
+      if (u.includes('translate.googleapis.com/translate_a/single')) {
+        translateRequests += 1;
+        return new Response(
+          JSON.stringify([
+            [['Published the new cooperative workshop guide.', '新しい協力工場の案内を公開しました。', null, null]],
+            null,
+            'ja',
+          ]),
+          { status: 200, headers: { 'content-type': 'application/json' } }
+        );
+      }
+      return new Response('{}', { status: 404 });
+    };
+
+    const jaPost = toUnifiedItem({
+      id: 'bluesky:at://did:plc:ja9/app.bsky.feed.post/1',
+      protocol: 'bluesky',
+      language: 'ja',
+      content_text: '新しい協力工場の案内を公開しました。',
+      date_published: '2026-11-20T10:05:00Z',
+      author: { id: 'did:plc:ja9', name: 'Ken', handle: 'ken.bsky.social' },
+      _meta: { bluesky: { uri: 'at://did:plc:ja9/app.bsky.feed.post/1', cid: 'cid_ja9' } },
+    });
+
+    const jaCard = createPostCard(jaPost, {
+      onOpenThread: () => { openedThreadCount += 1; },
+    });
+    const origBody = jaCard.querySelector('.post-body-html');
+    const trBody = jaCard.querySelector('.post-translated-body');
+    const trBtn = jaCard.querySelector('.post-translate-btn');
+    const trMeta = jaCard.querySelector('.post-translate-meta');
+
+    assert.equal(origBody.getAttribute('lang'), 'ja');
+    assert.ok(trBody && trBody.hidden === true);
+    assert.equal(trBody.getAttribute('lang'), 'en');
+    assert.ok(trBtn && trBtn.type === 'button');
+    assert.ok(trBtn.textContent.includes('Translate from Japanese'));
+
+    trBtn.click();
+    await new Promise((r) => setTimeout(r, 30));
+
+    assert.equal(openedThreadCount, 0, 'Clicking translate button must not open thread');
+    assert.equal(translateRequests, 1);
+    assert.equal(origBody.hidden, true);
+    assert.equal(trBody.hidden, false);
+    assert.ok(trBody.innerHTML.includes('Published the new cooperative workshop guide.'));
+    assert.equal(trMeta.hidden, false);
+    assert.ok(trMeta.textContent.includes('Translated from Japanese'));
+    assert.ok(trBtn.textContent.includes('Show original'));
+
+    // Toggling back and forth reuses cached result with zero additional fetch calls
+    trBtn.click();
+    assert.equal(origBody.hidden, false);
+    assert.equal(trBody.hidden, true);
+    assert.equal(trMeta.hidden, true);
+    assert.ok(trBtn.textContent.includes('Translate from Japanese'));
+
+    trBtn.click();
+    assert.equal(origBody.hidden, true);
+    assert.equal(trBody.hidden, false);
+    assert.equal(translateRequests, 1);
+
+    // Direct translateUnifiedPost call with error recovery path
+    clearTranslationCacheForTests();
+    let failOnce = true;
+    const errCard = createPostCard(mastoNormFr, {
+      onTranslatePost: async () => {
+        if (failOnce) {
+          failOnce = false;
+          throw new Error('Network unreachable');
+        }
+        return translateUnifiedPost({
+          id: 'mastodon:mock_err_ok',
+          protocol: 'mastodon',
+          language: 'fr',
+          content_text: 'Bonjour.',
+        }).catch(() => ({ text: 'Hello.', html: '<p>Hello.</p>', detectedSourceLanguage: 'fr' }));
+      },
+    });
+    const errBtn = errCard.querySelector('.post-translate-btn');
+    const errStatus = errCard.querySelector('.post-translate-error');
+    assert.equal(errStatus.getAttribute('role'), 'status');
+    errBtn.click();
+    await new Promise((r) => setTimeout(r, 20));
+    assert.ok(errBtn.textContent.includes('Retry translation'));
+    assert.ok(errStatus.textContent.includes('Translation unavailable'));
+  } finally {
+    clearTranslationCacheForTests();
+    resetAuthStoreForTests();
+    resetConnectionStoreForTests();
+    globalThis.fetch = prevFetch;
+    dom.restore();
+  }
+});
+
+test('Visual URL truncation preserves full textContent, stripHtmlToText, and skips human labels or pre-truncated ellipsis', async () => {
+  const dom = installMockDom();
+  try {
+    resetAuthStoreForTests();
+    resetConnectionStoreForTests();
+    const {
+      MAX_VISIBLE_URL_CHARS,
+      renderSanitizedHtml,
+    } = await import('../web/queries/fediverse.js');
+    const { renderBskyRichTextToHtml } = await import('../web/queries/bluesky.js');
+    const { plainTextToHtml, stripHtmlToText } = await import('../web/core/schema/unifiedItem.js');
+    const { createPostCard } = await import('../web/components/PostCard.js');
+
+    assert.equal(MAX_VISIBLE_URL_CHARS, 26);
+    const longUrl = 'https://docs.google.com/document/d/e/2PACX-1vSM3FIWv7JoAiUECvR9DiukYFePGcUEJILQLyjvokmO2xGBwHCAsMGTpFk8nxVO2bMunZSFpsdcgIVL/pub';
+
+    // 1. plainTextToHtml + renderBskyRichTextToHtml emit .invisible and .ellipsis while preserving stripHtmlToText
+    const plainHtml = plainTextToHtml(`Check out ${longUrl} today`);
+    assert.ok(plainHtml.includes('class="invisible"'), 'plainTextToHtml must hide scheme via .invisible');
+    assert.ok(plainHtml.includes('class="ellipsis"'), 'plainTextToHtml must cap visible portion via .ellipsis');
+    assert.equal(stripHtmlToText(plainHtml), `Check out ${longUrl} today`);
+
+    const facetEnd = new TextEncoder().encode(`Check out ${longUrl}`).length;
+    const facetStart = new TextEncoder().encode('Check out ').length;
+    const bskyHtml = renderBskyRichTextToHtml(`Check out ${longUrl} today`, [
+      {
+        index: { byteStart: facetStart, byteEnd: facetEnd },
+        features: [{ $type: 'app.bsky.richtext.facet#link', uri: longUrl }],
+      },
+    ]);
+    assert.ok(bskyHtml.includes('class="invisible"'));
+    assert.ok(bskyHtml.includes('class="ellipsis"'));
+    assert.equal(stripHtmlToText(bskyHtml), `Check out ${longUrl} today`);
+
+    // 2. Already-truncated Bluesky facet label ending in ... and multi-word human anchor labels are NOT double-truncated
+    const preTruncBox = dom.document.createElement('div');
+    renderSanitizedHtml(preTruncBox, `<p><a href="${longUrl}">youtu.be/JLjyYDakdXo?...</a></p>`);
+    assert.equal(preTruncBox.querySelectorAll('.ellipsis').length, 0);
+    assert.equal(preTruncBox.querySelector('a').textContent, 'youtu.be/JLjyYDakdXo?...');
+
+    const humanLabelBox = dom.document.createElement('div');
+    renderSanitizedHtml(humanLabelBox, `<p><a href="${longUrl}">Read the full document here</a></p>`);
+    assert.equal(humanLabelBox.querySelectorAll('.ellipsis').length, 0);
+    assert.equal(humanLabelBox.querySelector('a').textContent, 'Read the full document here');
+
+    // 3. Bare raw URL <a> inside sanitized HTML + Mastodon server spans survive renderSanitizedHtml
+    const bareBox = dom.document.createElement('div');
+    renderSanitizedHtml(bareBox, `<p><a href="${longUrl}">${longUrl}</a></p>`);
+    assert.ok(bareBox.querySelector('a .invisible'));
+    assert.ok(bareBox.querySelector('a .ellipsis'));
+    assert.equal(bareBox.querySelector('a').textContent, longUrl);
+
+    const mastoSpanBox = dom.document.createElement('div');
+    renderSanitizedHtml(
+      mastoSpanBox,
+      `<p><a href="${longUrl}"><span class="invisible">https://</span><span class="ellipsis">docs.google.com/docum</span><span class="invisible">ent/d/rest</span></a></p>`
+    );
+    assert.equal(mastoSpanBox.querySelectorAll('a .invisible').length, 2);
+    assert.equal(mastoSpanBox.querySelectorAll('a .ellipsis').length, 1);
+    assert.equal(mastoSpanBox.querySelector('a').textContent, 'https://docs.google.com/document/d/rest');
+
+    // 4. PostCard body and QuotePostCard render truncated URLs without nesting <a> inside <button>
+    const itemWithQuote = toUnifiedItem({
+      id: 'bluesky:at://did:plc:u_url/app.bsky.feed.post/1',
+      protocol: 'bluesky',
+      content_text: `Moon Heart notes: ${longUrl}`,
+      date_published: '2026-11-20T12:00:00Z',
+      author: { id: 'did:plc:u_url', name: 'Davy', handle: 'davy.bsky.social' },
+      _meta: {
+        bluesky: { uri: 'at://did:plc:u_url/app.bsky.feed.post/1', cid: 'c_url_1' },
+        quotePost: {
+          id: 'bluesky:at://did:plc:q1/app.bsky.feed.post/2',
+          protocol: 'bluesky',
+          url: 'https://bsky.app/profile/q1.bsky.social/post/2',
+          author: { name: 'Quoted', handle: 'q1.bsky.social' },
+          text: `Quoted doc: ${longUrl}`,
+        },
+      },
+    });
+    const card = createPostCard(itemWithQuote);
+    const bodyEl = card.querySelector('.post-body-html');
+    assert.ok(bodyEl.querySelector('a .ellipsis'), 'PostCard body must visually truncate raw HTTP URL');
+    assert.ok(bodyEl.querySelector('a .invisible'));
+    assert.ok(bodyEl.textContent.includes(longUrl), 'DOM textContent must preserve complete URL');
+
+    const quoteEl = card.querySelector('.post-quote-card');
+    assert.ok(quoteEl);
+    assert.equal(quoteEl.querySelectorAll('a').length, 0, 'Quote card button must not contain nested <a>');
+    const quoteUrlSpan = quoteEl.querySelector('.post-quote-url');
+    assert.ok(quoteUrlSpan, 'Quote card must wrap raw HTTP URL in .post-quote-url');
+    assert.ok(quoteUrlSpan.querySelector('.ellipsis'));
+    assert.ok(quoteUrlSpan.querySelector('.invisible'));
+    assert.ok(quoteUrlSpan.textContent.includes(longUrl));
+  } finally {
+    resetAuthStoreForTests();
+    resetConnectionStoreForTests();
+    dom.restore();
+  }
+});
+
+test('Account mute and block persist across Feed harvests, AuthorSheet, SettingsModal, and isolate Mastodon instances', async () => {
+  const dom = installMockDom();
+  const prevFetch = globalThis.fetch;
+  let settingsHandle = null;
+  let authorSheetHandle = null;
+
+  try {
+    resetMemoryStorageForTests();
+    resetAuthStoreForTests();
+    resetConnectionStoreForTests();
+    resetFeedStoreForTests();
+    resetModerationCacheForTests();
+    clearHarvesterCacheForTests();
+
+    const { openAuthorSheetModal } = await import('../web/components/AuthorSheetModal.js');
+    const { openSettingsModal } = await import('../web/components/sanctuary/SettingsModal.js');
+    const { activityStore, removeActivityByActor, resetActivityStoreForTests } = await import('../web/state/activityStore.js');
+    const {
+      DEFAULT_FEED_TUNING,
+      hydrateCachedModeration,
+      purgeModeratedAuthorAffinity,
+      removePostAcrossStreams,
+    } = await import('../web/state/feedStore.js');
+    const { harvestSanctuaryFeed } = await import('../web/queries/feedHarvester.js');
+    const { toggleMuteAuthor } = await import('../web/queries/socialClient.js');
+    const { isUnifiedItemModerated } = await import('../web/core/schema/unifiedItem.js');
+    const { getLocalModeratedAccounts } = await import('../web/storage/nativeStore.js');
+
+    resetActivityStoreForTests();
+
+    await upsertSocialAccount(
+      {
+        id: 'fediverse:davy@mastodon.social',
+        platform: 'fediverse',
+        instanceUrl: 'https://mastodon.social',
+        handle: 'davy',
+        acct: 'davy@mastodon.social',
+        userId: 'u_davy',
+      },
+      { accessToken: 'tok_davy' }
+    );
+
+    const bskyMillPost = {
+      uri: 'at://did:plc:mill123/app.bsky.feed.post/p1',
+      cid: 'cid_mill_1',
+      author: {
+        did: 'did:plc:mill123',
+        handle: 'millmessenger.bsky.social',
+        displayName: 'MILL MESSENGER',
+      },
+      record: {
+        text: 'Billionaires Always Want to Maintain Control #socialism',
+        createdAt: new Date(Date.now() - 120_000).toISOString(),
+      },
+      indexedAt: new Date(Date.now() - 120_000).toISOString(),
+      likeCount: 2,
+      repostCount: 0,
+      replyCount: 0,
+    };
+    const bskyKeepPost = {
+      uri: 'at://did:plc:keep456/app.bsky.feed.post/k1',
+      cid: 'cid_keep_1',
+      author: {
+        did: 'did:plc:keep456',
+        handle: 'coopnews.bsky.social',
+        displayName: 'Co-op News',
+      },
+      record: {
+        text: 'Worker cooperative annual report published today.',
+        createdAt: new Date(Date.now() - 60_000).toISOString(),
+      },
+      indexedAt: new Date(Date.now() - 60_000).toISOString(),
+      likeCount: 5,
+      repostCount: 1,
+      replyCount: 0,
+    };
+    const bridgyMillStatus = {
+      id: 'm_bridgy_mill',
+      created_at: new Date(Date.now() - 110_000).toISOString(),
+      content: '<p>Bridgy mirrored union note</p>',
+      url: 'https://bsky.brid.gy/r/mill',
+      account: {
+        id: 'm_u_bridgy',
+        username: 'millmessenger.bsky.social',
+        acct: 'millmessenger.bsky.social@bsky.brid.gy',
+        display_name: 'MILL MESSENGER (Bridgy)',
+      },
+    };
+    const fosstodonAlice = {
+      id: 'm_foss_alice',
+      created_at: new Date(Date.now() - 90_000).toISOString(),
+      content: '<p>Alice on Fosstodon</p>',
+      url: 'https://fosstodon.org/@alice/1',
+      account: { id: '9901', username: 'alice', acct: 'alice@fosstodon.org', display_name: 'Alice Foss' },
+    };
+    const kolektivaAlice = {
+      id: 'm_kol_alice',
+      created_at: new Date(Date.now() - 80_000).toISOString(),
+      content: '<p>Alice on Kolektiva</p>',
+      url: 'https://kolektiva.social/@alice/1',
+      account: { id: '7701', username: 'alice', acct: 'alice@kolektiva.social', display_name: 'Alice Kol' },
+    };
+
+    const mastoLookupCalls = [];
+    const mastoMuteCalls = [];
+    globalThis.fetch = async (url, init = {}) => {
+      const u = String(url);
+      const method = String(init?.method || 'GET').toUpperCase();
+      if (u.includes('app.bsky.unspecced.getPopularFeedGenerators')) {
+        return new Response(
+          JSON.stringify({ feeds: [{ uri: 'at://did:plc:gen1/app.bsky.feed.generator/coop-feed', displayName: 'Co-op Mutual Aid' }] }),
+          { status: 200, headers: { 'content-type': 'application/json' } }
+        );
+      }
+      if (u.includes('/app.bsky.feed.getFeed') || u.includes('/app.bsky.feed.searchPosts')) {
+        return new Response(
+          JSON.stringify({ feed: [{ post: bskyMillPost }, { post: bskyKeepPost }], posts: [bskyMillPost, bskyKeepPost] }),
+          { status: 200, headers: { 'content-type': 'application/json' } }
+        );
+      }
+      if (u.includes('/api/v1/timelines/tag/') || u.includes('/api/v1/timelines/public')) {
+        return new Response(
+          JSON.stringify([bridgyMillStatus, fosstodonAlice, kolektivaAlice]),
+          { status: 200, headers: { 'content-type': 'application/json' } }
+        );
+      }
+      if (u.includes('/api/v1/accounts/lookup')) {
+        mastoLookupCalls.push(u);
+        return new Response(
+          JSON.stringify({ id: 'remote_9901', acct: 'alice@fosstodon.org' }),
+          { status: 200, headers: { 'content-type': 'application/json' } }
+        );
+      }
+      if (u.includes('/api/v1/accounts/') && u.includes('/mute')) {
+        mastoMuteCalls.push({ url: u, method });
+        return new Response(JSON.stringify({ id: 'remote_9901', muting: true }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      if (u.includes('/api/v1/mutes') || u.includes('/api/v1/blocks') || u.includes('/api/v2/filters')) {
+        return new Response(JSON.stringify([]), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
+    };
+
+    // 1. Initial harvest includes @millmessenger.bsky.social when unmuted
+    const initialHarvest = await harvestSanctuaryFeed({
+      fediAuth: await getAuthenticatedAccount('fediverse'),
+      bskyAuth: null,
+      tuning: DEFAULT_FEED_TUNING,
+      moderatedActors: feedStore.get().moderatedActors,
+      forceRefresh: true,
+    });
+    assert.ok(initialHarvest.items.some((p) => p.author?.handle === 'millmessenger.bsky.social'));
+
+    const millUnified = toUnifiedItem({
+      id: 'bluesky:at://did:plc:mill123/app.bsky.feed.post/p1',
+      protocol: 'bluesky',
+      content_text: 'Billionaires Always Want to Maintain Control',
+      date_published: '2026-11-20T12:00:00Z',
+      author: { id: 'did:plc:mill123', name: 'MILL MESSENGER', handle: 'millmessenger.bsky.social' },
+      _meta: { bluesky: { uri: 'at://did:plc:mill123/app.bsky.feed.post/p1', cid: 'cid_mill_1' } },
+    });
+    setStreamItems('feed', initialHarvest.items);
+    activityStore.set({
+      ...activityStore.get(),
+      items: [
+        {
+          id: 'act_mill_1',
+          protocol: 'bluesky',
+          _meta: { notification: { actor: { id: 'did:plc:mill123', handle: 'millmessenger.bsky.social' } } },
+          author: { id: 'did:plc:mill123', handle: 'millmessenger.bsky.social' },
+        },
+      ],
+    });
+    recordBehavioralSignal(millUnified, 'open_thread');
+
+    // 2. Mute @millmessenger.bsky.social while Bluesky bridge is offline (public AppView case)
+    await toggleMuteAuthor(millUnified.author.id, false, {
+      protocol: 'bluesky',
+      acct: 'millmessenger.bsky.social',
+      displayName: 'MILL MESSENGER',
+    });
+    removePostAcrossStreams((it) => isUnifiedItemModerated(it, feedStore.get().moderatedActors));
+    removeActivityByActor(millUnified.author, 'bluesky');
+    purgeModeratedAuthorAffinity([
+      canonicalizeActorHandle('millmessenger.bsky.social', 'bluesky'),
+      'did:plc:mill123',
+    ]);
+
+    assert.ok(feedStore.get().moderatedActors.includes('bluesky:millmessenger.bsky.social'));
+    assert.ok(feedStore.get().moderatedActors.some((k) => k.includes('did:plc:mill123')));
+    assert.equal(
+      feedStore.get().streams.feed.items.some((p) => (p.author?.handle || '').includes('millmessenger')),
+      false,
+      'Native Bluesky and Bridgy mirror posts must be removed from Feed immediately'
+    );
+    assert.equal(activityStore.get().items.length, 0);
+    assert.equal(feedStore.get().implicitAuthors['bluesky:millmessenger.bsky.social'], undefined);
+
+    // 3. Simulated app reload: re-hydrate moderation from nativeStore and re-harvest upstream Feed
+    clearHarvesterCacheForTests();
+    resetFeedStoreForTests();
+    await hydrateCachedModeration();
+    const afterReloadHarvest = await harvestSanctuaryFeed({
+      fediAuth: await getAuthenticatedAccount('fediverse'),
+      bskyAuth: null,
+      tuning: DEFAULT_FEED_TUNING,
+      moderatedActors: feedStore.get().moderatedActors,
+      forceRefresh: true,
+    });
+    assert.equal(
+      afterReloadHarvest.items.some((p) => (p.author?.handle || '').includes('millmessenger')),
+      false,
+      'Muted Bluesky account must remain filtered after reload and fresh Feed harvest'
+    );
+
+    // Also verify upstream Bluesky viewer.muted flag is filtered by applyKeywordFilters
+    const viewerMutedItem = toUnifiedItem({
+      id: 'bluesky:at://did:plc:vm9/app.bsky.feed.post/1',
+      protocol: 'bluesky',
+      content_text: 'Server-muted Bluesky post',
+      date_published: '2026-11-20T12:00:00Z',
+      author: { id: 'did:plc:vm9', handle: 'vm9.bsky.social', viewer: { muted: true } },
+      _meta: { bluesky: { uri: 'at://did:plc:vm9/app.bsky.feed.post/1', viewerMuted: true } },
+    });
+    assert.equal(applyKeywordFilters([viewerMutedItem, millUnified], [], feedStore.get().moderatedActors).length, 0);
+
+    // 4. AuthorSheetModal reflects Muted badge + Unmute button even when disconnected
+    authorSheetHandle = openAuthorSheetModal({
+      author: { id: 'did:plc:mill123', name: 'MILL MESSENGER', handle: 'millmessenger.bsky.social', protocol: 'bluesky' },
+      item: millUnified,
+    });
+    await new Promise((r) => setTimeout(r, 20));
+    const sheetDlg = dom.document.getElementById('author-sheet-dialog');
+    assert.ok(sheetDlg);
+    assert.ok(sheetDlg.textContent.includes('Muted'));
+    assert.ok(sheetDlg.textContent.includes('Unmute'));
+    authorSheetHandle?.close?.();
+    authorSheetHandle = null;
+
+    // 5. SettingsModal -> Moderation lists locally persisted @millmessenger.bsky.social and Unmute clears it
+    settingsHandle = openSettingsModal({ initialTab: 'moderation' });
+    await new Promise((r) => setTimeout(r, 30));
+    const settingsDlg = dom.document.getElementById('connection-settings-dialog');
+    assert.ok(settingsDlg && settingsDlg.textContent.includes('millmessenger.bsky.social'));
+    const unmuteBtn = Array.from(settingsDlg.querySelectorAll('button')).find(
+      (b) => b.textContent.trim() === 'Unmute'
+    );
+    assert.ok(unmuteBtn, 'SettingsModal must show Unmute button for locally muted Bluesky account');
+    unmuteBtn.click();
+    await new Promise((r) => setTimeout(r, 40));
+    assert.equal(feedStore.get().moderatedActors.includes('bluesky:millmessenger.bsky.social'), false);
+    const localAfterUnmute = await getLocalModeratedAccounts();
+    assert.equal(
+      localAfterUnmute.mutes.some((m) => String(m.acct || m.username || '').includes('millmessenger')),
+      false
+    );
+    settingsHandle?.close?.();
+    settingsHandle = null;
+
+    // 6. Mastodon remote instance mute resolves lookup_account and isolates same username across instances
+    const fossUnified = toUnifiedItem({
+      network: 'fediverse',
+      id: 'm_foss_alice',
+      instanceUrl: 'https://fosstodon.org',
+      content_text: 'Alice on Fosstodon',
+      date_published: '2026-11-20T12:00:00Z',
+      author: { id: '9901', name: 'Alice Foss', handle: 'alice@fosstodon.org' },
+      _meta: { mastodon: { statusId: 'm_foss_alice', instanceUrl: 'https://fosstodon.org' } },
+    });
+    const kolUnified = toUnifiedItem({
+      network: 'fediverse',
+      id: 'm_kol_alice',
+      instanceUrl: 'https://kolektiva.social',
+      content_text: 'Alice on Kolektiva',
+      date_published: '2026-11-20T12:00:00Z',
+      author: { id: '7701', name: 'Alice Kol', handle: 'alice@kolektiva.social' },
+      _meta: { mastodon: { statusId: 'm_kol_alice', instanceUrl: 'https://kolektiva.social' } },
+    });
+    await toggleMuteAuthor(fossUnified.author.id, false, {
+      protocol: 'mastodon',
+      acct: 'alice@fosstodon.org',
+      displayName: 'Alice Foss',
+      instanceUrl: 'https://fosstodon.org',
+    });
+    assert.ok(mastoLookupCalls.some((u) => u.includes('alice%40fosstodon.org') || u.includes('alice@fosstodon.org')));
+    assert.ok(mastoMuteCalls.some((c) => c.url.includes('/api/v1/accounts/remote_9901/mute')));
+    assert.equal(isUnifiedItemModerated(fossUnified, feedStore.get().moderatedActors), true);
+    assert.equal(isUnifiedItemModerated(kolUnified, feedStore.get().moderatedActors), false);
+  } finally {
+    authorSheetHandle?.close?.();
+    settingsHandle?.close?.();
+    clearHarvesterCacheForTests();
+    resetMemoryStorageForTests();
+    resetFeedStoreForTests();
+    resetAuthStoreForTests();
+    resetConnectionStoreForTests();
+    globalThis.fetch = prevFetch;
+    dom.restore();
+  }
+});
+
+test('Default Sanctuary discovery sources, Lemmy v3 post harvesting, and auth-gated Mastodon trends fallback work cleanly', async () => {
+  assert.deepEqual([...DEFAULT_SANCTUARY_CHANNELS], [
+    'council communism',
+    'left communism',
+    'workers councils',
+    'historical materialism',
+    'pannekoek',
+    'at://did:plc:b3mupbm5prwiusw43fy7dgwb/app.bsky.feed.generator/aaadx3mkuxx7i',
+  ]);
+  assert.deepEqual([...DEFAULT_SANCTUARY_INSTANCES], [
+    'kolektiva.social',
+    'social.coop',
+    'union.place',
+    'todon.eu',
+    'todon.nl',
+    'babka.social',
+    'lemmy.ml',
+    'hexbear.net',
+    'lemmygrad.ml',
+    'lemmy.dbzer0.com',
+  ]);
+  assert.equal(conceptToHashtag('workers councils'), 'workerscouncils');
+  assert.equal(conceptToHashtag('worker councils'), 'workerscouncils');
+  assert.deepEqual(normalizeFeedTuning({ discoveryInstances: ['://lemmy.dbzer0.com'] }).discoveryInstances, ['lemmy.dbzer0.com']);
+
+  const seenUrls = [];
+  const mockFetch = async (url) => {
+    const u = String(url);
+    seenUrls.push(u);
+    if (u.startsWith('https://hexbear.net/api/v3/post/list')) {
+      return new Response(
+        JSON.stringify({
+          next_page: 'P99ec80',
+          posts: [
+            {
+              post: {
+                id: 10089572,
+                name: 'Council communism discussion thread',
+                body: 'Notes on workers councils.\n\nSecond paragraph.',
+                url: 'https://example.org/essay',
+                ap_id: 'https://hexbear.net/post/10089572',
+                published: '2026-11-20T19:59:17Z',
+                nsfw: false,
+              },
+              creator: {
+                id: 220,
+                name: 'wombat',
+                display_name: 'wombat',
+                actor_id: 'https://hexbear.net/u/wombat',
+              },
+              community: {
+                id: 342883,
+                name: 'theory',
+                nsfw: false,
+              },
+              counts: {
+                comments: 4,
+                upvotes: 19,
+                score: 19,
+              },
+            },
+          ],
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      );
+    }
+    if (u.startsWith('https://lemmy.dbzer0.com/api/v3/post/list')) {
+      return new Response(
+        JSON.stringify({
+          next_page: 'P4b142c4',
+          posts: [
+            {
+              post: {
+                id: 78726672,
+                name: 'Mutual aid infographic',
+                url: 'https://lemmy.dbzer0.com/pictrs/image/sample.webp',
+                thumbnail_url: 'https://lemmy.dbzer0.com/pictrs/image/thumb.webp',
+                ap_id: 'https://lemmy.dbzer0.com/post/78726672',
+                published: '2026-11-20T21:18:11Z',
+              },
+              creator: {
+                id: 15,
+                name: 'archivist',
+                actor_id: 'https://lemmy.dbzer0.com/u/archivist',
+              },
+              community: { name: 'anarchism', nsfw: false },
+              counts: { comments: 1, upvotes: 7 },
+            },
+          ],
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      );
+    }
+    if (u.startsWith('https://todon.eu/api/v1/timelines/public')) {
+      return new Response(JSON.stringify({ error: 'This method requires an authenticated user' }), {
+        status: 422,
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+    if (u.startsWith('https://todon.eu/api/v1/trends/statuses')) {
+      return new Response(
+        JSON.stringify([
+          {
+            id: 't_trend_1',
+            created_at: '2026-11-20T20:39:43.000Z',
+            content: '<p>Trending status on todon.eu</p>',
+            url: 'https://todon.eu/@member/1',
+            uri: 'https://todon.eu/users/member/statuses/1',
+            account: { id: 'm1', username: 'member', acct: 'member', display_name: 'Member' },
+            media_attachments: [],
+            emojis: [],
+          },
+        ]),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      );
+    }
+    return new Response('[]', { status: 200, headers: { 'content-type': 'application/json' } });
+  };
+
+  const hexbearPage = await getLemmyLocalPosts({ instanceUrl: 'https://hexbear.net', limit: 12, fetchImpl: mockFetch });
+  assert.equal(hexbearPage.items.length, 1);
+  assert.equal(hexbearPage.nextCursor, 'P99ec80');
+  assert.equal(hexbearPage.items[0].linkCard.url, 'https://example.org/essay');
+  assert.equal(hexbearPage.items[0].author.acct, 'wombat@hexbear.net');
+
+  const dbzPage = await fetchDiscoveryInstanceTimeline({ host: 'lemmy.dbzer0.com', maxId: 'P100', fetchImpl: mockFetch });
+  assert.equal(dbzPage.items.length, 1);
+  assert.equal(dbzPage.items[0].media[0].url, 'https://lemmy.dbzer0.com/pictrs/image/sample.webp');
+  assert.ok(seenUrls.some((u) => u.includes('lemmy.dbzer0.com/api/v3/post/list') && u.includes('page_cursor=P100')));
+
+  const todonPage = await fetchDiscoveryInstanceTimeline({ host: 'todon.eu', fetchImpl: mockFetch });
+  assert.equal(todonPage.items.length, 1);
+  assert.equal(todonPage.items[0].id, 't_trend_1');
+  assert.ok(seenUrls.some((u) => u.includes('todon.eu/api/v1/trends/statuses')));
+
+  const harvested = await harvestSanctuaryFeed({
+    tuning: {
+      sliders: { recencyHalfLifeHours: 8 },
+      discoveryChannels: ['council communism', 'at://did:plc:b3mupbm5prwiusw43fy7dgwb/app.bsky.feed.generator/aaadx3mkuxx7i'],
+      discoveryInstances: ['hexbear.net', 'todon.eu'],
+    },
+    fetchImpl: mockFetch,
+    forceRefresh: true,
+  });
+  assert.ok(harvested.items.some((it) => it.content_text.includes('Council communism discussion thread')));
+  assert.ok(harvested.items.some((it) => it.content_text.includes('Trending status on todon.eu')));
+});
+
+test('Threads client relays via /api/social/threads-proxy when Sanctuary node is online and falls back to direct fetch when dormant', async () => {
+  const prevFetch = globalThis.fetch;
+  const prevLoc = globalThis.location;
+  globalThis.location = { origin: 'http://127.0.0.1:5000', protocol: 'http:', hostname: '127.0.0.1', port: '5000' };
+
+  const { verifyThreadsCredentials, deleteThreadsPost, exchangeThreadsLongLivedToken } = await import('../web/queries/threads.js');
+  const calls = [];
+  let proxyMode = 'ok';
+
+  globalThis.fetch = async (url, init = {}) => {
+    const u = String(url);
+    const bodyText = typeof init?.body === 'string' ? init.body : '';
+    calls.push({ url: u, method: init?.method || 'GET', body: bodyText });
+    if (u === 'http://127.0.0.1:5000/api/social/threads-proxy') {
+      const payload = JSON.parse(bodyText);
+      if (proxyMode === 'err400') {
+        return new Response(
+          JSON.stringify({
+            status: 400,
+            body: { error: { message: 'Invalid OAuth access token', error_user_msg: 'Token expired' } },
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } }
+        );
+      }
+      if (payload.method === 'DELETE') {
+        return new Response(JSON.stringify({ status: 200, body: { success: true } }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      return new Response(
+        JSON.stringify({ status: 200, body: { id: 'th_uid_1', username: 'davy_threads' } }),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      );
+    }
+    if (u.startsWith('https://graph.threads.net/access_token')) {
+      return new Response(JSON.stringify({ access_token: 'long_tok_1', expires_in: 5184000 }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+    return new Response('{}', { status: 404 });
+  };
+
+  try {
+    resetConnectionStoreForTests();
+    connectionStore.set({ mode: 'online', nodeUrl: 'http://127.0.0.1:5000' });
+
+    const me = await verifyThreadsCredentials({ accessToken: 'th_tok_1' });
+    assert.equal(me.username, 'davy_threads');
+    assert.equal(calls[0].url, 'http://127.0.0.1:5000/api/social/threads-proxy');
+    const firstPayload = JSON.parse(calls[0].body);
+    assert.equal(firstPayload.method, 'GET');
+    assert.ok(firstPayload.url.startsWith('https://graph.threads.net/v1.0/me?'));
+
+    const delRes = await deleteThreadsPost({ postId: '9988', accessToken: 'th_tok_1' });
+    assert.equal(delRes.success, true);
+    assert.equal(JSON.parse(calls[1].body).method, 'DELETE');
+
+    proxyMode = 'err400';
+    await assert.rejects(
+      () => verifyThreadsCredentials({ accessToken: 'bad_tok' }),
+      (err) => err?.name === 'FetchError' && err.status === 400 && err.message === 'Token expired'
+    );
+
+    // Dormant mode bypasses the desktop proxy and uses direct fetch (for standalone PWA / APK)
+    resetConnectionStoreForTests();
+    const exchanged = await exchangeThreadsLongLivedToken({ clientSecret: 'sec', accessToken: 'short_tok' });
+    assert.equal(exchanged.access_token, 'long_tok_1');
+    assert.ok(calls[calls.length - 1].url.startsWith('https://graph.threads.net/access_token?'));
+  } finally {
+    resetConnectionStoreForTests();
+    globalThis.location = prevLoc;
     globalThis.fetch = prevFetch;
   }
 });

@@ -1,4 +1,5 @@
 import { isAllowedSocialUrl } from '../constants/endpoints.js';
+import { requestSocialBridge } from './sanctuary.js';
 
 const HTTPS_URL_RE = /https:\/\/[^\s<>"'`]+/g;
 const YT_ID_RE = /^[A-Za-z0-9_-]{11}$/;
@@ -47,6 +48,7 @@ export function parseVideoEmbedInfo(url) {
   const parts = parsed.pathname.split('/').filter(Boolean);
 
   let ytId = '';
+  let isShorts = false;
   if (host === 'youtu.be') {
     const cand = parts[0] || '';
     if (YT_ID_RE.test(cand)) ytId = cand;
@@ -62,7 +64,10 @@ export function parseVideoEmbedInfo(url) {
       const cand = parsed.searchParams.get('v') || '';
       if (YT_ID_RE.test(cand)) ytId = cand;
     } else if (parts.length >= 2 && (parts[0] === 'shorts' || parts[0] === 'live' || parts[0] === 'embed')) {
-      if (YT_ID_RE.test(parts[1])) ytId = parts[1];
+      if (YT_ID_RE.test(parts[1])) {
+        ytId = parts[1];
+        isShorts = parts[0] === 'shorts';
+      }
     }
   }
 
@@ -73,6 +78,7 @@ export function parseVideoEmbedInfo(url) {
       embedUrl: `https://www.youtube-nocookie.com/embed/${ytId}?autoplay=1&rel=0`,
       thumbnailUrl: `https://i.ytimg.com/vi/${ytId}/hqdefault.jpg`,
       canonicalUrl: `https://www.youtube.com/watch?v=${ytId}`,
+      ...(isShorts ? { isPortrait: true } : {}),
     };
   }
 
@@ -99,17 +105,6 @@ function isPublicHttpsHost(parsed) {
     return false;
   }
   return isAllowedSocialUrl(parsed.href);
-}
-
-function getBackendOriginIfAvailable() {
-  if (globalThis.Capacitor?.Plugins?.SanctuaryNativeStore) return '';
-  if (typeof globalThis.process?.versions?.node === 'string' && !globalThis.__SANCTUARY_FORCE_HTTP_STORE__) {
-    return '';
-  }
-  const loc = globalThis.location;
-  if (!loc || !loc.origin || loc.origin === 'null') return '';
-  if (loc.protocol !== 'http:' && loc.protocol !== 'https:') return '';
-  return loc.origin.replace(/\/+$/, '');
 }
 
 function mergeSignal(callerSignal, timeoutMs = 6000) {
@@ -162,28 +157,13 @@ export async function fetchLinkPreview(url, { signal, fetchImpl } = {}) {
 
   const doFetch = fetchImpl || globalThis.fetch;
   const reqSignal = mergeSignal(signal, 6000);
-  const origin = !fetchImpl ? getBackendOriginIfAvailable() : '';
 
-  if (origin && typeof doFetch === 'function') {
-    try {
-      const res = await doFetch(`${origin}/api/social/link-preview`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url: cleanUrl }),
-        ...(reqSignal ? { signal: reqSignal } : {}),
-      });
-      if (res.ok) {
-        const data = await res.json().catch(() => null);
-        if (data?.card?.url) {
-          if (!fetchImpl) {
-            if (previewCache.size >= 128) previewCache.delete(previewCache.keys().next().value);
-            previewCache.set(cleanUrl, { value: data.card, expiresAt: now + LINK_PREVIEW_TTL_MS });
-          }
-          return { ...data.card };
-        }
-      }
-    } catch {
-      // Fall through to public oEmbed / video metadata
+  if (!fetchImpl) {
+    const res = await requestSocialBridge('/link-preview', { url: cleanUrl }, { timeoutMs: 6000 });
+    if (res?.card?.url) {
+      if (previewCache.size >= 128) previewCache.delete(previewCache.keys().next().value);
+      previewCache.set(cleanUrl, { value: res.card, expiresAt: now + LINK_PREVIEW_TTL_MS });
+      return { ...res.card };
     }
   }
 

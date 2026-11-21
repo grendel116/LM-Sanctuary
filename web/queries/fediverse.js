@@ -52,6 +52,119 @@ function escapeHtmlAttr(value) {
     .replace(/'/g, '&#39;');
 }
 
+export const MAX_VISIBLE_URL_CHARS = 26;
+
+/**
+ * Split a raw HTTP(S) URL label into hidden scheme/tail and capped visible prefix parts
+ * while keeping full text intact in the DOM for accessibility, copy, and search.
+ * @param {string} rawLabel
+ * @param {string} [safeHref]
+ */
+export function splitUrlDisplayParts(rawLabel, safeHref = '') {
+  const label = String(rawLabel || '');
+  if (!label || /\s/.test(label) || label.startsWith('@') || label.startsWith('#') || /(?:\.\.\.|…)$/.test(label)) {
+    return null;
+  }
+  const schemeMatch = /^(https?:\/\/(?:www\.)?)/i.exec(label);
+  let matchesHrefHost = false;
+  if (!schemeMatch && safeHref) {
+    try {
+      const parsed = new URL(String(safeHref));
+      if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+        const host = parsed.hostname.toLowerCase().replace(/^www\./, '');
+        const cleanLabel = label.toLowerCase().replace(/^www\./, '');
+        matchesHrefHost = Boolean(
+          host
+          && (cleanLabel === host || cleanLabel.startsWith(`${host}/`) || cleanLabel.startsWith(`${host}?`) || cleanLabel.startsWith(`${host}#`))
+          && [...label].length > MAX_VISIBLE_URL_CHARS
+        );
+      }
+    } catch {
+      matchesHrefHost = false;
+    }
+  }
+  if (!schemeMatch && !matchesHrefHost) {
+    return null;
+  }
+
+  const prefix = schemeMatch ? schemeMatch[1] : '';
+  const rest = label.slice(prefix.length);
+  if (!rest) return null;
+
+  const restChars = [...rest];
+  if (rest.endsWith('/') && restChars.length - 1 <= MAX_VISIBLE_URL_CHARS && !rest.slice(0, -1).includes('/')) {
+    return {
+      prefix,
+      visible: rest.slice(0, -1),
+      ellipsis: false,
+      tail: '/',
+    };
+  }
+  if (restChars.length <= MAX_VISIBLE_URL_CHARS) {
+    return {
+      prefix,
+      visible: rest,
+      ellipsis: false,
+      tail: '',
+    };
+  }
+  return {
+    prefix,
+    visible: restChars.slice(0, MAX_VISIBLE_URL_CHARS).join(''),
+    ellipsis: true,
+    tail: restChars.slice(MAX_VISIBLE_URL_CHARS).join(''),
+  };
+}
+
+/**
+ * Format an HTTP(S) anchor label using `.invisible` and `.ellipsis` spans for CSS truncation.
+ * @param {string} rawLabel
+ * @param {string} [safeHref]
+ * @returns {string}
+ */
+export function formatTruncatedUrlInnerHtml(rawLabel, safeHref = '') {
+  const parts = splitUrlDisplayParts(rawLabel, safeHref);
+  if (!parts) return escapeHtmlText(String(rawLabel || ''));
+  const chunks = [];
+  if (parts.prefix) {
+    chunks.push(`<span class="invisible">${escapeHtmlText(parts.prefix)}</span>`);
+  }
+  if (parts.visible) {
+    chunks.push(
+      parts.ellipsis
+        ? `<span class="ellipsis">${escapeHtmlText(parts.visible)}</span>`
+        : `<span>${escapeHtmlText(parts.visible)}</span>`
+    );
+  }
+  if (parts.tail) {
+    chunks.push(`<span class="invisible">${escapeHtmlText(parts.tail)}</span>`);
+  }
+  return chunks.join('');
+}
+
+export function buildUrlDisplayFragment(doc, parts) {
+  const frag = doc.createDocumentFragment();
+  if (parts.prefix) {
+    const sp = doc.createElement('span');
+    sp.className = 'invisible';
+    sp.textContent = parts.prefix;
+    frag.appendChild(sp);
+  }
+  if (parts.visible) {
+    const sp = doc.createElement('span');
+    if (parts.ellipsis) sp.className = 'ellipsis';
+    sp.textContent = parts.visible;
+    frag.appendChild(sp);
+  }
+  if (parts.tail) {
+    const sp = doc.createElement('span');
+    sp.className = 'invisible';
+    sp.textContent = parts.tail;
+    frag.appendChild(sp);
+  }
+  return frag;
+}
+
 export function decodeHtmlEntities(str) {
   return String(str || '').replace(/&(#x?[0-9a-fA-F]+|[a-zA-Z]+);/g, (full, ent) => {
     const lower = ent.toLowerCase();
@@ -457,6 +570,21 @@ function appendDomNodesFromCleanHtml(containerEl, cleanHtml) {
   appendCleanHtmlWithoutDomParser(containerEl, cleanHtml);
 }
 
+function decorateBareUrlAnchors(containerEl) {
+  if (!containerEl || typeof containerEl.querySelectorAll !== 'function') return;
+  const doc = containerEl.ownerDocument || globalThis.document;
+  if (!doc) return;
+  for (const anchor of containerEl.querySelectorAll('a[href]')) {
+    const cls = anchor.getAttribute?.('class') || '';
+    if (/\b(?:mention|hashtag)\b/.test(cls)) continue;
+    if (anchor.childNodes.length !== 1 || anchor.childNodes[0]?.nodeType !== 3) continue;
+    const rawText = anchor.childNodes[0].nodeValue || '';
+    const parts = splitUrlDisplayParts(rawText, anchor.getAttribute?.('href') || '');
+    if (!parts) continue;
+    anchor.replaceChildren(buildUrlDisplayFragment(doc, parts));
+  }
+}
+
 /**
  * Safely mount untrusted Fediverse HTML inside a DOM element without innerHTML assignment.
  * Prefers native Element.prototype.setHTML() when present and falls back to DOMParser allowlist node creation.
@@ -470,18 +598,28 @@ export function renderSanitizedHtml(containerEl, html, customEmojis = []) {
   const cleanHtml = sanitizeFediverseHtmlToString(html, customEmojis);
   if (!cleanHtml) return;
 
-  if (typeof containerEl.setHTML === 'function') {
-    containerEl.setHTML(cleanHtml);
+  if ('setHTML' in containerEl && typeof containerEl.setHTML === 'function') {
+    const sanitizerConfig = {
+      elements: [...ALLOWED_TAGS, 'img'],
+      attributes: [...ALLOWED_NODE_ATTRS],
+    };
+    try {
+      containerEl.setHTML(cleanHtml, { sanitizer: sanitizerConfig });
+    } catch {
+      appendDomNodesFromCleanHtml(containerEl, cleanHtml);
+    }
     if (typeof containerEl.querySelectorAll === 'function') {
       for (const anchor of containerEl.querySelectorAll('a[href]')) {
         anchor.setAttribute('rel', 'noopener noreferrer');
         anchor.setAttribute('target', '_blank');
       }
     }
+    decorateBareUrlAnchors(containerEl);
     return;
   }
 
   appendDomNodesFromCleanHtml(containerEl, cleanHtml);
+  decorateBareUrlAnchors(containerEl);
 }
 
 /**
@@ -780,12 +918,16 @@ export function normalizeMastodonStatus(raw, instanceUrl) {
     createdAtMs: Date.parse(post.created_at || raw.created_at || '') || 0,
     author: normalizeMastodonAccount(post.account || {}, origin),
     rebloggedBy: reblogSource ? normalizeMastodonAccount(raw.account || {}, origin) : null,
+    rebloggedAt: reblogSource ? String(raw.created_at || '') : '',
+    pinned: Boolean(post.pinned),
     contentHtml: post.content || '',
     sanitizedHtml: sanitizeFediverseHtmlToString(post.content || '', emojis),
     spoilerText: post.spoiler_text || '',
     sensitive: Boolean(post.sensitive),
     visibility: post.visibility || 'public',
+    language: post.language ? String(post.language).trim().toLowerCase() : '',
     inReplyToId: post.in_reply_to_id ? String(post.in_reply_to_id) : null,
+    inReplyToAccountId: post.in_reply_to_account_id ? String(post.in_reply_to_account_id) : null,
     media: Array.isArray(post.media_attachments)
       ? post.media_attachments.map((att) => ({
           id: String(att.id || ''),
@@ -900,6 +1042,7 @@ export async function getTimeline({
   maxId = '',
   sinceId = '',
   limit = 20,
+  timeoutMs,
   fetchImpl,
 }) {
   const origin = normalizeInstanceUrl(instanceUrl);
@@ -924,6 +1067,33 @@ export async function getTimeline({
   const res = await fetchWrapper(`${origin}${path}?${params.toString()}`, {
     headers: authHeaders(accessToken),
     responseType: 'raw',
+    ...(timeoutMs ? { timeoutMs } : {}),
+    fetchImpl,
+  });
+  const list = await res.json();
+  const items = Array.isArray(list) ? list.map((s) => normalizeMastodonStatus(s, origin)) : [];
+  const nextCursor = items.length >= limit ? extractNextMaxIdFromHeaders(res.headers, list) : null;
+  return { items, nextCursor };
+}
+
+export async function getTagTimeline({
+  instanceUrl = 'https://mastodon.social',
+  accessToken = '',
+  tag = '',
+  maxId = '',
+  limit = 15,
+  timeoutMs,
+  fetchImpl,
+} = {}) {
+  const cleanTag = String(tag || '').trim().replace(/^#+/, '').replace(/[^\p{L}\p{N}_]/gu, '');
+  if (!cleanTag) return { items: [], nextCursor: null };
+  const origin = normalizeInstanceUrl(instanceUrl);
+  const params = new URLSearchParams({ limit: String(limit) });
+  if (maxId) params.set('max_id', maxId);
+  const res = await fetchWrapper(`${origin}/api/v1/timelines/tag/${encodeURIComponent(cleanTag)}?${params.toString()}`, {
+    headers: authHeaders(accessToken),
+    responseType: 'raw',
+    ...(timeoutMs ? { timeoutMs } : {}),
     fetchImpl,
   });
   const list = await res.json();
@@ -936,6 +1106,7 @@ export async function getTrendingStatuses({
   instanceUrl = 'https://mastodon.social',
   limit = 20,
   offset = 0,
+  timeoutMs,
   fetchImpl,
 } = {}) {
   const origin = normalizeInstanceUrl(instanceUrl);
@@ -944,6 +1115,7 @@ export async function getTrendingStatuses({
     offset: String(Math.max(0, Number(offset) || 0)),
   });
   const list = await fetchWrapper(`${origin}/api/v1/trends/statuses?${params.toString()}`, {
+    ...(timeoutMs ? { timeoutMs } : {}),
     fetchImpl,
   });
   const items = Array.isArray(list) ? list.map((s) => normalizeMastodonStatus(s, origin)) : [];
@@ -951,6 +1123,200 @@ export async function getTrendingStatuses({
     items,
     nextOffset: items.length >= limit ? (Number(offset) || 0) + items.length : null,
   };
+}
+
+/**
+ * Return true if the host/origin matches a known Lemmy / Hexbear instance domain.
+ * @param {string} hostOrUrl
+ * @returns {boolean}
+ */
+export function isLemmyInstanceHost(hostOrUrl) {
+  const clean = String(hostOrUrl || '')
+    .trim()
+    .toLowerCase()
+    .replace(/^(?:https?:\/\/|:\/\/|\/\/)/, '')
+    .split(/[/?#]/)[0]
+    .replace(/\.$/, '');
+  if (!clean) return false;
+  return /^(?:lemmy[a-z0-9-]*\.|hexbear\.net$)/i.test(clean) || /\.lemmy\./i.test(clean);
+}
+
+/**
+ * Normalize a Lemmy v3 PostView row ({ post, creator, community, counts }) into a fediverse PostItem.
+ * @param {object} row
+ * @param {string} instanceUrl
+ */
+export function normalizeLemmyPost(row, instanceUrl) {
+  const origin = normalizeInstanceUrl(instanceUrl);
+  const host = new URL(origin).host;
+  const post = row?.post || {};
+  const creator = row?.creator || {};
+  const community = row?.community || {};
+  const counts = row?.counts || {};
+
+  const postId = String(post.id || '');
+  const permalink = sanitizeHref(post.ap_id || '') || `${origin}/post/${encodeURIComponent(postId)}`;
+
+  let creatorHost = host;
+  if (creator.actor_id) {
+    try {
+      creatorHost = new URL(creator.actor_id).host || host;
+    } catch {
+      creatorHost = host;
+    }
+  }
+  const creatorName = String(creator.name || '').trim();
+  const acct = creatorName ? `${creatorName}@${creatorHost}` : host;
+  const displayName = decodeHtmlEntities(String(creator.display_name || creatorName || acct)).trim();
+
+  const title = decodeHtmlEntities(String(post.name || '')).trim();
+  const bodyText = decodeHtmlEntities(String(post.body || '')).trim();
+  const commName = String(community.name || '').trim();
+  const communityLabel = commName ? `!${commName}@${host}` : '';
+
+  const htmlParts = [];
+  if (title) {
+    htmlParts.push(`<p><strong>${escapeHtmlText(title)}</strong></p>`);
+  }
+  if (communityLabel) {
+    htmlParts.push(`<p><span>${escapeHtmlText(communityLabel)}</span></p>`);
+  }
+  if (bodyText) {
+    for (const para of bodyText.replace(/\r\n/g, '\n').split(/\n{2,}/)) {
+      const trimmed = para.trim();
+      if (trimmed) {
+        htmlParts.push(`<p>${trimmed.split('\n').map((line) => escapeHtmlText(line)).join('<br>')}</p>`);
+      }
+    }
+  }
+  const contentHtml = htmlParts.join('');
+
+  const safePostUrl = sanitizeHref(post.url || '');
+  const safeThumb = cleanMastodonMediaUrl(sanitizeHref(post.thumbnail_url || '') || '');
+  const isImagePostUrl = Boolean(
+    safePostUrl
+    && (/\.(?:jpe?g|png|gif|webp|avif)(?:\?.*)?$/i.test(safePostUrl) || /\/(?:pictrs\/image|image_proxy)\b/i.test(safePostUrl))
+  );
+
+  const media = isImagePostUrl
+    ? [{
+        id: `lemmy-media:${postId}`,
+        type: 'image',
+        url: safePostUrl,
+        previewUrl: safeThumb || safePostUrl,
+        description: title,
+        width: 0,
+        height: 0,
+        meta: null,
+      }]
+    : [];
+
+  let linkCard = null;
+  if (safePostUrl && !isImagePostUrl && safePostUrl !== permalink) {
+    linkCard = {
+      url: safePostUrl,
+      title: decodeHtmlEntities(String(post.embed_title || title || safePostUrl)),
+      description: decodeHtmlEntities(String(post.embed_description || '')),
+      image: safeThumb,
+    };
+  }
+
+  const publishedAt = String(post.published || counts.published || '');
+  return {
+    key: `fediverse:${origin}:lemmy:${post.ap_id || postId}`,
+    network: 'fediverse',
+    instanceUrl: origin,
+    id: `lemmy:${postId}`,
+    wrapperId: `lemmy:${postId}`,
+    uri: post.ap_id || permalink,
+    url: permalink,
+    createdAt: publishedAt,
+    createdAtMs: Date.parse(publishedAt) || 0,
+    author: {
+      id: String(creator.id || ''),
+      username: creatorName || host,
+      acct,
+      displayName,
+      avatar: cleanMastodonMediaUrl(creator.avatar || ''),
+      header: '',
+      url: sanitizeHref(creator.actor_id || '') || '',
+      note: '',
+      noteText: '',
+      fields: [],
+      locked: false,
+      bot: Boolean(creator.bot_account),
+      discoverable: true,
+      indexable: true,
+      hideCollections: false,
+      defaultVisibility: 'public',
+      defaultSensitive: false,
+      defaultLanguage: 'en',
+      attributionDomains: [],
+      followersCount: 0,
+      followingCount: 0,
+      statusesCount: 0,
+      emojis: [],
+    },
+    rebloggedBy: null,
+    rebloggedAt: '',
+    pinned: Boolean(post.featured_local || post.featured_community),
+    contentHtml,
+    sanitizedHtml: sanitizeFediverseHtmlToString(contentHtml, []),
+    spoilerText: '',
+    sensitive: Boolean(post.nsfw || community.nsfw),
+    visibility: 'public',
+    language: '',
+    inReplyToId: null,
+    inReplyToAccountId: null,
+    media,
+    emojis: [],
+    linkCard,
+    counts: {
+      replies: Number(counts.comments || 0),
+      reposts: 0,
+      likes: Number(counts.upvotes ?? counts.score ?? 0),
+    },
+    viewerState: {
+      favourited: false,
+      reblogged: false,
+      bookmarked: false,
+    },
+    raw: row,
+  };
+}
+
+/**
+ * Fetch local posts from a Lemmy v3 / Hexbear instance (/api/v3/post/list).
+ */
+export async function getLemmyLocalPosts({
+  instanceUrl,
+  pageCursor = '',
+  limit = 12,
+  timeoutMs,
+  fetchImpl,
+} = {}) {
+  const origin = normalizeInstanceUrl(instanceUrl);
+  const params = new URLSearchParams({
+    type_: 'Local',
+    sort: 'New',
+    limit: String(limit),
+  });
+  const cursorStr = String(pageCursor || '').trim();
+  if (cursorStr) {
+    if (/^\d+$/.test(cursorStr)) {
+      params.set('page', cursorStr);
+    } else {
+      params.set('page_cursor', cursorStr);
+    }
+  }
+  const data = await fetchWrapper(`${origin}/api/v3/post/list?${params.toString()}`, {
+    ...(timeoutMs ? { timeoutMs } : {}),
+    fetchImpl,
+  });
+  const rows = Array.isArray(data?.posts) ? data.posts : [];
+  const items = rows.map((row) => normalizeLemmyPost(row, origin));
+  const nextCursor = items.length > 0 && data?.next_page ? String(data.next_page) : null;
+  return { items, nextCursor };
 }
 
 export async function getUserLists({ instanceUrl, accessToken, fetchImpl }) {
@@ -1106,11 +1472,12 @@ export async function getAccountProfile({ instanceUrl, accessToken = '', account
   return normalizeMastodonAccount(raw, origin);
 }
 
-export async function lookupAccountByAcct({ instanceUrl, accessToken = '', acct, fetchImpl }) {
+export async function lookupAccountByAcct({ instanceUrl, accessToken = '', acct, timeoutMs, fetchImpl }) {
   const origin = normalizeInstanceUrl(instanceUrl);
   const cleanAcct = String(acct || '').trim().replace(/^@/, '');
   const raw = await fetchWrapper(`${origin}/api/v1/accounts/lookup?acct=${encodeURIComponent(cleanAcct)}`, {
     headers: authHeaders(accessToken),
+    ...(timeoutMs ? { timeoutMs } : {}),
     fetchImpl,
   });
   return normalizeMastodonAccount(raw, origin);
@@ -1122,20 +1489,23 @@ export async function getAccountStatuses({
   accountId,
   maxId = '',
   excludeReplies = false,
+  excludeReblogs = false,
   onlyMedia = false,
   pinned = false,
   limit = 20,
+  timeoutMs,
   fetchImpl,
 }) {
   const origin = normalizeInstanceUrl(instanceUrl);
   const params = new URLSearchParams({ limit: String(limit) });
   if (maxId) params.set('max_id', maxId);
   if (excludeReplies) params.set('exclude_replies', 'true');
+  if (excludeReblogs) params.set('exclude_reblogs', 'true');
   if (onlyMedia) params.set('only_media', 'true');
   if (pinned) params.set('pinned', 'true');
   const rows = await fetchWrapper(
     `${origin}/api/v1/accounts/${encodeURIComponent(accountId)}/statuses?${params.toString()}`,
-    { headers: authHeaders(accessToken), fetchImpl }
+    { headers: authHeaders(accessToken), ...(timeoutMs ? { timeoutMs } : {}), fetchImpl }
   );
   return Array.isArray(rows) ? rows.map((s) => normalizeMastodonStatus(s, origin)) : [];
 }
@@ -1297,6 +1667,38 @@ export async function toggleBookmark({ instanceUrl, accessToken, statusId, bookm
     fetchImpl,
   });
   return normalizeMastodonStatus(updated, origin);
+}
+
+export async function translateMastodonStatus({
+  instanceUrl,
+  accessToken = '',
+  statusId,
+  lang = 'en',
+  fetchImpl,
+}) {
+  const origin = normalizeInstanceUrl(instanceUrl);
+  const raw = await fetchWrapper(`${origin}/api/v1/statuses/${encodeURIComponent(statusId)}/translate`, {
+    method: 'POST',
+    headers: authHeaders(accessToken),
+    json: { lang },
+    timeoutMs: 8000,
+    fetchImpl,
+  });
+  const contentHtml = String(raw?.content || '');
+  return {
+    html: sanitizeFediverseHtmlToString(contentHtml, []),
+    text: decodeHtmlEntities(
+      contentHtml
+        .replace(/<br\s*\/?>/gi, '\n')
+        .replace(/<\/p\s*>/gi, '\n\n')
+        .replace(/<[^>]*>/g, '')
+    )
+      .replace(/\n{3,}/g, '\n\n')
+      .trim(),
+    spoilerText: String(raw?.spoiler_text || ''),
+    detectedSourceLanguage: String(raw?.detected_source_language || '').trim().toLowerCase(),
+    provider: raw?.provider ? `Mastodon (${raw.provider})` : 'Mastodon',
+  };
 }
 
 export async function updateCredentials({

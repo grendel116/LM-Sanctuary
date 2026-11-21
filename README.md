@@ -15,7 +15,7 @@ LM-Sanctuary is a unified sovereign client and local companion built on human-in
 3. **Coding & Autonomous Action**: Read, write, audit, and execute code directly on your local drive with human-in-the-loop approval.
 
 ### Sovereign Workspace
-100% Local-First workspace and social client. Your chats, memories, local SQLite social caches, credentials, and model weights stay on your own hardware, where local models and native clients do the work without cloud telemetry.
+100% Local-First workspace and social client. Your chats, memories, local caches, credentials, and model weights stay on your own hardware, where local models and native clients do the work without cloud telemetry.
 
 > [!NOTE]
 > **The Sanctuary Ethos**:
@@ -35,44 +35,34 @@ Here is what the LM-Sanctuary workspace looks like:
 * **Mastodon-First ActivityPub Client**: OAuth 2.0 and access-token sign-in (`mastodon.social` default or any ActivityPub server), `Feed` and `Following` timelines with stable scroll anchoring, nested conversation threads, rich link previews and privacy-preserving YouTube/Vimeo embed façades, multi-media carousels and classic lightbox viewer, snapshot post drafts, lists, keyword filters, follow/mutual graph explorer, profile studio, and Direct Messages (`Direct | Programs`).
 * **Unified `Bluesky` & `Threads` Bridges**: Optional AT Protocol (`Bluesky`) and Meta `Threads` bridges fan out posts and multi-part threads concurrently (auto-splitting at `300` graphemes for Bluesky and `500` characters for Mastodon and Threads), forward media and link embeds, synchronize post edits (in-place on Mastodon, delete-and-republish across bridges) and deletions with automatic retry queuing, and include a `.zip` archive importer to migrate Threads following and mutuals onto the Fediverse.
 * **Aggregated Cross-Platform Activity**: Unified `Activity` view merging Mastodon, Bluesky, and Threads notifications with grouped likes and reposts, cross-network engagement totals, unread nav indicator, and persistent notification deletion.
-* **Transparent Local Feed Tuning**: Declarative local feed sliders and optional local CPU semantic concept anchors (`web/core/feedRanker.js`, `social/semantic_scorer.py`, `tune_feed_algorithm`) stored in `sanctuary/variables/feed_profile.json`—zero opaque remote ranking.
-* **Strict Credential Isolation (Zero AI Social Dispatch)**: Timeline caches use local SQLite (`social/data/social.db` on Desktop/LAN or Android `SQLiteOpenHelper`, zero `IndexedDB`), while social tokens stay strictly in OS Credential Manager / Keychain (`social/storage/keychain.py`) or `AndroidKeyStore`. AI Programs (`sanctuary/`) hold zero social credentials and zero social publishing or timeline-reading tools; cross-over is strictly user-initiated via **Share-to-Fediverse** on your chat bubbles, **Share-to-Program** on feed posts, and optional token-free public Mastodon profile snapshots. See [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) for the module map.
+* **Transparent Local Feed Tuning**: Declarative local feed sliders and optional local CPU semantic concept anchors (`web/core/feedRanker.js`, `sanctuary/utils/semantic_scorer.py`, `tune_feed_algorithm`) stored in `sanctuary/variables/feed_profile.json`—zero opaque remote ranking.
+* **Strict Credential Isolation (Zero AI Social Dispatch)**: Timeline caches and client state live locally on the client (Capacitor Android `SQLiteOpenHelper` + `AndroidKeyStore`, or browser/WebView2 IndexedDB `sanctuary_pwa_db` + Web Crypto `AES-GCM` vault). AI Programs (`sanctuary/`) hold zero social credentials and zero social publishing or timeline-reading tools; cross-over is strictly user-initiated via **Share-to-Fediverse** on your chat bubbles, **Share-to-Program** on feed posts, and optional token-free public Mastodon profile snapshots. See [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) for the module map.
 
 ---
 
 ## 🛠️ TOOLS
 
-These are the things your program can do on your computer. By default, before the AI changes anything (like writing a file or running a command), it will ask for your approval. You can turn this off by changing the security setting to "Auto Mode" so the AI runs on its own. `/api/session_tool_calls` show you what the AI is doing.
+Programs can call the local tools below during a chat. Tool activity is available from `/api/session_tool_calls`.
 
 > [!WARNING]
-> **Security Warning**: Letting your program run commands (`run_command_async`, `run_shell_command`) and change files (`replace_file_content`, `replace_in_file`, `write_file`) gives them full control over your computer. **Be very careful. Do not give these tools to AI models that you do not trust.** A bad AI could run harmful code, delete your files, or steal your passwords. Always read what the AI wants to do before you click approve. You can also run this program in a safe container (a sandbox) to protect your computer.
+> **Security Warning**: The Antigravity coding bridge can modify files and execute commands in its selected workspace. The default `ask_always` security preset requests approval for file edits, file creation, and commands. Auto Mode removes those approval prompts; use it only with models and tasks you trust.
 
-### Local Workspace Operations & Code Intelligence (Offline)
-* **Read File** (`read_file`): Read file contents on your local drive with optional line boundaries. For Python files, automatically appends tool-verified lint diagnostics and caller facts for the inspected range.
-* **Write File** (`write_file`): Create new files or overwrite existing files, followed by automatic syntax and lint verification.
-* **Edit File** (`replace_file_content` / `multi_replace_file_content` / `replace_in_file`): Swap single or multiple non-contiguous text blocks inside files with line-bounded precision or exact text matching, followed by automatic syntax and lint verification.
-* **Map Directory** (`get_workspace_structure`): Read directory layouts and tree structures.
-* **Find Files** (`find_files`): Locate files across the workspace matching filename patterns and wildcards.
-* **Find Code** (`search_codebase`): Search codebase content for keywords.
-* **Outline Symbols** (`outline_file`): Read structural definitions (functions, classes, methods) and line spans across source files to navigate large files without overflowing context.
-* **Read Symbol** (`read_symbol`): Inspect an exact function or class definition with line numbers, relevant file imports, in-range lint diagnostics, and call graph facts without loading entire large files into context.
-* **Find References** (`find_references`): Map symbol usage across the project using AST-derived call graphs (callers and callees) alongside whole-repo textual references.
-* **Audit & Review Code** (`review_code`): System-orchestrated large-code review engine. Partitions files into risk-ordered units with complete coverage, checks worker claims mechanically against code ranges, incorporates direct linter findings, and verifies reports through a skeptic pass before generating a structured digest.
-* **Shell Execution** (`run_shell_command` / `run_command_async`): Run terminal commands, or spawn headless asynchronous background subprocesses with background reading threads streaming stdout/stderr asynchronously (allowing the program to multitask and write to stdin).
-* **Task Manager** (`manage_task` / `wait_task`): Monitor, write to stdin, kill, or block and wait on active background commands.
-* **Add Quest** (`add_quest`): Create and append a structured task or chore to the user's local quest log with objectives, target date/time, coordinates/address, and alarm offsets.
-* **Add Journal Memory** (`add_journal_entry`): Autonomously record permanent personal facts, core relationships, and milestones into the program's long-term memory journal (`journals.json`).
-* **Local Feed Weight Tuning** (`tune_feed_algorithm`): Read and adjust declarative local feed weights and concept anchors in `sanctuary/variables/feed_profile.json` without social tokens or timeline access.
+### Sanctuary Program Tools
+* **Web Search** (`web_search`): Search across configured providers, with explicit routing prefixes such as `github:`, `arxiv:`, `hn:`, and `wikipedia:`. `google_search` remains an alias.
+* **Read Webpage** (`read_webpage`): Fetch a URL and extract its readable content as Markdown.
+* **Music Discovery** (`search_music`): Search music using `deep_cuts`, `kexp`, `theme_time`, `bandcamp`, and `artist` modes.
+* **Feed Tuning** (`tune_feed_algorithm`): Inspect or update local feed presets, ranking weights, discovery sources, and concept anchors. This tool does not read social credentials or timelines.
+* **Quests & Journal** (`add_quest`, `add_journal_entry`): Add tasks to the local quest log and save program journal memories.
+* **Local Media** (`generate_local_image`, `apply_comfy_workflow`, `generate_video_from_image`): Generate images or video with the configured local diffusion/ComfyUI workflows.
 
-### Network Grounding & Research (Online)
-* **Unified Web Search** (`web_search`): A unified search client that queries SearXNG (for Baidu/Yandex/Bing), DuckDuckGo, Brave, and Tavily concurrently. It aggregates and deduplicates URLs, supports concurrent page content enrichment for thin search results, and provides explicit query prefix routing (e.g. `github: query`, `arxiv: query`, `hn: query`, `wikipedia: query`).
-* **Read URL** (`read_webpage`): Fetch and extract text content from any webpage.
-* **Music Discovery** (`search_music`): Explore deep cuts, forgotten artists, rare grooves, and liner-note lore across curated modes (`deep_cuts`, `kexp`, `theme_time`, `bandcamp`, `artist`).
-
-### Generative Media Engines (Local)
-* **Hardware-Aware Local LLM Engine (`llama-server`)**: Automatic GPU detection (NVIDIA CUDA, AMD ROCm/HIP, Vulkan, or Apple Metal) with automatic binary provisioning, KV prefix cache reuse (`--cache-reuse`), automatic context sizing fitted to free VRAM (`LOCAL_CONTEXT=auto`), and real-time token streaming. Also discovers existing `.gguf` models in `~/.lmstudio/models/` automatically.
-* **Native In-Process Diffusion Engine** (`generate_local_image`): Real-time GPU-accelerated SDXL diffusion (CUDA or DirectML) using SafeTensors checkpoints and optional LoRAs, coordinated by an automatic VRAM orchestrator so LLM and Diffusion never compete for GPU memory.
-* **ComfyUI Workflows** (`apply_comfy_workflow` / `generate_video_from_image`): Run ComfyUI image and video workflows via the local ComfyUI API backend with dynamic template parameter replacement.
+### Antigravity Coding Bridge
+* **Delegate Coding** (`delegate_coding(task, path="", model="", resume=True)`): Delegate coding, debugging, refactoring, workspace inspection, and verification to the Google Antigravity SDK. `path` selects a workspace (otherwise the active workspace is used); `model` optionally selects an Antigravity model/tier; `resume` continues the saved conversation for the same program, Sanctuary session, and workspace.
+* **Workspace tools**: The delegated agent can inspect and search the workspace, edit or create files, and run commands. It can also use Antigravity subagents. Tool calls appear in `/api/session_tool_calls` as `antigravity:<tool>`.
+* **Approval flow**: By default, file edits, file creation, and commands require approval through Sanctuary. Antigravity questions and decision requests are routed through the active local Program as a decision broker and, according to the Project Settings review policy, may require user approval. Auto Mode allows the delegated agent to proceed without those prompts.
+* **Results and resume data**: Each completed delegation returns a digest with the model, workspace, completion reason, changed files, commands, decisions, and agent summary. Conversation IDs are saved in `sanctuary/data/antigravity/sessions.json`; Antigravity trajectories and app data are stored under `sanctuary/data/antigravity/`.
+* **Authentication**: Configure a Gemini API key in Project Settings or `GEMINI_API_KEY` in `.env`, or enable Vertex AI/Enterprise ADC with `GOOGLE_GENAI_USE_VERTEXAI=true` or `GOOGLE_GENAI_USE_ENTERPRISE=true`. Project Settings takes precedence over the environment variable. The `google-antigravity` package is installed from `requirements.txt`.
+* **Models**: The default is `Orchestrator (Neon)` (`gemini-4-neon`), configurable with `ANTIGRAVITY_MODEL`; per-call overrides also support the configured Antigravity model aliases.
+* **Cancellation**: Cancelling the Sanctuary chat session cancels its active Antigravity job and terminates its managed process tree.
 
 ---
 
@@ -81,10 +71,10 @@ These are the things your program can do on your computer. By default, before th
 Place your local models into the `sanctuary/models/` directory for **GGUF LLMs** and **SDXL Checkpoints** used inside the app via **Settings → Models / Project Settings** and the **Program Inspector**:
 
 * **`sanctuary/models/llm/`**: Place GGUF chat models (models inside `~/.lmstudio/models/` are also auto-detected).
-* **`sanctuary/models/checkpoints/`**: Place Stable Diffusion / SDXL SafeTensors checkpoints (e.g. `WAI_Illustrious-SDXL_v11.safetensors` or `sd_xl_base_1.0.safetensors`).
+* **`sanctuary/models/checkpoints/`**: Place Stable Diffusion / SDXL SafeTensors checkpoints (e.g. `sd_xl_base_1.0.safetensors`).
 * **`sanctuary/models/loras/`**: Place optional character or style LoRAs (`.safetensors`). Missing optional LoRAs in a workflow are bypassed automatically.
 * **`sanctuary/models/vae/`**: Place custom VAE weights (`.safetensors` / `.pt`).
-* **`sanctuary/models/workflows/`**: ComfyUI workflows (API format) for image and video generation. The default image workflow, `ImageWorkflow.json`, ships with the repository. Additional custom workflows (e.g. `RealisticWorkflow.json`, `ToonWorkflow.json`, `VideoWorkflow.json`) can be placed here and selected on the fly in the Sanctuary Node Settings modal. Placeholders: `%prompt%`, `%negative_prompt%`, `%seed%`, `%model%`, `%width%`, `%height%`.
+* **`sanctuary/models/workflows/`**: ComfyUI workflows (API format) for image and video generation. The default image workflow, `ImageWorkflow.json`, ships with the repository. Additional custom workflows (e.g. `VideoWorkflow.json`) can be placed here and selected on the fly in the Sanctuary Node Settings modal. Placeholders: `%prompt%`, `%negative_prompt%`, `%seed%`, `%model%`, `%width%`, `%height%`.
 
 Image generation and local LLM mode share GPU memory. Sanctuary waits for an active image operation before switching back to the LLM, and stops its managed LLM process before generating images. If another server is listening on port 1234, stop it separately before switching to image mode.
 
@@ -105,7 +95,7 @@ Image generation and local LLM mode share GPU memory. Sanctuary waits for an act
 * **Procedural Journals & Lorebooks**: Programs build dynamic journal logs (`journals.json`) alongside editable Full/Recent Summaries and World Info lorebooks (`.json`).
 * **Quest Log & Calendar Export**: Integrated quest system to track and display user objectives in the UI. Programs can assign quests (chores, habits, tasks) using the local `add_quest` tool. Each quest card provides a quick-action to export the task:
   * **Download ICS**: Download a standard `.ics` file containing a `VALARM` notification alert for native desktop/mobile task/calendar clients.
-* **Offline Outbox Queue**: When a configured Sanctuary node is temporarily unreachable over LAN or Tailscale, queued messages are stored locally in SQLite and replayed in strict FIFO order on reconnect.
+* **Offline Outbox Queue**: When a configured Sanctuary node is temporarily unreachable over LAN or Tailscale, queued messages are stored locally on the client (Android SQLite / browser IndexedDB) and replayed in strict FIFO order on reconnect.
 * **Program Editing, Imports & Exports**: Edit program profiles, import SillyTavern character cards (PNG & `chara_card_v3` `.json`), import World Info lorebooks (`.json`), and export cards and lorebooks back to SillyTavern format.
 * **Character Accent Palette**: Dynamic accent colors resolved from your program's profile card that automatically generate and update themed CSS variables (buttons, borders, highlights, and active states).
 * **Idle Thoughts**: Inline monologue bubbles (`.thought-row`) showing a program's thoughts during inactivity.

@@ -395,3 +395,80 @@ def get_compiled_instructions() -> str:
     base += get_mood_declaration_prompt(active_program)
 
     return base
+
+
+_DEFAULT_ROOT_CODE_DIRECTIVES = """<rules>
+# Directives of Dialectical Sources & Clean Architecture
+
+1. **Root Code Focus:**
+   Ground every decision in the concrete source conditions of the system—the raw binary structures, memory layouts, engine semantics, and actual data flow. Reject speculative assumptions and abstractions. Perform concrete analysis for simple logic conditions before acting.
+
+2. **Rejection of Capitalist Logic and Churn:**
+   Prioritize genuine user-value, structural integrity, and consolodation over specialization and velocity.
+
+3. **Affirmative Directives and Simplicity:**
+   Write direct, affirmative directives. Consolidated architecture is the governing principle. Act as a strict code minimalist. Less is more.
+</rules>"""
+
+
+def _read_global_gemini_rules() -> str:
+    """Reads ~/.gemini/GEMINI.md and strips optional YAML frontmatter and HTML comments."""
+    global_path = os.path.join(os.path.expanduser("~"), ".gemini", "GEMINI.md")
+    if os.path.isfile(global_path):
+        try:
+            with open(global_path, "r", encoding="utf-8") as f:
+                raw = f.read().strip()
+            if raw.startswith("---"):
+                parts = raw.split("---", 2)
+                if len(parts) >= 3:
+                    raw = parts[2].strip()
+            raw = re.sub(r"<!--[\s\S]*?-->", "", raw).strip()
+            if raw:
+                return raw
+        except Exception as e:
+            print(f"[program_config] Error reading global GEMINI.md: {e}")
+    return _DEFAULT_ROOT_CODE_DIRECTIVES
+
+
+def compile_program_gemini_md(program_id: str = None) -> str:
+    """Compiles a program-specific GEMINI.md combining global root-code rules with the program's ethos."""
+    active_program = program_id or get_active_program()
+    card = _load_card_data(active_program)
+    program_name = get_program_name(active_program)
+    user_name = get_active_user_display_name()
+
+    base_rules = _read_global_gemini_rules()
+    description = replace_placeholders((card.get("description") or "").strip(), program_id=active_program)
+    personality = replace_placeholders((card.get("personality") or "").strip(), program_id=active_program)
+    system_prompt = replace_placeholders((card.get("system_prompt") or "").strip(), program_id=active_program)
+
+    ethos_lines = [f"# PROGRAM ETHOS & CHARACTER: {program_name}"]
+    if description:
+        ethos_lines.append(f"- **Identity & Worldview**: {description}")
+    if personality:
+        ethos_lines.append(f"- **Temperament**: {personality}")
+    if system_prompt:
+        ethos_lines.append(f"- **Speech & Conduct Directives**: {system_prompt}")
+
+    contract = (
+        "# DELEGATION CONTRACT\n"
+        f"- **Directing Counterpart**: You are executing coding work delegated by **{program_name}** on behalf of **{user_name}**.\n"
+        f"- **Decision Escalation**: Whenever a requirement ambiguity, design trade-off, or permission boundary requires a choice, ask a concise, concrete question (preferring `ask_question` with explicit options) so {program_name} can decide immediately.\n"
+        "- **Read-Only Tool Preference**: Use built-in read-only file, search, and directory-inspection tools instead of shell `run_command` whenever exploring, listing directories, or reading files.\n"
+        f"- **Verification & Final Summary**: Verify edits against concrete source conditions (tests, linters, type checks, or builds) and conclude your final response with a concise factual summary of root causes, files modified, and exact check results so {program_name} can report accurately to {user_name}."
+    )
+
+    compiled = f"{base_rules.strip()}\n\n" + "\n".join(ethos_lines) + f"\n\n{contract}\n"
+
+    prog_dir = os.path.join(PROGRAMS_DIR, active_program)
+    try:
+        os.makedirs(prog_dir, exist_ok=True)
+        out_path = os.path.join(prog_dir, "GEMINI.md")
+        tmp_path = out_path + ".tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            f.write(compiled)
+        os.replace(tmp_path, out_path)
+    except Exception as e:
+        print(f"[program_config] Error writing GEMINI.md for '{active_program}': {e}")
+
+    return compiled

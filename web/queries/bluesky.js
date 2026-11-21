@@ -6,7 +6,7 @@ import {
 } from '../constants/endpoints.js';
 import { FetchError } from './fetch/FetchError.js';
 import { fetchWrapper } from './fetch/fetchWrapper.js';
-import { extractFieldLinkUrl } from './fediverse.js';
+import { extractFieldLinkUrl, formatTruncatedUrlInnerHtml } from './fediverse.js';
 
 const utf8Encoder = new TextEncoder();
 const utf8Decoder = new TextDecoder('utf-8', { fatal: false });
@@ -160,6 +160,7 @@ export async function bskyRequest({
   accessJwt = '',
   refreshJwt = '',
   onSessionRefreshed,
+  timeoutMs,
   fetchImpl,
 }) {
   const origin = cleanServiceOrigin(serviceUrl);
@@ -186,6 +187,7 @@ export async function bskyRequest({
       headers: reqHeaders,
       json,
       body,
+      ...(timeoutMs ? { timeoutMs } : {}),
       fetchImpl,
     });
   };
@@ -274,7 +276,7 @@ export function linkifyPlainTextSegment(rawSegment) {
     if (tokenStart > cursor) {
       parts.push(escapeBskyHtmlText(input.slice(cursor, tokenStart)));
     }
-    parts.push(`<a href="${escapeBskyHtmlAttr(href)}" target="_blank" rel="noopener noreferrer">${escapeBskyHtmlText(clean)}</a>`);
+    parts.push(`<a href="${escapeBskyHtmlAttr(href)}" target="_blank" rel="noopener noreferrer">${formatTruncatedUrlInnerHtml(clean, href)}</a>`);
     if (suffix) {
       parts.push(escapeBskyHtmlText(suffix));
     }
@@ -294,7 +296,7 @@ function renderBskyFacetAnchor(label, features = []) {
       try {
         const parsed = new URL(String(feat.uri).trim());
         if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
-          return `<a href="${escapeBskyHtmlAttr(parsed.href)}" target="_blank" rel="noopener noreferrer">${escapeBskyHtmlText(label)}</a>`;
+          return `<a href="${escapeBskyHtmlAttr(parsed.href)}" target="_blank" rel="noopener noreferrer">${formatTruncatedUrlInnerHtml(label, parsed.href)}</a>`;
         }
       } catch {
         // Ignore invalid facet link URI
@@ -548,6 +550,9 @@ export function normalizeBskyPost(feedItem) {
     });
   }
 
+  const authorViewer = author?.viewer || {};
+  const reasonViewer = feedItem?.reason?.by?.viewer || {};
+
   return {
     key: `bluesky:${uri || post?.cid || ''}`,
     network: 'bluesky',
@@ -573,14 +578,18 @@ export function normalizeBskyPost(feedItem) {
           acct: feedItem.reason.by.handle || '',
           displayName: feedItem.reason.by.displayName || feedItem.reason.by.handle || '',
           avatar: feedItem.reason.by.avatar || '',
+          ...(feedItem?.reason?.uri ? { uri: String(feedItem.reason.uri) } : {}),
         }
       : null,
+    rebloggedAt: feedItem?.reason?.indexedAt ? String(feedItem.reason.indexedAt) : '',
     text: record.text || '',
     facets,
     sanitizedHtml: renderBskyRichTextToHtml(record.text || '', facets),
     spoilerText: '',
     labels,
     visibility: 'public',
+    language: Array.isArray(record.langs) && record.langs[0] ? String(record.langs[0]).trim().toLowerCase() : '',
+    langs: Array.isArray(record.langs) ? record.langs.map((l) => String(l || '').trim().toLowerCase()).filter(Boolean) : [],
     media,
     linkCard,
     ...(quotePost ? { quotePost } : {}),
@@ -594,6 +603,16 @@ export function normalizeBskyPost(feedItem) {
       likeUri: post?.viewer?.like || null,
       reblogged: Boolean(post?.viewer?.repost),
       repostUri: post?.viewer?.repost || null,
+      replyDisabled: Boolean(post?.viewer?.replyDisabled),
+      viewerMuted: Boolean(authorViewer.muted || authorViewer.mutedByList || reasonViewer.muted || reasonViewer.mutedByList),
+      viewerBlocking: Boolean(
+        authorViewer.blocking
+        || authorViewer.blockedBy
+        || authorViewer.blockingByList
+        || reasonViewer.blocking
+        || reasonViewer.blockedBy
+        || reasonViewer.blockingByList
+      ),
       bookmarked: false,
     },
     reply: record.reply && typeof record.reply === 'object' ? record.reply : null,
@@ -1085,6 +1104,19 @@ export async function getBskyAuthorFeed(opts) {
   };
 }
 
+export async function getBskyActorLikes(opts = {}) {
+  const { actor, limit = 15, cursor = '', ...auth } = opts;
+  const data = await bskyPublicReadRequest({
+    ...auth,
+    endpoint: 'app.bsky.feed.getActorLikes',
+    params: { actor, limit, ...(cursor ? { cursor } : {}) },
+  });
+  return {
+    items: Array.isArray(data?.feed) ? data.feed.map(normalizeBskyPost) : [],
+    nextCursor: data?.cursor || null,
+  };
+}
+
 export async function getBskyPostThread(opts) {
   const { uri, depth = 6, parentHeight = 20, ...auth } = opts;
   const data = await bskyPublicReadRequest({
@@ -1243,14 +1275,96 @@ export async function muteBskyActor({ serviceUrl = DEFAULT_BSKY_SERVICE, actor, 
 }
 
 export async function blockBskyActor({ targetDid, blockUri = null, unblock = false, ...rest }) {
+  let resolvedDid = String(targetDid || '').trim();
+  if (resolvedDid && !resolvedDid.startsWith('did:')) {
+    const cleanHandle = resolvedDid.replace(/^bluesky:/i, '').replace(/^@/, '').trim();
+    if (cleanHandle) {
+      const res = await bskyRequest({
+        ...rest,
+        endpoint: 'com.atproto.identity.resolveHandle',
+        params: { handle: cleanHandle },
+      });
+      if (res?.did) resolvedDid = String(res.did);
+    }
+  }
   const out = await toggleBskyGraphRecord({
     ...rest,
-    targetDid,
+    targetDid: resolvedDid,
     recordUri: blockUri,
     collection: 'app.bsky.graph.block',
     undo: unblock,
   });
   return { blocking: out.active, blockUri: out.active ? (out.uri || 'blocked') : null };
+}
+
+export async function hideBskyReply({
+  serviceUrl = DEFAULT_BSKY_SERVICE,
+  repo,
+  rootUri,
+  replyUri,
+  unhide = false,
+  accessJwt,
+  refreshJwt,
+  onSessionRefreshed,
+  fetchImpl,
+}) {
+  const cleanRoot = String(rootUri || '').replace(/^bluesky:/, '').trim();
+  const cleanReply = String(replyUri || '').replace(/^bluesky:/, '').trim();
+  if (!cleanRoot.startsWith('at://') || !cleanReply.startsWith('at://')) return false;
+  const parts = cleanRoot.slice('at://'.length).split('/');
+  if (parts.length < 3) return false;
+  const [rootDid, collection, rkey] = parts;
+  if (rootDid !== repo || collection !== 'app.bsky.feed.post' || !rkey) return false;
+
+  let record = {
+    $type: 'app.bsky.feed.threadgate',
+    post: cleanRoot,
+    createdAt: new Date().toISOString(),
+    hiddenReplies: [],
+  };
+  try {
+    const existing = await bskyRequest({
+      serviceUrl,
+      endpoint: 'com.atproto.repo.getRecord',
+      params: { repo, collection: 'app.bsky.feed.threadgate', rkey },
+      accessJwt,
+      refreshJwt,
+      onSessionRefreshed,
+      fetchImpl,
+    });
+    if (existing?.value && typeof existing.value === 'object') {
+      record = {
+        ...existing.value,
+        $type: 'app.bsky.feed.threadgate',
+        post: existing.value.post || cleanRoot,
+        createdAt: existing.value.createdAt || new Date().toISOString(),
+      };
+    }
+  } catch {
+    // No existing threadgate record
+  }
+
+  const cur = Array.isArray(record.hiddenReplies) ? record.hiddenReplies.map(String).filter(Boolean) : [];
+  record.hiddenReplies = unhide
+    ? cur.filter((u) => u !== cleanReply)
+    : [...new Set([...cur, cleanReply])].slice(0, 50);
+
+  await bskyRequest({
+    serviceUrl,
+    endpoint: 'com.atproto.repo.putRecord',
+    method: 'POST',
+    json: {
+      repo,
+      collection: 'app.bsky.feed.threadgate',
+      rkey,
+      record,
+    },
+    accessJwt,
+    refreshJwt,
+    onSessionRefreshed,
+    fetchImpl,
+  });
+  return true;
 }
 
 export async function searchBskyActors(opts) {
@@ -1263,16 +1377,41 @@ export async function searchBskyActors(opts) {
 }
 
 export async function searchBskyPosts(opts) {
-  const { query, limit = 20, cursor = '', ...auth } = opts;
+  const { query, limit = 20, cursor = '', sort = 'latest', lang = '', ...auth } = opts;
   const data = await bskyPublicReadRequest({
     ...auth,
     endpoint: 'app.bsky.feed.searchPosts',
-    params: { q: query, limit, ...(cursor ? { cursor } : {}) },
+    params: {
+      q: query,
+      limit,
+      ...(sort ? { sort } : {}),
+      ...(lang ? { lang } : {}),
+      ...(cursor ? { cursor } : {}),
+    },
   });
   return {
     items: Array.isArray(data?.posts) ? data.posts.map((p) => normalizeBskyPost({ post: p })) : [],
     nextCursor: data?.cursor || null,
   };
+}
+
+export async function searchBskyFeedGenerators(opts = {}) {
+  const { query = '', limit = 6, ...auth } = opts;
+  const data = await bskyPublicReadRequest({
+    ...auth,
+    endpoint: 'app.bsky.unspecced.getPopularFeedGenerators',
+    params: { query: String(query || '').trim(), limit },
+  });
+  return (Array.isArray(data?.feeds) ? data.feeds : [])
+    .map((f) => ({
+      uri: String(f?.uri || ''),
+      cid: String(f?.cid || ''),
+      displayName: String(f?.displayName || ''),
+      description: String(f?.description || ''),
+      likeCount: Number(f?.likeCount || 0),
+      creatorHandle: String(f?.creator?.handle || ''),
+    }))
+    .filter((f) => f.uri.startsWith('at://'));
 }
 
 export async function uploadBskyBlob({

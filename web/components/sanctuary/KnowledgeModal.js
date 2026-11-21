@@ -19,6 +19,7 @@ import {
   uploadDatabankFile,
 } from '../../queries/sanctuary.js';
 import { connectionStore } from '../../state/sanctuary/connection.js';
+import { createLoadingState, updateLoadingStateLabel } from '../ui/index.js';
 import {
   createClassicModalDialog,
   downloadNodeFile,
@@ -66,6 +67,7 @@ export function openKnowledgeModal({
   const doc = globalThis.document;
   let activeTab = DESCRIPTORS[initialTab] ? initialTab : 'upload';
   let closed = false;
+  let tabEpoch = 0;
 
   const modal = createClassicModalDialog({
     id: 'databank-dialog',
@@ -102,14 +104,8 @@ export function openKnowledgeModal({
   loreBtn.textContent = 'Lorebooks';
   tabBar.append(uploadBtn, memBtn, loreBtn);
 
-  const loaderEl = doc.createElement('div');
-  loaderEl.className = 'classic-loader-banner';
+  const loaderEl = createLoadingState('Vectorizing and indexing content…', { doc, inline: true });
   loaderEl.hidden = true;
-  const spinnerEl = doc.createElement('div');
-  spinnerEl.className = 'animate-spin classic-spinner-ring';
-  const loaderTxt = doc.createElement('span');
-  loaderTxt.textContent = 'Vectorizing and indexing content...';
-  loaderEl.append(spinnerEl, loaderTxt);
 
   const bodyHost = doc.createElement('div');
   bodyHost.className = 'classic-modal-scroll-body';
@@ -123,14 +119,14 @@ export function openKnowledgeModal({
     }
   };
 
-  function setLoading(loading, msg = 'Vectorizing and indexing content...') {
+  function setLoading(loading, msg = 'Vectorizing and indexing content…') {
     loaderEl.hidden = !loading;
-    loaderTxt.textContent = msg;
+    updateLoadingStateLabel(loaderEl, msg);
   }
 
-  async function renderDataBankTab() {
+  async function renderDataBankTab(epoch = tabEpoch) {
     const filesData = await fetchDatabankFiles().catch((e) => ({ error: e.message }));
-    if (closed || activeTab !== 'upload') return;
+    if (closed || activeTab !== 'upload' || epoch !== tabEpoch) return;
 
     const wrap = doc.createElement('div');
     wrap.className = 'classic-cards-stack';
@@ -343,13 +339,13 @@ export function openKnowledgeModal({
     bodyHost.replaceChildren(wrap);
   }
 
-  async function renderJournalsTab() {
+  async function renderJournalsTab(epoch = tabEpoch) {
     const jData = await fetchProgramJournals(programId, sessionId).catch(() => ({
       journals: [],
       recent_chapters: [],
       epic_chronicle: '',
     }));
-    if (closed || activeTab !== 'memories') return;
+    if (closed || activeTab !== 'memories' || epoch !== tabEpoch) return;
 
     let rawEpic = (jData.epic_chronicle || '').trim();
     const recentChapters = [...(jData.recent_chapters || [])];
@@ -764,9 +760,9 @@ export function openKnowledgeModal({
     redraw(false);
   }
 
-  async function renderLorebooksTab() {
+  async function renderLorebooksTab(epoch = tabEpoch) {
     const data = await fetchLorebooks().catch(() => ({ lorebooks: [] }));
-    if (closed || activeTab !== 'lorebooks') return;
+    if (closed || activeTab !== 'lorebooks' || epoch !== tabEpoch) return;
 
     const books = data?.lorebooks || [];
     const wrap = doc.createElement('div');
@@ -899,7 +895,7 @@ export function openKnowledgeModal({
           panel.hidden = !expanded;
           chevron.classList.toggle('is-open', expanded);
           if (expanded && entriesCache === null) {
-            panel.textContent = 'Loading entries...';
+            panel.replaceChildren(createLoadingState('Loading entries…', { doc, compact: true }));
             try {
               const res = book.source === 'card'
                 ? await fetchCardLorebookEntries()
@@ -909,6 +905,7 @@ export function openKnowledgeModal({
               entriesCache = [];
               showAlert('Load Failed', err?.message || 'Unable to load lorebook entries.');
             }
+            if (closed || activeTab !== 'lorebooks' || epoch !== tabEpoch) return;
             renderEntriesEditor(panel, entriesCache, book.source === 'card', book.filename, {
               onSavedEntries: (updated) => {
                 entriesCache = updated;
@@ -937,15 +934,18 @@ export function openKnowledgeModal({
   }
 
   async function loadTab() {
+    const epoch = ++tabEpoch;
     uploadBtn.classList.toggle('active', activeTab === 'upload');
     memBtn.classList.toggle('active', activeTab === 'memories');
     loreBtn.classList.toggle('active', activeTab === 'lorebooks');
     descriptorEl.textContent = DESCRIPTORS[activeTab] || '';
+    bodyHost.replaceChildren(createLoadingState('Loading knowledge base…', { doc, compact: true }));
 
     await ensureActiveProgram();
-    if (activeTab === 'upload') await renderDataBankTab();
-    else if (activeTab === 'memories') await renderJournalsTab();
-    else await renderLorebooksTab();
+    if (closed || epoch !== tabEpoch) return;
+    if (activeTab === 'upload') await renderDataBankTab(epoch);
+    else if (activeTab === 'memories') await renderJournalsTab(epoch);
+    else await renderLorebooksTab(epoch);
   }
 
   uploadBtn.addEventListener('click', () => { activeTab = 'upload'; void loadTab(); });

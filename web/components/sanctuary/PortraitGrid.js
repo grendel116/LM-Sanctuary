@@ -10,6 +10,7 @@ import {
 } from '../../queries/sanctuary.js';
 import { prefillFromUserBubble } from '../../state/composeStore.js';
 import { bumpProgramAvatarVersion } from '../../state/sanctuary/connection.js';
+import { createLoadingState } from '../ui/index.js';
 import {
   createClassicModalDialog,
   showAlert,
@@ -925,10 +926,7 @@ export function openProgramGalleryModal({
     bodyHost.replaceChildren();
 
     if (loading) {
-      const loadingEl = doc.createElement('p');
-      loadingEl.className = 'empty-state';
-      loadingEl.textContent = 'Loading gallery media...';
-      bodyHost.appendChild(loadingEl);
+      bodyHost.appendChild(createLoadingState('Loading gallery media…', { doc, compact: true }));
       return;
     }
 

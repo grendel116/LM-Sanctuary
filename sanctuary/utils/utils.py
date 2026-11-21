@@ -31,12 +31,9 @@ TOOL_ALIASES = {
     "dalle.text2im": "generate_local_image",
     "dalle:text2im": "generate_local_image",
     "text2im": "generate_local_image",
-    "view_file": "read_file",
-    "write_to_file": "write_file",
-    "run_command": "run_shell_command",
-    "find_by_name": "find_files",
-    "grep_search": "search_codebase",
-    "list_dir": "get_workspace_structure",
+    "antigravity_code": "delegate_coding",
+    "code_with_antigravity": "delegate_coding",
+    "run_coding_task": "delegate_coding",
 }
 
 _MAIN_DIRECTIVE_PROMPT = (
@@ -303,11 +300,6 @@ def _normalize_tool_call_paths(tool_name: str, args_str: str) -> str:
     r"""Normalizes Windows backslashes in file/directory path arguments to forward slashes
     so Python AST parsing never corrupts path characters into escape sequences (e.g. \r, \a, \u).
     """
-    file_tools = {
-        "read_file", "write_file", "replace_in_file", "replace_file_content",
-        "multi_replace_file_content",         "get_workspace_structure", "find_files", "outline_file", "read_symbol", "review_code"
-    }
-
     # 1. Quoted Windows drive paths: e.g. "C:\foo\bar" -> "C:/foo/bar"
     def fix_drive_path(m):
         return m.group(1) + m.group(2).replace("\\", "/")
@@ -316,24 +308,13 @@ def _normalize_tool_call_paths(tool_name: str, args_str: str) -> str:
 
     # 2. Named path parameters: path="...", cwd="...", etc.
     path_param_re = re.compile(
-        r'(\b(?:path|filename|file_path|filepath|target_file|cwd|directory|working_dir)\s*=\s*)(["\'])(.*?)\2',
+        r'(\b(?:path|filename|file_path|filepath|target_file|cwd|directory|working_dir|workspace|folder)\s*=\s*)(["\'])(.*?)\2',
         re.DOTALL
     )
     def fix_param_path(m):
         return m.group(1) + m.group(2) + m.group(3).replace("\\", "/") + m.group(2)
 
-    normalized = path_param_re.sub(fix_param_path, normalized)
-
-    # 3. Positional path arguments for file tools
-    if tool_name in file_tools:
-        pos_match = re.match(r'^\s*(["\'])(.*?)\1', normalized)
-        if pos_match:
-            quote = pos_match.group(1)
-            val = pos_match.group(2)
-            if "\\" in val:
-                normalized = f"{quote}{val.replace('\\', '/')}{quote}" + normalized[pos_match.end():]
-
-    return normalized
+    return path_param_re.sub(fix_param_path, normalized)
 
 
 def _parse_emulated_tool_call(tool_name: str, args_str: str) -> dict:
@@ -374,34 +355,13 @@ def _parse_emulated_tool_call(tool_name: str, args_str: str) -> dict:
                 args = [val]
 
     # --- Parameter Alias Normalization ---
-    file_tools = {"read_file", "write_file", "replace_in_file", "replace_file_content",     "multi_replace_file_content", "get_workspace_structure", "find_files", "outline_file", "read_symbol", "review_code"}
-    if tool_name in file_tools:
-        for alias in ("filename", "file_path", "filepath", "target_file", "AbsolutePath", "TargetFile"):
+    if tool_name == "delegate_coding":
+        for alias in ("cwd", "directory", "workspace", "folder", "working_dir", "file_path", "filepath", "target_file", "AbsolutePath", "TargetFile"):
             if alias in kwargs and "path" not in kwargs:
                 kwargs["path"] = kwargs.pop(alias)
-    if tool_name == "write_file":
-        if "CodeContent" in kwargs and "content" not in kwargs:
-            kwargs["content"] = kwargs.pop("CodeContent")
-    elif tool_name == "replace_in_file":
-        if "target_content" in kwargs and "old_text" not in kwargs:
-            kwargs["old_text"] = kwargs.pop("target_content")
-        if "replacement_content" in kwargs and "new_text" not in kwargs:
-            kwargs["new_text"] = kwargs.pop("replacement_content")
-    elif tool_name in ("run_shell_command", "run_command_async"):
-        for alias in ("cmd", "command_line", "CommandLine"):
-            if alias in kwargs and "command" not in kwargs:
-                kwargs["command"] = kwargs.pop(alias)
-        for alias in ("working_dir", "directory", "Cwd"):
-            if alias in kwargs and "cwd" not in kwargs:
-                kwargs["cwd"] = kwargs.pop(alias)
-    elif tool_name == "search_codebase":
-        for alias in ("query", "pattern", "Query"):
-            if alias in kwargs and "keyword" not in kwargs:
-                kwargs["keyword"] = kwargs.pop(alias)
-    elif tool_name == "find_files":
-        for alias in ("query", "name", "glob", "Pattern"):
-            if alias in kwargs and "pattern" not in kwargs:
-                kwargs["pattern"] = kwargs.pop(alias)
+        for alias in ("prompt", "request", "goal", "instruction", "query"):
+            if alias in kwargs and "task" not in kwargs:
+                kwargs["task"] = kwargs.pop(alias)
 
     return {"args": args, "kwargs": kwargs}
 

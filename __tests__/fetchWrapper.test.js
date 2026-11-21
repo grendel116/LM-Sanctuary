@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { FetchError } from '../web/queries/fetch/FetchError.js';
-import { fetchWrapper } from '../web/queries/fetch/fetchWrapper.js';
+import { fetchWrapper, formatApiErrorMessage } from '../web/queries/fetch/fetchWrapper.js';
 
 test('fetchWrapper distinguishes deadline timeout from user AbortController cancellation', async () => {
   const hangingFetch = (_url, init) => new Promise((_resolve, reject) => {
@@ -84,6 +84,40 @@ test('fetchWrapper parses HTTP error JSON payloads into FetchError status and bo
       assert.equal(err.status, 401);
       assert.equal(err.message, 'Token expired');
       assert.deepEqual(err.body, { error: 'Token expired' });
+      return true;
+    }
+  );
+});
+
+test('formatApiErrorMessage and fetchWrapper strip raw OAuth JSON/trace IDs and clarify Threads subcode 5258005', async () => {
+  const raw5258005 =
+    'Threads token refresh failed (400): {"error":{"message":"API access blocked.","code":200,"type":"OAuthException","error_subcode":5258005,"fbtrace_id":"A_V9nKjl9qQa06wFPx_F164"}}';
+  assert.equal(
+    formatApiErrorMessage(raw5258005),
+    'Threads token refresh failed (400): API access blocked. 60-day tokens must be at least 24 hours old before refreshing.'
+  );
+
+  const truncatedRaw =
+    'Threads publish failed (400): {"error":{"message":"The requested resource does not exist","code":24,"type":"OAuthException","error_subcode":4279009,"is_transient":false,"error_user_msg":"The media with id 17993710425118777 cannot be found.","error_user_title":"Media Not Found","f';
+  assert.equal(
+    formatApiErrorMessage(truncatedRaw),
+    'Threads publish failed (400): The media with id 17993710425118777 cannot be found.'
+  );
+
+  const mockFetch = async () => new Response(
+    JSON.stringify({ error: raw5258005 }),
+    { status: 400, headers: { 'content-type': 'application/json' } }
+  );
+
+  await assert.rejects(
+    () => fetchWrapper('/api/social/accounts/threads/oauth/refresh', { method: 'POST', fetchImpl: mockFetch }),
+    (err) => {
+      assert.ok(err instanceof FetchError);
+      assert.equal(
+        err.message,
+        'Threads token refresh failed (400): API access blocked. 60-day tokens must be at least 24 hours old before refreshing.'
+      );
+      assert.equal(err.message.includes('fbtrace_id'), false);
       return true;
     }
   );

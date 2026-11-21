@@ -2,10 +2,16 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-  getCachedProgramHistory,
   cacheProgramHistory,
+  deleteVaultSecret,
+  enqueueLocalRetry,
+  getCachedProgramHistory,
+  listLocalFilterRules,
+  listLocalRetries,
+  listVaultIds,
   loadVaultSecret,
   resetMemoryStorageForTests,
+  saveLocalFilterRule,
   saveVaultSecret,
   storeGet,
 } from '../web/storage/kvStorage.js';
@@ -99,4 +105,37 @@ test('composeStore prefillFromUserBubble populates draft text, turn media, and a
   const counts = computeRemainingCounts(s);
   assert.equal(counts.bluesky, 300 - 29);
   assert.equal(counts.fediverse, 500 - 29);
+});
+
+test('enqueueLocalRetry and saveLocalFilterRule persist kv snapshots and vault roundtrips save/load/delete', async () => {
+  resetMemoryStorageForTests();
+
+  await enqueueLocalRetry({
+    id: 'retry_bsky_1',
+    operation: 'publish',
+    protocol: 'bluesky',
+    payload: { textParts: ['hello'] },
+  });
+  await saveLocalFilterRule({
+    id: 'local_filter_1',
+    title: 'crypto',
+    phrase: 'crypto',
+    filter_action: 'hide',
+  });
+
+  const retrySnap = await storeGet('kv', 'local_retries_v1');
+  const filterSnap = await storeGet('kv', 'local_filter_rules_v1');
+  assert.equal(Array.isArray(retrySnap), true);
+  assert.equal(retrySnap.some((r) => r.id === 'retry_bsky_1'), true);
+  assert.equal(Array.isArray(filterSnap), true);
+  assert.equal(filterSnap.some((f) => f.id === 'local_filter_1'), true);
+  assert.equal((await listLocalRetries()).length, 1);
+  assert.equal((await listLocalFilterRules()).length, 1);
+
+  await saveVaultSecret('probe_acct', { token: 'abc_123' });
+  assert.deepEqual(await loadVaultSecret('probe_acct'), { token: 'abc_123' });
+  assert.equal((await listVaultIds()).includes('probe_acct'), true);
+  await deleteVaultSecret('probe_acct');
+  assert.equal(await loadVaultSecret('probe_acct'), null);
+  assert.equal((await listVaultIds()).includes('probe_acct'), false);
 });

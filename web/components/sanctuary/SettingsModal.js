@@ -14,11 +14,13 @@ import {
   addKeywordFilter,
   fetchKeywordFilters,
   fetchModerationAccounts,
+  peekCachedModerationAccounts,
   removeKeywordFilter,
   removeModeratedAccount,
   toggleBlockAuthor,
   toggleMuteAuthor,
 } from '../../queries/socialClient.js';
+import { feedStore } from '../../state/feedStore.js';
 import {
   checkSanctuaryHealth,
   connectionStore,
@@ -27,6 +29,7 @@ import {
 } from '../../state/sanctuary/connection.js';
 import { flushOutbox, outboxStore } from '../../state/sanctuary/outboxModel.js';
 import { openFeedTuningModal } from '../FeedTuningModal.js';
+import { createLoadingState } from '../ui/index.js';
 import { createClassicModalDialog, showAlert, showPrompt } from './SanctuaryDialog.js';
 
 const SETTINGS_SVG = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--primary-accent)" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="21" x2="4" y2="14"></line><line x1="4" y1="10" x2="4" y2="3"></line><line x1="12" y1="21" x2="12" y2="12"></line><line x1="12" y1="8" x2="12" y2="3"></line><line x1="20" y1="21" x2="20" y2="16"></line><line x1="20" y1="12" x2="20" y2="3"></line><line x1="1" y1="14" x2="7" y2="14"></line><line x1="9" y1="8" x2="15" y2="8"></line><line x1="17" y1="16" x2="23" y2="16"></line></svg>`;
@@ -61,6 +64,7 @@ export function openSettingsModal({
     folders: [],
     security_preset: 'ask_always',
     artifact_review_policy: 'ask_always',
+    gemini_api_key: '',
     search_engine: 'web_crawling',
     searxng_url: '',
     tts_voice: 'af_heart',
@@ -488,7 +492,32 @@ export function openSettingsModal({
     });
     revRow.append(revInfo, revSelect);
 
-    progBlock.append(ph, secRow, revRow);
+    const apiKeyRow = doc.createElement('div');
+    apiKeyRow.className = 'classic-setting-row';
+    const apiKeyInfo = doc.createElement('div');
+    const apiKeyLbl = doc.createElement('label');
+    apiKeyLbl.setAttribute('for', 'project-gemini-api-key');
+    apiKeyLbl.textContent = 'Antigravity API Key';
+    const apiKeySub = doc.createElement('p');
+    apiKeySub.className = 'classic-card-subtext';
+    apiKeySub.textContent = 'Gemini API key for delegated coding jobs.';
+    apiKeyInfo.append(apiKeyLbl, apiKeySub);
+
+    const apiKeyIn = doc.createElement('input');
+    apiKeyIn.type = 'password';
+    apiKeyIn.id = 'project-gemini-api-key';
+    apiKeyIn.className = 'onboarding-input';
+    apiKeyIn.style.width = '180px';
+    apiKeyIn.placeholder = 'AIza...';
+    apiKeyIn.autocomplete = 'off';
+    apiKeyIn.value = projectSettings.gemini_api_key || '';
+    apiKeyIn.addEventListener('change', async () => {
+      projectSettings.gemini_api_key = apiKeyIn.value.trim();
+      await saveProjectSettings(projectSettings);
+    });
+    apiKeyRow.append(apiKeyInfo, apiKeyIn);
+
+    progBlock.append(ph, secRow, revRow, apiKeyRow);
 
     // Search Settings
     const searchBlock = doc.createElement('div');
@@ -660,26 +689,16 @@ export function openSettingsModal({
     bodyHost.replaceChildren(card);
   }
 
+  let modTabEpoch = 0;
+
   async function renderModerationTab() {
     nodeStatusRefs = null;
+    const epoch = ++modTabEpoch;
     const card = doc.createElement('div');
     card.className = 'form-card-container';
-
-    const loading = doc.createElement('p');
-    loading.className = 'classic-card-subtext';
-    loading.textContent = 'Loading Moderation Rules...';
-    card.appendChild(loading);
     bodyHost.replaceChildren(card);
 
-    const [filters, mutes, blocks] = await Promise.all([
-      fetchKeywordFilters().catch(() => []),
-      fetchModerationAccounts('mutes').catch(() => []),
-      fetchModerationAccounts('blocks').catch(() => []),
-    ]);
-    if (closed || activeTab !== 'moderation') return;
-
-    card.replaceChildren();
-
+    // 1. Keyword Filters (mount form immediately & pre-populate from feedStore)
     const filterBlock = doc.createElement('div');
     const fh = doc.createElement('h4');
     fh.className = 'modal-sub-header';
@@ -709,23 +728,24 @@ export function openSettingsModal({
     addFilterBtn.className = 'btn-sleek-pill';
     addFilterBtn.textContent = '+ Filter';
     addForm.append(phraseIn, actSelect, addFilterBtn);
-    addForm.addEventListener('submit', async (ev) => {
-      ev.preventDefault();
-      const phrase = phraseIn.value.trim();
-      if (!phrase) return;
-      await addKeywordFilter({ title: phrase, phrase, filterAction: actSelect.value });
-      void renderModerationTab();
-    });
 
     const filtersWrap = doc.createElement('div');
     filtersWrap.className = 'moderation-filter-chips';
-    if (filters.length === 0) {
-      const p = doc.createElement('p');
-      p.className = 'classic-card-subtext';
-      p.textContent = 'No keyword filters active.';
-      filtersWrap.appendChild(p);
-    } else {
-      for (const f of filters) {
+
+    const renderFilterChips = (rules = [], { loading = false } = {}) => {
+      filtersWrap.replaceChildren();
+      if (loading && rules.length === 0) {
+        filtersWrap.appendChild(createLoadingState('Loading keyword filters…', { doc, compact: true }));
+        return;
+      }
+      if (rules.length === 0) {
+        const p = doc.createElement('p');
+        p.className = 'classic-card-subtext';
+        p.textContent = 'No keyword filters active.';
+        filtersWrap.appendChild(p);
+        return;
+      }
+      for (const f of rules) {
         const phrase = f.phrase || f.title || '';
         const mode = String(f.filter_action || 'hide').toLowerCase();
         const chip = doc.createElement('div');
@@ -753,7 +773,9 @@ export function openSettingsModal({
           delBtn.disabled = true;
           try {
             await removeKeywordFilter(f.id);
-            void renderModerationTab();
+            if (!closed && activeTab === 'moderation' && epoch === modTabEpoch) {
+              renderFilterChips(feedStore.get().filters || []);
+            }
           } catch (err) {
             delBtn.disabled = false;
             showAlert('Filter Error', err?.message || 'Unable to remove filter.');
@@ -762,9 +784,31 @@ export function openSettingsModal({
         chip.appendChild(delBtn);
         filtersWrap.appendChild(chip);
       }
-    }
+    };
+
+    addForm.addEventListener('submit', async (ev) => {
+      ev.preventDefault();
+      const phrase = phraseIn.value.trim();
+      if (!phrase) return;
+      addFilterBtn.disabled = true;
+      try {
+        await addKeywordFilter({ title: phrase, phrase, filterAction: actSelect.value });
+        phraseIn.value = '';
+        if (!closed && activeTab === 'moderation' && epoch === modTabEpoch) {
+          renderFilterChips(feedStore.get().filters || []);
+        }
+      } catch (err) {
+        showAlert('Filter Error', err?.message || 'Unable to add filter.');
+      } finally {
+        addFilterBtn.disabled = false;
+      }
+    });
+
+    const cachedFilters = feedStore.get().filters || [];
+    renderFilterChips(cachedFilters, { loading: cachedFilters.length === 0 });
     filterBlock.append(fh, fSub, addForm, filtersWrap);
 
+    // 2. Feed Algorithm (interactive immediately at 0ms)
     const algoBlock = doc.createElement('div');
     algoBlock.className = 'classic-section-divider';
     const algoRow = doc.createElement('div');
@@ -788,141 +832,220 @@ export function openSettingsModal({
     algoRow.append(algoInfo, tuneBtn);
     algoBlock.appendChild(algoRow);
 
-    const buildModAccountSection = (title, emptyText, items, btnLabel, actionFn) => {
+    // 3. Muted & Blocked Account Sections (independent loading + in-place unmute/unblock)
+    const buildModAccountSection = (title, emptyText, initialItems, btnLabel, actionFn, { loading = false } = {}) => {
+      let items = Array.isArray(initialItems) ? [...initialItems] : [];
       const section = doc.createElement('div');
       section.className = 'classic-section-divider';
       const h = doc.createElement('h4');
       h.className = 'modal-sub-header';
-      h.textContent = items.length > 0 ? `${title} (${items.length})` : title;
       section.appendChild(h);
-      if (items.length === 0) {
-        const p = doc.createElement('p');
-        p.className = 'classic-card-subtext';
-        p.textContent = emptyText;
-        section.appendChild(p);
-        return section;
-      }
 
-      let filterQuery = '';
-      let visibleLimit = 50;
-      const stack = doc.createElement('div');
-      stack.className = 'classic-cards-stack';
-      const moreBtn = doc.createElement('button');
-      moreBtn.type = 'button';
-      moreBtn.className = 'edit-btn edit-cancel-btn';
-      moreBtn.hidden = true;
+      const contentHost = doc.createElement('div');
+      section.appendChild(contentHost);
 
-      const renderRows = () => {
-        const q = filterQuery.trim().toLowerCase();
-        const filtered = q
-          ? items.filter((acc) => {
-              const txt = `${acc.displayName || ''} ${acc.username || ''} ${acc.acct || ''}`.toLowerCase();
-              return txt.includes(q);
-            })
-          : items;
-        const slice = filtered.slice(0, visibleLimit);
-        stack.replaceChildren();
-        for (const acc of slice) {
-          const row = doc.createElement('div');
-          row.className = 'moderation-account-row';
+      const renderSectionBody = () => {
+        h.textContent = items.length > 0 ? `${title} (${items.length})` : title;
+        contentHost.replaceChildren();
+        if (loading && items.length === 0) {
+          contentHost.appendChild(createLoadingState(`Loading ${title.toLowerCase()}…`, { doc, compact: true }));
+          return;
+        }
+        if (items.length === 0) {
+          const p = doc.createElement('p');
+          p.className = 'classic-card-subtext';
+          p.textContent = emptyText;
+          contentHost.appendChild(p);
+          return;
+        }
 
-          const avatar = doc.createElement('img');
-          avatar.className = 'moderation-account-avatar';
-          avatar.src = acc.avatar || DEFAULT_AVATAR_DATA_URI;
-          avatar.alt = '';
-          avatar.loading = 'lazy';
+        let filterQuery = '';
+        let visibleLimit = 50;
+        const stack = doc.createElement('div');
+        stack.className = 'classic-cards-stack';
+        const moreBtn = doc.createElement('button');
+        moreBtn.type = 'button';
+        moreBtn.className = 'edit-btn edit-cancel-btn';
+        moreBtn.hidden = true;
 
-          const info = doc.createElement('div');
-          info.className = 'moderation-account-info';
-          const nameEl = doc.createElement('span');
-          nameEl.className = 'moderation-account-name';
-          nameEl.textContent = acc.displayName || acc.username || acc.acct || '';
-          const cleanAcct = String(acc.acct || acc.username || '').replace(/^@/, '');
-          info.appendChild(nameEl);
-          if (cleanAcct) {
-            const handleEl = doc.createElement('span');
-            handleEl.className = 'moderation-account-handle';
-            handleEl.textContent = `@${cleanAcct}`;
-            info.appendChild(handleEl);
-          }
+        const renderRows = () => {
+          const q = filterQuery.trim().toLowerCase();
+          const filtered = q
+            ? items.filter((acc) => {
+                const txt = `${acc.displayName || ''} ${acc.username || ''} ${acc.acct || ''}`.toLowerCase();
+                return txt.includes(q);
+              })
+            : items;
+          const slice = filtered.slice(0, visibleLimit);
+          stack.replaceChildren();
+          for (const acc of slice) {
+            const row = doc.createElement('div');
+            row.className = 'moderation-account-row';
 
-          const badgeEl = doc.createElement('span');
-          badgeEl.className = 'post-protocol-badge';
-          badgeEl.textContent = acc.protocol === 'threads'
-            ? 'Threads'
-            : (acc.protocol === 'bluesky' ? 'Bluesky' : 'Mastodon');
+            const avatar = doc.createElement('img');
+            avatar.className = 'moderation-account-avatar';
+            avatar.src = acc.avatar || DEFAULT_AVATAR_DATA_URI;
+            avatar.alt = '';
+            avatar.loading = 'lazy';
 
-          const btn = doc.createElement('button');
-          btn.type = 'button';
-          btn.className = 'edit-btn moderation-unaction-btn';
-          btn.textContent = btnLabel;
-          btn.addEventListener('click', async () => {
-            btn.disabled = true;
-            try {
-              await actionFn(acc);
-              void renderModerationTab();
-            } catch (err) {
-              btn.disabled = false;
-              showAlert('Moderation Error', err?.message || `Unable to ${btnLabel.toLowerCase()} account.`);
+            const info = doc.createElement('div');
+            info.className = 'moderation-account-info';
+            const nameEl = doc.createElement('span');
+            nameEl.className = 'moderation-account-name';
+            nameEl.textContent = acc.displayName || acc.username || acc.acct || '';
+            const cleanAcct = String(acc.acct || acc.username || '').replace(/^@/, '');
+            info.appendChild(nameEl);
+            if (cleanAcct) {
+              const handleEl = doc.createElement('span');
+              handleEl.className = 'moderation-account-handle';
+              handleEl.textContent = `@${cleanAcct}`;
+              info.appendChild(handleEl);
             }
-          });
-          row.append(avatar, info, badgeEl, btn);
-          stack.appendChild(row);
-        }
-        const rem = filtered.length - slice.length;
-        moreBtn.hidden = rem <= 0;
-        if (rem > 0) {
-          moreBtn.textContent = `Show ${Math.min(rem, 100)} more (${rem} remaining)`;
-        }
-      };
 
-      if (items.length > 20) {
-        const searchBox = doc.createElement('search');
-        searchBox.className = 'moderation-account-search';
-        const searchIn = doc.createElement('input');
-        searchIn.type = 'search';
-        searchIn.className = 'onboarding-input';
-        searchIn.placeholder = `Filter ${title.toLowerCase()}...`;
-        searchIn.setAttribute('aria-label', `Filter ${title}`);
-        searchIn.setAttribute('autocorrect', 'off');
-        searchIn.setAttribute('autocapitalize', 'none');
-        searchIn.setAttribute('spellcheck', 'false');
-        searchIn.addEventListener('input', () => {
-          filterQuery = searchIn.value || '';
-          visibleLimit = 50;
+            const badgeEl = doc.createElement('span');
+            badgeEl.className = 'post-protocol-badge';
+            badgeEl.textContent = acc.protocol === 'threads'
+              ? 'Threads'
+              : (acc.protocol === 'bluesky' ? 'Bluesky' : 'Mastodon');
+
+            const btn = doc.createElement('button');
+            btn.type = 'button';
+            btn.className = 'edit-btn moderation-unaction-btn';
+            btn.textContent = btnLabel;
+            btn.addEventListener('click', async () => {
+              btn.disabled = true;
+              try {
+                await actionFn(acc);
+                items = items.filter((entry) => entry !== acc);
+                if (!closed && activeTab === 'moderation' && epoch === modTabEpoch) {
+                  h.textContent = items.length > 0 ? `${title} (${items.length})` : title;
+                  if (items.length === 0) renderSectionBody();
+                  else renderRows();
+                }
+              } catch (err) {
+                btn.disabled = false;
+                showAlert('Moderation Error', err?.message || `Unable to ${btnLabel.toLowerCase()} account.`);
+              }
+            });
+            row.append(avatar, info, badgeEl, btn);
+            stack.appendChild(row);
+          }
+          const rem = filtered.length - slice.length;
+          moreBtn.hidden = rem <= 0;
+          if (rem > 0) {
+            moreBtn.textContent = `Show ${Math.min(rem, 100)} more (${rem} remaining)`;
+          }
+        };
+
+        if (items.length > 20) {
+          const searchBox = doc.createElement('search');
+          searchBox.className = 'moderation-account-search';
+          const searchIn = doc.createElement('input');
+          searchIn.type = 'search';
+          searchIn.className = 'onboarding-input';
+          searchIn.placeholder = `Filter ${title.toLowerCase()}...`;
+          searchIn.setAttribute('aria-label', `Filter ${title}`);
+          searchIn.setAttribute('autocorrect', 'off');
+          searchIn.setAttribute('autocapitalize', 'none');
+          searchIn.setAttribute('spellcheck', 'false');
+          searchIn.addEventListener('input', () => {
+            filterQuery = searchIn.value || '';
+            visibleLimit = 50;
+            renderRows();
+          });
+          searchBox.appendChild(searchIn);
+          contentHost.appendChild(searchBox);
+        }
+
+        moreBtn.addEventListener('click', () => {
+          visibleLimit += 100;
           renderRows();
         });
-        searchBox.appendChild(searchIn);
-        section.appendChild(searchBox);
-      }
 
-      moreBtn.addEventListener('click', () => {
-        visibleLimit += 100;
         renderRows();
-      });
+        contentHost.append(stack, moreBtn);
+      };
 
-      renderRows();
-      section.append(stack, moreBtn);
+      renderSectionBody();
       return section;
     };
 
-    card.append(
-      filterBlock,
-      algoBlock,
-      buildModAccountSection('Muted Accounts', 'No muted accounts.', mutes, 'Unmute', (acc) =>
-        acc.localModeration
-          ? removeModeratedAccount('mutes', acc)
-          : toggleMuteAuthor(acc.id, true, { protocol: acc.protocol })
-      ),
-      buildModAccountSection('Blocked Accounts', 'No blocked accounts.', blocks, 'Unblock', (acc) =>
-        acc.localModeration
-          ? removeModeratedAccount('blocks', acc)
-          : toggleBlockAuthor(acc.id, true, {
-              protocol: acc.protocol,
-              blockUri: acc.relationship?.blockUri || acc.viewer?.blocking || null,
-            })
-      )
+    const unmuteAccount = async (acc) => {
+      await toggleMuteAuthor(acc.id || acc.acct || acc.username, true, {
+        protocol: acc.protocol,
+        acct: acc.acct || acc.username,
+      });
+      if (acc.localModeration) {
+        await removeModeratedAccount('mutes', acc);
+      }
+    };
+    const unblockAccount = async (acc) => {
+      await toggleBlockAuthor(acc.id || acc.acct || acc.username, true, {
+        protocol: acc.protocol,
+        acct: acc.acct || acc.username,
+        blockUri: acc.relationship?.blockUri || acc.viewer?.blocking || null,
+      });
+      if (acc.localModeration) {
+        await removeModeratedAccount('blocks', acc);
+      }
+    };
+
+    const cachedMutes = peekCachedModerationAccounts('mutes');
+    const cachedBlocks = peekCachedModerationAccounts('blocks');
+
+    const mutesHost = doc.createElement('div');
+    mutesHost.appendChild(
+      buildModAccountSection('Muted Accounts', 'No muted accounts.', cachedMutes || [], 'Unmute', unmuteAccount, {
+        loading: cachedMutes === null,
+      })
     );
+
+    const blocksHost = doc.createElement('div');
+    blocksHost.appendChild(
+      buildModAccountSection('Blocked Accounts', 'No blocked accounts.', cachedBlocks || [], 'Unblock', unblockAccount, {
+        loading: cachedBlocks === null,
+      })
+    );
+
+    card.append(filterBlock, algoBlock, mutesHost, blocksHost);
+
+    void fetchKeywordFilters()
+      .then((freshFilters) => {
+        if (closed || activeTab !== 'moderation' || epoch !== modTabEpoch) return;
+        renderFilterChips(freshFilters || [], { loading: false });
+      })
+      .catch(() => {
+        if (closed || activeTab !== 'moderation' || epoch !== modTabEpoch) return;
+        renderFilterChips(feedStore.get().filters || [], { loading: false });
+      });
+
+    void fetchModerationAccounts('mutes')
+      .then((mutes) => {
+        if (closed || activeTab !== 'moderation' || epoch !== modTabEpoch) return;
+        mutesHost.replaceChildren(
+          buildModAccountSection('Muted Accounts', 'No muted accounts.', mutes, 'Unmute', unmuteAccount)
+        );
+      })
+      .catch(() => {
+        if (closed || activeTab !== 'moderation' || epoch !== modTabEpoch) return;
+        mutesHost.replaceChildren(
+          buildModAccountSection('Muted Accounts', 'No muted accounts.', cachedMutes || [], 'Unmute', unmuteAccount)
+        );
+      });
+
+    void fetchModerationAccounts('blocks')
+      .then((blocks) => {
+        if (closed || activeTab !== 'moderation' || epoch !== modTabEpoch) return;
+        blocksHost.replaceChildren(
+          buildModAccountSection('Blocked Accounts', 'No blocked accounts.', blocks, 'Unblock', unblockAccount)
+        );
+      })
+      .catch(() => {
+        if (closed || activeTab !== 'moderation' || epoch !== modTabEpoch) return;
+        blocksHost.replaceChildren(
+          buildModAccountSection('Blocked Accounts', 'No blocked accounts.', cachedBlocks || [], 'Unblock', unblockAccount)
+        );
+      });
   }
 
   function renderBody() {

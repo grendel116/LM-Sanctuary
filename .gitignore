@@ -27,6 +27,7 @@ backups/
 scratch/
 sanctuary/data/
 social/data/
+webview_data/
 reports/
 sanctuary/certs/
 *.db
