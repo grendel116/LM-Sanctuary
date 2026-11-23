@@ -1,5 +1,6 @@
 import { applyRootProgramTheme } from '../../constants/theme.js';
-import { bumpProgramAvatarVersion } from '../../state/sanctuary/connection.js';
+import { bumpProgramAvatarVersion, connectionStore } from '../../state/sanctuary/connection.js';
+import { sessionStore } from '../../state/sanctuary/sessionModel.js';
 import {
   createProgramFromDescription,
   fetchProgramProfile,
@@ -13,7 +14,6 @@ import {
 import {
   createClassicModalDialog,
   downloadNodeFile,
-  isDavyActiveUser,
   showAlert,
 } from './SanctuaryDialog.js';
 
@@ -57,11 +57,6 @@ export function openProgramCardModal({
   activeProgramId = '',
   onSaved,
 } = {}) {
-  if (programId === 'sebile' && !isDavyActiveUser(activeUser)) {
-    showAlert('Protected Program', 'Sebile is a permanent core program and can only be edited by Davy.');
-    return null;
-  }
-
   const doc = globalThis.document;
   let currentProgramId = programId;
   let originalName = '';
@@ -282,7 +277,7 @@ export function openProgramCardModal({
     try {
       let targetId = currentProgramId;
       let wasActive = false;
-      if (newName !== originalName && currentProgramId !== 'sebile') {
+      if (newName !== originalName) {
         const ren = await renameProgram(currentProgramId, newName);
         if (ren?.new_id) targetId = ren.new_id;
         wasActive = Boolean(ren?.was_active);
@@ -362,11 +357,6 @@ export function openPaletteModal({
   activeProgramId = '',
   onUpdated,
 } = {}) {
-  if (programId === 'sebile' && !isDavyActiveUser(activeUser)) {
-    showAlert('Protected Program', 'Sebile is a permanent core program and can only be edited by Davy.');
-    return null;
-  }
-
   const doc = globalThis.document;
   const modal = createClassicModalDialog({
     id: 'program-palette-dialog',
@@ -380,22 +370,25 @@ export function openPaletteModal({
   heading.innerHTML = `${PALETTE_SVG}<span>Customize Program Theme</span>`;
 
   const desc = doc.createElement('p');
+  desc.className = 'classic-modal-desc';
   desc.textContent = `Select a preset color theme or custom hex color for ${programName}.`;
 
+  const presetSection = doc.createElement('div');
+  presetSection.className = 'palette-modal-section';
+
   const presetLbl = doc.createElement('label');
+  presetLbl.className = 'palette-section-label';
   presetLbl.textContent = 'Preset Themes';
-  presetLbl.style.fontSize = '0.72rem';
-  presetLbl.style.color = 'var(--text-muted)';
-  presetLbl.style.display = 'block';
-  presetLbl.style.marginBottom = '8px';
 
   const presetGrid = doc.createElement('div');
   presetGrid.className = 'classic-palette-grid';
+  presetSection.append(presetLbl, presetGrid);
 
   const colorPicker = doc.createElement('input');
   colorPicker.type = 'color';
   colorPicker.id = 'custom-palette-color-picker';
   colorPicker.className = 'classic-color-picker';
+  colorPicker.setAttribute('aria-label', 'Pick custom theme color');
   colorPicker.value = '#9370db';
 
   const hexInput = doc.createElement('input');
@@ -407,11 +400,17 @@ export function openPaletteModal({
   hexInput.placeholder = '#9370DB';
   hexInput.value = '#9370DB';
 
+  const applyBtn = doc.createElement('button');
+  applyBtn.type = 'button';
+  applyBtn.className = 'edit-btn edit-save-btn palette-apply-btn';
+  applyBtn.textContent = 'Apply Theme';
+
   const presetButtons = [];
   const selectColor = (hex) => {
     const clean = hex.startsWith('#') ? hex : `#${hex}`;
     colorPicker.value = clean;
     hexInput.value = clean.toUpperCase();
+    modal.dialog.style.setProperty('--palette-preview-accent', clean);
     for (const { btn, hex: pHex } of presetButtons) {
       btn.classList.toggle('is-selected', pHex.toLowerCase() === clean.toLowerCase());
     }
@@ -421,6 +420,7 @@ export function openPaletteModal({
     const btn = doc.createElement('button');
     btn.type = 'button';
     btn.className = 'classic-swatch-btn';
+    btn.style.setProperty('--swatch-color', preset.hex);
     const dot = doc.createElement('span');
     dot.className = 'classic-swatch-dot';
     dot.style.backgroundColor = preset.hex;
@@ -439,12 +439,17 @@ export function openPaletteModal({
     if (hex && !hex.startsWith('#')) hex = `#${hex}`;
     if (/^#[0-9a-fA-F]{6}$/.test(hex)) {
       colorPicker.value = hex;
+      modal.dialog.style.setProperty('--palette-preview-accent', hex);
+      for (const { btn, hex: pHex } of presetButtons) {
+        btn.classList.toggle('is-selected', pHex.toLowerCase() === hex.toLowerCase());
+      }
     }
   });
 
   const customGrp = doc.createElement('div');
-  customGrp.className = 'input-group';
+  customGrp.className = 'palette-modal-section palette-custom-section';
   const customLbl = doc.createElement('label');
+  customLbl.className = 'palette-section-label';
   customLbl.setAttribute('for', 'custom-palette-color-text');
   customLbl.textContent = 'Custom Theme Color';
   const pickerRow = doc.createElement('div');
@@ -456,14 +461,10 @@ export function openPaletteModal({
   footer.className = 'classic-modal-footer-end';
   const cancelBtn = doc.createElement('button');
   cancelBtn.type = 'button';
-  cancelBtn.className = 'onboarding-btn';
+  cancelBtn.className = 'edit-btn edit-cancel-btn';
   cancelBtn.textContent = 'Cancel';
   cancelBtn.addEventListener('click', () => modal.close());
 
-  const applyBtn = doc.createElement('button');
-  applyBtn.type = 'button';
-  applyBtn.className = 'onboarding-btn';
-  applyBtn.textContent = 'Apply Theme';
   applyBtn.addEventListener('click', async () => {
     const color = hexInput.value.trim();
     if (!/^#[0-9a-fA-F]{6}$/.test(color)) {
@@ -474,8 +475,28 @@ export function openPaletteModal({
     applyBtn.textContent = 'Applying...';
     try {
       const res = await updateProgramPalette(programId, color);
-      if (res?.theme && (!activeProgramId || programId === activeProgramId)) {
-        applyRootProgramTheme(res.theme);
+      const updatedTheme = res?.theme || color;
+      connectionStore.set((prev) => ({
+        programs: Array.isArray(prev.programs)
+          ? prev.programs.map((p) =>
+              p?.id === programId
+                ? { ...p, accent_color: color, theme_color: color, theme: res?.theme || p.theme }
+                : p
+            )
+          : prev.programs,
+      }));
+      const latestConn = connectionStore.get();
+      const latestSess = sessionStore.get();
+      const isCurrentActive =
+        programId === latestConn.activeProgram ||
+        programId === latestSess.activeProgramId ||
+        (!latestConn.activeProgram && !activeProgramId) ||
+        programId === activeProgramId;
+      if (isCurrentActive && updatedTheme) {
+        if (programId === latestSess.activeProgramId) {
+          sessionStore.set({ theme: res?.theme || updatedTheme });
+        }
+        applyRootProgramTheme(updatedTheme);
       }
       modal.close();
       await onUpdated?.(res);
@@ -488,12 +509,21 @@ export function openPaletteModal({
   });
 
   footer.append(cancelBtn, applyBtn);
-  modal.card.append(heading, desc, presetLbl, presetGrid, customGrp, footer);
+  modal.card.append(heading, desc, presetSection, customGrp, footer);
   modal.open();
+
+  const initConn = connectionStore.get();
+  const progSummary = initConn.programs?.find((p) => p?.id === programId);
+  const seededColor =
+    progSummary?.theme?.primary_accent ||
+    progSummary?.accent_color ||
+    progSummary?.theme_color ||
+    '#9370db';
+  selectColor(seededColor);
 
   void fetchProgramTheme(programId)
     .then((tData) => {
-      const current = tData?.theme?.primary_accent || '#9370db';
+      const current = tData?.theme?.primary_accent || seededColor;
       selectColor(current);
     })
     .catch(() => {});

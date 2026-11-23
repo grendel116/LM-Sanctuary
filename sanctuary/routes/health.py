@@ -92,11 +92,10 @@ def mobile_health():
             folder_path = os.path.join(progs_dir, folder)
             if not os.path.isdir(folder_path):
                 continue
-            if folder != "sebile":
-                has_json = os.path.isfile(os.path.join(folder_path, f"{folder}.json"))
-                has_md = any(f.lower().endswith(".md") for f in os.listdir(folder_path))
-                if not has_json and not has_md:
-                    continue
+            has_json = os.path.isfile(os.path.join(folder_path, f"{folder}.json"))
+            has_md = any(f.lower().endswith(".md") for f in os.listdir(folder_path))
+            if not has_json and not has_md:
+                continue
 
             card = st.read_program_card(folder)
             prog_name = (card.get("name") or "").strip() or folder.title()

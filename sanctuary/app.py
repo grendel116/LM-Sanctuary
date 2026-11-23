@@ -4,7 +4,6 @@ import ipaddress
 import json
 import os
 import sys
-import threading
 from contextlib import nullcontext
 from pathlib import Path
 from urllib.parse import urlparse
@@ -16,10 +15,17 @@ if SANCTUARY_DIR not in sys.path:
 if REPO_ROOT not in sys.path:
     sys.path.append(REPO_ROOT)
 
+os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "8")
+os.environ.setdefault("OMP_NUM_THREADS", "4")
+os.environ.setdefault("MKL_NUM_THREADS", "4")
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+
 from flask import Flask, jsonify, make_response, request, send_file, send_from_directory
 
 import state as st
 from core.program_config import get_program_name
+from routes.browser_vault import browser_vault_bp
 from routes.chat import chat_bp
 from routes.health import health_bp
 from routes.knowledge import knowledge_bp
@@ -82,6 +88,7 @@ app.register_blueprint(social_bridge_bp)
 app.register_blueprint(social_accounts_bp)
 app.register_blueprint(social_drafts_bp)
 app.register_blueprint(social_linked_posts_bp)
+app.register_blueprint(browser_vault_bp)
 
 migrated_sessions, session_migration_errors = migrate_session_files(
     os.path.join(st.base_dir, "core", "programs")
@@ -128,6 +135,7 @@ def check_program_change():
         "/api/generation_status",
         "/api/events/",
         "/api/social/",
+        "/api/browser/",
         "/assets/",
         "/app/",
         "/core/",
@@ -334,18 +342,6 @@ if __name__ == "__main__":
         except ImportError:
             print("[!] pyOpenSSL is not installed. To run with ad-hoc SSL, please run: pip install pyopenssl")
             print("[!] Falling back to HTTP...")
-
-    if os.environ.get("OPEN_BROWSER", "").lower() == "true" and os.environ.get("WERKZEUG_RUN_MAIN") != "true":
-        browser_host = host if host != "0.0.0.0" else "127.0.0.1"
-        protocol = "https" if ssl_context else "http"
-        url = f"{protocol}://{browser_host}:{port}"
-
-        def open_browser():
-            import webbrowser
-            print(f"[*] Automatically opening browser to: {url}")
-            webbrowser.open(url)
-
-        threading.Timer(1.5, open_browser).start()
 
     app.run(
         host=host,

@@ -5,19 +5,14 @@ import requests
 import numpy as np
 from bs4 import BeautifulSoup
 
-# Lazy-loaded embedding model to speed up server boot and reload times
-_embedding_model = None
-
 def get_embedding_model():
-    global _embedding_model
-    if _embedding_model is None:
-        os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
-        from sentence_transformers import SentenceTransformer
-        try:
-            _embedding_model = SentenceTransformer('all-MiniLM-L6-v2', device="cpu", local_files_only=True)
-        except Exception:
-            _embedding_model = SentenceTransformer('all-MiniLM-L6-v2', device="cpu")
-    return _embedding_model
+    """Return the single process-wide thread-safe SentenceTransformer adapter."""
+    from utils.semantic_scorer import get_shared_embedding_model
+
+    model = get_shared_embedding_model(local_files_only=True)
+    if model is None:
+        model = get_shared_embedding_model(local_files_only=False)
+    return model
 
 
 class DataBankManager:
@@ -75,13 +70,41 @@ class DataBankManager:
         return clean_text
 
     def scrape_url(self, url: str) -> str:
-        """Fetches a webpage and scrapes clean plain text from it."""
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        }
-        res = requests.get(url, headers=headers, timeout=15)
-        res.raise_for_status()
-        return self.clean_html(res.text)
+        """Fetches a webpage locally first, escalating to Cloud `/v1/tools/crawl/scrape` when JS/blocked."""
+        from utils.url_privacy import strip_tracking_params
+
+        clean_url = strip_tracking_params(url)
+        static_text = ""
+        try:
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            }
+            res = requests.get(clean_url, headers=headers, timeout=12)
+            if res.status_code == 200:
+                static_text = self.clean_html(res.text)
+        except Exception as local_err:
+            static_text = ""
+            last_err = local_err
+        else:
+            last_err = None
+
+        if len(static_text.strip()) >= 240:
+            return static_text
+
+        try:
+            from core import greenpt_client
+
+            cloud_md = greenpt_client.scrape_markdown(clean_url)
+            if cloud_md:
+                return cloud_md
+        except Exception:
+            pass
+
+        if static_text.strip():
+            return static_text
+        if last_err is not None:
+            raise last_err
+        raise RuntimeError(f"Could not extract readable content from {clean_url}")
 
     def extract_pdf_text(self, file_path: str) -> str:
         """Tries to extract text from a PDF file using pypdf."""
@@ -190,24 +213,46 @@ class DataBankManager:
 
     def ingest_file(self, file_path: str, original_filename: str) -> str:
         ext = os.path.splitext(original_filename)[1].lower()
-        
-        if ext in ['.txt', '.md', '.py']:
+
+        if ext in ('.txt', '.md', '.py', '.json', '.csv', '.js', '.ts', '.css', '.yaml', '.yml'):
             with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
                 text = f.read()
             return self.ingest_text(text, original_filename, "file")
-            
-        elif ext in ['.html', '.htm']:
+
+        if ext in ('.html', '.htm'):
             with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
                 html = f.read()
             clean_text = self.clean_html(html)
             return self.ingest_text(clean_text, original_filename, "file")
-            
-        elif ext == '.pdf':
-            clean_text = self.extract_pdf_text(file_path)
+
+        if ext == '.pdf':
+            clean_text = ""
+            try:
+                clean_text = self.extract_pdf_text(file_path)
+            except Exception:
+                clean_text = ""
+            if len(clean_text.strip()) < 80:
+                try:
+                    from core import greenpt_client
+
+                    ocr_md = greenpt_client.convert_document(file_path, original_filename)
+                    if ocr_md:
+                        clean_text = ocr_md
+                except Exception:
+                    pass
             return self.ingest_text(clean_text, original_filename, "file")
-            
-        else:
-            raise ValueError(f"Unsupported file format: {ext}")
+
+        if ext in ('.docx', '.pptx', '.xlsx', '.png', '.jpg', '.jpeg', '.webp', '.tiff'):
+            from core import greenpt_client
+
+            converted = greenpt_client.convert_document(file_path, original_filename)
+            if not converted:
+                raise ValueError(
+                    f"Converting '{ext}' files requires a Cloud API Key (Docling `/v1/tools/documents/convert/file`)."
+                )
+            return self.ingest_text(converted, original_filename, "file")
+
+        raise ValueError(f"Unsupported file format: {ext}")
 
     def ingest_url(self, url: str) -> str:
         clean_text = self.scrape_url(url)
@@ -295,7 +340,26 @@ class DataBankManager:
                 
         results.sort(key=lambda x: x[0], reverse=True)
         top_results = results[:top_k]
-        
+
+        if len(results) > 1 and (results[0][0] - results[1][0]) < 0.08:
+            try:
+                from core import greenpt_client
+
+                if greenpt_client.is_cloud_enabled(require_native_greenpt=True):
+                    candidates = results[: max(top_k, min(12, len(results)))]
+                    reranked = greenpt_client.rerank(
+                        query_text,
+                        [item[2] for item in candidates],
+                        top_n=top_k,
+                    )
+                    if reranked:
+                        top_results = [
+                            (r_score, candidates[idx][1], candidates[idx][2])
+                            for idx, r_score in reranked
+                        ]
+            except Exception:
+                pass
+
         if not top_results:
             return ""
         

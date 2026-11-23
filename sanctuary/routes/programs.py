@@ -378,15 +378,14 @@ def list_programs():
             for folder in os.listdir(vs.PROGRAMS_DIR):
                 folder_path = st.get_program_dir(folder)
                 if os.path.isdir(folder_path):
-                    if folder != "sebile":
-                        has_json = os.path.isfile(os.path.join(folder_path, f"{folder}.json"))
-                        has_md = any(f.lower().endswith(".md") for f in os.listdir(folder_path))
-                        if not has_json and not has_md:
-                            try:
-                                shutil.rmtree(folder_path, ignore_errors=True)
-                            except Exception:
-                                pass
-                            continue
+                    has_json = os.path.isfile(os.path.join(folder_path, f"{folder}.json"))
+                    has_md = any(f.lower().endswith(".md") for f in os.listdir(folder_path))
+                    if not has_json and not has_md:
+                        try:
+                            shutil.rmtree(folder_path, ignore_errors=True)
+                        except Exception:
+                            pass
+                        continue
                     program_name = folder.title()
                     card = st.read_program_card(folder)
                     if card.get("name"):
@@ -642,12 +641,6 @@ def update_program_palette():
         if not color:
             return jsonify({'error': 'Missing color'}), 400
 
-        if program_id.lower() == 'sebile':
-            from runners.program import get_active_user
-            active_u = get_active_user().lower()
-            if not (active_u == 'davy' or active_u.startswith('mastodon_')):
-                return jsonify({'error': 'Cannot modify theme for default program Sebile'}), 400
-            
         # Validate hex color
         if not re.match(r'^#[0-9a-fA-F]{6}$', color):
             return jsonify({'error': 'Invalid hex color format. Must be #RRGGBB'}), 400
@@ -687,9 +680,6 @@ def delete_program():
         program_id = data.get('program_id')
         if not program_id:
             return jsonify({'error': 'Missing program_id'}), 400
-            
-        if program_id == 'sebile':
-            return jsonify({'error': 'Cannot delete default program Sebile'}), 400
 
         from utils import image_cancellation
         image_cancellation.cancel(program_id=program_id)
@@ -772,7 +762,7 @@ def delete_program():
         if curr_session in to_remove:
             set_active_session('default')
 
-        # 5. If the deleted program is currently active, switch to Sebile first
+        # 5. If the deleted program is currently active, switch to another remaining program (or clear)
         from runners.program import get_active_program, set_active_program
         # global migrated to st
         active_program = get_active_program()
@@ -781,23 +771,44 @@ def delete_program():
             or getattr(st.runner, 'program_id', None) == program_id
             or st._cached_active_program == program_id
         )
+        fallback_prog = ""
+        if os.path.isdir(programs_dir):
+            for other_prog in sorted(os.listdir(programs_dir)):
+                if other_prog == program_id:
+                    continue
+                other_dir = os.path.join(programs_dir, other_prog)
+                if not os.path.isdir(other_dir):
+                    continue
+                has_json = os.path.isfile(os.path.join(other_dir, f"{other_prog}.json"))
+                has_md = any(f.lower().endswith(".md") for f in os.listdir(other_dir))
+                if has_json or has_md:
+                    fallback_prog = other_prog
+                    break
+
         if is_active:
-            os.environ["ACTIVE_PROGRAM"] = "sebile"
-            try:
-                set_active_program("sebile")
-                set_active_session("default")
-            except Exception as e:
-                print(f"Error resetting active program to sebile: {e}")
-                
-            st._cached_active_program = "sebile"
+            if fallback_prog:
+                os.environ["ACTIVE_PROGRAM"] = fallback_prog
+                try:
+                    set_active_program(fallback_prog)
+                    set_active_session("default")
+                except Exception as e:
+                    print(f"Error switching active program to {fallback_prog}: {e}")
 
-            # Switch active runner state cleanly to sebile
-            st.reload_program_state("sebile")
+                st._cached_active_program = fallback_prog
+                st.reload_program_state(fallback_prog)
+            else:
+                os.environ["ACTIVE_PROGRAM"] = ""
+                st._cached_active_program = ""
+                if st.runner is not None:
+                    st.runner.program_id = ""
 
-        # 6. Clean project_settings.json (folders and program_voices)
+        # 6. Clean project_settings.json (active_program, folders, and program_voices)
         from runners.program import _load_settings, _save_settings
         settings = _load_settings()
         settings_changed = False
+        if is_active and not fallback_prog and settings.get("active_program") != "":
+            settings["active_program"] = ""
+            settings_changed = True
         norm_prog_path = os.path.normpath(program_path)
         folders = settings.get("folders", [])
         cleaned_folders = [f for f in folders if os.path.normpath(f) != norm_prog_path]
@@ -845,7 +856,7 @@ def delete_program():
                 return jsonify({'error': f"Failed to completely remove directory for '{program_id}'"}), 500
         
         st.broadcast_status()
-        return jsonify({'status': 'success', 'switched_to': 'sebile' if is_active else None})
+        return jsonify({'status': 'success', 'switched_to': (fallback_prog or None) if is_active else None})
     except Exception as e:
         traceback.print_exc()
         return jsonify({'error': str(e)}), 500
@@ -877,34 +888,7 @@ def rename_program():
         
         if not os.path.exists(old_path):
             return jsonify({'error': f"Program '{program_id}' does not exist"}), 404
-            
-        # Sebile is a permanent core program and can only be renamed/edited by Davy
-        if program_id == 'sebile':
-            from runners.program import get_active_user
-            active_u = get_active_user().lower()
-            if not (active_u == 'davy' or active_u.startswith('mastodon_')):
-                return jsonify({'error': 'Cannot rename default program Sebile'}), 400
-            
-            json_path = os.path.join(old_path, "sebile.json")
-            if os.path.exists(json_path):
-                try:
-                    with open(json_path, "r", encoding="utf-8") as f:
-                        jdata = json.load(f)
-                    data_block = jdata.get("data", jdata)
-                    data_block["name"] = new_name
-                    with open(json_path, "w", encoding="utf-8") as f:
-                        json.dump(jdata, f, indent=2, ensure_ascii=False)
-                except Exception as e:
-                    print(f"Error updating Sebile JSON: {e}")
-            
-            st._update_program_references('sebile', 'sebile', new_name)
-            active_program = get_active_program() or os.getenv("ACTIVE_PROGRAM", "sebile")
-            return jsonify({
-                'status': 'success',
-                'new_id': 'sebile',
-                'was_active': (active_program == 'sebile')
-            })
-            
+
         # If new_id is different from program_id, perform folder rename
         if new_id != program_id:
             if os.path.exists(new_path):
@@ -1059,12 +1043,6 @@ def save_program_profile():
         program_id = incoming.get('program_id')
         if not program_id:
             return jsonify({'error': 'Missing program_id'}), 400
-
-        if program_id.lower() == 'sebile':
-            from runners.program import get_active_user
-            active_u = get_active_user().lower()
-            if not (active_u == 'davy' or active_u.startswith('mastodon_')):
-                return jsonify({'error': 'Cannot modify default program Sebile'}), 400
 
         program_dir = os.path.normpath(os.path.join(vs.PROGRAMS_DIR, program_id))
         if not os.path.exists(program_dir):
@@ -1267,11 +1245,25 @@ def _strip_profile_html(raw: str) -> str:
     return re.sub(r"\s+", " ", _html.unescape(text)).strip()
 
 
+def _parse_iso_timestamp(raw_ts: str) -> float:
+    ts = str(raw_ts or "").strip()
+    if not ts:
+        return 0.0
+    from datetime import datetime, timezone
+    try:
+        dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.timestamp()
+    except Exception:
+        return 0.0
+
+
 def _normalize_recent_social_posts(raw_posts) -> list[dict[str, str]]:
-    """Sanitize and cap public recent social posts (max 3 plain-text entries, zero credentials)."""
+    """Sanitize, sort newest-first, and cap public recent social posts (max 3 entries, zero credentials)."""
     if not isinstance(raw_posts, list):
         return []
-    cleaned: list[dict[str, str]] = []
+    collected: list[tuple[float, dict[str, str]]] = []
     seen_texts: set[str] = set()
     for item in raw_posts:
         if isinstance(item, dict):
@@ -1286,10 +1278,9 @@ def _normalize_recent_social_posts(raw_posts) -> list[dict[str, str]]:
         seen_texts.add(plain)
         if len(plain) > 500:
             plain = plain[:497].rstrip() + "..."
-        cleaned.append({"text": plain, "created_at": raw_ts})
-        if len(cleaned) >= 3:
-            break
-    return cleaned
+        collected.append((_parse_iso_timestamp(raw_ts), {"text": plain, "created_at": raw_ts}))
+    collected.sort(key=lambda pair: pair[0], reverse=True)
+    return [entry for _ts, entry in collected[:3]]
 
 
 def sync_mastodon_profile_markdown(profile: dict) -> dict:

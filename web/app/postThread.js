@@ -215,13 +215,16 @@ export function renderPostThreadView(containerEl, {
             onAskSanctuary(p);
           }
         : undefined,
-      onEditPost: authStore.get().isMastodonConnected ? (p) => {
-        if (p?.protocol !== 'mastodon') return;
+      onEditPost: (authStore.get().isMastodonConnected || authStore.get().isBlueskyConnected) ? (p) => {
+        const authNow = authStore.get();
+        const canEdit = (p?.protocol === 'mastodon' && authNow.isMastodonConnected)
+          || (p?.protocol === 'bluesky' && authNow.isBlueskyConnected);
+        if (!canEdit) return;
         openEditPostDialog(p, {
           onSaved: (updated) => {
             if (!updated || destroyed) return;
             applyUpdatedItem(updated);
-            mutatePostAcrossStreams(p.id || p.key, () => updated);
+            mutatePostAcrossStreams((it) => it?.id === p.id || it?.key === p.key || it?.id === updated.id, () => updated);
           },
         });
       } : null,
@@ -463,7 +466,18 @@ export function renderPostThreadView(containerEl, {
           ...(currentFocal.metrics || {}),
           replies: Number(currentFocal.metrics?.replies ?? 0) + 1,
         },
+        _meta: {
+          ...(currentFocal._meta || {}),
+          viewerReplied: true,
+          ...(currentFocal.protocol === 'mastodon' || currentFocal._meta?.mastodon
+            ? { mastodon: { ...(currentFocal._meta?.mastodon || {}), replied: true } }
+            : {}),
+          ...(currentFocal.protocol === 'bluesky' || currentFocal._meta?.bluesky
+            ? { bluesky: { ...(currentFocal._meta?.bluesky || {}), replied: true } }
+            : {}),
+        },
       };
+      mutatePostAcrossStreams(currentFocal.id || currentFocal.key, () => currentFocal);
       if (replied) {
         const unifiedReply = toUnifiedItem(replied);
         if (!descendants.some((d) => d.item.id === unifiedReply.id)) {

@@ -6,8 +6,10 @@ import {
   generatePortraitStream,
   listProgramImages,
   regenerateImage,
+  resolveProgramAvatarUrl,
   resolveSanctuaryMediaUrl,
 } from '../../queries/sanctuary.js';
+import { DEFAULT_AVATAR_DATA_URI } from '../../constants/avatars.js';
 import { prefillFromUserBubble } from '../../state/composeStore.js';
 import { bumpProgramAvatarVersion } from '../../state/sanctuary/connection.js';
 import { createLoadingState } from '../ui/index.js';
@@ -17,7 +19,7 @@ import {
   showConfirm,
 } from './SanctuaryDialog.js';
 
-export const MAX_IMAGES_PER_ROW = 3;
+export const MAX_IMAGES_PER_ROW = 2;
 
 const REGEN_SVG = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="23 4 23 10 17 10"></polyline><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path></svg>`;
 const VIDEO_SVG = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="23 7 16 12 23 17 23 7"></polygon><rect x="1" y="5" width="15" height="14" rx="2" ry="2"></rect></svg>`;
@@ -283,6 +285,7 @@ export function createPortraitCardElement(imgUrl, prompt, msgId, role = 'program
           image_url: stripNodeBase(imgUrl),
           program_id: speakerId || '',
         });
+        container.remove();
         await ctx.onRefreshHistory?.();
       })
     );
@@ -328,14 +331,49 @@ export async function streamPortraitGeneration(chatContainer, {
   prompt = '',
   speakerId = null,
   msgId,
-  count = 3,
+  count = MAX_IMAGES_PER_ROW,
   ctx = {},
+  createTypingRow = null,
 } = {}) {
   const doc = globalThis.document;
+  const sentinel = chatContainer.querySelector?.('#bottom-sentinel');
+  const typingObj = typeof createTypingRow === 'function' ? createTypingRow() : null;
+  const typingRow = typingObj?.row || null;
+  if (typingRow) {
+    chatContainer.insertBefore(typingRow, sentinel || null);
+    chatContainer.scrollTop = chatContainer.scrollHeight;
+  }
+
   const placeholder = doc.createElement('div');
   placeholder.className = 'message-row program-row portrait-stream-placeholder';
   placeholder.dataset.msgId = msgId || '';
   placeholder.dataset.isTransient = 'true';
+
+  if (speakerId) {
+    placeholder.dataset.senderId = speakerId;
+    const avatarContainer = doc.createElement('div');
+    avatarContainer.className = 'avatar-container';
+    const avatar = doc.createElement('img');
+    avatar.className = 'avatar program-avatar';
+    avatar.setAttribute('data-sender-id', speakerId);
+    const avatarSrc = ctx.hasProgramProfile?.(speakerId) === false
+      ? DEFAULT_AVATAR_DATA_URI
+      : (resolveProgramAvatarUrl(speakerId, {
+          cacheBuster: ctx.getAvatarVersion?.(speakerId) ?? ctx.cacheBuster,
+        }) || DEFAULT_AVATAR_DATA_URI);
+    avatar.src = avatarSrc;
+    avatar.alt = ctx.programName || speakerId || 'Program';
+    avatar.addEventListener('error', () => {
+      if (avatar.src !== DEFAULT_AVATAR_DATA_URI) {
+        avatar.src = DEFAULT_AVATAR_DATA_URI;
+      }
+    });
+    avatarContainer.appendChild(avatar);
+    placeholder.appendChild(avatarContainer);
+  }
+
+  const bubblesContainer = doc.createElement('div');
+  bubblesContainer.className = 'message-bubbles-container has-portrait-grid';
 
   const grid = doc.createElement('div');
   grid.className = 'portrait-grid';
@@ -348,13 +386,17 @@ export async function streamPortraitGeneration(chatContainer, {
     grid.appendChild(slot);
   }
   const bubble = doc.createElement('div');
-  bubble.className = 'message program image-message';
+  bubble.className = 'message program image-message has-portrait-grid';
   bubble.appendChild(grid);
-  placeholder.appendChild(bubble);
+  bubblesContainer.appendChild(bubble);
+  placeholder.appendChild(bubblesContainer);
 
-  const sentinel = chatContainer.querySelector?.('#bottom-sentinel');
-  chatContainer.insertBefore(placeholder, sentinel || null);
-  chatContainer.scrollTop = chatContainer.scrollHeight;
+  let placeholderMounted = false;
+  if (!typingRow) {
+    placeholderMounted = true;
+    chatContainer.insertBefore(placeholder, sentinel || null);
+    chatContainer.scrollTop = chatContainer.scrollHeight;
+  }
 
   try {
     return await generatePortraitStream(
@@ -368,6 +410,11 @@ export async function streamPortraitGeneration(chatContainer, {
       {
         onEvent(evt) {
           if (evt.type === 'slot' && typeof evt.index === 'number' && slots[evt.index]) {
+            if (!placeholderMounted) {
+              placeholderMounted = true;
+              typingRow?.remove?.();
+              chatContainer.insertBefore(placeholder, chatContainer.querySelector?.('#bottom-sentinel') || null);
+            }
             const card = createPortraitCardElement(
               evt.image_url,
               evt.prompt || prompt,
@@ -378,11 +425,13 @@ export async function streamPortraitGeneration(chatContainer, {
             );
             grid.replaceChild(card, slots[evt.index]);
             slots[evt.index] = card;
+            chatContainer.scrollTop = chatContainer.scrollHeight;
           }
         },
       }
     );
   } finally {
+    typingRow?.remove?.();
     placeholder.remove();
   }
 }
@@ -1055,25 +1104,31 @@ export function openAvatarCropModal(sourceUrl, programId, onSaved) {
   const modal = createClassicModalDialog({
     id: 'crop-modal',
     title: 'Crop Program Avatar',
-    maxWidth: '520px',
+    maxWidth: 'min(92dvw, 520px)',
     onClose: () => {
       cropperInstance?.destroy?.();
       cropperInstance = null;
       modal.dialog.remove();
     },
   });
+  modal.card.style.width = 'fit-content';
+  modal.card.style.minWidth = '280px';
+  modal.card.style.alignItems = 'center';
+  if (modal.headingEl) {
+    modal.headingEl.style.alignSelf = 'stretch';
+  }
 
   const wrap = doc.createElement('div');
-  wrap.className = 'cropper-container';
+  wrap.className = 'avatar-crop-stage';
 
   const img = doc.createElement('img');
-  img.src = resolveSanctuaryMediaUrl(withProgramOwnerQuery(sourceUrl, programId));
   img.alt = 'Crop avatar';
-  img.style.maxWidth = '100%';
+  img.className = 'avatar-crop-source';
   wrap.appendChild(img);
 
   const footer = doc.createElement('div');
   footer.className = 'classic-modal-footer-end';
+  footer.style.width = '100%';
 
   const cancelBtn = doc.createElement('button');
   cancelBtn.type = 'button';
@@ -1120,17 +1175,45 @@ export function openAvatarCropModal(sourceUrl, programId, onSaved) {
     }
   });
 
+  const fitStageAndInitCropper = () => {
+    if (cropperInstance || modal.dialog.isConnected === false) return;
+    const nw = Number(img.naturalWidth || img.width || 0);
+    const nh = Number(img.naturalHeight || img.height || 0);
+    if (nw > 0 && nh > 0) {
+      const maxW = Math.max(220, Math.min((Number(globalThis.innerWidth) || 520) - 64, 460));
+      const maxH = Math.max(220, Math.round((Number(globalThis.innerHeight) || 760) * 0.6));
+      const scale = Math.min(maxW / nw, maxH / nh);
+      const stageW = Math.max(1, Math.round(nw * scale));
+      const stageH = Math.max(1, Math.round(nh * scale));
+      wrap.style.width = `${stageW}px`;
+      wrap.style.height = `${stageH}px`;
+      img.style.width = '100%';
+      img.style.height = '100%';
+    }
+    if (typeof globalThis.Cropper === 'function') {
+      cropperInstance = new globalThis.Cropper(img, {
+        aspectRatio: 1,
+        viewMode: 1,
+        dragMode: 'move',
+        autoCropArea: 0.9,
+        background: false,
+        responsive: true,
+        checkOrientation: false,
+      });
+    }
+  };
+
+  img.addEventListener('load', fitStageAndInitCropper, { once: true });
+  img.addEventListener('error', fitStageAndInitCropper, { once: true });
+  img.src = resolveSanctuaryMediaUrl(withProgramOwnerQuery(sourceUrl, programId));
+
   footer.appendChild(cancelBtn);
   footer.appendChild(saveBtn);
   modal.card.appendChild(wrap);
   modal.card.appendChild(footer);
   modal.open();
 
-  if (typeof globalThis.Cropper === 'function') {
-    cropperInstance = new globalThis.Cropper(img, {
-      aspectRatio: 1,
-      viewMode: 1,
-      autoCropArea: 0.9,
-    });
+  if ((img.complete && Number(img.naturalWidth) > 0) || !('complete' in img)) {
+    fitStageAndInitCropper();
   }
 }

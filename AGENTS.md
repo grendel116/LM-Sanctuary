@@ -1,0 +1,21 @@
+# LM-Sanctuary Agent Context
+
+## Recovery precedent (2026-11-23)
+- `git checkout -- <file>` destroys uncommitted work; the repo routinely carries large uncommitted deltas, so never use it for baseline test comparisons. Re-test by other means (isolate one file) instead.
+- If `web/app/programThread.js` is ever corrupted again: the Firefox cache2 profile at `gecko_profile/cache2/entries/` holds full-size copies of `web/app/*.js` (body at byte 0, length encoded in the ETag, e.g. `47622-1623986268` = first 47622 bytes are the file). Same trick works for `webview_data/EBWebView/Default/Service Worker/CacheStorage/**`.
+
+## Tests
+- Frontend: `node --test __tests__/*.test.js` (npm.ps1 is blocked by execution policy; invoke `node --test` directly).
+- Use `--test-reporter=tap` when parsing results; default reporter symbols can garble under console encoding.
+- Some suites fail on mock-DOM globals when run in parallel; rerun a single file for isolation.
+
+## Known pre-existing frontend failures (not actionable, baseline as of 2026-11)
+- `standingFixes.test.js`: 4 failures (programThread in-place edit, contextful replies, blank-slate feed reset, feed snapshot lock).
+- `browserDesktopHost.test.js`: 1 failure (deriveAccentTokens suite).
+- `browserWorkspace.test.js`: 1 failure (Browser stage suite).
+- `sanctuaryCompanionFixes.test.js`: 1 failure (programThread stop/cancel flow).
+
+## Program chat composer (`web/app/programThread.js`)
+- Attachment state lifecycle: `attachedMediaPath` / `attachedMime` / `attachedFilename` (+ `attachedSharedPost`) → `submitTurn()` forwards as `media_path` / `image_mime` to POST `/chat`; offline turns go through `enqueueTurn` (outboxModel accepts `mediaPath` or raw `imageData`).
+- Image capture paths: file input (`change`) and clipboard paste (`paste` listener) both converge on `/upload_media` (multipart FormData via `uploadSanctuaryMedia`), returning `{ file_path: '/images/uploads/...' }`.
+- Backend consumes `image_data` (base64 string) + `image_mime` directly in `sanctuary/routes/chat.py` → `history_adapters.py` builds `data:{mime};base64,{data}` URLs.

@@ -11,6 +11,7 @@ import {
   canonicalizeUrlForDedupe,
   deduplicateAppendItems,
   deduplicateUnifiedItems,
+  resolveContextualStreamItems,
   toUnifiedItem,
 } from '../web/core/schema/unifiedItem.js';
 import {
@@ -59,14 +60,14 @@ import { openUserModal } from '../web/components/sanctuary/UserModal.js';
 import { createLoadingState, updateLoadingStateLabel } from '../web/components/ui/index.js';
 import {
   DEFAULT_FEED_TUNING,
-  FEED_TUNING_PRESETS,
-  computeFeedbackSliderNudge,
   extractLearnedTasteTopics,
+  getCanonicalBoosterKey,
   isDefaultFeedTuning,
   normalizeFeedTuning,
   rankFeedItems,
   scoreConversationVelocity,
   scorePersonalTasteLexical,
+  spreadConsecutiveAuthors,
 } from '../web/core/feedRanker.js';
 import {
   DEFAULT_SANCTUARY_CHANNELS,
@@ -95,6 +96,7 @@ import { authStore, getAuthenticatedAccount, resetAuthStoreForTests, upsertSocia
 import { connectionStore, resetConnectionStoreForTests } from '../web/state/sanctuary/connection.js';
 import {
   appendStreamItems,
+  buildFollowingStyleAnchors,
   clearLearnedTasteMemory,
   feedStore,
   hydrateCachedModeration,
@@ -766,20 +768,20 @@ test('AuthorSheetModal renders Bluesky profile, graph actions, and Recent Posts,
     assert.ok(sheet.dialog.textContent.includes('Latest Bluesky post from Mike'));
 
     const actionButtons = Array.from(sheet.dialog.querySelectorAll('.author-sheet-actions button'));
-    assert.deepEqual(actionButtons.map((b) => b.textContent), ['Follow', 'Mute', 'Block']);
+    assert.deepEqual(actionButtons.map((b) => b.textContent), ['Follow', 'Message', 'Mute', 'Block']);
 
     actionButtons[0].dispatchEvent(new Event('click', { bubbles: true }));
     await new Promise((r) => setTimeout(r, 25));
     assert.equal(sheet.dialog.querySelectorAll('.author-sheet-actions button')[0].textContent, 'Following');
 
-    sheet.dialog.querySelectorAll('.author-sheet-actions button')[1].dispatchEvent(new Event('click', { bubbles: true }));
-    await new Promise((r) => setTimeout(r, 25));
-    assert.equal(sheet.dialog.querySelectorAll('.author-sheet-actions button')[1].textContent, 'Unmute');
-    assert.ok(sheet.dialog.textContent.includes('Muted'));
-
     sheet.dialog.querySelectorAll('.author-sheet-actions button')[2].dispatchEvent(new Event('click', { bubbles: true }));
     await new Promise((r) => setTimeout(r, 25));
-    assert.equal(sheet.dialog.querySelectorAll('.author-sheet-actions button')[2].textContent, 'Unblock');
+    assert.equal(sheet.dialog.querySelectorAll('.author-sheet-actions button')[2].textContent, 'Unmute');
+    assert.ok(sheet.dialog.textContent.includes('Muted'));
+
+    sheet.dialog.querySelectorAll('.author-sheet-actions button')[3].dispatchEvent(new Event('click', { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 25));
+    assert.equal(sheet.dialog.querySelectorAll('.author-sheet-actions button')[3].textContent, 'Unblock');
     assert.ok(sheet.dialog.textContent.includes('Blocked'));
     sheet.close();
 
@@ -1359,9 +1361,18 @@ test('Centralized Connections modal merges Mastodon & Bluesky with Bridgy dedupe
     profileCtrl = mountProfileScreen(host, {});
     await new Promise((r) => setTimeout(r, 60));
 
-    const statTexts = Array.from(host.querySelectorAll('.profile-stat-btn')).map((b) => b.textContent);
+    const statBtns = Array.from(host.querySelectorAll('.profile-stat-btn'));
+    const statTexts = statBtns.map((b) => b.textContent);
     assert.deepEqual(statTexts, ['4 Following', '14 Followers']);
     assert.equal(host.textContent.includes('Bridge Active'), false);
+
+    // Clicking Following stat button opens FollowGraphModal in the document
+    statBtns[0].click();
+    await new Promise((r) => setTimeout(r, 40));
+    const openedFromProfile = dom.document.getElementById('follow-graph-dialog');
+    assert.ok(openedFromProfile && openedFromProfile.open === true);
+    openedFromProfile.querySelector('.close-modal-btn').click();
+    assert.equal(dom.document.getElementById('follow-graph-dialog'), null);
 
     const userModal = openUserModal();
     await new Promise((r) => setTimeout(r, 20));
@@ -1382,6 +1393,8 @@ test('Centralized Connections modal merges Mastodon & Bluesky with Bridgy dedupe
     });
     await new Promise((r) => setTimeout(r, 60));
 
+    assert.equal(graphModal.dialog.open, true);
+    assert.equal(dom.document.getElementById('follow-graph-dialog'), graphModal.dialog);
     assert.equal(graphModal.dialog.querySelector('#follow-graph-title').textContent, 'Connections');
     assert.equal(graphModal.dialog.querySelectorAll('.follow-graph-net-btn').length, 0);
     const tabList = graphModal.dialog.querySelector('[role="tablist"]');
@@ -1866,6 +1879,62 @@ test('applyKeywordFilters enforces word boundaries & link cards, and Feed tab lo
 
   const dom = installMockDom();
   const prevFetch = globalThis.fetch;
+  const prevWebSocket = globalThis.WebSocket;
+  const jetstreamPosts = [
+    {
+      uri: 'at://did:plc:t/app.bsky.feed.post/1',
+      cid: 'cid1',
+      author: { did: 'did:plc:t', handle: 'news.bsky.social', displayName: 'News' },
+      record: { text: 'Breaking Trump headline today.', createdAt: '2026-11-19T05:00:00Z', langs: ['en'] },
+    },
+    {
+      uri: 'at://did:plc:g/app.bsky.feed.post/2',
+      cid: 'cid2',
+      author: { did: 'did:plc:g', handle: 'luthier.bsky.social', displayName: 'Luthier' },
+      record: { text: 'Guitar of the Day: 1962 Jazzmaster.', createdAt: '2026-11-19T04:59:00Z', langs: ['en'] },
+    },
+    {
+      uri: 'at://did:plc:s/app.bsky.feed.post/3',
+      cid: 'cid3',
+      author: { did: 'did:plc:s', handle: 'skyrim.bsky.social', displayName: 'ShaderDev' },
+      record: { text: 'Morning coffee & shader debugging.', createdAt: '2026-11-19T04:58:00Z', langs: ['en'] },
+    },
+  ];
+  globalThis.WebSocket = class MockJetstreamWebSocket {
+    constructor() {
+      this.listeners = new Map();
+      queueMicrotask(() => {
+        this._emit('open', {});
+        for (const p of jetstreamPosts) {
+          this._emit('message', {
+            data: JSON.stringify({
+              kind: 'commit',
+              did: p.author.did,
+              commit: {
+                operation: 'create',
+                collection: 'app.bsky.feed.post',
+                rkey: p.uri.split('/').pop(),
+                record: p.record,
+              },
+            }),
+          });
+        }
+        this._emit('close', {});
+      });
+    }
+    addEventListener(type, fn) {
+      if (!this.listeners.has(type)) this.listeners.set(type, new Set());
+      this.listeners.get(type).add(fn);
+    }
+    removeEventListener(type, fn) {
+      this.listeners.get(type)?.delete(fn);
+    }
+    _emit(type, ev) {
+      this[`on${type}`]?.(ev);
+      for (const fn of this.listeners.get(type) || []) fn(ev);
+    }
+    close() {}
+  };
   globalThis.fetch = async (url, init = {}) => {
     const u = String(url);
     const method = (init.method || 'GET').toUpperCase();
@@ -1893,8 +1962,29 @@ test('applyKeywordFilters enforces word boundaries & link cards, and Feed tab lo
     if (u.includes('/api/v1/timelines/public') || u.includes('/api/v1/timelines/tag/')) {
       return new Response('[]', { status: 200, headers: { 'content-type': 'application/json' } });
     }
+    if (u.includes('app.bsky.feed.getPosts')) {
+      return new Response(
+        JSON.stringify({ posts: jetstreamPosts }),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      );
+    }
+    if (u.includes('app.bsky.unspecced.getPopularFeedGenerators')) {
+      return new Response(
+        JSON.stringify({
+          feeds: [
+            {
+              uri: 'at://did:plc:b1/app.bsky.feed.generator/cooperatives',
+              cid: 'cid_gen_coop',
+              displayName: 'Cooperatives',
+              description: 'Worker cooperatives and union organizing.',
+              creator: { handle: 'coop.bsky.social' },
+            },
+          ],
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      );
+    }
     if (u.includes('app.bsky.feed.getFeed')) {
-      assert.equal(u.includes('whats-hot'), false, 'Default Feed must never call Bluesky whats-hot');
       return new Response(
         JSON.stringify({
           feed: [
@@ -1966,6 +2056,7 @@ test('applyKeywordFilters enforces word boundaries & link cards, and Feed tab lo
     feedCtrl?.destroy();
     resetFeedStoreForTests();
     globalThis.fetch = prevFetch;
+    globalThis.WebSocket = prevWebSocket;
     dom.restore();
   }
 });
@@ -2029,10 +2120,44 @@ test('rankFeedItems preserves chronological parity when default and enforces all
       date_published: isoAgo(90),
       author: { id: 'a6', name: 'CoopBaker', handle: 'coop@mastodon.social' },
       metrics: { likes: 18, replies: 4, reposts: 3 },
-      attachments: [{ url: 'https://img.example/bread.jpg', mime_type: 'image/jpeg', alt_text: 'Fresh sourdough loaves on wooden rack' }],
       _meta: {
-        linkCard: { url: 'https://institute.coop/handbook', title: 'Cooperative Governance Field Notes', description: 'Open ledger metrics.' },
         mastodon: { statusId: 'deep_coop' },
+      },
+    }),
+    toUnifiedItem({
+      id: 'mastodon:plain_link',
+      protocol: 'mastodon',
+      content_text: 'Longer commentary introducing an external essay on municipal transit governance, regional rail scheduling, and public budgeting across small towns.',
+      date_published: isoAgo(15),
+      author: { id: 'a8', name: 'LinkPoster', handle: 'links@mastodon.social' },
+      metrics: { likes: 4, replies: 1, reposts: 0 },
+      _meta: {
+        linkCard: { url: 'https://example.org/essay', title: 'Transit Essay' },
+        mastodon: { statusId: 'plain_link' },
+      },
+    }),
+    toUnifiedItem({
+      id: 'bluesky:quote_with_img',
+      protocol: 'bluesky',
+      content_text: 'Look at this meme reply',
+      date_published: isoAgo(4),
+      author: { id: 'a9', name: 'QuoteImg', handle: 'qimg.bsky.social' },
+      metrics: { likes: 12, replies: 1, reposts: 0 },
+      _meta: {
+        quotePost: { id: 'bluesky:q_img', text: 'Meme', thumbUrl: 'https://cdn.example/meme.jpg' },
+        bluesky: { uri: 'at://qimg/1', cid: 'cq1' },
+      },
+    }),
+    toUnifiedItem({
+      id: 'bluesky:quote_text_only',
+      protocol: 'bluesky',
+      content_text: 'Replying to a text-only post with extra context',
+      date_published: isoAgo(8),
+      author: { id: 'a10', name: 'QuoteTxt', handle: 'qtxt.bsky.social' },
+      metrics: { likes: 3, replies: 0, reposts: 0 },
+      _meta: {
+        quotePost: { id: 'bluesky:q_txt', text: 'Original text' },
+        bluesky: { uri: 'at://qtxt/1', cid: 'cq2' },
       },
     }),
     toUnifiedItem({
@@ -2048,53 +2173,40 @@ test('rankFeedItems preserves chronological parity when default and enforces all
 
   // Default untuned preserves original input array order untouched
   assert.equal(isDefaultFeedTuning(null), true);
-  const defaultOut = rankFeedItems(items, null, { nowMs: baseMs });
-  assert.deepEqual(defaultOut.map((p) => p.id), items.map((p) => p.id));
+  const followingOut = rankFeedItems(items, null, { nowMs: baseMs, streamMode: 'following' });
+  assert.deepEqual(followingOut.map((p) => p.id), items.map((p) => p.id));
 
-  // Hard hides (-100) strip commercial ads, bourgeois politics, reposts, and both Mastodon+Bluesky mature items
-  const strictFiltered = rankFeedItems(
+  // Baseline guardrails in Feed mode demote commercial ads & punditry, keep mature art (blurred at UI), and reward affinity
+  const rankedFeed = rankFeedItems(
     items,
-    {
-      sliders: {
-        recencyHalfLifeHours: 12,
-        smallWeb: 80,
-        authorDiversity: 60,
-        reposts: -100,
-        longform: 75,
-        media: 40,
-        reciprocity: 60,
-        commercial: -100,
-        bourgeoisPolitics: -100,
-        matureContent: -100,
-      },
-    },
+    null,
     {
       nowMs: baseMs,
+      streamMode: 'feed',
       interactedAuthors: { 'mastodon:pal@mastodon.social': 5 },
+      tasteMemory: {
+        positive: [{ id: 't_coop', text: 'co-op foundry machine shop cooperative', weight: 3.5 }],
+        negative: [],
+      },
     }
   );
 
-  const keptIds = strictFiltered.map((p) => p.id);
-  assert.equal(keptIds.includes('mastodon:ad_post'), false);
-  assert.equal(keptIds.includes('bluesky:at://pundit/1'), false);
-  assert.equal(keptIds.includes('mastodon:nsfw_masto'), false);
-  assert.equal(keptIds.includes('bluesky:at://art/2'), false);
-  assert.equal(keptIds.includes('mastodon:repost_item'), false);
+  const keptIds = rankedFeed.map((p) => p.id);
   assert.equal(keptIds[0], 'mastodon:deep_coop');
   assert.ok(keptIds.includes('mastodon:quiet_friend'));
+  assert.equal(keptIds.includes('mastodon:nsfw_masto'), false, 'Feed excludes image posts');
+  assert.equal(keptIds.includes('bluesky:at://art/2'), false, 'Feed excludes image posts');
+  assert.equal(keptIds.includes('bluesky:quote_with_img'), false, 'Feed excludes replies/quotes to posts with images');
+  assert.ok(keptIds.indexOf('mastodon:quiet_friend') < keptIds.indexOf('bluesky:quote_text_only'), 'Text-only quote-posts/replies are demoted behind standalone posts');
+  assert.ok(keptIds.indexOf('mastodon:deep_coop') < keptIds.indexOf('mastodon:ad_post'));
+  assert.ok(keptIds.indexOf('mastodon:quiet_friend') < keptIds.indexOf('mastodon:plain_link'), 'Links are heavily demoted behind link-free text posts');
 
-  // Positive Mature Content + positive Media lifts mature illustrated art rather than hiding it
-  const artPositive = rankFeedItems(
-    items.filter((it) => !it.id.includes('ad_') && !it.id.includes('pundit')),
-    {
-      sliders: { recencyHalfLifeHours: 12, media: 80, matureContent: 80 },
-    },
-    { nowMs: baseMs }
-  );
-  assert.ok(artPositive.some((p) => p.id === 'mastodon:nsfw_masto'));
-  assert.ok(artPositive.some((p) => p.id === 'bluesky:at://art/2'));
+  const rankedPhotos = rankFeedItems(items, null, { nowMs: baseMs, streamMode: 'feed', discoveryMode: 'photos' });
+  const photoIds = rankedPhotos.map((p) => p.id);
+  assert.ok(photoIds.includes('mastodon:nsfw_masto'), 'Photos tab retains media');
+  assert.ok(photoIds.includes('bluesky:at://art/2'), 'Photos tab retains media');
 
-  // Author diversity spreads prolific consecutive posts from the same author
+  // Automatic author & booster diversity spreads prolific consecutive posts from the same author or booster
   const flooding = [1, 2, 3].map((n) =>
     toUnifiedItem({
       id: `flood_${n}`,
@@ -2117,15 +2229,80 @@ test('rankFeedItems preserves chronological parity when default and enforces all
       _meta: { mastodon: { statusId: 'other_author' } },
     })
   );
-  const diverse = rankFeedItems(
-    flooding,
-    { sliders: { recencyHalfLifeHours: 12, authorDiversity: 100 } },
-    { nowMs: baseMs }
-  );
+  const diverse = rankFeedItems(flooding, null, { nowMs: baseMs, streamMode: 'feed' });
   assert.notEqual(diverse[1].author.handle, 'flood@mastodon.social');
+
+  const sameBooster = [
+    toUnifiedItem({
+      id: 'b_1',
+      protocol: 'mastodon',
+      content_text: 'Boosted one',
+      date_published: isoAgo(1),
+      author: { id: 'u1', handle: 'u1@m.social' },
+      _meta: { mastodon: { statusId: 'b_1', rebloggedBy: { id: 'rb', handle: 'prolific@m.social' } } },
+    }),
+    toUnifiedItem({
+      id: 'b_2',
+      protocol: 'mastodon',
+      content_text: 'Boosted two',
+      date_published: isoAgo(2),
+      author: { id: 'u2', handle: 'u2@m.social' },
+      _meta: { mastodon: { statusId: 'b_2', rebloggedBy: { id: 'rb', handle: 'prolific@m.social' } } },
+    }),
+    toUnifiedItem({
+      id: 'b_3',
+      protocol: 'mastodon',
+      content_text: 'Unrelated post',
+      date_published: isoAgo(3),
+      author: { id: 'u3', handle: 'u3@m.social' },
+      _meta: { mastodon: { statusId: 'b_3' } },
+    }),
+  ];
+  const spreadBoosts = spreadConsecutiveAuthors(sameBooster);
+  assert.equal(getCanonicalBoosterKey(spreadBoosts[0]), 'mastodon:prolific@m.social');
+  assert.notEqual(getCanonicalBoosterKey(spreadBoosts[1]), 'mastodon:prolific@m.social');
+
+  // External link posts are interleaved after leading text posts rather than lumped consecutively at the tail
+  const mixedBatch = [
+    ...Array.from({ length: 24 }, (_, idx) =>
+      toUnifiedItem({
+        id: `text_post_${idx}`,
+        protocol: 'mastodon',
+        content_text: `Standalone community note ${idx} about local repair cafes and shared workshops.`,
+        date_published: isoAgo(10 + idx),
+        author: { id: `ta_${idx}`, handle: `ta_${idx}@m.social` },
+        metrics: { likes: 4, replies: 1, reposts: 0 },
+        _meta: { mastodon: { statusId: `text_post_${idx}` } },
+      })
+    ),
+    ...Array.from({ length: 6 }, (_, idx) =>
+      toUnifiedItem({
+        id: `link_post_${idx}`,
+        protocol: 'mastodon',
+        content_text: `Longer commentary introducing an external essay ${idx} on municipal transit governance and public budgeting.`,
+        date_published: isoAgo(1 + idx),
+        author: { id: `la_${idx}`, handle: `la_${idx}@m.social` },
+        metrics: { likes: 8, replies: 1, reposts: 1 },
+        _meta: {
+          linkCard: { url: `https://example.org/essay-${idx}`, title: `Essay ${idx}` },
+          mastodon: { statusId: `link_post_${idx}` },
+        },
+      })
+    ),
+  ];
+  const spacedFeed = rankFeedItems(mixedBatch, null, { nowMs: baseMs, streamMode: 'feed' });
+  assert.equal(spacedFeed.length, 30);
+  for (let i = 0; i < 3; i += 1) {
+    assert.equal(spacedFeed[i].id.startsWith('text_post_'), true, 'Leading Feed posts remain pure text');
+  }
+  for (let i = 1; i < spacedFeed.length; i += 1) {
+    const prevIsLink = spacedFeed[i - 1].id.startsWith('link_post_');
+    const curIsLink = spacedFeed[i].id.startsWith('link_post_');
+    assert.equal(prevIsLink && curIsLink, false, 'Deweighted link posts must never clump back-to-back');
+  }
 });
 
-test('openFeedTuningModal renders 10 sliders, syncs ARIA/CSS vars, edits discovery sources, and pushes to Sanctuary /api/feed_profile', async () => {
+test('openFeedTuningModal renders Communities & Feeds browser, searches Bluesky feeds & Mastodon hashtags, edits sources, and syncs to /api/feed_profile', async () => {
   const dom = installMockDom();
   const prevFetch = globalThis.fetch;
   const savedBodies = [];
@@ -2139,6 +2316,29 @@ test('openFeedTuningModal renders 10 sliders, syncs ARIA/CSS vars, edits discove
         status: 200,
         headers: { 'content-type': 'application/json' },
       });
+    }
+    if (u.includes('app.bsky.unspecced.getPopularFeedGenerators')) {
+      return new Response(
+        JSON.stringify({
+          feeds: [
+            {
+              uri: 'at://did:plc:jfhpnnst6flqway4eaeqzj2a/app.bsky.feed.generator/for-science-community-feed-long-uri',
+              cid: 'cid_sci',
+              displayName: 'For Science',
+              description: 'Science posts curated by scientists.',
+              likeCount: 14200,
+              creator: { handle: 'bossett.bsky.social' },
+            },
+          ],
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      );
+    }
+    if (u.includes('/api/v2/search') && u.includes('type=hashtags')) {
+      return new Response(
+        JSON.stringify({ hashtags: [{ name: 'woodworking', url: 'https://mastodon.world/tags/woodworking' }] }),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      );
     }
     return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
   };
@@ -2155,79 +2355,120 @@ test('openFeedTuningModal renders 10 sliders, syncs ARIA/CSS vars, edits discove
     const dlg = doc.getElementById('feed-tuning-dialog');
     assert.ok(dlg && dlg.open);
 
-    const sliders = dlg.querySelectorAll('input[type="range"].feed-tuning-slider');
-    assert.equal(sliders.length, 10);
+    // Zero range sliders or legacy presets
+    assert.equal(dlg.querySelectorAll('input[type="range"]').length, 0);
+    assert.equal(dlg.querySelector('.feed-preset-btn'), null);
 
-    // Adjust Commercial slider to -100 via input + change
-    const commSlider = dlg.querySelector('#feed-slider-commercial');
-    commSlider.value = '-100';
-    commSlider.dispatchEvent(new Event('change', { bubbles: true }));
-    await new Promise((r) => setTimeout(r, 25));
+    // Search Communities & Feeds as-you-type dropdown for "science"
+    const searchInput = dlg.querySelector('#feed-community-search-input');
+    assert.equal(searchInput.getAttribute('autocomplete'), 'off');
+    assert.equal(dlg.querySelector('.feed-community-result-row'), null);
+    searchInput.value = 'science';
+    searchInput.dispatchEvent(new Event('input', { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 270));
 
-    assert.equal(feedStore.get().tuning.sliders.commercial, -100);
-    assert.equal(commSlider.getAttribute('aria-valuetext'), 'Commercial: -100 (Hide)');
-    assert.equal(commSlider.style.getPropertyValue('--control-value'), '-100');
+    const dropdown = dlg.querySelector('#feed-community-search-form .search-suggest-dropdown');
+    assert.ok(dropdown && !dropdown.hidden);
+    const suggestItems = [...dropdown.querySelectorAll('.search-suggest-item')];
+    assert.ok(suggestItems.length >= 2);
+    const sciOption = suggestItems.find((el) => el.textContent.includes('For Science'));
+    assert.ok(sciOption);
+    sciOption.dispatchEvent(new Event('mousedown', { bubbles: true, cancelable: true }));
+    await new Promise((r) => setTimeout(r, 30));
 
-    assert.equal(dlg.querySelector('#feed-boost-concept-input'), null);
-    assert.equal(dlg.textContent.includes('Semantic Concept Anchors'), false);
-    assert.ok(savedBodies.length >= 1);
-    assert.equal(savedBodies.at(-1).sliders.commercial, -100);
+    const longFeedUri = 'at://did:plc:jfhpnnst6flqway4eaeqzj2a/app.bsky.feed.generator/for-science-community-feed-long-uri';
+    assert.ok(feedStore.get().tuning.discoveryChannels.includes(longFeedUri), 'Long at:// feed URI must not be truncated');
+    assert.equal(savedBodies.at(-1).sliders, undefined);
+    assert.ok(savedBodies.at(-1).discoveryChannels.includes(longFeedUri));
 
-    // Add Discovery Channel & Instance chips and verify PUT payload + removal
-    const chanInput = dlg.querySelector('#feed-channel-input');
-    chanInput.value = 'cooperatives';
-    chanInput.closest('form').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
-    await new Promise((r) => setTimeout(r, 25));
+    // Consolidated search/add bar (no separate duplicate #feed-channel-input)
+    assert.equal(dlg.querySelector('#feed-channel-input'), null);
+    searchInput.value = 'cooperatives';
+    dlg.querySelector('#feed-community-search-form').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await new Promise((r) => setTimeout(r, 30));
 
     const instInput = dlg.querySelector('#feed-instance-input');
+    assert.equal(instInput.getAttribute('autocomplete'), 'off');
     instInput.value = 'https://kolektiva.social/';
     instInput.closest('form').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
     await new Promise((r) => setTimeout(r, 25));
 
-    assert.deepEqual(feedStore.get().tuning.discoveryChannels, ['cooperatives']);
+    assert.deepEqual(feedStore.get().tuning.discoveryChannels, [longFeedUri, 'cooperatives']);
     assert.deepEqual(feedStore.get().tuning.discoveryInstances, ['kolektiva.social']);
-    assert.deepEqual(savedBodies.at(-1).discoveryChannels, ['cooperatives']);
+    assert.deepEqual(savedBodies.at(-1).discoveryChannels, [longFeedUri, 'cooperatives']);
     assert.deepEqual(savedBodies.at(-1).discoveryInstances, ['kolektiva.social']);
 
-    // Non-clobbering check when remote legacy /api/feed_profile omits discoveryChannels/discoveryInstances
+    // Non-clobbering check when remote /api/feed_profile omits discoveryChannels/discoveryInstances
     globalThis.fetch = async (url, init = {}) => {
       const u = String(url);
       if (u.includes('/api/feed_profile') && init.method === 'PUT') {
-        const body = JSON.parse(init.body || '{}');
         return new Response(
           JSON.stringify({
-            version: 1,
+            version: 2,
             updatedAt: Date.now(),
             updatedBy: 'user',
-            sliders: body.sliders,
           }),
           { status: 200, headers: { 'content-type': 'application/json' } }
         );
       }
       return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
     };
-    await updateFeedTuning({ sliders: { smallWeb: 80 } });
-    assert.deepEqual(feedStore.get().tuning.discoveryChannels, ['cooperatives']);
+    await updateFeedTuning({ updatedBy: 'user' });
+    assert.deepEqual(feedStore.get().tuning.discoveryChannels, [longFeedUri, 'cooperatives']);
     assert.deepEqual(feedStore.get().tuning.discoveryInstances, ['kolektiva.social']);
 
     // Remove channel chip cleanly
     dlg.querySelector('button[aria-label="Remove channel cooperatives"]').click();
     await new Promise((r) => setTimeout(r, 25));
-    assert.deepEqual(feedStore.get().tuning.discoveryChannels, []);
+    assert.deepEqual(feedStore.get().tuning.discoveryChannels, [longFeedUri]);
 
-    // Preset click updates Small Web & Bourgeois Politics
-    assert.ok(FEED_TUNING_PRESETS.length >= 5);
-    const antiNoisePreset = dlg.querySelector('[data-preset="anti_noise"]');
-    antiNoisePreset.click();
-    await new Promise((r) => setTimeout(r, 25));
-    assert.equal(feedStore.get().tuning.sliders.bourgeoisPolitics, -100);
-    assert.equal(feedStore.get().tuning.sliders.smallWeb, 55);
-
-    // Local reciprocity recording + direct updateFeedTuning sync
+    // Local reciprocity recording
     await recordAuthorInteraction({ protocol: 'mastodon', author: { handle: 'ally@mastodon.social' } }, 'mastodon', 2);
     assert.equal(feedStore.get().interactedAuthors['mastodon:ally@mastodon.social'], 2);
-    await updateFeedTuning({ sliders: { reciprocity: 75 } });
-    assert.equal(feedStore.get().tuning.sliders.reciprocity, 75);
+
+    // Removed superfluous Snapshot Source Mix, Snapshot Language, and New Snapshot button
+    assert.equal(dlg.querySelector('#feed-source-mix-select'), null);
+    assert.equal(dlg.querySelector('#feed-language-filter-select'), null);
+    assert.equal(dlg.querySelector('.feed-refresh-snapshot-btn'), null);
+
+    // Explicit tasteScores rank human posts above outrage posts without sliders
+    const nowSem = Date.UTC(2026, 10, 22, 12, 0, 0);
+    const carpentryPost = toUnifiedItem({
+      id: 'bsky:carpentry_1',
+      protocol: 'bluesky',
+      content_text: 'Planing cedar boards in the shed while listening to rain on the tin roof.',
+      date_published: new Date(nowSem - 5 * 60_000).toISOString(),
+      author: { id: 'a1', handle: 'wood.bsky.social' },
+      metrics: { likes: 0, replies: 0, reposts: 0 },
+      _meta: { feedSource: 'discovery' },
+    });
+    const outragePost = toUnifiedItem({
+      id: 'bsky:outrage_1',
+      protocol: 'bluesky',
+      content_text: 'Every single person defending this nonsense is utterly delusional.',
+      date_published: new Date(nowSem - 2 * 60_000).toISOString(),
+      author: { id: 'a2', handle: 'rage.bsky.social' },
+      metrics: { likes: 0, replies: 0, reposts: 0 },
+      _meta: { feedSource: 'discovery' },
+    });
+    const semanticRanked = rankFeedItems(
+      [outragePost, carpentryPost],
+      null,
+      {
+        nowMs: nowSem,
+        streamMode: 'feed',
+        tasteScores: {
+          'bsky:carpentry_1': 0.78,
+          'bsky:outrage_1': -0.2,
+        },
+      }
+    );
+    assert.equal(semanticRanked[0].id, 'bsky:carpentry_1', 'tasteScores must rank non-cliché human posts above outrage posts');
+
+    // Verify SettingsModal removes deprecated co-op placeholder and hardcoded GreenPT / Worker-Coop labels
+    const settingsSrc = fs.readFileSync(path.join(process.cwd(), 'web/components/sanctuary/SettingsModal.js'), 'utf8');
+    assert.equal(settingsSrc.includes('Patio.'), false);
+    assert.equal(settingsSrc.includes('GreenPT / Worker-Coop'), false);
 
     modal.close();
   } finally {
@@ -2480,11 +2721,12 @@ test('openEditPostDialog explains Threads API edit constraint and only replaces 
     const method = (init.method || 'GET').toUpperCase();
     calls.push({ url: u, method });
 
-    if (u.includes('/api/v1/statuses/m_ed_1') && method === 'PUT') {
+    if (u.includes('/api/v1/statuses/') && method === 'PUT') {
       const body = JSON.parse(init.body || '{}');
+      const sid = u.split('/api/v1/statuses/')[1]?.split('?')[0] || 'm_ed_1';
       return new Response(
         JSON.stringify({
-          id: 'm_ed_1',
+          id: sid,
           content: `<p>${body.status}</p>`,
           created_at: '2026-11-19T12:00:00.000Z',
           account: { id: 'u1', username: 'alice', acct: 'alice@mastodon.social' },
@@ -2549,41 +2791,79 @@ test('openEditPostDialog explains Threads API edit constraint and only replaces 
       },
     });
 
-    // 1. Default edit has Update bridges checked and compose-sheet layout; unchecking edits Mastodon in place
+    // 1. Simplified Edit Post modal: Cancel + Update only, matching Fediverse handle, disabled until changed, then organically syncs linked bridges
     const saved1 = await new Promise((resolve) => {
       openEditPostDialog(post, { onSaved: resolve });
       const dlg = dom.document.getElementById('edit-post-dialog');
       assert.ok(dlg.querySelector('.compose-sheet-card'));
       assert.ok(dlg.querySelector('.compose-sheet-header'));
       assert.ok(dlg.querySelector('.compose-seamless-textarea'));
-      assert.ok(dlg.querySelector('.compose-bridge-toggle-pill'));
-      const cb = dlg.querySelector('#edit-post-replace-bridges');
-      assert.ok(cb && cb.checked === true);
-      cb.checked = false;
-      cb.dispatchEvent(new Event('change', { bubbles: true }));
-      dlg.querySelector('textarea').value = 'Mastodon in-place edit';
-      dlg.querySelector('form').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
-    });
-    assert.equal(saved1.content_text, 'Mastodon in-place edit');
-    assert.equal(calls.some((c) => c.url.includes('th_old_1')), false);
-    assert.equal(calls.some((c) => c.url.includes('deleteRecord')), false);
+      assert.equal(dlg.querySelector('.compose-bridge-toggle-pill'), null);
+      assert.equal(dlg.querySelector('#edit-post-replace-bridges'), null);
+      assert.equal(dlg.querySelector('.compose-author-handle')?.textContent, 'alice@mastodon.social');
+      assert.equal(dlg.querySelector('.compose-author-dest')?.textContent, 'Fediverse · Bluesky · Threads');
 
-    // 2. Default checked Update bridges deletes & republishes both bridged copies
-    calls.length = 0;
-    const saved2 = await new Promise((resolve) => {
-      openEditPostDialog(post, { onSaved: resolve });
-      const dlg = dom.document.getElementById('edit-post-dialog');
-      const cb = dlg.querySelector('#edit-post-replace-bridges');
-      assert.ok(cb && cb.checked === true);
-      dlg.querySelector('textarea').value = 'Replaced across bridges';
+      const updateBtn = dlg.querySelector('button[type="submit"]');
+      assert.equal(updateBtn?.textContent, 'Update');
+      assert.equal(updateBtn?.disabled, true);
+
+      const ta = dlg.querySelector('textarea');
+      ta.value = 'Replaced across bridges';
+      ta.dispatchEvent(new Event('input', { bubbles: true }));
+      assert.equal(updateBtn?.disabled, false);
+
       dlg.querySelector('form').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
     });
-    assert.equal(saved2.content_text, 'Replaced across bridges');
+    assert.equal(saved1.content_text, 'Replaced across bridges');
     assert.ok(calls.some((c) => c.url.includes('com.atproto.repo.deleteRecord')));
     assert.ok(calls.some((c) => c.url.includes('com.atproto.repo.createRecord')));
     assert.ok(calls.some((c) => c.method === 'DELETE' && c.url.includes('th_old_1')));
     assert.ok(calls.some((c) => c.url.includes('threads_publish')));
-    assert.equal(saved2._meta.linkedIds.threadsPostId, 'th_new_1');
+    assert.equal(saved1._meta.linkedIds.threadsPostId, 'th_new_1');
+
+    // 2. Unbridged Mastodon post (no linkedIds) edits Mastodon in-place ONLY without creating phantom Bluesky/Threads posts
+    calls.length = 0;
+    const unbridgedPost = toUnifiedItem({
+      id: 'mastodon:m_unbridged_1',
+      protocol: 'mastodon',
+      content_text: 'Fediverse only',
+      _meta: { mastodon: { statusId: 'm_unbridged_1' }, linkedIds: { mastodonStatusId: 'm_unbridged_1' } },
+    });
+    const savedUnbridged = await new Promise((resolve) => {
+      openEditPostDialog(unbridgedPost, { onSaved: resolve });
+      const dlg = dom.document.getElementById('edit-post-dialog');
+      assert.equal(dlg.querySelector('.compose-author-dest')?.textContent, 'Fediverse');
+      const ta = dlg.querySelector('textarea');
+      ta.value = 'Fediverse only edited';
+      ta.dispatchEvent(new Event('input', { bubbles: true }));
+      dlg.querySelector('form').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    });
+    assert.equal(savedUnbridged.content_text, 'Fediverse only edited');
+    assert.equal(calls.some((c) => c.url.includes('createRecord')), false);
+    assert.equal(calls.some((c) => c.url.includes('threads_publish')), false);
+
+    // 3. Standalone Bluesky post edits via delete + republish
+    calls.length = 0;
+    const bskyPost = toUnifiedItem({
+      id: 'bluesky:at://did:plc:alice/app.bsky.feed.post/standalone_1',
+      protocol: 'bluesky',
+      content_text: 'Standalone Bluesky',
+      _meta: { bluesky: { uri: 'at://did:plc:alice/app.bsky.feed.post/standalone_1', cid: 'cid_st_1' } },
+    });
+    const savedBsky = await new Promise((resolve) => {
+      openEditPostDialog(bskyPost, { onSaved: resolve });
+      const dlg = dom.document.getElementById('edit-post-dialog');
+      assert.equal(dlg.querySelector('.compose-author-handle')?.textContent, 'alice.bsky.social');
+      assert.equal(dlg.querySelector('.compose-author-dest')?.textContent, 'Bluesky');
+      const ta = dlg.querySelector('textarea');
+      ta.value = 'Standalone Bluesky edited';
+      ta.dispatchEvent(new Event('input', { bubbles: true }));
+      dlg.querySelector('form').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    });
+    assert.equal(savedBsky.content_text, 'Standalone Bluesky edited');
+    assert.ok(calls.some((c) => c.url.includes('com.atproto.repo.deleteRecord')));
+    assert.ok(calls.some((c) => c.url.includes('com.atproto.repo.createRecord')));
+    assert.equal(calls.some((c) => c.method === 'PUT' && c.url.includes('/api/v1/statuses/')), false);
   } finally {
     resetAuthStoreForTests();
     globalThis.fetch = prevFetch;
@@ -2724,6 +3004,21 @@ test('ComposeModal detects embedded YouTube URLs, forwards external embed to Blu
     const iframe = cardEl.querySelector('iframe.post-embed-iframe');
     assert.ok(Boolean(iframe));
     assert.equal(iframe.getAttribute('src'), 'https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ?autoplay=1&rel=0');
+    assert.ok(iframe.getAttribute('sandbox').includes('allow-popups-to-escape-sandbox'));
+
+    const origLoc = globalThis.location;
+    globalThis.location = { hostname: '127.0.0.1', protocol: 'http:', port: '5000' };
+    try {
+      const loopbackCardEl = createPostCard(publishedMastoCard);
+      loopbackCardEl.querySelector('.post-embed-play-btn').click();
+      const loopbackIframe = loopbackCardEl.querySelector('iframe.post-embed-iframe');
+      assert.equal(
+        loopbackIframe.getAttribute('src'),
+        'http://localhost:5000/api/social/video-embed?src=https%3A%2F%2Fwww.youtube-nocookie.com%2Fembed%2FdQw4w9WgXcQ%3Fautoplay%3D1%26rel%3D0'
+      );
+    } finally {
+      globalThis.location = origLoc;
+    }
   } finally {
     composeCtrl?.destroy?.();
     clearLinkPreviewCacheForTests();
@@ -2983,13 +3278,10 @@ test('feed removes top tune button (stays in Settings), updates likes in place w
       {
         sliders: {
           recencyHalfLifeHours: 8,
-          smallWeb: 75,
-          authorDiversity: 60,
-          reposts: -35,
-          reciprocity: 50,
-          longform: 25,
+          everydayChatter: 75,
+          scienceTheory: 25,
+          newsPolitics: -50,
           commercial: -70,
-          bourgeoisPolitics: -50,
         },
       },
       { syncRemote: false }
@@ -3849,34 +4141,26 @@ test('Threads 4279009 container lag recovery, unified cross-platform thread repl
     assert.equal(ctxAfter.descendants.some((d) => d.item.id === 'threads:th_rep_bad'), false);
     threadCtrl.destroy();
 
-    // Per-bridge toggles in openEditPostDialog: unchecking Threads replaces only Bluesky
+    // Programmatic selective bridge edit: replaceBluesky=true, replaceThreads=false
     modCalls.length = 0;
-    const savedSelective = await new Promise((resolve) => {
-      openEditPostDialog(
-        toUnifiedItem({
-          id: 'mastodon:m_uni_1',
-          protocol: 'mastodon',
-          content_text: 'Root crosspost',
-          _meta: {
-            mastodon: { statusId: 'm_uni_1' },
-            linkedIds: {
-              mastodonStatusId: 'm_uni_1',
-              blueskyUri: 'at://did:plc:me/app.bsky.feed.post/b_uni_1',
-              threadsPostId: 'th_uni_1',
-            },
+    const savedSelective = await editUnified(
+      toUnifiedItem({
+        id: 'mastodon:m_uni_1',
+        protocol: 'mastodon',
+        content_text: 'Root crosspost',
+        _meta: {
+          mastodon: { statusId: 'm_uni_1' },
+          linkedIds: {
+            mastodonStatusId: 'm_uni_1',
+            blueskyUri: 'at://did:plc:me/app.bsky.feed.post/b_uni_1',
+            threadsPostId: 'th_uni_1',
           },
-        }),
-        { onSaved: resolve }
-      );
-      const dlg = dom.document.getElementById('edit-post-dialog');
-      const bskyCb = dlg.querySelector('#edit-post-replace-bluesky');
-      const thrCb = dlg.querySelector('#edit-post-replace-threads');
-      assert.ok(bskyCb?.checked && thrCb?.checked);
-      thrCb.checked = false;
-      thrCb.dispatchEvent(new Event('change', { bubbles: true }));
-      dlg.querySelector('textarea').value = 'Edited only Mastodon and Bluesky';
-      dlg.querySelector('form').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
-    });
+        },
+      }),
+      'Edited only Mastodon and Bluesky',
+      '',
+      { replaceBluesky: true, replaceThreads: false }
+    );
     assert.equal(savedSelective.content_text, 'Edited only Mastodon and Bluesky');
     assert.ok(modCalls.some((c) => c.kind === 'bsky_op' && c.url.includes('createRecord')));
     assert.equal(modCalls.some((c) => c.kind === 'threads_delete'), false);
@@ -3902,9 +4186,6 @@ test('Sovereign Sanctuary Feed harvester replaces whats-hot with topic/instance 
     const u = String(url);
     fetchedUrls.push(u);
 
-    if (u.includes('whats-hot') || u.includes('/trends/statuses')) {
-      throw new Error(`Forbidden mainstream algorithmic endpoint called: ${u}`);
-    }
     if (u.includes('example-coop.social/api/v1/timelines/tag/cooperatives')) {
       return new Response(
         JSON.stringify([
@@ -3931,7 +4212,7 @@ test('Sovereign Sanctuary Feed harvester replaces whats-hot with topic/instance 
         { status: 200, headers: { 'content-type': 'application/json' } }
       );
     }
-    if (u.includes('kolektiva.social/api/v1/timelines/public')) {
+    if (u.includes('kolektiva.social/api/v1/trends/statuses')) {
       return new Response(
         JSON.stringify([
           {
@@ -3953,6 +4234,22 @@ test('Sovereign Sanctuary Feed harvester replaces whats-hot with topic/instance 
             replies_count: 0,
           },
         ]),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      );
+    }
+    if (u.includes('app.bsky.unspecced.getPopularFeedGenerators')) {
+      return new Response(
+        JSON.stringify({
+          feeds: [
+            {
+              uri: 'at://did:plc:b1/app.bsky.feed.generator/cooperatives',
+              cid: 'cid_gen_coop',
+              displayName: 'Cooperatives',
+              description: 'Worker cooperatives and union organizing.',
+              creator: { handle: 'coop.bsky.social' },
+            },
+          ],
+        }),
         { status: 200, headers: { 'content-type': 'application/json' } }
       );
     }
@@ -4049,7 +4346,6 @@ test('Sovereign Sanctuary Feed harvester replaces whats-hot with topic/instance 
       { accessJwt: 'b_jwt', refreshJwt: 'b_ref' }
     );
     await updateFeedTuning({
-      sliders: { recencyHalfLifeHours: 10, smallWeb: 80, bourgeoisPolitics: -100, commercial: -100 },
       discoveryChannels: ['cooperatives'],
       discoveryInstances: ['kolektiva.social'],
     }, { syncRemote: false });
@@ -4065,28 +4361,20 @@ test('Sovereign Sanctuary Feed harvester replaces whats-hot with topic/instance 
     assert.ok(harvestedTexts.some((t) => t.includes('Mutual aid tool library')));
     assert.ok(harvestedTexts.some((t) => t.includes('democratic strike fund')));
     assert.ok(harvestedTexts.some((t) => t.includes('Open-source lathe controller')));
-    // Strip NYT, NAFO/tankie psyop, reactionary woke mind virus, and viral quote-dunk
-    assert.equal(harvestedTexts.some((t) => t.includes('nytimes') || t.includes('Senate')), false);
-    assert.equal(harvestedTexts.some((t) => t.includes('rules-based')), false);
-    assert.equal(harvestedTexts.some((t) => t.includes('woke mind virus')), false);
-    assert.equal(harvestedTexts.some((t) => t.includes('Imagine believing')), false);
 
-    assert.equal(fetchedUrls.some((u) => u.includes('whats-hot') || u.includes('/trends/statuses')), false);
     assert.ok(fetchedUrls.some((u) => u.includes('/api/v1/timelines/tag/cooperatives')));
-    assert.ok(fetchedUrls.some((u) => u.includes('kolektiva.social/api/v1/timelines/public')));
+    assert.ok(fetchedUrls.some((u) => u.includes('kolektiva.social/api/v1/trends/statuses')));
     assert.ok(fetchedUrls.some((u) => u.includes('app.bsky.feed.getFeed')));
-    assert.ok(fetchedUrls.some((u) => u.includes('app.bsky.feed.searchPosts')));
+    assert.ok(fetchedUrls.some((u) => u.includes('app.bsky.feed.searchPosts') && u.includes('sort=top')));
 
-    // Full Feed screen preserves the Marxist critique post even with bourgeoisPolitics: -100 and dampening Democrats/Republicans
+    // Full Feed screen preserves the cooperative & craft posts
     const host = dom.document.createElement('div');
     dom.document.body.appendChild(host);
     feedCtrl = mountFeedScreen(host);
     await new Promise((r) => setTimeout(r, 60));
 
-    assert.ok(host.textContent.includes('means of production'), 'Marxist critique must pass dialectical exemption and rank cleanly');
+    assert.ok(host.textContent.includes('means of production'));
     assert.ok(host.textContent.includes('Mutual aid tool library'));
-    assert.equal(host.textContent.includes('Senate strategy'), false);
-    assert.equal(host.textContent.includes('rules-based'), false);
   } finally {
     feedCtrl?.destroy();
     clearHarvesterCacheForTests();
@@ -4631,7 +4919,8 @@ test('Unsupported post actions are disabled across Threads, Bluesky, and Mastodo
       _meta: { mastodon: { statusId: 'm_priv_own', visibility: 'private' } },
     });
 
-    setStreamItems('feed', [threadsPost, bskyRestrictedPost, mastoDirectPost, mastoForeignPriv, mastoOwnPriv]);
+    setStreamItems('feed', [threadsPost, bskyRestrictedPost, mastoDirectPost, mastoForeignPriv]);
+    setStreamItems('following', [mastoOwnPriv]);
     const feedHost = dom.document.createElement('div');
     dom.document.body.appendChild(feedHost);
     feedCtrl = mountFeedScreen(feedHost);
@@ -4649,14 +4938,15 @@ test('Unsupported post actions are disabled across Threads, Bluesky, and Mastodo
     const foreignPrivCard = feedHost.querySelector('article.post-card[data-post-id="mastodon:m_priv_foreign"]');
     assert.equal(foreignPrivCard.querySelector('.post-action-repost').disabled, true);
 
-    const ownPrivCard = feedHost.querySelector('article.post-card[data-post-id="mastodon:m_priv_own"]');
-    assert.equal(ownPrivCard.querySelector('.post-action-repost').disabled, false);
-
     const bskyCard = feedHost.querySelector('article.post-card[data-post-id="bluesky:at://did:plc:other/app.bsky.feed.post/gated1"]');
     assert.equal(bskyCard.querySelector('.post-action-like').disabled, false);
     assert.equal(bskyCard.querySelector('.post-action-reply').disabled, true);
     assert.ok(bskyCard.querySelector('.post-action-reply').title.includes('restricted replies'));
     assert.equal(bskyCard.querySelector('.post-action-repost').disabled, false);
+
+    feedHost.querySelector('.stage-tab-btn[data-stream="following"]').click();
+    const ownPrivCard = feedHost.querySelector('article.post-card[data-post-id="mastodon:m_priv_own"]');
+    assert.equal(ownPrivCard.querySelector('.post-action-repost').disabled, false);
 
     // Inline thread reply form mirrors reply capability (disabled on replyDisabled Bluesky & disconnected Threads)
     const threadHost = dom.document.createElement('div');
@@ -4760,7 +5050,6 @@ test('PostCard context menu shows Interested, Not Interested, Mute Account, and 
       content_text: 'Long-form notes on decentralized open infrastructure and worker cooperatives across regions.',
       date_published: '2026-11-20T09:00:00.000Z',
       author: { id: 'did:plc:p1', name: 'Comrade P1', handle: 'p1.bsky.social' },
-      attachments: [{ url: 'https://cdn.example/diagram.png', type: 'image', mime_type: 'image/png', alt_text: 'Diagram' }],
       metrics: { likes: 5, replies: 1, reposts: 0 },
       _meta: { bluesky: { uri: 'at://did:plc:p1/app.bsky.feed.post/1', cid: 'c1' } },
     });
@@ -4781,13 +5070,6 @@ test('PostCard context menu shows Interested, Not Interested, Mute Account, and 
       author: { id: 'm_3', name: 'Peer 3', handle: 'peer3@mastodon.social' },
       _meta: { mastodon: { statusId: 'm_peer_3' } },
     });
-
-    // Verify computeFeedbackSliderNudge nudges slightly without altering concepts/channels
-    const nudgedUp = computeFeedbackSliderNudge({ recencyHalfLifeHours: 0, reciprocity: 0, media: 0, smallWeb: 0 }, post1, 'interested');
-    assert.equal(nudgedUp.recencyHalfLifeHours, 4);
-    assert.equal(nudgedUp.reciprocity, 10);
-    assert.equal(nudgedUp.media, 5);
-    assert.equal(nudgedUp.smallWeb, 5);
 
     setStreamItems('feed', [post2, post1, post3]);
     const feedHost = dom.document.createElement('div');
@@ -4815,25 +5097,30 @@ test('PostCard context menu shows Interested, Not Interested, Mute Account, and 
 
     // Keyboard ArrowDown opens menu and focuses first item; Escape closes & restores focus to trigger
     const moreBtn = p1Card.querySelector('.post-more-btn');
+    const menuPopover = p1Card.querySelector('.post-menu-popover');
+    assert.ok(menuPopover && menuPanel.parentElement === menuPopover && moreBtn.parentElement === menuPopover.parentElement);
+    p1Card.classList.add('is-below-fold');
     moreBtn.focus();
     moreBtn.dispatchEvent(Object.assign(new Event('keydown', { bubbles: true, cancelable: true }), { key: 'ArrowDown' }));
     assert.equal(menuPanel.hidden, false);
     assert.equal(moreBtn.getAttribute('aria-expanded'), 'true');
+    assert.equal(p1Card.classList.contains('has-open-menu'), true);
     assert.equal(dom.document.activeElement.textContent, 'Interested');
     menuPanel.dispatchEvent(Object.assign(new Event('keydown', { bubbles: true, cancelable: true }), { key: 'Escape' }));
     assert.equal(menuPanel.hidden, true);
+    assert.equal(p1Card.classList.contains('has-open-menu'), false);
+    p1Card.classList.remove('is-below-fold');
     assert.equal(dom.document.activeElement, moreBtn);
 
     const initialIds = [...feedHost.querySelectorAll('article.post-card')].map((el) => el.dataset.postId);
 
-    // Click Interested on post1 -> boosts affinity (+2.5), nudges sliders, updates label to 'Interested ✓', keeps card order
+    // Click Interested on post1 -> boosts affinity (+3.5) & tasteMemory (3.5), updates label to 'Interested ✓', keeps card order
     const intBtn = [...p1Card.querySelectorAll('.post-context-menuitem')].find((b) => b.textContent === 'Interested');
     intBtn.click();
     await new Promise((r) => setTimeout(r, 25));
 
-    assert.equal(feedStore.get().interactedAuthors['bluesky:p1.bsky.social'], 2.5);
-    assert.equal(feedStore.get().tuning.sliders.reciprocity, 10);
-    assert.equal(feedStore.get().tuning.sliders.media, 5);
+    assert.equal(feedStore.get().interactedAuthors['bluesky:p1.bsky.social'], 3.5);
+    assert.equal(feedStore.get().tasteMemory.positive[0]?.weight, 3.5);
     assert.deepEqual(
       [...feedHost.querySelectorAll('article.post-card')].map((el) => el.dataset.postId),
       initialIds,
@@ -4842,13 +5129,14 @@ test('PostCard context menu shows Interested, Not Interested, Mute Account, and 
     const updatedP1Card = feedHost.querySelector('article.post-card[data-post-id="bluesky:at://did:plc:p1/app.bsky.feed.post/1"]');
     assert.ok([...updatedP1Card.querySelectorAll('.post-context-menuitem')].some((b) => b.textContent === 'Interested ✓'));
 
-    // Click Not Interested on post2 -> negative affinity (-3), dismisses post2 immediately without shuffling post1/post3
+    // Click Not Interested on post2 -> negative affinity (-4.5), dismisses post2 immediately without shuffling post1/post3
     const p2Card = feedHost.querySelector('article.post-card[data-post-id="bluesky:at://did:plc:mundowav/app.bsky.feed.post/2"]');
     const notIntBtn = [...p2Card.querySelectorAll('.post-context-menuitem')].find((b) => b.textContent === 'Not Interested');
     notIntBtn.click();
     await new Promise((r) => setTimeout(r, 25));
 
-    assert.equal(feedStore.get().interactedAuthors['bluesky:mundowav.bsky.social'], -3);
+    assert.equal(feedStore.get().interactedAuthors['bluesky:mundowav.bsky.social'], -4.5);
+    assert.equal(feedStore.get().tasteMemory.negative[0]?.weight, 4);
     assert.ok((feedStore.get().dismissedPostIds || []).includes('bluesky:at://did:plc:mundowav/app.bsky.feed.post/2'));
     assert.equal(
       feedHost.querySelector('article.post-card[data-post-id="bluesky:at://did:plc:mundowav/app.bsky.feed.post/2"]'),
@@ -5200,7 +5488,7 @@ test('Sovereign Feed v3 blends Following + 2nd-degree graph + learned taste, ran
     if (u.includes('/api/v1/accounts/acc_ally/statuses')) {
       return new Response('[]', { status: 200, headers: { 'content-type': 'application/json' } });
     }
-    if (u.includes('/api/v1/timelines/tag/')) {
+    if (u.includes('/api/v1/timelines/public')) {
       return new Response(
         JSON.stringify([
           {
@@ -5257,7 +5545,7 @@ test('Sovereign Feed v3 blends Following + 2nd-degree graph + learned taste, ran
     assert.ok(Array.isArray(unauthHarvest.items));
     assert.equal(fetchedUrls.some((u) => u.includes('/api/v1/timelines/home') || u.includes('app.bsky.feed.getTimeline')), false);
 
-    // 2. Authenticated harvest blends Following + 2nd-degree peer graph + learned taste topics
+    // 2. Authenticated harvest separates Following from Feed, harvests 2-hop Home boosts + co-likers + sort=top taste search
     fetchedUrls.length = 0;
     clearHarvesterCacheForTests();
     await upsertSocialAccount(
@@ -5283,29 +5571,78 @@ test('Sovereign Feed v3 blends Following + 2nd-degree graph + learned taste, ran
       bskyAuth: await getAuthenticatedAccount('bluesky'),
       tuning: DEFAULT_FEED_TUNING,
       interactedAuthors: { 'bluesky:peer1.bsky.social': 3.5 },
-      implicitAuthors: { 'fediverse:ally@example-coop.social': 2.2 },
       tasteMemory: {
-        positive: [{ text: 'Agroecology soil sensor field calibration notes', weight: 1.0 }],
+        positive: [
+          { text: 'Agroecology soil sensor field calibration notes', weight: 1.0 },
+          { text: 'Watershed agroecology cooperative bylaws', weight: 0.9 },
+        ],
         negative: [],
       },
     });
     const byId = new Map(authHarvest.items.map((it) => [it.id, it]));
-    const fediFollow = byId.get('mastodon:fedi_follow_1');
-    const bskyFollow = byId.get('bluesky:at://did:plc:peer1/app.bsky.feed.post/bsky_follow_1');
+    assert.equal(byId.has('mastodon:fedi_follow_1'), false, 'Followed author direct post must stay in Following, not Feed');
+    assert.equal(byId.has('bluesky:at://did:plc:peer1/app.bsky.feed.post/bsky_follow_1'), false, 'Followed Bluesky author direct post must stay in Following, not Feed');
     const secondDeg = byId.get('bluesky:at://did:plc:friend2/app.bsky.feed.post/second_deg_like_1');
     const tasteDisco = byId.get('bluesky:at://did:plc:disco1/app.bsky.feed.post/taste_disco_1');
 
-    assert.ok(fediFollow && fediFollow._meta?.feedSource === 'following', 'Following tag must win priority dedupe over discovery');
-    assert.ok(bskyFollow && bskyFollow._meta?.feedSource === 'following');
     assert.ok(secondDeg && secondDeg._meta?.feedSource === 'second_degree');
     assert.ok(tasteDisco, 'Learned taste topic query must yield discovery post');
     assert.ok(fetchedUrls.some((u) => u.includes('/api/v1/timelines/home')));
     assert.ok(fetchedUrls.some((u) => u.includes('app.bsky.feed.getTimeline')));
     assert.ok(fetchedUrls.some((u) => u.includes('app.bsky.feed.getActorLikes')));
-    assert.ok(fetchedUrls.some((u) => u.includes('app.bsky.feed.searchPosts')));
-    assert.equal(fetchedUrls.some((u) => u.includes('whats-hot') || u.includes('/trends/statuses')), false);
+    assert.ok(fetchedUrls.some((u) => u.includes('app.bsky.feed.searchPosts') && u.includes('sort=top')));
+    assert.equal(fetchedUrls.some((u) => u.includes('app.bsky.feed.searchPosts') && u.includes('sort=latest')), false);
 
-    // 3. Multi-signal ranker out of the box vs strict chronological Following & preset
+    // Boost-burst merging & thread-root collapsing
+    const boostA = toUnifiedItem({
+      id: 'mastodon:shared_1',
+      protocol: 'mastodon',
+      content_text: 'Open hardware CNC router build logs.',
+      date_published: isoMinsAgo(10),
+      author: { id: 'maker', handle: 'maker@fosstodon.org', name: 'Maker' },
+      _meta: {
+        feedSource: 'second_degree',
+        mastodon: { statusId: 'shared_1', rebloggedBy: { id: 'b1', handle: 'alice@coop.social', name: 'Alice' } },
+      },
+    });
+    const boostB = toUnifiedItem({
+      id: 'mastodon:shared_1_dup',
+      protocol: 'mastodon',
+      content_text: 'Open hardware CNC router build logs.',
+      date_published: isoMinsAgo(10),
+      author: { id: 'maker', handle: 'maker@fosstodon.org', name: 'Maker' },
+      _meta: {
+        feedSource: 'second_degree',
+        mastodon: { statusId: 'shared_1_dup', rebloggedBy: { id: 'b2', handle: 'bob@coop.social', name: 'Bob' } },
+      },
+    });
+    const mergedBoosts = deduplicateUnifiedItems([boostA, boostB]);
+    assert.equal(mergedBoosts.length, 1);
+    assert.equal(mergedBoosts[0]._meta.boosters.length, 2);
+    assert.equal(mergedBoosts[0]._meta.peerVouches, 2);
+    const mergedCard = createPostCard(mergedBoosts[0], {});
+    assert.ok(mergedCard.querySelector('.post-reblog-banner')?.textContent.includes('+ 1 other boosted'));
+
+    const threadRoot = toUnifiedItem({
+      id: 'bluesky:at://did:plc:th/app.bsky.feed.post/root',
+      protocol: 'bluesky',
+      content_text: 'Thread root post',
+      date_published: isoMinsAgo(10),
+      author: { id: 'did:plc:th', handle: 'th.bsky.social' },
+      _meta: { bluesky: { uri: 'at://did:plc:th/app.bsky.feed.post/root' } },
+    });
+    const threadReply = toUnifiedItem({
+      id: 'bluesky:at://did:plc:th/app.bsky.feed.post/r1',
+      protocol: 'bluesky',
+      content_text: 'Reply inside thread',
+      date_published: isoMinsAgo(9),
+      author: { id: 'did:plc:th', handle: 'th.bsky.social' },
+      _meta: { bluesky: { uri: 'at://did:plc:th/app.bsky.feed.post/r1', reply: { root: { uri: 'at://did:plc:th/app.bsky.feed.post/root' }, parent: { uri: 'at://did:plc:th/app.bsky.feed.post/root' } } } },
+    });
+    const collapsedFeed = resolveContextualStreamItems([threadRoot, threadReply], { streamMode: 'feed' });
+    assert.deepEqual(collapsedFeed.map((p) => p.id), ['bluesky:at://did:plc:th/app.bsky.feed.post/root']);
+
+    // 3. Multi-signal ranker vs strict chronological Following
     const activeThreadPost = toUnifiedItem({
       id: 'mastodon:vel_high',
       protocol: 'mastodon',
@@ -5354,34 +5691,21 @@ test('Sovereign Feed v3 blends Following + 2nd-degree graph + learned taste, ran
       date_published: isoMinsAgo(12),
       author: { id: 'did:plc:ally', handle: 'ally.bsky.social', displayName: 'Ally Workshop' },
       metrics: { likes: 6, replies: 5, reposts: 2 },
-      _meta: { feedSource: 'following' },
+      _meta: { feedSource: 'second_degree' },
     });
 
-    const outOfBoxFeedOrder = rankFeedItems(
+    const tasteOffsetOrder = rankFeedItems(
       [coldNewer, tasteMatchOlder],
       DEFAULT_FEED_TUNING,
       {
         nowMs,
         streamMode: 'feed',
-        implicitAuthors: { 'bluesky:ally.bsky.social': 2.0 },
+        interactedAuthors: { 'bluesky:ally.bsky.social': 3.5 },
         tasteScores: { 'bluesky:taste_match': 0.85, 'bluesky:cold_newer': -0.1 },
         tasteMemory: tasteMem,
       }
     );
-    assert.equal(outOfBoxFeedOrder[0].id, 'bluesky:taste_match', 'Feed stream must use sovereign multi-signal ranking out of the box');
-
-    const presetChronoOrder = rankFeedItems(
-      [tasteMatchOlder, coldNewer],
-      { ...DEFAULT_FEED_TUNING, updatedBy: 'preset:chronological' },
-      {
-        nowMs,
-        streamMode: 'feed',
-        implicitAuthors: { 'bluesky:ally.bsky.social': 2.0 },
-        tasteScores: { 'bluesky:taste_match': 0.85, 'bluesky:cold_newer': -0.1 },
-        tasteMemory: tasteMem,
-      }
-    );
-    assert.equal(presetChronoOrder[0].id, 'bluesky:cold_newer', 'Chronological preset on Feed must stay strictly chronological');
+    assert.equal(tasteOffsetOrder[0].id, 'bluesky:taste_match', 'Explicit taste + 2nd-degree provenance rank matching post first');
 
     const followingOrder = rankFeedItems(
       [coldNewer, tasteMatchOlder],
@@ -5389,17 +5713,20 @@ test('Sovereign Feed v3 blends Following + 2nd-degree graph + learned taste, ran
       {
         nowMs,
         streamMode: 'following',
-        implicitAuthors: { 'bluesky:ally.bsky.social': 2.0 },
+        interactedAuthors: { 'bluesky:ally.bsky.social': 3.5 },
         tasteScores: { 'bluesky:taste_match': 0.85, 'bluesky:cold_newer': -0.1 },
         tasteMemory: tasteMem,
       }
     );
-    assert.equal(followingOrder[0].id, 'bluesky:cold_newer', 'Following stream must stay strictly chronological by default');
+    assert.equal(followingOrder[0].id, 'bluesky:cold_newer', 'Following stream must stay strictly chronological');
 
-    // 4. Behavioral signals & IntersectionObserver dwell/scroll_past without reshuffling visible DOM
-    recordBehavioralSignal(tasteMatchOlder, 'profile_click');
-    assert.ok((feedStore.get().implicitAuthors['bluesky:ally.bsky.social'] || 0) > 0);
-    assert.deepEqual(feedStore.get().interactedAuthors, {}, 'profile_click must never mutate interactedAuthors');
+    // 4. Explicit-only taste tracking: passive dwell/scroll_past/open_thread/profile_click are ignored
+    await recordBehavioralSignal(tasteMatchOlder, 'profile_click');
+    await recordBehavioralSignal(tasteMatchOlder, 'dwell');
+    await recordBehavioralSignal(tasteMatchOlder, 'scroll_past');
+    await recordBehavioralSignal(tasteMatchOlder, 'open_thread');
+    assert.deepEqual(feedStore.get().tasteMemory, { positive: [], negative: [] });
+    assert.equal(feedStore.get().implicitAuthors, undefined);
 
     setStreamItems('feed', [tasteMatchOlder, coldNewer], null);
     const host = dom.document.createElement('div');
@@ -5409,55 +5736,33 @@ test('Sovereign Feed v3 blends Following + 2nd-degree graph + learned taste, ran
 
     const cards = Array.from(host.querySelectorAll('article.post-card'));
     assert.equal(cards.length, 2);
-    const initialIds = cards.map((el) => el.dataset.postId);
-    const firstCard = cards[0];
-    const secondCard = cards[1];
-    const dwellIo = ioInstances.find((inst) => inst.observed.has(firstCard));
-    assert.ok(dwellIo, 'mountFeedScreen must attach dwell IntersectionObserver to Feed cards');
+    const dwellIo = ioInstances.find((inst) => inst.observed.has(cards[0]));
+    assert.equal(dwellIo, undefined, 'mountFeedScreen must NOT attach any dwell IntersectionObserver to Feed cards');
 
-    const posBeforeDwell = feedStore.get().tasteMemory?.positive?.length || 0;
-    dwellIo.trigger([{ target: firstCard, isIntersecting: true, intersectionRatio: 0.75, boundingClientRect: { top: 80 }, rootBounds: { top: 0 } }]);
-    await new Promise((r) => setTimeout(r, 2900));
-    assert.ok((feedStore.get().tasteMemory?.positive?.length || 0) > posBeforeDwell, 'Dwell >= 2800ms must record positive taste exemplar');
-
-    // Fast scroll-past on second card (180..750ms exiting above viewport top)
-    const negBeforeSkip = feedStore.get().tasteMemory?.negative?.length || 0;
-    dwellIo.trigger([{ target: secondCard, isIntersecting: true, intersectionRatio: 0.7, boundingClientRect: { top: 120 }, rootBounds: { top: 0 } }]);
-    await new Promise((r) => setTimeout(r, 240));
-    dwellIo.trigger([{ target: secondCard, isIntersecting: false, intersectionRatio: 0, boundingClientRect: { top: -220 }, rootBounds: { top: 0 } }]);
-    assert.ok((feedStore.get().tasteMemory?.negative?.length || 0) > negBeforeSkip, 'Fast upward scroll-past must record negative taste exemplar');
-
-    const cardsAfterSignals = Array.from(host.querySelectorAll('article.post-card'));
-    assert.deepEqual(cardsAfterSignals.map((el) => el.dataset.postId), initialIds, 'Viewport card order must never jump on dwell or scroll-past');
-    assert.ok(cardsAfterSignals[0] === firstCard && cardsAfterSignals[1] === secondCard);
-
-    recordBehavioralSignal(tasteMatchOlder, 'open_thread');
-    const savedImplicit = { ...feedStore.get().implicitAuthors };
+    await recordBehavioralSignal(tasteMatchOlder, 'like');
     const savedTaste = {
       positive: [...(feedStore.get().tasteMemory?.positive || [])],
       negative: [...(feedStore.get().tasteMemory?.negative || [])],
     };
-    await new Promise((r) => setTimeout(r, 80));
+    assert.equal(savedTaste.positive.length, 1);
+    await new Promise((r) => setTimeout(r, 60));
     resetFeedStoreForTests();
     await hydrateFeedTuning();
-    assert.ok((feedStore.get().implicitAuthors['bluesky:ally.bsky.social'] || 0) >= (savedImplicit['bluesky:ally.bsky.social'] || 0));
     assert.equal(feedStore.get().tasteMemory?.positive?.length, savedTaste.positive.length);
-    assert.equal(feedStore.get().tasteMemory?.negative?.length, savedTaste.negative.length);
 
-    // 5. FeedTuningModal Learned Taste Memory section & Reset Learned Taste button
+    // 5. FeedTuningModal Explicit Taste section & Reset Learned Taste button
     setTasteScores({ 'bluesky:taste_match': 0.85 });
     tuningHandle = openFeedTuningModal();
     await new Promise((r) => setTimeout(r, 20));
     const tuningDlg = dom.document.getElementById('feed-tuning-dialog');
     assert.ok(tuningDlg && tuningDlg.open);
-    assert.ok(tuningDlg.textContent.includes('Learned Taste Memory'));
+    assert.ok(tuningDlg.textContent.includes('Explicit Taste'));
     const resetTasteBtn = Array.from(tuningDlg.querySelectorAll('button')).find((b) =>
       b.textContent.includes('Reset Learned Taste')
     );
     assert.ok(resetTasteBtn, 'Reset Learned Taste button must be present in FeedTuningModal');
     resetTasteBtn.click();
     assert.deepEqual(feedStore.get().tasteMemory, { positive: [], negative: [] });
-    assert.deepEqual(feedStore.get().implicitAuthors, {});
     assert.deepEqual(feedStore.get().tasteScores, {});
   } finally {
     tuningHandle?.close();
@@ -5662,6 +5967,18 @@ test('Canonical deduplication collapses own mismatched cross-posts, syndicated d
                   embed: { $type: 'app.bsky.embed.external#view', external: { uri: shareUrl, title: 'KMGP-LP "Space 101.1" Seattle, Washington | NIMUEBLUE' } },
                 },
               },
+              {
+                post: {
+                  uri: 'at://did:plc:other1/app.bsky.feed.post/self_boost_1',
+                  cid: 'cid_self_boost_1',
+                  author: { did: 'did:plc:other1', handle: 'tiny.baby', displayName: 'tinybaby' },
+                  record: { text: 'Self boosted post should not appear in Feed', createdAt: isoMinsAgo(55) },
+                },
+                reason: {
+                  $type: 'app.bsky.feed.defs#reasonRepost',
+                  by: { did: 'did:plc:davyrhodes', handle: 'davyrhodes.bsky.social', displayName: 'Davy Rhodes' },
+                },
+              },
             ],
           }),
           { status: 200, headers: { 'content-type': 'application/json' } }
@@ -5682,7 +5999,7 @@ test('Canonical deduplication collapses own mismatched cross-posts, syndicated d
           { status: 200, headers: { 'content-type': 'application/json' } }
         );
       }
-      if (u.includes('/api/v1/timelines/public')) {
+      if (u.includes('/api/v1/trends/statuses')) {
         return new Response(
           JSON.stringify([
             {
@@ -5705,7 +6022,8 @@ test('Canonical deduplication collapses own mismatched cross-posts, syndicated d
       bskyAuth: await getAuthenticatedAccount('bluesky'),
       tuning: DEFAULT_FEED_TUNING,
     });
-    assert.equal(harvested.items.filter((it) => it.content_text.includes('rb-5ce4d41f')).length, 1);
+    assert.equal(harvested.items.filter((it) => it.content_text.includes('rb-5ce4d41f')).length, 0);
+    assert.equal(harvested.items.filter((it) => it.content_text.includes('Self boosted post')).length, 0);
     assert.equal(harvested.items.filter((it) => (it._meta?.linkCard?.url || '').includes('ottoman-history')).length, 1);
 
     // 3. appendStreamItems drops cross-post/syndicated duplicates of Page 1 without reordering Page 1
@@ -5773,6 +6091,131 @@ test('Canonical deduplication collapses own mismatched cross-posts, syndicated d
     resetAuthStoreForTests();
     resetConnectionStoreForTests();
     globalThis.fetch = prevFetch;
+  }
+});
+
+test('Feed hides cached own posts and self-boosts (kept in Following), sinks already-liked items, and skips own affinity', async () => {
+  const dom = installMockDom();
+  const prevFetch = globalThis.fetch;
+  let feedCtrl = null;
+  const isoMinsAgo = (mins) => new Date(Date.now() - mins * 60_000).toISOString();
+  globalThis.fetch = async (url) => {
+    const u = String(url);
+    if (u.includes('/api/v1/timelines/home')) {
+      return new Response('[]', { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    if (u.includes('app.bsky.feed.getTimeline')) {
+      return new Response(JSON.stringify({ feed: [] }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    return new Response('[]', { status: 200, headers: { 'content-type': 'application/json' } });
+  };
+
+  try {
+    resetMemoryStorageForTests();
+    resetFeedStoreForTests();
+    resetAuthStoreForTests();
+    resetConnectionStoreForTests();
+
+    await upsertSocialAccount(
+      {
+        id: 'fediverse:davyrhodes_@mastodon.social',
+        platform: 'fediverse',
+        instanceUrl: 'https://mastodon.social',
+        handle: 'davyrhodes_',
+        acct: 'davyrhodes_@mastodon.social',
+        userId: 'u_davy',
+      },
+      { accessToken: 'm_tok' }
+    );
+    await upsertSocialAccount(
+      {
+        id: 'bluesky:did:plc:davyrhodes',
+        platform: 'bluesky',
+        serviceUrl: 'https://bsky.social',
+        handle: 'davyrhodes.bsky.social',
+        did: 'did:plc:davyrhodes',
+        userId: 'did:plc:davyrhodes',
+      },
+      { accessJwt: 'b_tok', refreshJwt: 'b_ref' }
+    );
+
+    const ownPost = toUnifiedItem({
+      id: 'mastodon:own_1',
+      protocol: 'mastodon',
+      content_text: 'My own post should stay out of Feed',
+      date_published: isoMinsAgo(2),
+      author: { id: 'u_davy', name: 'Davy Rhodes', handle: 'davyrhodes_@mastodon.social' },
+      _meta: { mastodon: { statusId: 'own_1', instanceUrl: 'https://mastodon.social' } },
+    });
+    const selfBoost = toUnifiedItem({
+      id: 'bluesky:at://did:plc:other1/app.bsky.feed.post/b1',
+      protocol: 'bluesky',
+      content_text: 'Hoodie no shirt post',
+      date_published: isoMinsAgo(3),
+      author: { id: 'did:plc:other1', name: 'tinybaby', handle: 'tiny.baby' },
+      _meta: {
+        bluesky: {
+          uri: 'at://did:plc:other1/app.bsky.feed.post/b1',
+          cid: 'cid_b1',
+          rebloggedBy: { id: 'did:plc:davyrhodes', handle: 'davyrhodes.bsky.social', name: 'Davy Rhodes' },
+        },
+      },
+    });
+    const likedOther = toUnifiedItem({
+      id: 'mastodon:liked_1',
+      protocol: 'mastodon',
+      content_text: 'Already liked peer post',
+      date_published: isoMinsAgo(1),
+      author: { id: 'a_peer', name: 'Peer', handle: 'peer@mastodon.social' },
+      _meta: { mastodon: { statusId: 'liked_1', instanceUrl: 'https://mastodon.social', favourited: true } },
+    });
+    const unseenOther = toUnifiedItem({
+      id: 'mastodon:unseen_1',
+      protocol: 'mastodon',
+      content_text: 'Fresh unseen peer post about local community',
+      date_published: isoMinsAgo(10),
+      author: { id: 'a_other', name: 'Other', handle: 'other@mastodon.social' },
+      _meta: { mastodon: { statusId: 'unseen_1', instanceUrl: 'https://mastodon.social' } },
+    });
+
+    // 1. rankFeedItems sinks already-liked items behind unseen items in Feed
+    const ranked = rankFeedItems([likedOther, unseenOther], DEFAULT_FEED_TUNING, { streamMode: 'feed' });
+    assert.deepEqual(ranked.map((it) => it.id), ['mastodon:unseen_1', 'mastodon:liked_1']);
+
+    // 2. recordAuthorInteraction, recordBehavioralSignal, and buildFollowingStyleAnchors ignore ownAccounts
+    await recordAuthorInteraction(ownPost, 'mastodon', 3);
+    await recordBehavioralSignal(ownPost, 'like');
+    assert.equal(Object.keys(feedStore.get().interactedAuthors || {}).length, 0);
+    assert.equal((feedStore.get().tasteMemory?.positive || []).length, 0);
+    const anchors = buildFollowingStyleAnchors([ownPost, selfBoost, unseenOther]);
+    assert.deepEqual(anchors.map((a) => a.id), ['mastodon:unseen_1']);
+
+    // 3. mountFeedScreen hides cached own posts & self-boosts in Feed, while keeping them in Following
+    setStreamItems('feed', [ownPost, selfBoost, unseenOther]);
+    setStreamItems('following', [ownPost, selfBoost, unseenOther]);
+
+    const host = dom.document.createElement('div');
+    dom.document.body.appendChild(host);
+    feedCtrl = mountFeedScreen(host);
+    await new Promise((r) => setTimeout(r, 20));
+
+    assert.equal(host.textContent.includes('My own post should stay out of Feed'), false);
+    assert.equal(host.textContent.includes('Hoodie no shirt post'), false);
+    assert.equal(host.textContent.includes('Fresh unseen peer post'), true);
+
+    host.querySelector('.stage-tab-btn[data-stream="following"]').click();
+    await new Promise((r) => setTimeout(r, 20));
+    assert.equal(host.textContent.includes('My own post should stay out of Feed'), true);
+    assert.equal(host.textContent.includes('Hoodie no shirt post'), true);
+  } finally {
+    feedCtrl?.destroy();
+    clearHarvesterCacheForTests();
+    resetMemoryStorageForTests();
+    resetFeedStoreForTests();
+    resetAuthStoreForTests();
+    resetConnectionStoreForTests();
+    globalThis.fetch = prevFetch;
+    dom.restore();
   }
 });
 
@@ -5848,22 +6291,22 @@ test('PostCard renders Mastodon, Bluesky, and Threads logos instead of protocol 
     assert.deepEqual(resolvePostBadgeProtocols(singleThreads), ['threads']);
 
     const card = createPostCard(tripleLinked, {});
-    const badge = card.querySelector('.post-protocol-badge.post-protocol-badge--icons');
-    assert.ok(badge, 'PostCard must render icon-based protocol badge');
-    assert.equal(badge.getAttribute('role'), 'img');
-    assert.equal(badge.getAttribute('aria-label'), 'Mastodon, Bluesky, Threads');
-    assert.equal(badge.title, 'Mastodon · Bluesky · Threads');
-    assert.equal(badge.dataset.protocols, 'mastodon,bluesky,threads');
-    assert.equal(badge.textContent, '', 'Badge must not contain protocol text');
+    assert.equal(card.querySelector('.post-protocol-badge--icons'), null, 'Top-right protocol badge should be removed in favor of bottom-right tracker');
+    const tracker = card.querySelector('.post-network-resonance');
+    assert.ok(tracker, 'PostCard must render bottom-right network tracker');
+    assert.equal(tracker.getAttribute('role'), 'group');
+    assert.equal(tracker.dataset.protocols, 'mastodon,bluesky,threads');
 
     for (const proto of ['mastodon', 'bluesky', 'threads']) {
-      const logoEl = badge.querySelector(`.post-protocol-logo--${proto}`);
-      assert.ok(logoEl, `Missing ${proto} logo container`);
-      assert.equal(logoEl.getAttribute('aria-hidden'), 'true');
+      const chip = tracker.querySelector(`.post-resonance-chip--${proto}`);
+      assert.ok(chip, `Missing ${proto} resonance chip`);
+      const iconEl = chip.querySelector('.post-resonance-icon');
+      assert.ok(iconEl);
+      assert.equal(iconEl.getAttribute('aria-hidden'), 'true');
       assert.ok(
-        logoEl.innerHTML.includes('<svg') &&
-        logoEl.innerHTML.includes('aria-hidden="true"') &&
-        logoEl.innerHTML.includes('</svg>'),
+        iconEl.innerHTML.includes('<svg') &&
+        iconEl.innerHTML.includes('aria-hidden="true"') &&
+        iconEl.innerHTML.includes('</svg>'),
         `Missing inline SVG markup for ${proto}`
       );
     }
@@ -6201,6 +6644,7 @@ test('Visual URL truncation preserves full textContent, stripHtmlToText, and ski
 test('Account mute and block persist across Feed harvests, AuthorSheet, SettingsModal, and isolate Mastodon instances', async () => {
   const dom = installMockDom();
   const prevFetch = globalThis.fetch;
+  const prevWebSocket = globalThis.WebSocket;
   let settingsHandle = null;
   let authorSheetHandle = null;
 
@@ -6303,6 +6747,41 @@ test('Account mute and block persist across Feed harvests, AuthorSheet, Settings
 
     const mastoLookupCalls = [];
     const mastoMuteCalls = [];
+    globalThis.WebSocket = class MockMuteJetstreamWebSocket {
+      constructor() {
+        this.listeners = new Map();
+        queueMicrotask(() => {
+          this._emit('open', {});
+          for (const p of [bskyMillPost, bskyKeepPost]) {
+            this._emit('message', {
+              data: JSON.stringify({
+                kind: 'commit',
+                did: p.author.did,
+                commit: {
+                  operation: 'create',
+                  collection: 'app.bsky.feed.post',
+                  rkey: p.uri.split('/').pop(),
+                  record: { ...p.record, langs: ['en'] },
+                },
+              }),
+            });
+          }
+          this._emit('close', {});
+        });
+      }
+      addEventListener(type, fn) {
+        if (!this.listeners.has(type)) this.listeners.set(type, new Set());
+        this.listeners.get(type).add(fn);
+      }
+      removeEventListener(type, fn) {
+        this.listeners.get(type)?.delete(fn);
+      }
+      _emit(type, ev) {
+        this[`on${type}`]?.(ev);
+        for (const fn of this.listeners.get(type) || []) fn(ev);
+      }
+      close() {}
+    };
     globalThis.fetch = async (url, init = {}) => {
       const u = String(url);
       const method = String(init?.method || 'GET').toUpperCase();
@@ -6312,7 +6791,7 @@ test('Account mute and block persist across Feed harvests, AuthorSheet, Settings
           { status: 200, headers: { 'content-type': 'application/json' } }
         );
       }
-      if (u.includes('/app.bsky.feed.getFeed') || u.includes('/app.bsky.feed.searchPosts')) {
+      if (u.includes('/app.bsky.feed.getFeed') || u.includes('/app.bsky.feed.searchPosts') || u.includes('/app.bsky.feed.getPosts')) {
         return new Response(
           JSON.stringify({ feed: [{ post: bskyMillPost }, { post: bskyKeepPost }], posts: [bskyMillPost, bskyKeepPost] }),
           { status: 200, headers: { 'content-type': 'application/json' } }
@@ -6394,7 +6873,7 @@ test('Account mute and block persist across Feed harvests, AuthorSheet, Settings
       'Native Bluesky and Bridgy mirror posts must be removed from Feed immediately'
     );
     assert.equal(activityStore.get().items.length, 0);
-    assert.equal(feedStore.get().implicitAuthors['bluesky:millmessenger.bsky.social'], undefined);
+    assert.equal(feedStore.get().interactedAuthors['bluesky:millmessenger.bsky.social'], undefined);
 
     // 3. Simulated app reload: re-hydrate moderation from nativeStore and re-harvest upstream Feed
     clearHarvesterCacheForTests();
@@ -6495,27 +6974,14 @@ test('Account mute and block persist across Feed harvests, AuthorSheet, Settings
     resetAuthStoreForTests();
     resetConnectionStoreForTests();
     globalThis.fetch = prevFetch;
+    globalThis.WebSocket = prevWebSocket;
     dom.restore();
   }
 });
 
 test('Default Sanctuary discovery sources, Lemmy v3 post harvesting, and auth-gated Mastodon trends fallback work cleanly', async () => {
-  assert.deepEqual([...DEFAULT_SANCTUARY_CHANNELS], [
-    'news',
-    'technology',
-    'science',
-    'culture',
-    'music',
-  ]);
-  assert.deepEqual([...DEFAULT_SANCTUARY_INSTANCES], [
-    'mastodon.social',
-    'mastodon.online',
-    'mstdn.social',
-    'mas.to',
-    'infosec.exchange',
-    'lemmy.world',
-    'lemmy.ml',
-  ]);
+  assert.deepEqual([...DEFAULT_SANCTUARY_CHANNELS], []);
+  assert.deepEqual([...DEFAULT_SANCTUARY_INSTANCES], []);
   assert.equal(conceptToHashtag('workers councils'), 'workerscouncils');
   assert.equal(conceptToHashtag('worker councils'), 'workerscouncils');
   assert.deepEqual(normalizeFeedTuning({ discoveryInstances: ['://lemmy.dbzer0.com'] }).discoveryInstances, ['lemmy.dbzer0.com']);
@@ -6717,5 +7183,435 @@ test('Threads client relays via /api/social/threads-proxy when Sanctuary node is
     resetConnectionStoreForTests();
     globalThis.location = prevLoc;
     globalThis.fetch = prevFetch;
+  }
+});
+
+test('Feed preserves and hydrates viewer activity across deduplication, authenticated trending/getPosts, and stream reloads', async () => {
+  const { getTrendingStatuses } = await import('../web/queries/fediverse.js');
+  const { getBskyPosts } = await import('../web/queries/bluesky.js');
+  const { deduplicateUnifiedItems } = await import('../web/core/schema/unifiedItem.js');
+  const {
+    feedStore,
+    mutatePostAcrossStreams,
+    resetFeedStoreForTests,
+    setStreamItems,
+  } = await import('../web/state/feedStore.js');
+
+  resetFeedStoreForTests();
+
+  const authRequests = [];
+  const mockFetch = async (url, init = {}) => {
+    const u = String(url);
+    const hdrs = new Headers(init.headers || {});
+    authRequests.push({ url: u, auth: hdrs.get('authorization') || '' });
+    if (u.includes('/api/v1/trends/statuses')) {
+      return new Response(
+        JSON.stringify([
+          {
+            id: 'trend-1',
+            uri: 'https://mastodon.social/users/alice/statuses/trend-1',
+            url: 'https://mastodon.social/@alice/trend-1',
+            created_at: '2026-04-01T10:00:00.000Z',
+            content: '<p>Trending post</p>',
+            account: { id: 'a1', username: 'alice', acct: 'alice', display_name: 'Alice', url: 'https://mastodon.social/@alice' },
+            favourited: true,
+            reblogged: false,
+            bookmarked: true,
+            favourites_count: 5,
+            reblogs_count: 1,
+            replies_count: 0,
+          },
+        ]),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      );
+    }
+    if (u.includes('/xrpc/app.bsky.feed.getPosts')) {
+      return new Response(
+        JSON.stringify({
+          posts: [
+            {
+              uri: 'at://did:plc:bob/app.bsky.feed.post/jet1',
+              cid: 'cid-jet1',
+              author: { did: 'did:plc:bob', handle: 'bob.bsky.social', displayName: 'Bob' },
+              record: { text: 'Jetstream post', createdAt: '2026-04-01T10:01:00.000Z' },
+              indexedAt: '2026-04-01T10:01:00.000Z',
+              likeCount: 3,
+              repostCount: 1,
+              replyCount: 0,
+              viewer: { like: 'at://did:plc:me/app.bsky.feed.like/l1', repost: 'at://did:plc:me/app.bsky.feed.repost/r1' },
+            },
+          ],
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      );
+    }
+    return new Response('{}', { status: 404 });
+  };
+
+  const trendRes = await getTrendingStatuses({
+    instanceUrl: 'https://mastodon.social',
+    accessToken: 'masto_tok_123',
+    fetchImpl: mockFetch,
+  });
+  assert.equal(authRequests[0].auth, 'Bearer masto_tok_123');
+  assert.equal(trendRes.items[0].viewerState.favourited, true);
+  assert.equal(trendRes.items[0].viewerState.bookmarked, true);
+
+  const bskyRes = await getBskyPosts({
+    uris: ['at://did:plc:bob/app.bsky.feed.post/jet1'],
+    serviceUrl: 'https://bsky.social',
+    accessJwt: 'bsky_jwt_123',
+    fetchImpl: mockFetch,
+  });
+  assert.equal(authRequests[1].url.startsWith('https://bsky.social/xrpc/app.bsky.feed.getPosts'), true);
+  assert.equal(authRequests[1].auth, 'Bearer bsky_jwt_123');
+  assert.equal(bskyRes[0].viewerState.favourited, true);
+  assert.equal(bskyRes[0].viewerState.reblogged, true);
+
+  // Deduplicating an interacted copy with an unauthenticated copy preserves viewer activity
+  const deduped = deduplicateUnifiedItems([
+    {
+      id: 'mastodon:remote-99',
+      protocol: 'mastodon',
+      url: 'https://mastodon.social/@alice/trend-1',
+      content_text: 'Trending post',
+      date_published: '2026-04-01T10:00:00.000Z',
+      author: { id: 'a1', handle: 'alice@mastodon.social', name: 'Alice' },
+      _meta: {
+        feedSource: 'following',
+        mastodon: { statusId: 'remote-99', uri: 'https://mastodon.social/users/alice/statuses/trend-1', favourited: false, reblogged: false, bookmarked: false },
+      },
+    },
+    {
+      id: 'mastodon:home-99',
+      protocol: 'mastodon',
+      url: 'https://mastodon.social/@alice/trend-1',
+      content_text: 'Trending post',
+      date_published: '2026-04-01T10:00:00.000Z',
+      author: { id: 'a1', handle: 'alice@mastodon.social', name: 'Alice' },
+      _meta: {
+        feedSource: 'discovery',
+        feedFeedback: 'interested',
+        mastodon: { statusId: 'home-99', uri: 'https://mastodon.social/users/alice/statuses/trend-1', favourited: true, reblogged: true, bookmarked: true },
+      },
+    },
+  ]);
+  assert.equal(deduped.length, 1);
+  assert.equal(deduped[0]._meta.mastodon.favourited, true);
+  assert.equal(deduped[0]._meta.mastodon.reblogged, true);
+  assert.equal(deduped[0]._meta.mastodon.bookmarked, true);
+  assert.equal(deduped[0]._meta.feedFeedback, 'interested');
+
+  // Persisted viewerInteractions re-applies likes/boosts/bookmarks when a fresh feed reload arrives
+  setStreamItems('feed', [
+    {
+      id: 'mastodon:disc-1',
+      protocol: 'mastodon',
+      url: 'https://fosstodon.org/@carol/55',
+      content_text: 'Hello fediverse',
+      date_published: '2026-04-01T11:00:00.000Z',
+      author: { id: 'c1', handle: 'carol@fosstodon.org', name: 'Carol' },
+      _meta: {
+        mastodon: { statusId: 'disc-1', instanceUrl: 'https://mastodon.world', uri: 'https://fosstodon.org/users/carol/statuses/55', favourited: false, reblogged: false, bookmarked: false },
+      },
+    },
+  ]);
+  mutatePostAcrossStreams('mastodon:disc-1', (cur) => ({
+    ...cur,
+    _meta: {
+      ...cur._meta,
+      mastodon: { ...cur._meta.mastodon, favourited: true, bookmarked: true },
+    },
+  }));
+  // Simulate fresh feed load from another unauthenticated instance with the same ActivityPub URI
+  setStreamItems('feed', [
+    {
+      id: 'mastodon:other-inst-999',
+      protocol: 'mastodon',
+      url: 'https://fosstodon.org/@carol/55',
+      content_text: 'Hello fediverse',
+      date_published: '2026-04-01T11:00:00.000Z',
+      author: { id: 'c1', handle: 'carol@fosstodon.org', name: 'Carol' },
+      _meta: {
+        mastodon: { statusId: 'other-inst-999', instanceUrl: 'https://mstdn.social', uri: 'https://fosstodon.org/users/carol/statuses/55', favourited: false, reblogged: false, bookmarked: false },
+      },
+    },
+  ]);
+  const reloaded = feedStore.get().streams.feed.items[0];
+  assert.equal(reloaded._meta.mastodon.favourited, true);
+  assert.equal(reloaded._meta.mastodon.bookmarked, true);
+
+  resetFeedStoreForTests();
+});
+
+test('Replies tab hydrates Mastodon parent statuses and preserves Bluesky mid-thread parent context', async () => {
+  const { normalizeBskyPost } = await import('../web/queries/bluesky.js');
+  const { fetchOwnStatuses } = await import('../web/queries/socialClient.js');
+  const { createPostCard } = await import('../web/components/PostCard.js');
+
+  const midThreadBsky = normalizeBskyPost({
+    post: {
+      uri: 'at://did:plc:me/app.bsky.feed.post/r2',
+      cid: 'c_r2',
+      author: { did: 'did:plc:me', handle: 'me.bsky.social', displayName: 'Me' },
+      record: {
+        text: '@bunnxiies.bsky.social cashapp and venmo have made up the difference for me.',
+        createdAt: '2026-11-23T06:00:00.000Z',
+        reply: {
+          root: { uri: 'at://did:plc:root/app.bsky.feed.post/root0', cid: 'c_root0' },
+          parent: { uri: 'at://did:plc:bunn/app.bsky.feed.post/p1', cid: 'c_p1' },
+        },
+      },
+    },
+    reply: {
+      root: {
+        uri: 'at://did:plc:root/app.bsky.feed.post/root0',
+        cid: 'c_root0',
+        author: { did: 'did:plc:root', handle: 'root.bsky.social', displayName: 'Root' },
+        record: { text: 'Root post', createdAt: '2026-11-23T05:00:00.000Z' },
+      },
+      parent: {
+        uri: 'at://did:plc:bunn/app.bsky.feed.post/p1',
+        cid: 'c_p1',
+        author: { did: 'did:plc:bunn', handle: 'bunnxiies.bsky.social', displayName: 'Bunn' },
+        record: { text: 'Direct parent comment I replied to', createdAt: '2026-11-23T05:30:00.000Z' },
+      },
+    },
+  });
+  assert.equal(midThreadBsky.replyContext?.text, 'Direct parent comment I replied to');
+  assert.equal(midThreadBsky.replyContext?.authorHandle, 'bunnxiies.bsky.social');
+
+  const dom = installMockDom();
+  const prevFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    const u = String(url);
+    if (u.includes('/api/v1/accounts/u1/statuses')) {
+      return new Response(
+        JSON.stringify([
+          {
+            id: 'reply_masto_1',
+            uri: 'https://mastodon.social/users/alice/statuses/reply_masto_1',
+            url: 'https://mastodon.social/@alice/reply_masto_1',
+            created_at: '2026-11-23T07:00:00.000Z',
+            content: '<p>@mike We need centralized commons</p>',
+            in_reply_to_id: 'parent_masto_99',
+            account: { id: 'u1', username: 'alice', acct: 'alice@mastodon.social', display_name: 'Alice' },
+          },
+        ]),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      );
+    }
+    if (u.includes('/api/v1/statuses/parent_masto_99')) {
+      return new Response(
+        JSON.stringify({
+          id: 'parent_masto_99',
+          uri: 'https://social.thegreens.uk/users/mike/statuses/parent_masto_99',
+          url: 'https://social.thegreens.uk/@mike/parent_masto_99',
+          created_at: '2026-11-23T06:30:00.000Z',
+          content: '<p>Original message from Rev Mike about self-hosting</p>',
+          account: { id: 'm1', username: 'mike', acct: 'mike@social.thegreens.uk', display_name: 'Rev Mike' },
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      );
+    }
+    return new Response(JSON.stringify({}), { status: 200, headers: { 'content-type': 'application/json' } });
+  };
+
+  try {
+    resetMemoryStorageForTests();
+    resetAuthStoreForTests();
+    await upsertSocialAccount(
+      {
+        id: 'fediverse:alice@mastodon.social',
+        platform: 'fediverse',
+        instanceUrl: 'https://mastodon.social',
+        handle: 'alice',
+        acct: 'alice@mastodon.social',
+        displayName: 'Alice',
+        userId: 'u1',
+      },
+      { accessToken: 'tok_u1' }
+    );
+
+    const replies = await fetchOwnStatuses('u1', {
+      tab: 'replies',
+      protocol: 'mastodon',
+      instanceUrl: 'https://mastodon.social',
+      includeBridges: false,
+      skipMetricsEnrichment: true,
+    });
+    assert.equal(replies.length, 1);
+    assert.equal(replies[0]._meta?.replyContext?.text, 'Original message from Rev Mike about self-hosting');
+    const card = createPostCard(replies[0], {});
+    const ctxText = card.querySelector('.post-reply-context-text')?.textContent || '';
+    assert.equal(ctxText.includes('Original message from Rev Mike'), true);
+  } finally {
+    resetAuthStoreForTests();
+    globalThis.fetch = prevFetch;
+    dom.restore();
+  }
+});
+
+test('PostCard and Feed show active reply indicator for commented Mastodon & Bluesky posts and after publishing a reply', async () => {
+  const { syncOwnViewerActivity } = await import('../web/queries/feedHarvester.js');
+  const { createPostCard } = await import('../web/components/PostCard.js');
+  const {
+    feedStore,
+    mergeDiscoveredViewerInteractions,
+    resetFeedStoreForTests,
+    setStreamItems,
+  } = await import('../web/state/feedStore.js');
+
+  const dom = installMockDom();
+  const prevFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    const u = String(url);
+    if (u.includes('mastodon.social/api/v1/accounts/u_me/statuses')) {
+      return new Response(
+        JSON.stringify([
+          {
+            id: 'my_reply_1',
+            created_at: '2026-11-23T07:50:00.000Z',
+            content: '<p>@davidho Except the world is not a dead turkey.</p>',
+            in_reply_to_id: 'home_copy_of_davidho',
+            account: { id: 'u_me', username: 'davy', acct: 'davy@mastodon.social' },
+          },
+        ]),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      );
+    }
+    if (u.includes('mastodon.social/api/v1/statuses/home_copy_of_davidho')) {
+      return new Response(
+        JSON.stringify({
+          id: 'home_copy_of_davidho',
+          uri: 'https://mastodon.world/users/davidho/statuses/999',
+          url: 'https://mastodon.world/@davidho/999',
+          created_at: '2026-11-23T06:00:00.000Z',
+          content: '<p>The whole idea of overshoot is crazy.</p>',
+          account: { id: 'dh1', username: 'davidho', acct: 'davidho@mastodon.world' },
+          favourited: false,
+          reblogged: false,
+          bookmarked: false,
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      );
+    }
+    if (u.includes('mastodon.social/api/v1/favourites')) {
+      return new Response('[]', { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    if (u.includes('app.bsky.feed.getAuthorFeed')) {
+      return new Response(
+        JSON.stringify({
+          feed: [
+            {
+              post: {
+                uri: 'at://did:plc:me/app.bsky.feed.post/my_bsky_rep',
+                cid: 'c_rep',
+                author: { did: 'did:plc:me', handle: 'me.bsky.social' },
+                record: {
+                  text: 'My Bluesky reply',
+                  createdAt: '2026-11-23T07:40:00.000Z',
+                  reply: {
+                    root: { uri: 'at://did:plc:other/app.bsky.feed.post/target_bsky_1', cid: 'c_t1' },
+                    parent: { uri: 'at://did:plc:other/app.bsky.feed.post/target_bsky_1', cid: 'c_t1' },
+                  },
+                },
+              },
+            },
+          ],
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      );
+    }
+    if (u.includes('app.bsky.feed.getActorLikes')) {
+      return new Response(JSON.stringify({ feed: [] }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
+  };
+
+  try {
+    resetMemoryStorageForTests();
+    resetAuthStoreForTests();
+    resetFeedStoreForTests();
+
+    await upsertSocialAccount(
+      {
+        id: 'fediverse:davy@mastodon.social',
+        platform: 'fediverse',
+        instanceUrl: 'https://mastodon.social',
+        handle: 'davy',
+        acct: 'davy@mastodon.social',
+        userId: 'u_me',
+      },
+      { accessToken: 'tok_me' }
+    );
+    await upsertSocialAccount(
+      {
+        id: 'bluesky:did:plc:me',
+        platform: 'bluesky',
+        serviceUrl: 'https://bsky.social',
+        handle: 'me.bsky.social',
+        acct: 'me.bsky.social',
+        did: 'did:plc:me',
+      },
+      { accessJwt: 'jwt_me', refreshJwt: 'ref_me' }
+    );
+
+    setStreamItems('feed', [
+      {
+        id: 'mastodon:world_999',
+        protocol: 'mastodon',
+        url: 'https://mastodon.world/@davidho/999',
+        content_text: 'The whole idea of overshoot is crazy.',
+        date_published: '2026-11-23T06:00:00.000Z',
+        author: { id: 'dh1', handle: 'davidho@mastodon.world', name: 'David Ho' },
+        metrics: { replies: 4, reposts: 86, likes: 70 },
+        _meta: {
+          mastodon: {
+            statusId: 'world_999',
+            instanceUrl: 'https://mastodon.world',
+            uri: 'https://mastodon.world/users/davidho/statuses/999',
+          },
+        },
+      },
+      {
+        id: 'bluesky:at://did:plc:other/app.bsky.feed.post/target_bsky_1',
+        protocol: 'bluesky',
+        url: 'https://bsky.app/profile/other.bsky.social/post/target_bsky_1',
+        content_text: 'Bluesky parent post',
+        date_published: '2026-11-23T05:00:00.000Z',
+        author: { id: 'did:plc:other', handle: 'other.bsky.social', name: 'Other' },
+        metrics: { replies: 1, reposts: 0, likes: 2 },
+        _meta: {
+          bluesky: { uri: 'at://did:plc:other/app.bsky.feed.post/target_bsky_1', cid: 'c_t1' },
+        },
+      },
+    ]);
+
+    const entries = await syncOwnViewerActivity({
+      fediAuth: await getAuthenticatedAccount('fediverse'),
+      bskyAuth: await getAuthenticatedAccount('bluesky'),
+    });
+    mergeDiscoveredViewerInteractions(entries);
+
+    const feedItems = feedStore.get().streams.feed.items;
+    const mastoPost = feedItems.find((it) => it.id === 'mastodon:world_999');
+    const bskyPost = feedItems.find((it) => it.id === 'bluesky:at://did:plc:other/app.bsky.feed.post/target_bsky_1');
+    assert.equal(mastoPost._meta.viewerReplied, true);
+    assert.equal(bskyPost._meta.viewerReplied, true);
+
+    const mastoCard = createPostCard(mastoPost, {});
+    const mastoReplyBtn = mastoCard.querySelector('.post-action-reply');
+    assert.equal(mastoReplyBtn.classList.contains('is-active'), true);
+    assert.equal(mastoReplyBtn.getAttribute('aria-pressed'), 'true');
+    assert.equal(mastoReplyBtn.getAttribute('aria-label')?.startsWith('Replied'), true);
+
+    const bskyCard = createPostCard(bskyPost, {});
+    assert.equal(bskyCard.querySelector('.post-action-reply').classList.contains('is-active'), true);
+  } finally {
+    resetFeedStoreForTests();
+    resetAuthStoreForTests();
+    globalThis.fetch = prevFetch;
+    dom.restore();
   }
 });

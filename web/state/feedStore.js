@@ -1,22 +1,34 @@
-import { computeFeedbackSliderNudge, normalizeFeedTuning } from '../core/feedRanker.js';
 import {
+  normalizeFeedTuning,
+  normalizeRankingManifest,
+} from '../core/feedRanker.js';
+import {
+  actorMatchesOwnAccountSet,
+  buildOwnAccountKeySet,
   canonicalizeActorHandle,
   deduplicateAppendItems,
   deduplicateUnifiedItems,
+  mergeViewerActivityMeta,
+  normalizeNativeUri,
   toUnifiedItem,
 } from '../core/schema/unifiedItem.js';
 import { fetchSanctuaryFeedProfile, saveSanctuaryFeedProfile } from '../queries/sanctuary.js';
-import { getLocalModeratedAccounts, storeGet, storePut } from '../storage/nativeStore.js';
+import { getLocalModeratedAccounts, storeDelete, storeGet, storePut } from '../storage/nativeStore.js';
 import { authStore } from './authStore.js';
 import { connectionStore, onSanctuaryEvent } from './sanctuary/connection.js';
 import { createStore } from './store.js';
 
 const FEED_TUNING_KV_KEY = 'feed_tuning_profile';
 const FEED_RECIPROCITY_KV_KEY = 'feed_interacted_authors';
-const FEED_IMPLICIT_AUTHORS_KV_KEY = 'feed_implicit_authors_v1';
 const FEED_TASTE_MEMORY_KV_KEY = 'feed_taste_memory_v1';
 const FEED_DISMISSED_POSTS_KV_KEY = 'feed_dismissed_posts';
+const FEED_VIEWER_INTERACTIONS_KV_KEY = 'feed_viewer_interactions_v1';
+const RANKING_MANIFEST_KV_KEY = 'sanctuary_ranking_manifest_v1';
+export const HARVESTER_CACHE_VERSION = 13;
+const STREAM_CACHE_TTL_MS = 24 * 3600_000;
+const ROLLING_DISCOVERY_STREAMS = new Set(['feed', 'photos', 'video', 'visual']);
 let sanctuarySyncBound = false;
+let tasteMutationEpoch = 0;
 
 function createEmptyStreamBucket() {
   return {
@@ -24,6 +36,8 @@ function createEmptyStreamBucket() {
     nextCursor: null,
     updatedAt: 0,
     generation: 0,
+    shuffleSeed: '',
+    deprioritizeIds: [],
   };
 }
 
@@ -33,6 +47,9 @@ function createInitialFeedState() {
     streams: {
       feed: createEmptyStreamBucket(),
       following: createEmptyStreamBucket(),
+      photos: createEmptyStreamBucket(),
+      video: createEmptyStreamBucket(),
+      visual: createEmptyStreamBucket(),
       home: createEmptyStreamBucket(),
       local: createEmptyStreamBucket(),
       federated: createEmptyStreamBucket(),
@@ -46,11 +63,13 @@ function createInitialFeedState() {
     moderatedActors: [],
     dismissedPostIds: [],
     tuning: normalizeFeedTuning(null),
+    rankingManifest: normalizeRankingManifest(null),
     interactedAuthors: {},
-    implicitAuthors: {},
+    viewerInteractions: {},
     semanticScores: {},
     tasteScores: {},
     tasteMemory: { positive: [], negative: [] },
+    userTuningEpoch: 0,
     loading: false,
     error: null,
   };
@@ -71,6 +90,218 @@ function parseTimestampMs(item) {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
+function getViewerInteractionKeys(rawItem) {
+  const u = toUnifiedItem(rawItem);
+  const keys = [];
+  if (u.id) keys.push(String(u.id));
+  const mUri = normalizeNativeUri(u._meta?.mastodon?.uri || '');
+  if (mUri) keys.push(mUri);
+  const bUri = String(u._meta?.bluesky?.uri || '').trim();
+  if (bUri) keys.push(bUri);
+  const normUrl = normalizeNativeUri(u.url || '');
+  if (normUrl) keys.push(normUrl);
+  return [...new Set(keys)];
+}
+
+export function applyViewerInteractionsToItem(rawItem, ledger = feedStore.get().viewerInteractions) {
+  if (!rawItem || typeof rawItem !== 'object') return rawItem;
+  const u = toUnifiedItem(rawItem);
+  if (!ledger || typeof ledger !== 'object') return u;
+  const keys = getViewerInteractionKeys(u);
+  let entry = null;
+  for (const k of keys) {
+    if (ledger[k] && typeof ledger[k] === 'object') {
+      entry = ledger[k];
+      break;
+    }
+  }
+  if (!entry) return u;
+
+  const nextMeta = { ...(u._meta || {}) };
+  let changed = false;
+
+  if (u.protocol === 'mastodon' || u._meta?.mastodon) {
+    const pm = u._meta?.mastodon || {};
+    const nextM = { ...pm };
+    if (typeof entry.favourited === 'boolean' && Boolean(pm.favourited) !== entry.favourited) {
+      nextM.favourited = entry.favourited;
+      changed = true;
+    }
+    if (typeof entry.reblogged === 'boolean' && Boolean(pm.reblogged) !== entry.reblogged) {
+      nextM.reblogged = entry.reblogged;
+      changed = true;
+    }
+    if (typeof entry.bookmarked === 'boolean' && Boolean(pm.bookmarked) !== entry.bookmarked) {
+      nextM.bookmarked = entry.bookmarked;
+      changed = true;
+    }
+    if (entry.replied && !pm.replied) {
+      nextM.replied = true;
+      changed = true;
+    }
+    if (changed) nextMeta.mastodon = nextM;
+  }
+
+  if (u.protocol === 'bluesky' || u._meta?.bluesky) {
+    const pb = u._meta?.bluesky || {};
+    const nextB = { ...pb };
+    let bChanged = false;
+    if (entry.likeUri !== undefined && (pb.likeUri || null) !== (entry.likeUri || null)) {
+      nextB.likeUri = entry.likeUri || null;
+      bChanged = true;
+    }
+    if (entry.repostUri !== undefined && (pb.repostUri || null) !== (entry.repostUri || null)) {
+      nextB.repostUri = entry.repostUri || null;
+      bChanged = true;
+    }
+    if (entry.replied && !pb.replied) {
+      nextB.replied = true;
+      bChanged = true;
+    }
+    if (bChanged) {
+      nextMeta.bluesky = nextB;
+      changed = true;
+    }
+  }
+
+  if (entry.replied && !u._meta?.viewerReplied) {
+    nextMeta.viewerReplied = true;
+    changed = true;
+  }
+
+  if (entry.feedFeedback && u._meta?.feedFeedback !== entry.feedFeedback) {
+    nextMeta.feedFeedback = entry.feedFeedback;
+    changed = true;
+  }
+
+  return changed ? { ...u, _meta: nextMeta } : u;
+}
+
+export function recordViewerInteraction(rawItem) {
+  if (!rawItem || typeof rawItem !== 'object') return;
+  const u = toUnifiedItem(rawItem);
+  const keys = getViewerInteractionKeys(u);
+  if (keys.length === 0) return;
+
+  const entry = { ts: Date.now() };
+  if (u.protocol === 'mastodon' || u._meta?.mastodon) {
+    const m = u._meta?.mastodon || {};
+    entry.favourited = Boolean(m.favourited);
+    entry.reblogged = Boolean(m.reblogged);
+    entry.bookmarked = Boolean(m.bookmarked);
+    if (m.replied || u._meta?.viewerReplied) entry.replied = true;
+  }
+  if (u.protocol === 'bluesky' || u._meta?.bluesky) {
+    const b = u._meta?.bluesky || {};
+    entry.likeUri = b.likeUri || null;
+    entry.repostUri = b.repostUri || null;
+    if (b.replied || u._meta?.viewerReplied) entry.replied = true;
+  }
+  if (u._meta?.viewerReplied) {
+    entry.replied = true;
+  }
+  if (u._meta?.feedFeedback) {
+    entry.feedFeedback = u._meta.feedFeedback;
+  }
+
+  const prev = feedStore.get().viewerInteractions || {};
+  const next = { ...prev };
+  for (const k of keys) {
+    next[k] = entry;
+  }
+  const allKeys = Object.keys(next);
+  if (allKeys.length > 500) {
+    allKeys
+      .sort((a, b) => Number(next[a]?.ts || 0) - Number(next[b]?.ts || 0))
+      .slice(0, allKeys.length - 500)
+      .forEach((dropKey) => delete next[dropKey]);
+  }
+  feedStore.set({ viewerInteractions: next });
+  void storePut('kv', FEED_VIEWER_INTERACTIONS_KV_KEY, next).catch(() => {});
+}
+
+export function mergeDiscoveredViewerInteractions(entries = []) {
+  const list = Array.isArray(entries) ? entries : [];
+  if (list.length === 0) return;
+  const prevState = feedStore.get();
+  const prevLedger = prevState.viewerInteractions || {};
+  const nextLedger = { ...prevLedger };
+  const now = Date.now();
+  let ledgerChanged = false;
+
+  for (const raw of list) {
+    const keys = (Array.isArray(raw?.keys) ? raw.keys : []).map((k) => String(k || '').trim()).filter(Boolean);
+    if (keys.length === 0) continue;
+    for (const k of keys) {
+      const cur = nextLedger[k] && typeof nextLedger[k] === 'object' ? nextLedger[k] : {};
+      const merged = { ...cur, ts: Math.max(Number(cur.ts || 0), now) };
+      let entryChanged = false;
+      if (raw.favourited && !cur.favourited) {
+        merged.favourited = true;
+        entryChanged = true;
+      }
+      if (raw.reblogged && !cur.reblogged) {
+        merged.reblogged = true;
+        entryChanged = true;
+      }
+      if (raw.bookmarked && !cur.bookmarked) {
+        merged.bookmarked = true;
+        entryChanged = true;
+      }
+      if (raw.replied && !cur.replied) {
+        merged.replied = true;
+        entryChanged = true;
+      }
+      if (raw.likeUri && !cur.likeUri) {
+        merged.likeUri = raw.likeUri;
+        entryChanged = true;
+      }
+      if (raw.repostUri && !cur.repostUri) {
+        merged.repostUri = raw.repostUri;
+        entryChanged = true;
+      }
+      if (entryChanged) {
+        nextLedger[k] = merged;
+        ledgerChanged = true;
+      }
+    }
+  }
+
+  if (!ledgerChanged) return;
+  const allKeys = Object.keys(nextLedger);
+  if (allKeys.length > 500) {
+    allKeys
+      .sort((a, b) => Number(nextLedger[a]?.ts || 0) - Number(nextLedger[b]?.ts || 0))
+      .slice(0, allKeys.length - 500)
+      .forEach((dropKey) => delete nextLedger[dropKey]);
+  }
+
+  let anyStreamChanged = false;
+  const nextStreams = {};
+  for (const [name, bucket] of Object.entries(prevState.streams || {})) {
+    let bucketChanged = false;
+    const nextItems = (bucket.items || []).map((item) => {
+      const updated = applyViewerInteractionsToItem(item, nextLedger);
+      if (updated !== item) {
+        bucketChanged = true;
+      }
+      return updated;
+    });
+    if (bucketChanged) {
+      anyStreamChanged = true;
+      nextStreams[name] = { ...bucket, items: nextItems };
+    } else {
+      nextStreams[name] = bucket;
+    }
+  }
+
+  feedStore.set({
+    viewerInteractions: nextLedger,
+    ...(anyStreamChanged ? { streams: nextStreams } : {}),
+  });
+  void storePut('kv', FEED_VIEWER_INTERACTIONS_KV_KEY, nextLedger).catch(() => {});
+}
+
 /**
  * Merge and deduplicate timeline UnifiedItems in newest-first chronological order.
  * @param {Array<object>} [existing]
@@ -79,13 +310,14 @@ function parseTimestampMs(item) {
  */
 export function mergeChronologicalPosts(existing = [], incoming = []) {
   const byKey = new Map();
+  const ledger = feedStore.get().viewerInteractions;
   for (const item of existing) {
-    const unified = toUnifiedItem(item);
+    const unified = applyViewerInteractionsToItem(item, ledger);
     const key = getPostIdentityKey(unified);
     if (key) byKey.set(key, unified);
   }
   for (const item of incoming) {
-    const unified = toUnifiedItem(item);
+    const unified = applyViewerInteractionsToItem(item, ledger);
     const key = getPostIdentityKey(unified);
     if (!key) continue;
     const prev = byKey.get(key);
@@ -114,6 +346,9 @@ export function setStreamItems(streamName, items, nextCursor = null, options = {
   const shuffleSeed = typeof options?.shuffleSeed === 'string' || typeof options?.shuffleSeed === 'number'
     ? String(options.shuffleSeed)
     : '';
+  const deprioritizeIds = Array.isArray(options?.deprioritizeIds)
+    ? options.deprioritizeIds.map((id) => String(id || '')).filter(Boolean)
+    : [];
   feedStore.set({
     streams: {
       ...prev.streams,
@@ -123,6 +358,7 @@ export function setStreamItems(streamName, items, nextCursor = null, options = {
         updatedAt: Date.now(),
         generation: prevGen + 1,
         shuffleSeed,
+        deprioritizeIds,
       },
     },
     loading: false,
@@ -133,9 +369,11 @@ export function setStreamItems(streamName, items, nextCursor = null, options = {
 export function appendStreamItems(streamName, items, nextCursor = null) {
   const prev = feedStore.get();
   const bucket = prev.streams[streamName] || createEmptyStreamBucket();
+  const ledger = prev.viewerInteractions;
   const existingUnified = (bucket.items || []).map((it) => toUnifiedItem(it));
+  const incomingUnified = (Array.isArray(items) ? items : []).map((it) => applyViewerInteractionsToItem(it, ledger));
   const ownAccounts = authStore.get().accounts || [];
-  const { nextExisting, appended } = deduplicateAppendItems(existingUnified, items, { ownAccounts });
+  const { nextExisting, appended } = deduplicateAppendItems(existingUnified, incomingUnified, { ownAccounts });
   feedStore.set({
     streams: {
       ...prev.streams,
@@ -145,6 +383,7 @@ export function appendStreamItems(streamName, items, nextCursor = null) {
         updatedAt: Date.now(),
         generation: bucket.generation || 0,
         shuffleSeed: bucket.shuffleSeed || '',
+        deprioritizeIds: Array.isArray(bucket.deprioritizeIds) ? bucket.deprioritizeIds : [],
       },
     },
     loading: false,
@@ -155,7 +394,7 @@ export function appendStreamItems(streamName, items, nextCursor = null) {
 export function prependStreamItem(streamName, item) {
   const prev = feedStore.get();
   const bucket = prev.streams[streamName] || createEmptyStreamBucket();
-  const unified = toUnifiedItem(item);
+  const unified = applyViewerInteractionsToItem(item, prev.viewerInteractions);
   const key = getPostIdentityKey(unified);
   if (!key) return;
   const existingUnified = (bucket.items || [])
@@ -267,10 +506,15 @@ export function mergePostMutation(prevItem, nextItem) {
     };
   }
 
-  const hasNextAttachments =
+  const explicitAttachments =
     Array.isArray(nextItem?.attachments) ||
     Array.isArray(nextItem?.media) ||
     Array.isArray(nextItem?.media_attachments);
+  const nextAtts = Array.isArray(next.attachments) ? next.attachments : [];
+  const prevAtts = Array.isArray(prev.attachments) ? prev.attachments : [];
+  const useNextAttachments =
+    Boolean(nextItem?._clearAttachments) ||
+    (explicitAttachments && (nextAtts.length > 0 || prevAtts.length === 0));
 
   return {
     ...prev,
@@ -281,7 +525,7 @@ export function mergePostMutation(prevItem, nextItem) {
     content_html: next.content_html || prev.content_html || '',
     date_published: prev.date_published || next.date_published,
     author: next.author?.id || next.author?.handle ? { ...prev.author, ...next.author } : prev.author,
-    attachments: hasNextAttachments ? next.attachments : prev.attachments,
+    attachments: useNextAttachments ? nextAtts : prevAtts,
     metrics: mergedMetrics,
     _meta: mergedMeta,
   };
@@ -294,6 +538,7 @@ export function mutatePostAcrossStreams(predicateOrKey, updater) {
 
   const prev = feedStore.get();
   let anyStreamChanged = false;
+  let lastUpdated = null;
   const nextStreams = {};
 
   for (const [name, bucket] of Object.entries(prev.streams)) {
@@ -303,6 +548,7 @@ export function mutatePostAcrossStreams(predicateOrKey, updater) {
       const candidate = updater(item);
       if (!candidate || candidate === item) return item;
       const updated = mergePostMutation(item, candidate);
+      lastUpdated = updated;
       bucketChanged = true;
       return updated;
     });
@@ -316,6 +562,9 @@ export function mutatePostAcrossStreams(predicateOrKey, updater) {
 
   if (anyStreamChanged) {
     feedStore.set({ streams: nextStreams });
+    if (lastUpdated) {
+      recordViewerInteraction(lastUpdated);
+    }
   }
 }
 
@@ -346,7 +595,11 @@ export function reconcileEnrichedStreamItems(enrichedItems = []) {
         linkedChanged
       ) {
         bucketChanged = true;
-        return mergePostMutation(item, enriched);
+        const merged = mergePostMutation(item, enriched);
+        return {
+          ...merged,
+          _meta: mergeViewerActivityMeta(merged._meta, item._meta),
+        };
       }
       return item;
     });
@@ -454,21 +707,44 @@ export function removePostAcrossStreams(predicateOrKey) {
 export async function persistStreamCache(streamName) {
   const bucket = feedStore.get().streams[streamName];
   if (!bucket) return;
-  const payload = streamName === 'feed' ? { ...bucket, harvesterVersion: 4 } : bucket;
+  const isDiscovery = ROLLING_DISCOVERY_STREAMS.has(streamName);
+  const now = Date.now();
+  let items = Array.isArray(bucket.items) ? bucket.items : [];
+  if (isDiscovery) {
+    items = items
+      .filter((it) => it && (now - Number(it._cachedAt || now)) <= STREAM_CACHE_TTL_MS)
+      .map((it) => (it._cachedAt ? it : { ...it, _cachedAt: now }))
+      .slice(0, 350);
+  }
+  const payload = isDiscovery
+    ? { ...bucket, items, harvesterVersion: HARVESTER_CACHE_VERSION, cachedAt: now }
+    : bucket;
   await storePut('timeline_cache', streamName, payload);
 }
 
 export async function hydrateCachedStream(streamName) {
   const cached = await storeGet('timeline_cache', streamName);
   if (!cached || !Array.isArray(cached.items)) return null;
-  if (streamName === 'feed' && Number(cached.harvesterVersion || 0) < 4) return null;
+  const isDiscovery = ROLLING_DISCOVERY_STREAMS.has(streamName);
+  if (isDiscovery) {
+    if (Number(cached.harvesterVersion || 0) < HARVESTER_CACHE_VERSION) return null;
+    const now = Date.now();
+    if (cached.cachedAt && now - Number(cached.cachedAt) > STREAM_CACHE_TTL_MS) {
+      return null;
+    }
+  }
+  const now = Date.now();
+  const validItems = isDiscovery
+    ? cached.items.filter((it) => it && (now - Number(it._cachedAt || cached.cachedAt || cached.updatedAt || now)) <= STREAM_CACHE_TTL_MS)
+    : cached.items;
+  if (isDiscovery && validItems.length === 0) return null;
   const prev = feedStore.get();
   const prevGen = prev.streams[streamName]?.generation || 0;
   feedStore.set({
     streams: {
       ...prev.streams,
       [streamName]: {
-        items: mergeChronologicalPosts([], cached.items),
+        items: mergeChronologicalPosts([], validItems),
         nextCursor: cached.nextCursor || null,
         updatedAt: cached.updatedAt || 0,
         generation: prevGen + 1,
@@ -538,9 +814,7 @@ export async function purgeModeratedAuthorAffinity(actorKeys = []) {
   if (keySet.size === 0) return;
   const cur = feedStore.get();
   const prevInteracted = cur.interactedAuthors || {};
-  const prevImplicit = cur.implicitAuthors || {};
   let changedInt = false;
-  let changedImp = false;
   const nextInteracted = {};
   for (const [k, v] of Object.entries(prevInteracted)) {
     if (keySet.has(k.toLowerCase())) {
@@ -549,24 +823,10 @@ export async function purgeModeratedAuthorAffinity(actorKeys = []) {
       nextInteracted[k] = v;
     }
   }
-  const nextImplicit = {};
-  for (const [k, v] of Object.entries(prevImplicit)) {
-    if (keySet.has(k.toLowerCase())) {
-      changedImp = true;
-    } else {
-      nextImplicit[k] = v;
-    }
+  if (changedInt) {
+    feedStore.set({ interactedAuthors: nextInteracted });
+    await storePut('kv', FEED_RECIPROCITY_KV_KEY, nextInteracted).catch(() => {});
   }
-  const patch = {};
-  if (changedInt) patch.interactedAuthors = nextInteracted;
-  if (changedImp) patch.implicitAuthors = nextImplicit;
-  if (Object.keys(patch).length > 0) {
-    feedStore.set(patch);
-  }
-  await Promise.all([
-    changedInt ? storePut('kv', FEED_RECIPROCITY_KV_KEY, nextInteracted).catch(() => {}) : Promise.resolve(),
-    changedImp ? storePut('kv', FEED_IMPLICIT_AUTHORS_KV_KEY, nextImplicit).catch(() => {}) : Promise.resolve(),
-  ]);
 }
 
 export function setSemanticScores(scoresMap = {}) {
@@ -577,6 +837,57 @@ export function setSemanticScores(scoresMap = {}) {
 export function setTasteScores(scoresMap = {}) {
   const clean = scoresMap && typeof scoresMap === 'object' ? scoresMap : {};
   feedStore.set({ tasteScores: { ...clean } });
+}
+
+function trimScoreCache(mapObj, maxEntries = 600) {
+  const keys = Object.keys(mapObj);
+  if (keys.length <= maxEntries) return mapObj;
+  const trimmed = {};
+  for (const k of keys.slice(keys.length - maxEntries)) {
+    trimmed[k] = mapObj[k];
+  }
+  return trimmed;
+}
+
+export function mergeSemanticFeedScores({ scores = {}, axisScores = {}, tasteScores = {}, replaceTaste = false } = {}) {
+  const st = feedStore.get();
+  const nextSemantic = { ...(st.semanticScores || {}) };
+  let semChanged = false;
+
+  if (axisScores && typeof axisScores === 'object') {
+    for (const [id, axes] of Object.entries(axisScores)) {
+      if (!id || !axes || typeof axes !== 'object') continue;
+      nextSemantic[id] = { ...(typeof nextSemantic[id] === 'object' && nextSemantic[id] ? nextSemantic[id] : {}), ...axes };
+      semChanged = true;
+    }
+  }
+  if (scores && typeof scores === 'object') {
+    for (const [id, val] of Object.entries(scores)) {
+      const num = Number(val);
+      if (!id || !Number.isFinite(num)) continue;
+      const prev = typeof nextSemantic[id] === 'object' && nextSemantic[id] ? nextSemantic[id] : {};
+      nextSemantic[id] = { ...prev, channelMatch: num };
+      semChanged = true;
+    }
+  }
+
+  let nextTaste = replaceTaste ? {} : { ...(st.tasteScores || {}) };
+  let tasteChanged = Boolean(replaceTaste && Object.keys(st.tasteScores || {}).length > 0);
+  if (tasteScores && typeof tasteScores === 'object') {
+    for (const [id, val] of Object.entries(tasteScores)) {
+      const num = Number(val);
+      if (!id || !Number.isFinite(num)) continue;
+      nextTaste[id] = num;
+      tasteChanged = true;
+    }
+  }
+
+  const patch = {};
+  if (semChanged) patch.semanticScores = trimScoreCache(nextSemantic, 600);
+  if (tasteChanged) patch.tasteScores = trimScoreCache(nextTaste, 600);
+  if (Object.keys(patch).length > 0) {
+    feedStore.set(patch);
+  }
 }
 
 function resolveAffinityAuthorKey(itemOrAuthor, protocol = 'mastodon') {
@@ -610,27 +921,28 @@ function updateBoundedAffinityMap(prevMap, authorKey, delta, { min = -20, max = 
 }
 
 export async function recordAuthorInteraction(itemOrAuthor, protocol = 'mastodon', weight = 1) {
+  const ownAccountKeys = buildOwnAccountKeySet(authStore.get().accounts || []);
+  const authorObj = itemOrAuthor?.author || itemOrAuthor;
+  const proto = itemOrAuthor?.protocol || protocol || 'mastodon';
+  const instUrl = itemOrAuthor?._meta?.mastodon?.instanceUrl || '';
+  if (actorMatchesOwnAccountSet(authorObj, proto, instUrl, ownAccountKeys)) return;
   const key = resolveAffinityAuthorKey(itemOrAuthor, protocol);
   if (!key) return;
   const numWeight = Number(weight);
   const delta = Number.isFinite(numWeight) && numWeight !== 0 ? numWeight : 1;
-  const next = updateBoundedAffinityMap(feedStore.get().interactedAuthors, key, delta, { min: -20, max: 40 });
+  const next = updateBoundedAffinityMap(feedStore.get().interactedAuthors, key, delta, { min: -20, max: 12 });
   feedStore.set({ interactedAuthors: next });
   await storePut('kv', FEED_RECIPROCITY_KV_KEY, next).catch(() => {});
 }
 
 const BEHAVIORAL_SIGNAL_CONFIG = Object.freeze({
-  dwell: { implicitDelta: 0.35, polarity: 'positive', exemplarWeight: 0.65 },
-  open_thread: { implicitDelta: 0.65, polarity: 'positive', exemplarWeight: 0.9 },
-  profile_click: { implicitDelta: 0.5, polarity: null, exemplarWeight: 0 },
-  scroll_past: { implicitDelta: -0.18, polarity: 'negative', exemplarWeight: 0.35 },
-  like: { implicitDelta: 0, polarity: 'positive', exemplarWeight: 1.5 },
-  repost: { implicitDelta: 0, polarity: 'positive', exemplarWeight: 1.8 },
-  bookmark: { implicitDelta: 0, polarity: 'positive', exemplarWeight: 1.6 },
-  reply: { implicitDelta: 0, polarity: 'positive', exemplarWeight: 2.0 },
-  share_sanctuary: { implicitDelta: 0, polarity: 'positive', exemplarWeight: 1.6 },
-  interested: { implicitDelta: 0, polarity: 'positive', exemplarWeight: 2.2 },
-  not_interested: { implicitDelta: 0, polarity: 'negative', exemplarWeight: 2.2 },
+  like: { polarity: 'positive', exemplarWeight: 1.5 },
+  repost: { polarity: 'positive', exemplarWeight: 1.8 },
+  bookmark: { polarity: 'positive', exemplarWeight: 1.6 },
+  reply: { polarity: 'positive', exemplarWeight: 2.0 },
+  share_sanctuary: { polarity: 'positive', exemplarWeight: 1.6 },
+  interested: { polarity: 'positive', exemplarWeight: 3.5 },
+  not_interested: { polarity: 'negative', exemplarWeight: 4.0 },
 });
 
 function buildTasteSnippet(u) {
@@ -647,29 +959,75 @@ function buildTasteSnippet(u) {
 }
 
 /**
- * Record implicit or explicit behavioral signals (dwell, scroll_past, open_thread,
- * profile_click, like, reply, repost, interested, not_interested) locally in feedStore.
+ * Sample recent original posts from the user's `following` stream as soft content-style anchors
+ * (lighter weight than explicit interactions) so discovery ranking reflects who they follow
+ * without injecting those authors' direct posts into Feed.
  */
-export async function recordBehavioralSignal(rawItem, signal = 'dwell') {
+export function buildFollowingStyleAnchors(followingItems = [], { maxAnchors = 14, excludeIds = [] } = {}) {
+  const list = Array.isArray(followingItems) ? followingItems : [];
+  if (list.length === 0 || maxAnchors <= 0) return [];
+  const excluded = new Set((Array.isArray(excludeIds) ? excludeIds : []).map((id) => String(id || '')));
+  const ownAccountKeys = buildOwnAccountKeySet(authStore.get().accounts || []);
+  const perAuthorCounts = new Map();
+  const anchors = [];
+
+  for (const raw of list) {
+    if (!raw || typeof raw !== 'object') continue;
+    const u = toUnifiedItem(raw);
+    const isBoost = Boolean(
+      u?._meta?.mastodon?.rebloggedBy
+      || u?._meta?.bluesky?.rebloggedBy
+      || u?._meta?.bluesky?.repostedBy
+      || u?._meta?.threads?.isRepost
+    );
+    if (isBoost) continue;
+    if (actorMatchesOwnAccountSet(u.author, u.protocol, u._meta?.mastodon?.instanceUrl || '', ownAccountKeys)) continue;
+    const postKey = getPostIdentityKey(u);
+    if (!postKey || excluded.has(postKey)) continue;
+    const snippet = buildTasteSnippet(u);
+    if (snippet.length < 25) continue;
+    const authorKey = resolveAffinityAuthorKey(u, u.protocol) || 'unknown';
+    const seenByAuthor = perAuthorCounts.get(authorKey) || 0;
+    if (seenByAuthor >= 2) continue;
+    perAuthorCounts.set(authorKey, seenByAuthor + 1);
+    excluded.add(postKey);
+    anchors.push({
+      id: postKey,
+      text: snippet,
+      weight: 0.35,
+      ts: Date.parse(u?.date_published || '') || 0,
+      source: 'following_style',
+    });
+    if (anchors.length >= maxAnchors) break;
+  }
+  return anchors;
+}
+
+export function mergeTasteMemoryWithFollowing(tasteMemory, followingItems = [], maxPositive = 40) {
+  const basePos = Array.isArray(tasteMemory?.positive) ? tasteMemory.positive : [];
+  const baseNeg = Array.isArray(tasteMemory?.negative) ? tasteMemory.negative : [];
+  const remainingSlots = Math.max(0, maxPositive - basePos.length);
+  const softCap = Math.min(14, Math.max(6, remainingSlots));
+  const excludeIds = basePos.map((e) => e?.id).filter(Boolean);
+  const anchors = buildFollowingStyleAnchors(followingItems, { maxAnchors: softCap, excludeIds });
+  return {
+    positive: [...basePos, ...anchors].slice(0, maxPositive),
+    negative: baseNeg,
+  };
+}
+
+/**
+ * Record explicit behavioral signals (like, repost, bookmark, reply, share_sanctuary,
+ * interested, not_interested) locally in feedStore. Passive scroll/dwell signals are ignored.
+ */
+export async function recordBehavioralSignal(rawItem, signal = 'like') {
   const cfg = BEHAVIORAL_SIGNAL_CONFIG[signal];
   if (!cfg || !rawItem || typeof rawItem !== 'object') return;
   const u = toUnifiedItem(rawItem);
-  const patch = {};
-  let saveImplicit = null;
+  const ownAccountKeys = buildOwnAccountKeySet(authStore.get().accounts || []);
+  if (actorMatchesOwnAccountSet(u.author, u.protocol, u._meta?.mastodon?.instanceUrl || '', ownAccountKeys)) return;
+  tasteMutationEpoch += 1;
   let saveTaste = null;
-
-  if (cfg.implicitDelta !== 0) {
-    const authorKey = resolveAffinityAuthorKey(u, u.protocol);
-    if (authorKey) {
-      saveImplicit = updateBoundedAffinityMap(
-        feedStore.get().implicitAuthors,
-        authorKey,
-        cfg.implicitDelta,
-        { min: -1.8, max: 2.5 }
-      );
-      patch.implicitAuthors = saveImplicit;
-    }
-  }
 
   const snippet = buildTasteSnippet(u);
   const postKey = getPostIdentityKey(u);
@@ -703,34 +1061,66 @@ export async function recordBehavioralSignal(rawItem, signal = 'dwell') {
         negative: [entry, ...prevNeg.filter((e) => e?.id !== postKey)].slice(0, 25),
       };
     }
-    patch.tasteMemory = saveTaste;
+    feedStore.set({ tasteMemory: saveTaste });
+    await storePut('kv', FEED_TASTE_MEMORY_KV_KEY, saveTaste).catch(() => {});
   }
-
-  if (Object.keys(patch).length > 0) {
-    feedStore.set(patch);
-  }
-  await Promise.all([
-    saveImplicit ? storePut('kv', FEED_IMPLICIT_AUTHORS_KV_KEY, saveImplicit).catch(() => {}) : Promise.resolve(),
-    saveTaste ? storePut('kv', FEED_TASTE_MEMORY_KV_KEY, saveTaste).catch(() => {}) : Promise.resolve(),
-  ]);
 }
 
 export async function clearLearnedTasteMemory() {
+  tasteMutationEpoch += 1;
   const emptyTaste = { positive: [], negative: [] };
   feedStore.set({
-    implicitAuthors: {},
     tasteScores: {},
     tasteMemory: emptyTaste,
   });
-  await Promise.all([
-    storePut('kv', FEED_IMPLICIT_AUTHORS_KV_KEY, {}).catch(() => {}),
-    storePut('kv', FEED_TASTE_MEMORY_KV_KEY, emptyTaste).catch(() => {}),
-  ]);
+  globalThis.dispatchEvent?.(new Event('sanctuary:taste-reset'));
+  try {
+    await storeDelete('kv', FEED_TASTE_MEMORY_KV_KEY);
+    await storePut('kv', FEED_TASTE_MEMORY_KV_KEY, emptyTaste);
+  } catch (err) {
+    console.warn('[feedStore] Failed to persist cleared taste memory:', err);
+  }
+}
+
+/**
+ * Clear custom discovery sources, explicit author affinity & taste memory, and cached Feed stream.
+ */
+export async function resetFeedBlankSlate() {
+  tasteMutationEpoch += 1;
+  const emptyTaste = { positive: [], negative: [] };
+  const prev = feedStore.get();
+  feedStore.set({
+    interactedAuthors: {},
+    viewerInteractions: {},
+    semanticScores: {},
+    tasteScores: {},
+    tasteMemory: emptyTaste,
+    streams: {
+      ...prev.streams,
+      feed: createEmptyStreamBucket(),
+      photos: createEmptyStreamBucket(),
+      video: createEmptyStreamBucket(),
+      visual: createEmptyStreamBucket(),
+    },
+  });
+  globalThis.dispatchEvent?.(new Event('sanctuary:taste-reset'));
+  await storePut('kv', FEED_TASTE_MEMORY_KV_KEY, emptyTaste).catch(() => {});
+  await storePut('kv', FEED_RECIPROCITY_KV_KEY, {}).catch(() => {});
+  await storePut('kv', FEED_VIEWER_INTERACTIONS_KV_KEY, {}).catch(() => {});
+  const updated = await updateFeedTuning(
+    {
+      discoveryChannels: [],
+      discoveryInstances: [],
+    },
+    { updatedBy: 'default' }
+  );
+  globalThis.dispatchEvent?.(new Event('sanctuary:feed-reset'));
+  return updated;
 }
 
 /**
  * Record explicit "Interested" / "Not Interested" feedback: updates author affinity,
- * nudges matching algorithm sliders slightly, and dismisses disliked posts.
+ * taste memory, and dismisses disliked posts.
  * @param {object} rawPost
  * @param {'interested' | 'not_interested'} [direction]
  * @returns {Promise<object | null>}
@@ -739,12 +1129,8 @@ export async function applyPostInterestFeedback(rawPost, direction = 'interested
   const u = toUnifiedItem(rawPost);
   const postKey = getPostIdentityKey(u);
   const isDislike = direction === 'not_interested';
-  await recordAuthorInteraction(u, u.protocol, isDislike ? -3 : 2.5);
+  await recordAuthorInteraction(u, u.protocol, isDislike ? -4.5 : 3.5);
   await recordBehavioralSignal(u, isDislike ? 'not_interested' : 'interested');
-
-  const curTuning = feedStore.get().tuning || normalizeFeedTuning(null);
-  const nextSliders = computeFeedbackSliderNudge(curTuning.sliders, u, isDislike ? 'not_interested' : 'interested');
-  await updateFeedTuning({ sliders: nextSliders }, { updatedBy: 'feedback' });
 
   if (isDislike) {
     if (postKey) {
@@ -784,25 +1170,39 @@ function preserveLocalSourcesIfOmitted(remoteProfile, localProfile) {
 export async function updateFeedTuning(patchOrProfile, { syncRemote = true, updatedBy = 'user' } = {}) {
   const cur = feedStore.get().tuning || normalizeFeedTuning(null);
   const candidate = patchOrProfile && typeof patchOrProfile === 'object' ? patchOrProfile : {};
+  const effectiveUpdatedBy = candidate.updatedBy || updatedBy || 'user';
   const merged = normalizeFeedTuning({
-    version: 1,
-    updatedBy: candidate.updatedBy || updatedBy || 'user',
+    version: 2,
+    updatedBy: effectiveUpdatedBy,
     updatedAt: Math.max(Date.now(), (Number(cur.updatedAt) || 0) + 1),
-    sliders: {
-      ...(cur.sliders || {}),
-      ...(candidate.sliders && typeof candidate.sliders === 'object' ? candidate.sliders : {}),
-    },
     discoveryChannels: candidate.discoveryChannels !== undefined ? candidate.discoveryChannels : cur.discoveryChannels,
     discoveryInstances: candidate.discoveryInstances !== undefined ? candidate.discoveryInstances : cur.discoveryInstances,
   });
 
-  feedStore.set({ tuning: merged, semanticScores: {} });
+  const channelsChanged = JSON.stringify(merged.discoveryChannels || []) !== JSON.stringify(cur.discoveryChannels || []);
+  let nextSemanticScores = feedStore.get().semanticScores || {};
+  if (channelsChanged && Object.keys(nextSemanticScores).length > 0) {
+    const stripped = {};
+    for (const [id, entry] of Object.entries(nextSemanticScores)) {
+      if (entry && typeof entry === 'object') {
+        const { channelMatch: _drop, ...rest } = entry;
+        if (Object.keys(rest).length > 0) stripped[id] = rest;
+      }
+    }
+    nextSemanticScores = stripped;
+  }
+
+  const bumpUserEpoch = effectiveUpdatedBy !== 'feedback' && effectiveUpdatedBy !== 'remote_sync';
+  const nextUserEpoch = bumpUserEpoch
+    ? (Number(feedStore.get().userTuningEpoch) || 0) + 1
+    : (Number(feedStore.get().userTuningEpoch) || 0);
+  feedStore.set({ tuning: merged, semanticScores: nextSemanticScores, userTuningEpoch: nextUserEpoch });
   await storePut('kv', FEED_TUNING_KV_KEY, merged).catch(() => {});
 
   if (syncRemote && connectionStore.get().mode === 'online' && connectionStore.get().nodeUrl) {
     try {
       const saved = await saveSanctuaryFeedProfile(merged);
-      if (saved && saved.sliders) {
+      if (saved && typeof saved === 'object' && !Array.isArray(saved)) {
         const normalizedRemote = preserveLocalSourcesIfOmitted(saved, merged);
         feedStore.set({ tuning: normalizedRemote });
         await storePut('kv', FEED_TUNING_KV_KEY, normalizedRemote).catch(() => {});
@@ -820,7 +1220,7 @@ export async function syncFeedTuningFromSanctuary() {
   if (!conn?.nodeUrl || conn.mode !== 'online') return feedStore.get().tuning;
   try {
     const remote = await fetchSanctuaryFeedProfile();
-    if (!remote || !remote.sliders) return feedStore.get().tuning;
+    if (!remote || typeof remote !== 'object' || Array.isArray(remote)) return feedStore.get().tuning;
     const localCur = feedStore.get().tuning || normalizeFeedTuning(null);
     const normalizedRemote = preserveLocalSourcesIfOmitted(remote, localCur);
     if (normalizedRemote.updatedAt >= (Number(localCur.updatedAt) || 0)) {
@@ -856,16 +1256,62 @@ export function bindSanctuaryFeedSync() {
   });
 }
 
+export async function hydrateRankingManifest() {
+  const cached = await storeGet('kv', RANKING_MANIFEST_KV_KEY).catch(() => null);
+  if (cached && typeof cached === 'object' && !Array.isArray(cached)) {
+    const normalized = normalizeRankingManifest(cached);
+    feedStore.set({ rankingManifest: normalized });
+    return normalized;
+  }
+  return feedStore.get().rankingManifest;
+}
+
+export function exportRankingManifest({ pretty = true } = {}) {
+  const current = normalizeRankingManifest(feedStore.get().rankingManifest);
+  return JSON.stringify(current, null, pretty ? 2 : 0);
+}
+
+export async function importRankingManifest(jsonOrObject) {
+  const parsed = typeof jsonOrObject === 'string' ? JSON.parse(jsonOrObject) : jsonOrObject;
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new TypeError('Ranking manifest must be a JSON object.');
+  }
+  const normalized = normalizeRankingManifest(parsed);
+  feedStore.set({
+    rankingManifest: normalized,
+    userTuningEpoch: (Number(feedStore.get().userTuningEpoch) || 0) + 1,
+  });
+  await storePut('kv', RANKING_MANIFEST_KV_KEY, normalized).catch(() => {});
+  globalThis.dispatchEvent?.(new Event('sanctuary:manifest-updated'));
+  return normalized;
+}
+
+export async function resetRankingManifest() {
+  const fresh = normalizeRankingManifest(null);
+  feedStore.set({
+    rankingManifest: fresh,
+    userTuningEpoch: (Number(feedStore.get().userTuningEpoch) || 0) + 1,
+  });
+  await storePut('kv', RANKING_MANIFEST_KV_KEY, fresh).catch(() => {});
+  globalThis.dispatchEvent?.(new Event('sanctuary:manifest-updated'));
+  return fresh;
+}
+
 export async function hydrateFeedTuning() {
   bindSanctuaryFeedSync();
-  const [cachedTuning, cachedAuthors, cachedImplicit, cachedTaste, cachedDismissed] = await Promise.all([
+  const tasteEpochAtStart = tasteMutationEpoch;
+  const [cachedTuning, cachedAuthors, cachedTaste, cachedDismissed, cachedManifest, cachedInteractions] = await Promise.all([
     storeGet('kv', FEED_TUNING_KV_KEY).catch(() => null),
     storeGet('kv', FEED_RECIPROCITY_KV_KEY).catch(() => null),
-    storeGet('kv', FEED_IMPLICIT_AUTHORS_KV_KEY).catch(() => null),
     storeGet('kv', FEED_TASTE_MEMORY_KV_KEY).catch(() => null),
     storeGet('kv', FEED_DISMISSED_POSTS_KV_KEY).catch(() => null),
+    storeGet('kv', RANKING_MANIFEST_KV_KEY).catch(() => null),
+    storeGet('kv', FEED_VIEWER_INTERACTIONS_KV_KEY).catch(() => null),
   ]);
   const patch = {};
+  if (cachedManifest && typeof cachedManifest === 'object' && !Array.isArray(cachedManifest)) {
+    patch.rankingManifest = normalizeRankingManifest(cachedManifest);
+  }
   if (cachedTuning && typeof cachedTuning === 'object') {
     const cur = feedStore.get().tuning;
     const norm = normalizeFeedTuning(cachedTuning);
@@ -876,14 +1322,16 @@ export async function hydrateFeedTuning() {
   if (cachedAuthors && typeof cachedAuthors === 'object' && !Array.isArray(cachedAuthors)) {
     patch.interactedAuthors = { ...(feedStore.get().interactedAuthors || {}), ...cachedAuthors };
   }
-  if (cachedImplicit && typeof cachedImplicit === 'object' && !Array.isArray(cachedImplicit)) {
-    patch.implicitAuthors = { ...(feedStore.get().implicitAuthors || {}), ...cachedImplicit };
+  if (cachedInteractions && typeof cachedInteractions === 'object' && !Array.isArray(cachedInteractions)) {
+    patch.viewerInteractions = { ...(feedStore.get().viewerInteractions || {}), ...cachedInteractions };
   }
-  if (cachedTaste && typeof cachedTaste === 'object' && !Array.isArray(cachedTaste)) {
-    patch.tasteMemory = {
-      positive: Array.isArray(cachedTaste.positive) ? cachedTaste.positive.slice(0, 40) : [],
-      negative: Array.isArray(cachedTaste.negative) ? cachedTaste.negative.slice(0, 25) : [],
-    };
+  if (tasteEpochAtStart === tasteMutationEpoch) {
+    if (cachedTaste && typeof cachedTaste === 'object' && !Array.isArray(cachedTaste)) {
+      patch.tasteMemory = {
+        positive: Array.isArray(cachedTaste.positive) ? cachedTaste.positive.slice(0, 40) : [],
+        negative: Array.isArray(cachedTaste.negative) ? cachedTaste.negative.slice(0, 25) : [],
+      };
+    }
   }
   if (Array.isArray(cachedDismissed)) {
     patch.dismissedPostIds = cachedDismissed.map(String).filter(Boolean).slice(-500);
@@ -898,5 +1346,6 @@ export async function hydrateFeedTuning() {
 }
 
 export function resetFeedStoreForTests() {
+  tasteMutationEpoch = 0;
   feedStore.set(createInitialFeedState());
 }

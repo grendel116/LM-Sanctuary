@@ -1,13 +1,15 @@
 ---
 name: web_browsing
-description: Search and read webpages, URLs, links, articles, online documentation, social sentiment, video topics, and factual data to answer questions and keep the user informed.
-summary: "Search the internet using [web_search(query=\"...\")] and read pages using [read_webpage(url=\"...\")]"
+title: Web Research & Direct Sanctuary Browser Control
+description: Search and read the web via your Cloud /v1 endpoint or local fallback, or inspect and interact directly with live tabs in Sanctuary Browser.
+summary: "Search the web via [web_search(query=\"...\")], read URLs via [read_webpage(url=\"...\")], or inspect and control the live Sanctuary Browser via [browser_action(action=\"snapshot|read|open|click|type|press|scroll|back|forward|list_tabs\", ...)]"
 retrieval: vector
-triggers: search, look up, browse, news, find information, google, website, article, wikipedia, github, arxiv, http, https, url, link, urls, links, www.
+triggers: search, look up, browse, browser, tab, tabs, open link, click, type, scroll, snapshot, screen, current page, open page, ecosia, news, find information, google, website, webpage, web page, page, site, docs, documentation, read page, check page, article, wikipedia, github, arxiv, http, https, url, link, urls, links, www.
 ---
-# SKILL: Web Browsing & Research
-When given a URL or link, or when asked to find news, historical context, facts, technical repos, papers, or information:
-1. When the user shares a URL or link, call `[read_webpage(url="...")]` to fetch and read the webpage content directly. Ground your response in the actual text of the page.
-2. If searching for information, formulate a specific search query using `web_search` or `google_search`. Prefix with `wikipedia:`, `github:`, `arxiv:`, or `hn:` to target specific sources.
-3. After receiving search results, summarize what each result reveals. Use `read_webpage` on the 1-2 most relevant URLs to get full page content for deeper analysis.
-4. Use a different, more specific query for any follow-up search. Ground all claims in what was actually retrieved. Do not invent or assume contents of pages without reading them.
+# SKILL: Web Research & Sanctuary Browser Control
+1. **Sanctuary Browser (`browser_action`)** — use for open tabs, JS-rendered/authenticated pages, or interactive UI:
+   - Inspect: `[browser_action(action="list_tabs")]`, `[browser_action(action="snapshot")]` (returns `[eN]` refs), `[browser_action(action="read")]`.
+   - Navigate: `[browser_action(action="open", url="https://...", split=False, new_tab=False)]`, `action="back|forward|scroll"`.
+   - Interact (run `snapshot` first): `[browser_action(action="click|type|select|press", ref="eN", text="...", key="Enter", clear=True)]`. Never bypass CAPTCHAs—ask the user to complete them in the pane.
+2. **Background Web Research (`web_search` & `read_webpage`)**:
+   - `[web_search(query="...")]` (supports `wikipedia:`, `github:`, `arxiv:`, `hn:`, `music:` prefixes) and `[read_webpage(url="...")]` for clean Markdown. Ground all claims strictly in retrieved text.

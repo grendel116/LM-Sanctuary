@@ -19,7 +19,7 @@ import {
   toggleMuteAuthor,
 } from '../queries/socialClient.js';
 import { authStore } from '../state/authStore.js';
-import { removeActivityByActor } from '../state/activityStore.js';
+import { removeActivityByActor, updateActivityActorFollowState } from '../state/activityStore.js';
 import { prefillReply } from '../state/composeStore.js';
 import { feedStore, mutatePostAcrossStreams, removePostAcrossStreams } from '../state/feedStore.js';
 import { connectionStore } from '../state/sanctuary/connection.js';
@@ -39,6 +39,7 @@ export function openAuthorSheetModal({
   item = null,
   onRelationshipChanged,
   onReply,
+  onMessageAuthor,
   onOpenPostThread,
   onAskSanctuary,
   onEditPost,
@@ -308,6 +309,7 @@ export function openAuthorSheetModal({
               author: nextAuthor,
               instanceUrl,
               onReply,
+              onMessageAuthor,
               onOpenPostThread,
               onAskSanctuary,
             }),
@@ -330,6 +332,7 @@ export function openAuthorSheetModal({
               author: nextAuthor,
               instanceUrl,
               onReply,
+              onMessageAuthor,
               onOpenPostThread,
               onAskSanctuary,
             }),
@@ -363,20 +366,93 @@ export function openAuthorSheetModal({
       : (profile.id || profile.acct);
     const canModerateRemote = Boolean(actionTargetId || profile.acct);
 
+    const buildFollowButton = (targetId, opts) => {
+      const followBtn = doc.createElement('button');
+      followBtn.type = 'button';
+      followBtn.className = `btn-sleek-pill ${rel?.following ? 'is-active' : ''}`;
+      followBtn.disabled = busy;
+      followBtn.textContent = rel?.following ? 'Following' : (rel?.requested ? 'Requested' : 'Follow');
+      followBtn.addEventListener('click', () =>
+        void runGraphAction(
+          async () => {
+            const wasFollowing = Boolean(rel?.following);
+            const res = await toggleFollowAuthor(targetId, wasFollowing, opts);
+            const nextRequested = Boolean(res?.requested && !res?.following);
+            const nextFollowing = typeof res?.following === 'boolean' ? res.following : (!wasFollowing && !nextRequested);
+            updateActivityActorFollowState(
+              { id: targetId, handle: profile.acct || '' },
+              opts.protocol,
+              { following: nextFollowing, requested: nextRequested, followUri: String(res?.followUri || '') }
+            );
+            return res;
+          },
+          'Unable to update follow status.'
+        )
+      );
+      return followBtn;
+    };
+
+    const extractHost = (rawUrl) => {
+      try {
+        return rawUrl ? new URL(String(rawUrl)).host.toLowerCase() : '';
+      } catch {
+        return '';
+      }
+    };
+    const buildDmRecipient = () => {
+      if (protocol === 'bluesky') {
+        const handle = String(profile.acct || nativeAcct || '').trim().replace(/^@/, '');
+        const did = String(profile.id || '').startsWith('did:') ? String(profile.id) : '';
+        return {
+          protocol: 'bluesky',
+          handle,
+          did,
+          displayName: profile.displayName || handle,
+          avatar: profile.avatar || '',
+        };
+      }
+      let handle = protocol === 'threads'
+        ? (String(profile.acct || '').includes('@') ? String(profile.acct).replace(/^@/, '') : (cleanThrHandle ? `${cleanThrHandle}@threads.net` : ''))
+        : String(profile.acct || '').trim().replace(/^@/, '');
+      if (protocol === 'mastodon' && handle && !handle.includes('@')) {
+        const ownFedi = (authSnapshot.accounts || []).find((a) => a.platform === 'fediverse');
+        const ownHost = extractHost(ownFedi?.instanceUrl);
+        const profileHost = extractHost(profile.url) || extractHost(instanceUrl);
+        if (profileHost && (!ownHost || profileHost !== ownHost)) {
+          handle = `${handle}@${profileHost}`;
+        }
+      }
+      return {
+        protocol: 'mastodon',
+        handle,
+        did: '',
+        displayName: profile.displayName || (handle ? `@${handle}` : ''),
+        avatar: profile.avatar || '',
+      };
+    };
+    const buildMessageButton = () => {
+      const msgBtn = doc.createElement('button');
+      msgBtn.type = 'button';
+      msgBtn.className = 'edit-btn edit-save-btn author-dm-btn';
+      msgBtn.disabled = busy;
+      msgBtn.textContent = 'Message';
+      msgBtn.addEventListener('click', () => {
+        const target = buildDmRecipient();
+        if (!target?.handle && !target?.did) return;
+        modal.close();
+        if (typeof onMessageAuthor === 'function') {
+          onMessageAuthor(target);
+        } else {
+          doc.dispatchEvent?.(new CustomEvent('sanctuary:open-dm', { detail: target }));
+        }
+      });
+      return msgBtn;
+    };
+
     if (canInteract && protocol === 'threads') {
       if (authSnapshot.isMastodonConnected && profile.federatedMastodonId) {
-        const followBtn = doc.createElement('button');
-        followBtn.type = 'button';
-        followBtn.className = `btn-sleek-pill ${rel?.following ? 'is-active' : ''}`;
-        followBtn.disabled = busy;
-        followBtn.textContent = rel?.following ? 'Following' : (rel?.requested ? 'Requested' : 'Follow');
-        followBtn.addEventListener('click', () =>
-          void runGraphAction(
-            () => toggleFollowAuthor(profile.federatedMastodonId, Boolean(rel?.following), { protocol: 'mastodon' }),
-            'Unable to update follow status.'
-          )
-        );
-        actionsRow.appendChild(followBtn);
+        actionsRow.appendChild(buildFollowButton(profile.federatedMastodonId, { protocol: 'mastodon' }));
+        actionsRow.appendChild(buildMessageButton());
       }
       const muteBtn = doc.createElement('button');
       muteBtn.type = 'button';
@@ -441,18 +517,8 @@ export function openAuthorSheetModal({
         blockUri: rel?.blockUri || null,
       };
       if (canInteract) {
-        const followBtn = doc.createElement('button');
-        followBtn.type = 'button';
-        followBtn.className = `btn-sleek-pill ${rel?.following ? 'is-active' : ''}`;
-        followBtn.disabled = busy;
-        followBtn.textContent = rel?.following ? 'Following' : (rel?.requested ? 'Requested' : 'Follow');
-        followBtn.addEventListener('click', () =>
-          void runGraphAction(
-            () => toggleFollowAuthor(actionTargetId, Boolean(rel?.following), actionOpts),
-            'Unable to update follow status.'
-          )
-        );
-        actionsRow.appendChild(followBtn);
+        actionsRow.appendChild(buildFollowButton(actionTargetId, actionOpts));
+        actionsRow.appendChild(buildMessageButton());
       }
 
       const muteBtn = doc.createElement('button');

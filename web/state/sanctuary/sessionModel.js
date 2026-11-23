@@ -59,7 +59,25 @@ function mergeQueuedOutbox(messages, queuedRecords) {
 export async function loadProgramSession(programId, sessionId = 'default', options = {}) {
   const transport = options.transport || { selectProgram, fetchHistory };
   const targetSession = sessionId || 'default';
-  const targetProgram = programId || connectionStore.get().activeProgram || 'sebile';
+  const conn = connectionStore.get();
+  const roster = Array.isArray(conn.programs) ? conn.programs : [];
+  let targetProgram = programId || conn.activeProgram || roster[0]?.id || '';
+  if (roster.length > 0 && targetProgram && conn.mode === 'online' && !roster.some((p) => p.id === targetProgram)) {
+    targetProgram = conn.activeProgram || roster[0]?.id || targetProgram;
+  }
+  if (!targetProgram) {
+    if (conn.mode === 'dormant') {
+      sessionStore.set({
+        activeProgramId: '',
+        activeSessionId: targetSession,
+        messages: [],
+        loading: true,
+        error: null,
+      });
+      return sessionStore.get();
+    }
+    targetProgram = 'sebile';
+  }
 
   sessionStore.set({
     activeProgramId: targetProgram,
@@ -68,7 +86,6 @@ export async function loadProgramSession(programId, sessionId = 'default', optio
     error: null,
   });
 
-  const conn = connectionStore.get();
   const queued = await getOutboxForSession(targetProgram, targetSession);
 
   if (conn.mode === 'online') {

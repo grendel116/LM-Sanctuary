@@ -1,4 +1,5 @@
 import { createOfflineNotice } from '../components/OfflineNotice.js';
+import { attachSearchSuggestions } from '../components/SearchSuggestions.js';
 import { createLoadingState } from '../components/ui/index.js';
 import { DEFAULT_AVATAR_DATA_URI } from '../constants/avatars.js';
 import {
@@ -13,9 +14,17 @@ import {
   getBskyConvoMessages,
   getBskyProfile,
   listBskyConvos,
+  searchBskyActors,
   sendBskyConvoMessage,
 } from '../queries/bluesky.js';
-import { getConversations, publishStatus } from '../queries/fediverse.js';
+import {
+  cleanMastodonMediaUrl,
+  getConversations,
+  getStatusContext,
+  publishStatus,
+  renderSanitizedHtml,
+  searchFediverse,
+} from '../queries/fediverse.js';
 import {
   createSession,
   deleteProgram,
@@ -29,7 +38,10 @@ import {
 import { authStore, getAuthenticatedAccount, updateAccountTokens } from '../state/authStore.js';
 import { checkSanctuaryHealth, connectionStore } from '../state/sanctuary/connection.js';
 import { sessionStore } from '../state/sanctuary/sessionModel.js';
-import { getCachedProgramHistory } from '../storage/kvStorage.js';
+import {
+  getCachedProgramHistory,
+  purgeCachedProgramData,
+} from '../storage/kvStorage.js';
 import { getCachedProgramsDirectory } from '../storage/nativeStore.js';
 
 const SEND_SVG = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>`;
@@ -144,6 +156,444 @@ function deriveLiveSnippetFromMessages(messages = []) {
   return '';
 }
 
+function formatDmTimestamp(raw) {
+  if (!raw) return '';
+  const ms = typeof raw === 'number' ? (raw > 1e12 ? raw : raw * 1000) : Date.parse(String(raw));
+  if (!Number.isFinite(ms)) return '';
+  return new Date(ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+export function getDirectConvoKey(convo) {
+  if (!convo || typeof convo !== 'object') return '';
+  const network = convo.network === 'bluesky' ? 'bluesky' : 'fediverse';
+  const idPart = String(convo.id || '').trim();
+  const handlePart = String(convo.handle || '').trim().replace(/^@/, '').toLowerCase();
+  return `${network}:${idPart || (handlePart ? `new:${handlePart}` : '')}`;
+}
+
+/**
+ * Resolve a DM recipient handle, DID, or author object into a normalized conversation descriptor.
+ */
+export async function resolveDirectConversationTarget(
+  recipient,
+  { fediConvos = [], bskyConvos = [] } = {}
+) {
+  const isObj = Boolean(recipient && typeof recipient === 'object');
+  const rawHandle = String(isObj ? (recipient.handle || recipient.did || '') : (recipient || ''))
+    .trim()
+    .replace(/^@/, '');
+  const explicitProto = isObj ? String(recipient.protocol || recipient.network || '').toLowerCase() : '';
+  const rawDid = isObj ? String(recipient.did || '').trim() : '';
+  if (!rawHandle && !rawDid) return null;
+
+  const authState = authStore.get();
+  const looksBluesky = explicitProto === 'bluesky'
+    || (
+      !explicitProto
+      && authState.isBlueskyConnected
+      && (rawHandle.startsWith('did:') || (!rawHandle.includes('@') && (rawHandle.includes('.') || !authState.isMastodonConnected)))
+    );
+
+  if (looksBluesky) {
+    const cleanHandle = rawHandle.toLowerCase();
+    const targetDid = rawDid || (rawHandle.startsWith('did:') ? rawHandle : '');
+    const existingBsky = bskyConvos.find((c) => {
+      const peerDidMatch = targetDid && (c.rawConvo?.members || []).some((m) => m.did === targetDid);
+      const peerHandleMatch = cleanHandle && String(c.handle || '').replace(/^@/, '').toLowerCase() === cleanHandle;
+      return Boolean(peerDidMatch || peerHandleMatch);
+    });
+    if (existingBsky) return existingBsky;
+
+    const bsky = await getAuthenticatedAccount('bluesky');
+    if (!bsky) throw new Error('Connect Bluesky under Profile → Accounts & Bridges.');
+    let peerDid = targetDid;
+    let peerDisplay = isObj ? (recipient.displayName || rawHandle) : rawHandle;
+    let peerAvatar = isObj ? (recipient.avatar || '') : '';
+    if (!peerDid) {
+      const prof = await getBskyProfile({
+        serviceUrl: bsky.meta.serviceUrl,
+        accessJwt: bsky.secrets.accessJwt,
+        refreshJwt: bsky.secrets.refreshJwt,
+        onSessionRefreshed: (tok) => updateAccountTokens(bsky.meta.id, tok),
+        actor: rawHandle,
+      });
+      peerDid = prof?.did || '';
+      peerDisplay = prof?.displayName || prof?.handle || peerDisplay;
+      peerAvatar = prof?.avatar || peerAvatar;
+    }
+    if (!peerDid) throw new Error(`Could not find Bluesky account @${rawHandle}.`);
+    const res = await getBskyConvoForMembers({
+      serviceUrl: bsky.meta.serviceUrl,
+      accessJwt: bsky.secrets.accessJwt,
+      refreshJwt: bsky.secrets.refreshJwt,
+      onSessionRefreshed: (tok) => updateAccountTokens(bsky.meta.id, tok),
+      members: bsky.meta.did ? [bsky.meta.did, peerDid] : [peerDid],
+    });
+    const convo = res?.convo;
+    const peer = (convo?.members || []).find((m) => m.did !== bsky.meta.did) || convo?.members?.[0];
+    return {
+      kind: 'human',
+      network: 'bluesky',
+      id: convo?.id || '',
+      displayName: peer?.displayName || peerDisplay || rawHandle,
+      handle: peer?.handle || rawHandle,
+      avatar: peer?.avatar || peerAvatar || '',
+      status: convo?.status || 'accepted',
+      rawConvo: convo || null,
+    };
+  }
+
+  const cleanFedi = rawHandle.replace(/^@/, '');
+  const existingFedi = fediConvos.find(
+    (c) => String(c.handle || '').replace(/^@/, '').toLowerCase() === cleanFedi.toLowerCase()
+  );
+  return existingFedi || {
+    kind: 'human',
+    network: 'fediverse',
+    id: `new:${cleanFedi}`,
+    displayName: (isObj && recipient.displayName) ? recipient.displayName : `@${cleanFedi}`,
+    handle: cleanFedi,
+    avatar: (isObj && recipient.avatar) ? recipient.avatar : '',
+    status: 'accepted',
+    rawConvo: null,
+  };
+}
+
+/**
+ * Mount a Sanctuary-styled 1:1 Direct Message conversation into a container (right dock or standalone).
+ */
+export function mountDirectMessageThread(containerEl, { convo, onBack, onMessageSent } = {}) {
+  const doc = containerEl?.ownerDocument || globalThis.document;
+  let threadDestroyed = false;
+  let lastReplyStatusId = convo?.rawConvo?.lastStatus?.id || null;
+
+  containerEl.replaceChildren();
+  const wrap = doc.createElement('section');
+  wrap.className = 'sanctuary-thread-view human-dm-thread';
+
+  const header = doc.createElement('header');
+  const titleArea = doc.createElement('div');
+  titleArea.className = 'header-title-area';
+
+  const backBtn = doc.createElement('button');
+  backBtn.type = 'button';
+  backBtn.className = 'back-nav-btn dm-dock-back-btn';
+  backBtn.setAttribute('aria-label', 'Back to Sanctuary chat');
+  backBtn.title = 'Back to Sanctuary chat';
+  backBtn.textContent = '←';
+  backBtn.addEventListener('click', () => onBack?.());
+
+  const avatarImg = doc.createElement('img');
+  avatarImg.className = 'convo-avatar dm-header-avatar';
+  avatarImg.src = cleanMastodonMediaUrl(convo?.avatar) || DEFAULT_AVATAR_DATA_URI;
+  avatarImg.alt = convo?.displayName || convo?.handle || 'Peer avatar';
+
+  const metaCol = doc.createElement('div');
+  metaCol.className = 'dm-header-meta';
+  const peerTitle = doc.createElement('strong');
+  peerTitle.className = 'human-dm-peer-name';
+  peerTitle.textContent = convo?.displayName || convo?.handle || 'Direct Message';
+
+  const peerHandle = doc.createElement('span');
+  peerHandle.className = 'post-author-handle';
+  peerHandle.textContent = convo?.handle ? `@${String(convo.handle).replace(/^@/, '')}` : '';
+  metaCol.append(peerTitle, peerHandle);
+  titleArea.append(backBtn, avatarImg, metaCol);
+
+  const headerActions = doc.createElement('div');
+  headerActions.className = 'header-actions';
+  const netPill = doc.createElement('span');
+  netPill.className = 'badge-default dm-network-pill';
+  netPill.textContent = convo?.network === 'bluesky' ? 'Bluesky' : 'Fediverse';
+  headerActions.appendChild(netPill);
+
+  header.append(titleArea, headerActions);
+
+  const streamEl = doc.createElement('div');
+  streamEl.className = 'sanctuary-chat-container human-dm-messages';
+  if (convo?.rawConvo || convo?.network === 'bluesky') {
+    streamEl.appendChild(createLoadingState('Loading messages…', { doc, compact: true }));
+  } else {
+    const promptEl = doc.createElement('p');
+    promptEl.className = 'empty-state';
+    promptEl.textContent = `Send a direct Fediverse mention to @${String(convo?.handle || '').replace(/^@/, '')}.`;
+    streamEl.appendChild(promptEl);
+  }
+
+  function buildDmBubbleRow({ isMe, text = '', html = '', emojis = [], media = [], timestamp = '' }) {
+    const row = doc.createElement('div');
+    row.className = `message-row ${isMe ? 'user-row' : 'program-row'}`;
+
+    if (!isMe) {
+      const avatarContainer = doc.createElement('div');
+      avatarContainer.className = 'avatar-container';
+      const pImg = doc.createElement('img');
+      pImg.className = 'avatar';
+      pImg.src = cleanMastodonMediaUrl(convo?.avatar) || DEFAULT_AVATAR_DATA_URI;
+      pImg.alt = convo?.displayName || convo?.handle || 'Peer';
+      avatarContainer.appendChild(pImg);
+      row.appendChild(avatarContainer);
+    }
+
+    const bubblesContainer = doc.createElement('div');
+    bubblesContainer.className = 'message-bubbles-container';
+
+    const bubble = doc.createElement('div');
+    bubble.className = `message ${isMe ? 'user' : 'program'}`;
+
+    const formattedTime = formatDmTimestamp(timestamp);
+    if (formattedTime) {
+      const actions = doc.createElement('div');
+      actions.className = 'message-actions';
+      const timeEl = doc.createElement('span');
+      timeEl.className = 'message-timestamp';
+      timeEl.textContent = formattedTime;
+      actions.appendChild(timeEl);
+      bubble.appendChild(actions);
+    }
+
+    const textDiv = doc.createElement('div');
+    textDiv.className = 'message-text';
+    if (html) {
+      renderSanitizedHtml(textDiv, html, emojis);
+    } else {
+      const p = doc.createElement('p');
+      p.textContent = String(text || '');
+      textDiv.appendChild(p);
+    }
+    bubble.appendChild(textDiv);
+
+    if (Array.isArray(media) && media.length > 0) {
+      const mediaWrap = doc.createElement('div');
+      mediaWrap.className = 'dm-message-media';
+      for (const m of media) {
+        const safeSrc = cleanMastodonMediaUrl(m?.url || m?.previewUrl);
+        if (!safeSrc) continue;
+        const mImg = doc.createElement('img');
+        mImg.src = safeSrc;
+        mImg.alt = m?.description || 'Attachment';
+        mImg.loading = 'lazy';
+        mediaWrap.appendChild(mImg);
+      }
+      if (mediaWrap.childNodes.length > 0) {
+        bubble.appendChild(mediaWrap);
+      }
+    }
+
+    bubblesContainer.appendChild(bubble);
+    row.appendChild(bubblesContainer);
+    return row;
+  }
+
+  function scrollStreamToBottom() {
+    streamEl.scrollTop = streamEl.scrollHeight || 0;
+  }
+
+  async function loadMessages() {
+    if (threadDestroyed || !convo) return;
+    if (convo.network === 'bluesky') {
+      const bsky = await getAuthenticatedAccount('bluesky');
+      if (!bsky || threadDestroyed) return;
+      const data = await getBskyConvoMessages({
+        serviceUrl: bsky.meta.serviceUrl,
+        accessJwt: bsky.secrets.accessJwt,
+        refreshJwt: bsky.secrets.refreshJwt,
+        onSessionRefreshed: (tok) => updateAccountTokens(bsky.meta.id, tok),
+        convoId: convo.id,
+      });
+      if (threadDestroyed) return;
+      const msgs = [...(data?.messages || [])].reverse();
+      if (msgs.length === 0) {
+        const emptyEl = doc.createElement('p');
+        emptyEl.className = 'empty-state';
+        emptyEl.textContent = `Start a conversation with ${convo.displayName || convo.handle || 'this user'}.`;
+        streamEl.replaceChildren(emptyEl);
+        return;
+      }
+      streamEl.replaceChildren(
+        ...msgs.map((m) =>
+          buildDmBubbleRow({
+            isMe: Boolean(bsky.meta?.did && m.sender?.did === bsky.meta.did),
+            text: m.text || '',
+            timestamp: m.sentAt || '',
+          })
+        )
+      );
+      scrollStreamToBottom();
+      return;
+    }
+
+    if (convo.rawConvo?.lastStatus) {
+      const fedi = await getAuthenticatedAccount('fediverse');
+      if (threadDestroyed) return;
+      const lastSt = convo.rawConvo.lastStatus;
+      let threadStatuses = [lastSt];
+      if (fedi?.meta?.instanceUrl && lastSt.id) {
+        try {
+          const ctx = await getStatusContext({
+            instanceUrl: fedi.meta.instanceUrl,
+            accessToken: fedi.secrets?.accessToken || '',
+            statusId: lastSt.id,
+          });
+          if (threadDestroyed) return;
+          const combined = [...(ctx.ancestors || []), ctx.status || lastSt, ...(ctx.descendants || [])];
+          const byId = new Map();
+          for (const st of combined) {
+            if (st?.id && !byId.has(st.id)) byId.set(st.id, st);
+          }
+          if (byId.size > 0) {
+            threadStatuses = [...byId.values()].sort(
+              (a, b) => (a.createdAtMs || Date.parse(a.createdAt || '') || 0) - (b.createdAtMs || Date.parse(b.createdAt || '') || 0)
+            );
+          }
+        } catch {
+          // Fall back to lastStatus cleanly if context endpoint is unavailable
+        }
+      }
+      if (threadStatuses.length > 0) {
+        lastReplyStatusId = threadStatuses[threadStatuses.length - 1]?.id || lastReplyStatusId;
+      }
+      const ownId = String(fedi?.meta?.userId || '');
+      const ownAcct = String(fedi?.meta?.acct || fedi?.meta?.handle || '').replace(/^@/, '').toLowerCase();
+      streamEl.replaceChildren(
+        ...threadStatuses.map((st) => {
+          const stId = String(st?.author?.id || '');
+          const stAcct = String(st?.author?.acct || st?.author?.username || '').replace(/^@/, '').toLowerCase();
+          const isMe = Boolean(
+            (ownId && stId && stId === ownId)
+            || (ownAcct && stAcct && stAcct === ownAcct)
+          );
+          return buildDmBubbleRow({
+            isMe,
+            html: st.contentHtml || '',
+            emojis: st.emojis || [],
+            media: st.media || [],
+            timestamp: st.createdAt || '',
+          });
+        })
+      );
+      scrollStreamToBottom();
+    }
+  }
+
+  const replyForm = doc.createElement('form');
+  replyForm.className = 'sanctuary-input-area human-dm-reply-form';
+  const wrapper = doc.createElement('div');
+  wrapper.className = 'input-wrapper';
+
+  const lbl = doc.createElement('label');
+  lbl.setAttribute('for', 'human-dm-input');
+  lbl.className = 'sr-only';
+  lbl.textContent = 'Direct message';
+
+  const input = doc.createElement('textarea');
+  input.id = 'human-dm-input';
+  input.className = 'sanctuary-user-input human-dm-input';
+  input.rows = 1;
+  input.placeholder = `Message ${convo?.displayName || convo?.handle || 'peer'}...`;
+
+  const syncInputState = () => {
+    wrapper.classList.toggle('has-unsent-text', input.value.trim().length > 0);
+  };
+  input.addEventListener('input', syncInputState);
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      if (typeof replyForm.requestSubmit === 'function') replyForm.requestSubmit();
+      else replyForm.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    }
+  });
+
+  const controls = doc.createElement('div');
+  controls.className = 'input-controls';
+  const sendBtn = doc.createElement('button');
+  sendBtn.type = 'submit';
+  sendBtn.className = 'send-btn';
+  sendBtn.setAttribute('aria-label', 'Send');
+  sendBtn.title = 'Send';
+  sendBtn.innerHTML = SEND_SVG;
+  controls.appendChild(sendBtn);
+
+  wrapper.append(lbl, input, controls);
+  replyForm.appendChild(wrapper);
+  wrap.append(header, streamEl, replyForm);
+  containerEl.appendChild(wrap);
+
+  replyForm.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const text = input.value.trim();
+    if (!text || threadDestroyed) return;
+    sendBtn.disabled = true;
+    try {
+      if (convo.network === 'bluesky') {
+        const bsky = await getAuthenticatedAccount('bluesky');
+        if (!bsky) throw new Error('Connect Bluesky under Profile → Accounts & Bridges.');
+        if (convo.status === 'request') {
+          await acceptBskyConvo({
+            serviceUrl: bsky.meta.serviceUrl,
+            accessJwt: bsky.secrets.accessJwt,
+            refreshJwt: bsky.secrets.refreshJwt,
+            onSessionRefreshed: (tok) => updateAccountTokens(bsky.meta.id, tok),
+            convoId: convo.id,
+          });
+          convo.status = 'accepted';
+        }
+        await sendBskyConvoMessage({
+          serviceUrl: bsky.meta.serviceUrl,
+          accessJwt: bsky.secrets.accessJwt,
+          refreshJwt: bsky.secrets.refreshJwt,
+          onSessionRefreshed: (tok) => updateAccountTokens(bsky.meta.id, tok),
+          convoId: convo.id,
+          text,
+        });
+        input.value = '';
+        syncInputState();
+        await loadMessages();
+      } else {
+        const fedi = await getAuthenticatedAccount('fediverse');
+        if (!fedi) throw new Error('Connect Fediverse under Profile → Accounts & Bridges.');
+        const prefix = convo.handle ? `@${String(convo.handle).replace(/^@/, '')} ` : '';
+        const created = await publishStatus({
+          instanceUrl: fedi.meta.instanceUrl,
+          accessToken: fedi.secrets.accessToken,
+          status: text.startsWith('@') ? text : `${prefix}${text}`,
+          visibility: 'direct',
+          inReplyToId: lastReplyStatusId || null,
+        });
+        if (created?.id) lastReplyStatusId = created.id;
+        input.value = '';
+        syncInputState();
+        if (streamEl.querySelector('.empty-state, .loading-state-card')) streamEl.replaceChildren();
+        streamEl.appendChild(
+          buildDmBubbleRow({
+            isMe: true,
+            text,
+            timestamp: created?.createdAt || Date.now(),
+          })
+        );
+        scrollStreamToBottom();
+      }
+      onMessageSent?.(convo);
+    } catch (err) {
+      showAlert('Message Failed', err?.message || 'Unable to send direct message.');
+    } finally {
+      if (!threadDestroyed) sendBtn.disabled = false;
+    }
+  });
+
+  if (convo?.rawConvo || convo?.network === 'bluesky') {
+    void loadMessages();
+  }
+
+  return {
+    focusInput: () => input.focus?.(),
+    refresh: loadMessages,
+    destroy() {
+      threadDestroyed = true;
+    },
+  };
+}
+
 /**
  * Messages screen: `Direct` holds human DMs alongside all Programs' chat
  * sessions under `Program Chats`, while `Programs` manages Program entries.
@@ -151,10 +601,13 @@ function deriveLiveSnippetFromMessages(messages = []) {
 export function mountMessagesScreen(containerEl, {
   initialTab = 'direct',
   initialProgramId = '',
+  initialDirectRecipient = null,
   activeUser = 'User',
   currentProgramId = '',
   currentSessionId = 'default',
+  activeDirectConvoKey = '',
   onSwitchProgram,
+  onOpenDirectConvo = null,
   onOpenCompose,
   onOpenAccounts,
   onProgramChanged,
@@ -165,6 +618,8 @@ export function mountMessagesScreen(containerEl, {
   let destroyed = false;
   let activeTab = initialProgramId ? 'programs' : (initialTab === 'programs' ? 'programs' : 'direct');
   let activeDirectConvo = null;
+  let inlineDmHandle = null;
+  let selectedDirectKey = activeDirectConvoKey || '';
   let fediConvos = [];
   let bskyConvos = [];
   let dmLoading = false;
@@ -175,6 +630,11 @@ export function mountMessagesScreen(containerEl, {
   let activeSessId = currentSessionId || 'default';
   let renamingSessionKey = null;
   const selectedGroupIds = new Set();
+
+  function destroyInlineDm() {
+    inlineDmHandle?.destroy?.();
+    inlineDmHandle = null;
+  }
 
   function hasConnectedDmAccount(authState = authStore.get()) {
     if (!authState) return false;
@@ -244,6 +704,7 @@ export function mountMessagesScreen(containerEl, {
 
   directTabBtn.addEventListener('click', () => {
     activeTab = 'direct';
+    destroyInlineDm();
     activeDirectConvo = null;
     void loadAllProgramSessions();
     renderView();
@@ -251,6 +712,7 @@ export function mountMessagesScreen(containerEl, {
 
   programsTabBtn.addEventListener('click', () => {
     activeTab = 'programs';
+    destroyInlineDm();
     activeDirectConvo = null;
     renamingSessionKey = null;
     renderView();
@@ -425,155 +887,15 @@ export function mountMessagesScreen(containerEl, {
   }
 
   function renderHumanThread(convo) {
-    bodyHost.replaceChildren();
-    const wrap = doc.createElement('div');
-    wrap.className = 'human-dm-thread';
-
-    const header = doc.createElement('div');
-    header.className = 'human-dm-header';
-    const backBtn = doc.createElement('button');
-    backBtn.type = 'button';
-    backBtn.className = 'edit-btn edit-cancel-btn';
-    backBtn.textContent = '← Back';
-    backBtn.addEventListener('click', () => {
-      activeDirectConvo = null;
-      renderView();
+    destroyInlineDm();
+    inlineDmHandle = mountDirectMessageThread(bodyHost, {
+      convo,
+      onBack: () => {
+        destroyInlineDm();
+        activeDirectConvo = null;
+        renderView();
+      },
     });
-
-    const peerTitle = doc.createElement('strong');
-    peerTitle.className = 'human-dm-peer-name';
-    peerTitle.textContent = convo.displayName || convo.handle || 'Direct Message';
-
-    const peerHandle = doc.createElement('span');
-    peerHandle.className = 'post-author-handle';
-    peerHandle.textContent = convo.handle ? `@${convo.handle.replace(/^@/, '')}` : '';
-
-    header.append(backBtn, peerTitle, peerHandle);
-
-    const streamEl = doc.createElement('div');
-    streamEl.className = 'human-dm-messages';
-    if (convo.rawConvo || convo.network === 'bluesky') {
-      streamEl.appendChild(createLoadingState('Loading messages…', { doc, compact: true }));
-    } else {
-      const promptEl = doc.createElement('p');
-      promptEl.className = 'empty-state';
-      promptEl.textContent = `Send a direct Fediverse mention to @${String(convo.handle || '').replace(/^@/, '')}.`;
-      streamEl.appendChild(promptEl);
-    }
-
-    const replyForm = doc.createElement('form');
-    replyForm.className = 'sanctuary-input-area human-dm-reply-form';
-    const wrapper = doc.createElement('div');
-    wrapper.className = 'input-wrapper';
-
-    const lbl = doc.createElement('label');
-    lbl.setAttribute('for', 'human-dm-input');
-    lbl.className = 'sr-only';
-    lbl.textContent = 'Direct message';
-
-    const input = doc.createElement('input');
-    input.type = 'text';
-    input.id = 'human-dm-input';
-    input.className = 'human-dm-input';
-    input.placeholder = `Message ${convo.displayName || convo.handle || 'peer'}`;
-
-    const sendBtn = doc.createElement('button');
-    sendBtn.type = 'submit';
-    sendBtn.className = 'send-btn';
-    sendBtn.setAttribute('aria-label', 'Send');
-    sendBtn.title = 'Send';
-    sendBtn.innerHTML = SEND_SVG;
-
-    wrapper.append(lbl, input, sendBtn);
-    replyForm.appendChild(wrapper);
-    wrap.append(header, streamEl, replyForm);
-    bodyHost.appendChild(wrap);
-
-    async function loadMessages() {
-      if (convo.network === 'bluesky') {
-        const bsky = await getAuthenticatedAccount('bluesky');
-        if (!bsky) return;
-        const data = await getBskyConvoMessages({
-          serviceUrl: bsky.meta.serviceUrl,
-          accessJwt: bsky.secrets.accessJwt,
-          refreshJwt: bsky.secrets.refreshJwt,
-          onSessionRefreshed: (tok) => updateAccountTokens(bsky.meta.id, tok),
-          convoId: convo.id,
-        });
-        if (destroyed) return;
-        const msgs = [...(data?.messages || [])].reverse();
-        streamEl.replaceChildren(
-          ...msgs.map((m) => {
-            const b = doc.createElement('div');
-            b.className = `human-dm-bubble ${m.sender?.did === bsky.meta.did ? 'is-me' : 'is-peer'}`;
-            b.textContent = m.text || '';
-            return b;
-          })
-        );
-      } else if (convo.rawConvo?.lastStatus) {
-        const b = doc.createElement('div');
-        b.className = 'human-dm-bubble is-peer';
-        b.textContent = String(convo.rawConvo.lastStatus.contentHtml || '').replace(/<[^>]*>/g, '');
-        streamEl.replaceChildren(b);
-      }
-    }
-
-    replyForm.addEventListener('submit', async (e) => {
-      e.preventDefault();
-      const text = input.value.trim();
-      if (!text) return;
-      sendBtn.disabled = true;
-      try {
-        if (convo.network === 'bluesky') {
-          const bsky = await getAuthenticatedAccount('bluesky');
-          if (!bsky) throw new Error('Connect Bluesky under User → Accounts.');
-          if (convo.status === 'request') {
-            await acceptBskyConvo({
-              serviceUrl: bsky.meta.serviceUrl,
-              accessJwt: bsky.secrets.accessJwt,
-              refreshJwt: bsky.secrets.refreshJwt,
-              onSessionRefreshed: (tok) => updateAccountTokens(bsky.meta.id, tok),
-              convoId: convo.id,
-            });
-          }
-          await sendBskyConvoMessage({
-            serviceUrl: bsky.meta.serviceUrl,
-            accessJwt: bsky.secrets.accessJwt,
-            refreshJwt: bsky.secrets.refreshJwt,
-            onSessionRefreshed: (tok) => updateAccountTokens(bsky.meta.id, tok),
-            convoId: convo.id,
-            text,
-          });
-          input.value = '';
-          await loadMessages();
-        } else {
-          const fedi = await getAuthenticatedAccount('fediverse');
-          if (!fedi) throw new Error('Connect Fediverse under User → Accounts.');
-          const prefix = convo.handle ? `@${String(convo.handle).replace(/^@/, '')} ` : '';
-          await publishStatus({
-            instanceUrl: fedi.meta.instanceUrl,
-            accessToken: fedi.secrets.accessToken,
-            status: text.startsWith('@') ? text : `${prefix}${text}`,
-            visibility: 'direct',
-            inReplyToId: convo.rawConvo?.lastStatus?.id || null,
-          });
-          input.value = '';
-          if (streamEl.querySelector('.empty-state, .loading-state-card')) streamEl.replaceChildren();
-          const sent = doc.createElement('div');
-          sent.className = 'human-dm-bubble is-me';
-          sent.textContent = text;
-          streamEl.appendChild(sent);
-        }
-      } catch (err) {
-        showAlert('Message Failed', err?.message || 'Unable to send direct message.');
-      } finally {
-        sendBtn.disabled = false;
-      }
-    });
-
-    if (convo.rawConvo || convo.network === 'bluesky') {
-      void loadMessages();
-    }
   }
 
   function appendAllProgramSessionsSection(parentEl) {
@@ -638,6 +960,7 @@ export function mountMessagesScreen(containerEl, {
           newChatProgId = chosenProgId;
           activeSessId = nextSid;
           renamingSessionKey = null;
+          selectedDirectKey = '';
           if (created) {
             const prevList = sessionsByProgram.get(chosenProgId) || [];
             sessionsByProgram.set(chosenProgId, [created, ...prevList.filter((s) => s.id !== created.id)]);
@@ -657,6 +980,7 @@ export function mountMessagesScreen(containerEl, {
       newChatProgId = chosenProgId;
       activeSessId = nextSid;
       renamingSessionKey = null;
+      selectedDirectKey = '';
       const prevList = sessionsByProgram.get(chosenProgId) || [];
       sessionsByProgram.set(chosenProgId, [
         normalizeSessionItem(
@@ -707,7 +1031,7 @@ export function mountMessagesScreen(containerEl, {
 
     for (const sess of allSessions) {
       const sessionKey = `${sess.programId}:${sess.id}`;
-      const isCurrent = sess.programId === activeProgId && sess.id === activeSessId;
+      const isCurrent = !selectedDirectKey && sess.programId === activeProgId && sess.id === activeSessId;
       const isRenaming = renamingSessionKey === sessionKey;
 
       const row = doc.createElement('div');
@@ -798,6 +1122,7 @@ export function mountMessagesScreen(containerEl, {
           activeProgId = sess.programId;
           newChatProgId = sess.programId;
           activeSessId = sess.id;
+          selectedDirectKey = '';
           onSwitchProgram?.(sess.programId, sess.id);
           renderView();
         });
@@ -866,8 +1191,29 @@ export function mountMessagesScreen(containerEl, {
     return focusRenameEl;
   }
 
+  function activateDirectConversation(convo) {
+    if (!convo) return;
+    selectedDirectKey = getDirectConvoKey(convo);
+    if (typeof onOpenDirectConvo === 'function') {
+      activeDirectConvo = null;
+      onOpenDirectConvo(convo);
+      renderView();
+      return;
+    }
+    activeDirectConvo = convo;
+    renderView();
+    bodyHost.querySelector('#human-dm-input')?.focus?.();
+  }
+
+  async function startDirectConversation(recipient) {
+    const convo = await resolveDirectConversationTarget(recipient, { fediConvos, bskyConvos });
+    if (!convo || destroyed) return;
+    activeTab = 'direct';
+    activateDirectConversation(convo);
+  }
+
   function renderDirectTab() {
-    if (activeDirectConvo) {
+    if (activeDirectConvo && typeof onOpenDirectConvo !== 'function') {
       renderHumanThread(activeDirectConvo);
       return;
     }
@@ -880,12 +1226,16 @@ export function mountMessagesScreen(containerEl, {
     newDmForm.className = 'messages-new-dm-form';
 
     const handleInput = doc.createElement('input');
-    handleInput.type = 'text';
+    handleInput.type = 'search';
     handleInput.className = 'onboarding-input';
     handleInput.placeholder = authState.isBlueskyConnected
       ? '@user@instance or handle.bsky.social'
       : '@user@instance';
     handleInput.setAttribute('aria-label', 'Recipient handle');
+    handleInput.setAttribute('autocomplete', 'off');
+    handleInput.setAttribute('autocorrect', 'off');
+    handleInput.setAttribute('autocapitalize', 'none');
+    handleInput.setAttribute('spellcheck', 'false');
 
     const startDmBtn = doc.createElement('button');
     startDmBtn.type = 'submit';
@@ -899,72 +1249,105 @@ export function mountMessagesScreen(containerEl, {
         onOpenCompose?.({ visibility: 'direct' });
         return;
       }
-      const looksBluesky =
-        authState.isBlueskyConnected
-        && (raw.startsWith('did:') || (!raw.includes('@') && (raw.includes('.') || !authState.isMastodonConnected)));
-      if (looksBluesky) {
+      startDmBtn.disabled = true;
+      try {
+        await startDirectConversation(raw);
+      } catch (err) {
+        showAlert('Direct Message Failed', err?.message || 'Unable to start conversation.');
+      } finally {
+        startDmBtn.disabled = false;
+      }
+    });
+    newDmForm.append(handleInput, startDmBtn);
+    attachSearchSuggestions(handleInput, {
+      anchorEl: newDmForm,
+      debounceMs: 220,
+      minChars: 2,
+      maxItems: 6,
+      getLocalSuggestions: (rawQ) => {
+        const q = String(rawQ || '').trim().replace(/^@/, '').toLowerCase();
+        if (!q) return [];
+        const matches = [];
+        for (const c of [...fediConvos, ...bskyConvos]) {
+          const acct = String(c?.peerAcct || c?.peerHandle || '').replace(/^@/, '');
+          const name = String(c?.peerName || '');
+          if (!acct) continue;
+          if (acct.toLowerCase().includes(q) || name.toLowerCase().includes(q)) {
+            matches.push({
+              kind: 'account',
+              icon: 'account',
+              label: name || `@${acct}`,
+              sublabel: `@${acct}`,
+              value: acct,
+            });
+          }
+          if (matches.length >= 4) break;
+        }
+        return matches;
+      },
+      fetchRemoteSuggestions: async (rawQ) => {
+        const cleanQ = String(rawQ || '').trim().replace(/^@/, '');
+        if (!cleanQ) return [];
+        const [fediAuth, bskyAuth] = await Promise.all([
+          getAuthenticatedAccount('fediverse').catch(() => null),
+          getAuthenticatedAccount('bluesky').catch(() => null),
+        ]);
+        const [fediRes, bskyActors] = await Promise.all([
+          fediAuth?.secrets?.accessToken
+            ? searchFediverse({
+                instanceUrl: fediAuth.meta?.instanceUrl,
+                accessToken: fediAuth.secrets.accessToken,
+                query: cleanQ,
+                type: 'accounts',
+                resolve: true,
+                limit: 4,
+              }).catch(() => ({ accounts: [] }))
+            : Promise.resolve({ accounts: [] }),
+          bskyAuth?.secrets?.accessJwt
+            ? searchBskyActors({
+                query: cleanQ,
+                limit: 4,
+                serviceUrl: bskyAuth.meta?.serviceUrl,
+                accessJwt: bskyAuth.secrets.accessJwt,
+              }).catch(() => [])
+            : Promise.resolve([]),
+        ]);
+        const items = [];
+        for (const a of fediRes?.accounts || []) {
+          if (!a?.acct) continue;
+          items.push({
+            kind: 'account',
+            icon: 'account',
+            label: a.displayName || a.username || a.acct,
+            sublabel: `@${a.acct}`,
+            value: a.acct,
+          });
+        }
+        for (const b of Array.isArray(bskyActors) ? bskyActors : []) {
+          const h = b?.handle || '';
+          if (!h) continue;
+          items.push({
+            kind: 'account',
+            icon: 'account',
+            label: b.displayName || h,
+            sublabel: `@${h}`,
+            value: h,
+          });
+        }
+        return items;
+      },
+      onSelect: async (item) => {
+        handleInput.value = '';
         startDmBtn.disabled = true;
         try {
-          const bsky = await getAuthenticatedAccount('bluesky');
-          if (!bsky) throw new Error('Connect Bluesky under Profile → Accounts & Bridges.');
-          let peerDid = raw.startsWith('did:') ? raw : '';
-          let peerDisplay = raw;
-          let peerAvatar = '';
-          if (!peerDid) {
-            const prof = await getBskyProfile({
-              serviceUrl: bsky.meta.serviceUrl,
-              accessJwt: bsky.secrets.accessJwt,
-              refreshJwt: bsky.secrets.refreshJwt,
-              onSessionRefreshed: (tok) => updateAccountTokens(bsky.meta.id, tok),
-              actor: raw,
-            });
-            peerDid = prof?.did || '';
-            peerDisplay = prof?.displayName || prof?.handle || raw;
-            peerAvatar = prof?.avatar || '';
-          }
-          if (!peerDid) throw new Error(`Could not find Bluesky account @${raw}.`);
-          const res = await getBskyConvoForMembers({
-            serviceUrl: bsky.meta.serviceUrl,
-            accessJwt: bsky.secrets.accessJwt,
-            refreshJwt: bsky.secrets.refreshJwt,
-            onSessionRefreshed: (tok) => updateAccountTokens(bsky.meta.id, tok),
-            members: bsky.meta.did ? [bsky.meta.did, peerDid] : [peerDid],
-          });
-          if (destroyed) return;
-          const convo = res?.convo;
-          const peer = (convo?.members || []).find((m) => m.did !== bsky.meta.did) || convo?.members?.[0];
-          activeDirectConvo = {
-            kind: 'human',
-            network: 'bluesky',
-            id: convo?.id || '',
-            displayName: peer?.displayName || peerDisplay || raw,
-            handle: peer?.handle || raw,
-            avatar: peer?.avatar || peerAvatar || '',
-            status: convo?.status || 'accepted',
-            rawConvo: convo || null,
-          };
-          renderView();
+          await startDirectConversation(item.value);
         } catch (err) {
-          showAlert('Direct Message Failed', err?.message || 'Unable to start Bluesky conversation.');
+          showAlert('Direct Message Failed', err?.message || 'Unable to start conversation.');
         } finally {
           startDmBtn.disabled = false;
         }
-        return;
-      }
-
-      activeDirectConvo = {
-        kind: 'human',
-        network: 'fediverse',
-        id: `new:${raw}`,
-        displayName: `@${raw}`,
-        handle: raw,
-        avatar: '',
-        status: 'accepted',
-        rawConvo: null,
-      };
-      renderView();
+      },
     });
-    newDmForm.append(handleInput, startDmBtn);
     wrap.appendChild(newDmForm);
 
     const focusRenameEl = appendAllProgramSessionsSection(wrap);
@@ -983,9 +1366,11 @@ export function mountMessagesScreen(containerEl, {
     const humanPool = [...fediConvos, ...bskyConvos];
 
     for (const convo of humanPool) {
+      const convoKey = getDirectConvoKey(convo);
+      const isSelected = Boolean(selectedDirectKey && convoKey === selectedDirectKey);
       const rowBtn = doc.createElement('button');
       rowBtn.type = 'button';
-      rowBtn.className = 'convo-row convo-row--human';
+      rowBtn.className = `convo-row convo-row--human${isSelected ? ' is-selected' : ''}`;
 
       const avatarWrap = doc.createElement('div');
       avatarWrap.className = 'convo-avatar-wrap';
@@ -1019,8 +1404,7 @@ export function mountMessagesScreen(containerEl, {
       bodyCol.append(topLine, sub);
       rowBtn.append(avatarWrap, bodyCol);
       rowBtn.addEventListener('click', () => {
-        activeDirectConvo = convo;
-        renderView();
+        activateDirectConversation(convo);
       });
       rowsHost.appendChild(rowBtn);
     }
@@ -1067,7 +1451,7 @@ export function mountMessagesScreen(containerEl, {
       wrap.appendChild(
         createOfflineNotice({
           variant: 'info',
-          message: 'Configure Sanctuary Node under Settings → Project Settings.',
+          message: 'Configure Sanctuary Node under Settings → Project.',
         })
       );
     } else if (conn.mode === 'offline') {
@@ -1280,15 +1664,25 @@ export function mountMessagesScreen(containerEl, {
       deleteBtn.className = 'row-icon-btn danger';
       deleteBtn.title = 'Delete Program';
       deleteBtn.setAttribute('aria-label', `Delete ${prog.name || prog.id}`);
-      deleteBtn.disabled = !isOnline || programs.length <= 1;
+      deleteBtn.disabled = !isOnline;
       deleteBtn.innerHTML = TRASH_ICON_SVG;
       deleteBtn.addEventListener('click', (e) => {
         e.stopPropagation();
         showConfirm('Delete Program', `Delete "${prog.name || prog.id}" and its history?`, async () => {
           try {
             await deleteProgram(prog.id);
+            await purgeCachedProgramData(prog.id);
             selectedGroupIds.delete(prog.id);
+            sessionsByProgram.delete(prog.id);
             await checkSanctuaryHealth();
+            const latestConn = connectionStore.get();
+            const nextProgId = latestConn.activeProgram || latestConn.programs?.[0]?.id || '';
+            if (activeProgId === prog.id || currentId === prog.id) {
+              activeProgId = nextProgId;
+              newChatProgId = nextProgId;
+              activeSessId = 'default';
+              onSwitchProgram?.(nextProgId, 'default');
+            }
             await refreshLists();
             void onProgramChanged?.();
           } catch (err) {
@@ -1397,17 +1791,35 @@ export function mountMessagesScreen(containerEl, {
   }
   void refreshLists();
   renderView();
+  if (initialDirectRecipient) {
+    void startDirectConversation(initialDirectRecipient).catch((err) => {
+      showAlert('Direct Message Failed', err?.message || 'Unable to open direct conversation.');
+    });
+  }
 
   return {
     setTab(tabName) {
       activeTab = tabName === 'programs' ? 'programs' : 'direct';
+      destroyInlineDm();
       activeDirectConvo = null;
       renamingSessionKey = null;
       if (activeTab === 'direct') void loadAllProgramSessions();
       renderView();
     },
+    setSelectedDirectConvo(convoOrNull) {
+      selectedDirectKey = getDirectConvoKey(convoOrNull);
+      if (!destroyed && activeTab === 'direct' && !renamingSessionKey) {
+        renderView();
+      }
+    },
+    openDirectRecipient(target) {
+      return startDirectConversation(target).catch((err) => {
+        showAlert('Direct Message Failed', err?.message || 'Unable to open direct conversation.');
+      });
+    },
     destroy() {
       destroyed = true;
+      destroyInlineDm();
       unsubConn();
       unsubAuth();
       unsubSession();

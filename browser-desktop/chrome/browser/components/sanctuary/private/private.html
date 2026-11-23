@@ -1,0 +1,78 @@
+<!doctype html>
+<!-- SPDX-License-Identifier: AGPL-3.0-only WITH AdditionRef-sval-app-store -->
+<html lang="en" class="private sanctuary-private">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src chrome:; img-src chrome: moz-extension: blob: data:; style-src chrome:; script-src chrome:; font-src chrome:; object-src 'none'"
+    />
+    <meta name="color-scheme" content="dark" />
+    <title>Private Browsing — Sanctuary Browser</title>
+    <link
+      rel="icon"
+      type="image/svg+xml"
+      href="chrome://browser/content/sval/home/favicon-private.svg"
+    />
+    <link rel="stylesheet" href="chrome://browser/content/sval/home/private.css" />
+    <script defer src="chrome://browser/content/sval/home/private.js"></script>
+  </head>
+  <body>
+    <main class="private-shell">
+      <header class="private-hero">
+        <div class="brand-emblem" aria-hidden="true">
+          <img src="chrome://branding/content/about-logo.svg" alt="" />
+        </div>
+        <h1>Sanctuary Browser Private Browsing</h1>
+        <p class="subtitle">
+          Visited pages, form entries, cookies, and temporary site data are discarded
+          when every private window closes.
+        </p>
+      </header>
+
+      <section class="search-stage" aria-label="Private Search and Navigation">
+        <form class="private-search-form" role="search">
+          <span class="search-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="11" cy="11" r="8"></circle>
+              <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+            </svg>
+          </span>
+          <input
+            id="private-query-input"
+            type="search"
+            name="q"
+            autofocus
+            autocomplete="off"
+            spellcheck="false"
+            placeholder="Search privately or enter address (@eco, @ddg, @gh, @w)…"
+            aria-label="Search privately or enter web address"
+          />
+          <button type="submit" class="go-btn">Go</button>
+        </form>
+
+        <p id="search-feedback" class="search-feedback" role="status" aria-live="polite" hidden></p>
+
+        <div class="engine-bar" role="group" aria-label="Search Engine">
+          <span id="engine-status" class="engine-status">Choose engine or use @prefix</span>
+          <div id="engine-pills" class="engine-pills"></div>
+        </div>
+      </section>
+
+      <section class="privacy-cards" aria-label="Session Protections">
+        <article class="privacy-card">
+          <h2>Zero Local History</h2>
+          <p>Tabs and searches in this window stay out of disk history and bookmarks.</p>
+        </article>
+        <article class="privacy-card">
+          <h2>Tracker Stripping</h2>
+          <p>Tracking query tokens like <code>utm_*</code>, <code>fbclid</code>, and <code>gclid</code> are removed automatically.</p>
+        </article>
+        <article class="privacy-card">
+          <h2>Isolated Storage</h2>
+          <p>Session cookies and site cache vanish the moment the private window exits.</p>
+        </article>
+      </section>
+    </main>
+  </body>
+</html>

@@ -37,8 +37,17 @@ class DeletedSocialLinkedPost(InvalidSocialLinkedPost):
     """Raised when a stale client attempts to restore a deleted linked post."""
 
 
+class InvalidBrowserBookmark(ValueError):
+    """Raised when a client submits an invalid browser bookmark record."""
+
+
+class DeletedBrowserBookmark(InvalidBrowserBookmark):
+    """Raised when a stale client attempts to restore a deleted bookmark."""
+
+
 MAX_SOCIAL_DRAFT_BYTES = 48 * 1024 * 1024
 MAX_SOCIAL_LINKED_POST_BYTES = 64 * 1024
+MAX_BROWSER_BOOKMARK_BYTES = 64 * 1024
 
 
 def _database_path() -> Path:
@@ -196,6 +205,23 @@ def _connect() -> sqlite3.Connection:
         """
         CREATE TABLE IF NOT EXISTS social_linked_post_deletions (
             canonical_id TEXT PRIMARY KEY,
+            deleted_at INTEGER NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS browser_bookmarks (
+            bookmark_id TEXT PRIMARY KEY,
+            encrypted_bookmark BLOB NOT NULL,
+            updated_at INTEGER NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS browser_bookmark_deletions (
+            bookmark_id TEXT PRIMARY KEY,
             deleted_at INTEGER NOT NULL
         )
         """
@@ -464,4 +490,99 @@ def delete_social_linked_post(canonical_id: str) -> None:
                 ON CONFLICT(canonical_id) DO UPDATE SET deleted_at = excluded.deleted_at
                 """,
                 (canonical_id, int(time.time() * 1000)),
+            )
+
+
+def list_browser_bookmarks() -> dict:
+    cipher = _fernet()
+    with closing(_connect()) as conn:
+        rows = conn.execute(
+            "SELECT encrypted_bookmark FROM browser_bookmarks ORDER BY updated_at DESC"
+        ).fetchall()
+        deleted_ids = [
+            row["bookmark_id"]
+            for row in conn.execute(
+                "SELECT bookmark_id FROM browser_bookmark_deletions ORDER BY deleted_at"
+            ).fetchall()
+        ]
+    return {
+        "bookmarks": [
+            json.loads(cipher.decrypt(row["encrypted_bookmark"]).decode("utf-8"))
+            for row in rows
+        ],
+        "deletedIds": deleted_ids,
+    }
+
+
+def save_browser_bookmark(bookmark_id: str, bookmark: dict) -> dict:
+    from urllib.parse import urlsplit
+
+    bookmark_id = str(bookmark_id or "").strip()
+    if not bookmark_id or len(bookmark_id) > 256:
+        raise InvalidBrowserBookmark("Bookmark ID must be between 1 and 256 characters")
+    if not isinstance(bookmark, dict) or str(bookmark.get("id") or "") != bookmark_id:
+        raise InvalidBrowserBookmark("Bookmark ID must match the requested ID")
+
+    raw_url = str(bookmark.get("url") or "").strip()
+    if not raw_url or len(raw_url) > 2048:
+        raise InvalidBrowserBookmark("Bookmark URL must be between 1 and 2048 characters")
+    parsed = urlsplit(raw_url)
+    if parsed.scheme.lower() not in ("http", "https") or not parsed.netloc:
+        raise InvalidBrowserBookmark("Bookmark URL must use http:// or https://")
+
+    now_ms = int(time.time() * 1000)
+    try:
+        updated_at = int(bookmark.get("updatedAt") or now_ms)
+        created_at = int(bookmark.get("createdAt") or updated_at)
+    except (OverflowError, TypeError, ValueError) as exc:
+        raise InvalidBrowserBookmark("Bookmark timestamps must be integers") from exc
+
+    saved_bookmark = {
+        "id": bookmark_id,
+        "url": raw_url,
+        "title": str(bookmark.get("title") or "").strip()[:300],
+        "folder": str(bookmark.get("folder") or "").strip()[:120],
+        "createdAt": created_at,
+        "updatedAt": updated_at,
+    }
+    serialized = json.dumps(saved_bookmark, ensure_ascii=False).encode("utf-8")
+    if len(serialized) > MAX_BROWSER_BOOKMARK_BYTES:
+        raise InvalidBrowserBookmark("Bookmark exceeds the 64 KiB server limit")
+
+    encrypted_bookmark = _fernet().encrypt(serialized)
+    with closing(_connect()) as conn:
+        with conn:
+            deleted = conn.execute(
+                "SELECT 1 FROM browser_bookmark_deletions WHERE bookmark_id = ?",
+                (bookmark_id,),
+            ).fetchone()
+            if deleted:
+                raise DeletedBrowserBookmark("This bookmark was deleted on another device")
+            conn.execute(
+                """
+                INSERT INTO browser_bookmarks (bookmark_id, encrypted_bookmark, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(bookmark_id) DO UPDATE SET
+                    encrypted_bookmark = excluded.encrypted_bookmark,
+                    updated_at = excluded.updated_at
+                """,
+                (bookmark_id, encrypted_bookmark, saved_bookmark["updatedAt"]),
+            )
+    return saved_bookmark
+
+
+def delete_browser_bookmark(bookmark_id: str) -> None:
+    bookmark_id = str(bookmark_id or "").strip()
+    if not bookmark_id or len(bookmark_id) > 256:
+        raise InvalidBrowserBookmark("Bookmark ID must be between 1 and 256 characters")
+    with closing(_connect()) as conn:
+        with conn:
+            conn.execute("DELETE FROM browser_bookmarks WHERE bookmark_id = ?", (bookmark_id,))
+            conn.execute(
+                """
+                INSERT INTO browser_bookmark_deletions (bookmark_id, deleted_at)
+                VALUES (?, ?)
+                ON CONFLICT(bookmark_id) DO UPDATE SET deleted_at = excluded.deleted_at
+                """,
+                (bookmark_id, int(time.time() * 1000)),
             )

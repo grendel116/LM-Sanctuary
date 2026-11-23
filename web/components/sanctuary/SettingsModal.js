@@ -1,7 +1,11 @@
 import { DEFAULT_AVATAR_DATA_URI } from '../../constants/avatars.js';
+import { SEARCH_ENGINES, normalizeSearchEngineId } from '../../core/urlPrivacy.js';
+import { formatApiErrorMessage } from '../../queries/fetch/fetchWrapper.js';
 import {
   browseWorkspaceFolder,
+  controlOpenHandsServer,
   fetchNativeModels,
+  fetchOpenHandsServerStatus,
   fetchProjectSettings,
   loadNativeLlm,
   openModelsFolder,
@@ -14,13 +18,17 @@ import {
   addKeywordFilter,
   fetchKeywordFilters,
   fetchModerationAccounts,
+  isUnifiedPublicDiscoveryEnabled,
   peekCachedModerationAccounts,
   removeKeywordFilter,
   removeModeratedAccount,
+  setUnifiedPublicDiscovery,
   toggleBlockAuthor,
   toggleMuteAuthor,
 } from '../../queries/socialClient.js';
+import { authStore } from '../../state/authStore.js';
 import { feedStore } from '../../state/feedStore.js';
+import { browserStore, setSearchConfig } from '../../state/browserStore.js';
 import {
   checkSanctuaryHealth,
   connectionStore,
@@ -38,7 +46,7 @@ const FOLDER_SVG = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" 
 const TAB_DESCRIPTORS = {
   engine: 'Select local chat and image models.',
   project: 'Workspace folders, execution policy, search, and node connection.',
-  moderation: 'Keyword filters, feed ranking, mutes, and blocks.',
+  moderation: 'Keyword filters, public discovery, feed ranking, mutes, and blocks.',
 };
 
 function normalizeSecurityPreset(raw) {
@@ -47,7 +55,7 @@ function normalizeSecurityPreset(raw) {
 }
 
 /**
- * Left-Rail Connection & Project Settings modal (Models | Project Settings | Moderation).
+ * Left-Rail Connection & Project Settings modal (Models | Project | Moderation).
  */
 export function openSettingsModal({
   initialTab = 'engine',
@@ -60,22 +68,54 @@ export function openSettingsModal({
   let nodeStatusRefs = null;
   let currentTemp = Number.isFinite(Number(temperature)) ? Number(temperature) : 0.95;
   let nativeInfo = null;
+  let openHandsServerInfo = null;
   let projectSettings = {
     folders: [],
     security_preset: 'ask_always',
     artifact_review_policy: 'ask_always',
-    gemini_api_key: '',
-    search_engine: 'web_crawling',
+    greenpt_api_key: '',
+    greenpt_base_url: 'https://api.greenpt.ai/v1',
+    openhands_model: 'glm-5.3',
+    cloud_fast_model: '',
+    cloud_vision_model: '',
+    cloud_private_model: '',
+    openhands_mode: 'auto',
+    openhands_server_port: 8091,
+    openhands_auto_start_server: false,
     searxng_url: '',
+    browser_search_engine: '',
+    browser_custom_search_url: '',
     tts_voice: 'af_heart',
   };
   let closed = false;
+  const dirtyFields = new Set();
+  let flushPendingKeySave = null;
+
+  async function patchProjectSettings(patch, { rerender = false } = {}) {
+    for (const key of Object.keys(patch)) {
+      dirtyFields.add(key);
+    }
+    Object.assign(projectSettings, patch);
+    const res = await saveProjectSettings(patch);
+    if (res?.settings) {
+      projectSettings = { ...res.settings };
+      for (const key of Object.keys(patch)) {
+        projectSettings[key] = patch[key];
+      }
+    }
+    await onSettingsChanged?.(projectSettings);
+    if (rerender && !closed && activeTab === 'project') {
+      renderProjectTab();
+    }
+    return res;
+  }
 
   const modal = createClassicModalDialog({
     id: 'connection-settings-dialog',
     maxWidth: '560px',
     onClose: () => {
       closed = true;
+      flushPendingKeySave?.();
       unsubConn();
       unsubOut();
       modal.dialog.remove();
@@ -96,7 +136,7 @@ export function openSettingsModal({
   const projBtn = doc.createElement('button');
   projBtn.type = 'button';
   projBtn.className = 'modal-tab-btn';
-  projBtn.textContent = 'Project Settings';
+  projBtn.textContent = 'Project';
   const modBtn = doc.createElement('button');
   modBtn.type = 'button';
   modBtn.className = 'modal-tab-btn';
@@ -159,6 +199,8 @@ export function openSettingsModal({
     const ckpts = nativeInfo?.checkpoints || [];
     const loras = nativeInfo?.loras || [];
     const workflows = nativeInfo?.workflows || [];
+    const isNodeOnline = connectionStore.get().mode === 'online';
+    const isLoadingModels = isNodeOnline && nativeInfo === null;
 
     // Native LLM Panel
     const llmBox = doc.createElement('div');
@@ -170,7 +212,9 @@ export function openSettingsModal({
     llmTitle.textContent = 'LLM Model';
     const llmBadge = doc.createElement('span');
     llmBadge.className = `status-badge ${ggufs.length > 0 ? 'status-online' : 'status-offline'}`;
-    llmBadge.textContent = ggufs.length > 0 ? 'Online' : 'No Models';
+    llmBadge.textContent = ggufs.length > 0
+      ? 'Online'
+      : (!isNodeOnline ? 'Server Offline' : (isLoadingModels ? 'Loading…' : 'No Models'));
     llmHead.append(llmTitle, llmBadge);
 
     const llmDesc = doc.createElement('p');
@@ -189,7 +233,9 @@ export function openSettingsModal({
     if (ggufs.length === 0) {
       const opt = doc.createElement('option');
       opt.value = '';
-      opt.textContent = 'No .gguf models found';
+      opt.textContent = !isNodeOnline
+        ? 'Sanctuary server offline — start server to load models'
+        : (isLoadingModels ? 'Loading local models…' : 'No .gguf models found');
       llmSelect.appendChild(opt);
     } else {
       for (const m of ggufs) {
@@ -234,7 +280,9 @@ export function openSettingsModal({
     diffTitle.textContent = 'Image Generation';
     const diffBadge = doc.createElement('span');
     diffBadge.className = `status-badge ${ckpts.length > 0 ? 'status-online' : 'status-offline'}`;
-    diffBadge.textContent = ckpts.length > 0 ? 'Online' : 'No Checkpoints';
+    diffBadge.textContent = ckpts.length > 0
+      ? 'Online'
+      : (!isNodeOnline ? 'Server Offline' : (isLoadingModels ? 'Loading…' : 'No Checkpoints'));
     diffHead.append(diffTitle, diffBadge);
 
     const diffDesc = doc.createElement('p');
@@ -252,7 +300,9 @@ export function openSettingsModal({
     if (ckpts.length === 0) {
       const opt = doc.createElement('option');
       opt.value = '';
-      opt.textContent = 'No SafeTensors checkpoints found';
+      opt.textContent = !isNodeOnline
+        ? 'Sanctuary server offline — start server to load checkpoints'
+        : (isLoadingModels ? 'Loading local checkpoints…' : 'No SafeTensors checkpoints found');
       ckptSelect.appendChild(opt);
     } else {
       for (const c of ckpts) {
@@ -362,10 +412,7 @@ export function openSettingsModal({
     foldersList.className = 'classic-cards-stack';
 
     const saveCurrent = async () => {
-      const res = await saveProjectSettings(projectSettings);
-      if (res?.settings) projectSettings = res.settings;
-      await onSettingsChanged?.(projectSettings);
-      renderProjectTab();
+      await patchProjectSettings({ folders: projectSettings.folders }, { rerender: true });
     };
 
     (projectSettings.folders || []).forEach((folder, idx) => {
@@ -384,6 +431,19 @@ export function openSettingsModal({
         defBadge.textContent = 'Default';
         row.appendChild(defBadge);
       } else {
+        const setDefBtn = doc.createElement('button');
+        setDefBtn.type = 'button';
+        setDefBtn.className = 'edit-btn';
+        setDefBtn.setAttribute('aria-label', `Set ${folder} as default folder`);
+        setDefBtn.textContent = 'Set Default';
+        setDefBtn.addEventListener('click', async () => {
+          projectSettings.folders = [folder, ...(projectSettings.folders || []).filter((f) => f !== folder)];
+          await saveCurrent();
+        });
+        row.appendChild(setDefBtn);
+      }
+
+      if (idx > 0 || (projectSettings.folders || []).length > 1) {
         const rmBtn = doc.createElement('button');
         rmBtn.type = 'button';
         rmBtn.className = 'action-icon-btn';
@@ -458,8 +518,7 @@ export function openSettingsModal({
       secSelect.appendChild(opt);
     }
     secSelect.addEventListener('change', async () => {
-      projectSettings.security_preset = secSelect.value;
-      await saveProjectSettings(projectSettings);
+      await patchProjectSettings({ security_preset: secSelect.value });
     });
     secRow.append(secInfo, secSelect);
 
@@ -487,37 +546,297 @@ export function openSettingsModal({
       revSelect.appendChild(opt);
     }
     revSelect.addEventListener('change', async () => {
-      projectSettings.artifact_review_policy = revSelect.value;
-      await saveProjectSettings(projectSettings);
+      await patchProjectSettings({ artifact_review_policy: revSelect.value });
     });
     revRow.append(revInfo, revSelect);
 
-    const apiKeyRow = doc.createElement('div');
-    apiKeyRow.className = 'classic-setting-row';
-    const apiKeyInfo = doc.createElement('div');
-    const apiKeyLbl = doc.createElement('label');
-    apiKeyLbl.setAttribute('for', 'project-gemini-api-key');
-    apiKeyLbl.textContent = 'Antigravity API Key';
-    const apiKeySub = doc.createElement('p');
-    apiKeySub.className = 'classic-card-subtext';
-    apiKeySub.textContent = 'Gemini API key for delegated coding jobs.';
-    apiKeyInfo.append(apiKeyLbl, apiKeySub);
+    const makeSettingRow = (inputId, titleText, subText, controlEl, subId = '') => {
+      const row = doc.createElement('div');
+      row.className = 'classic-setting-row';
+      const info = doc.createElement('div');
+      const lbl = doc.createElement('label');
+      if (inputId) lbl.setAttribute('for', inputId);
+      lbl.textContent = titleText;
+      const sub = doc.createElement('p');
+      sub.className = 'classic-card-subtext';
+      if (subId) sub.id = subId;
+      sub.textContent = subText;
+      info.append(lbl, sub);
+      row.append(info, controlEl);
+      return Object.assign(row, { _subEl: sub });
+    };
 
-    const apiKeyIn = doc.createElement('input');
-    apiKeyIn.type = 'password';
-    apiKeyIn.id = 'project-gemini-api-key';
-    apiKeyIn.className = 'onboarding-input';
-    apiKeyIn.style.width = '180px';
-    apiKeyIn.placeholder = 'AIza...';
-    apiKeyIn.autocomplete = 'off';
-    apiKeyIn.value = projectSettings.gemini_api_key || '';
-    apiKeyIn.addEventListener('change', async () => {
-      projectSettings.gemini_api_key = apiKeyIn.value.trim();
-      await saveProjectSettings(projectSettings);
+    const makeTextInput = (id, { type = 'text', value = '', placeholder = '', list = '' } = {}) => {
+      const inp = doc.createElement('input');
+      inp.type = type;
+      inp.id = id;
+      inp.className = 'onboarding-input';
+      inp.style.width = '200px';
+      inp.placeholder = placeholder;
+      inp.autocomplete = 'off';
+      if (list) inp.setAttribute('list', list);
+      inp.value = value;
+      return inp;
+    };
+
+    const greenptKeyIn = makeTextInput('project-greenpt-api-key', {
+      type: 'password',
+      value: projectSettings.greenpt_api_key || '',
+      placeholder: 'sk-...',
     });
-    apiKeyRow.append(apiKeyInfo, apiKeyIn);
+    let keyDebounceTimer = null;
+    const commitGreenptKey = async () => {
+      if (keyDebounceTimer) {
+        clearTimeout(keyDebounceTimer);
+        keyDebounceTimer = null;
+      }
+      flushPendingKeySave = null;
+      await patchProjectSettings({ greenpt_api_key: greenptKeyIn.value.trim() });
+    };
+    greenptKeyIn.addEventListener('input', () => {
+      dirtyFields.add('greenpt_api_key');
+      projectSettings.greenpt_api_key = greenptKeyIn.value.trim();
+      if (keyDebounceTimer) clearTimeout(keyDebounceTimer);
+      flushPendingKeySave = () => {
+        void commitGreenptKey().catch(() => {});
+      };
+      keyDebounceTimer = setTimeout(() => {
+        void commitGreenptKey().catch(() => {});
+      }, 350);
+    });
+    greenptKeyIn.addEventListener('change', commitGreenptKey);
+    const apiKeyRow = makeSettingRow(
+      'project-greenpt-api-key',
+      'Cloud API Key',
+      'Bearer API key for OpenHands coding, cloud upscale, and web tools.',
+      greenptKeyIn,
+    );
 
-    progBlock.append(ph, secRow, revRow, apiKeyRow);
+    const endpointPresets = doc.createElement('datalist');
+    endpointPresets.id = 'greenpt-endpoints-list';
+    ['https://api.greenpt.ai/v1', 'https://api.us.greenpt.ai/v1', 'https://gateway.inference.coop/v1', 'https://api.regolo.ai/v1', 'https://inference.tinfoil.sh/v1'].forEach((u) => {
+      const opt = doc.createElement('option');
+      opt.value = u;
+      endpointPresets.appendChild(opt);
+    });
+
+    const baseUrlIn = makeTextInput('project-greenpt-base-url', {
+      value: projectSettings.greenpt_base_url || 'https://api.greenpt.ai/v1',
+      placeholder: 'https://api.example.org/v1',
+      list: 'greenpt-endpoints-list',
+    });
+    baseUrlIn.addEventListener('change', async () => {
+      const nextUrl = baseUrlIn.value.trim() || 'https://api.greenpt.ai/v1';
+      baseUrlIn.value = nextUrl;
+      await patchProjectSettings({ greenpt_base_url: nextUrl });
+    });
+    const baseUrlWrap = doc.createElement('div');
+    baseUrlWrap.append(baseUrlIn, endpointPresets);
+    const baseUrlRow = makeSettingRow(
+      'project-greenpt-base-url',
+      'Cloud /v1 Endpoint',
+      'Any OpenAI-compatible /v1 endpoint (e.g. a worker co-op or regional host).',
+      baseUrlWrap,
+    );
+
+    const routingSelect = doc.createElement('select');
+    routingSelect.id = 'project-routing-policy';
+    routingSelect.className = 'onboarding-input glass-select';
+    routingSelect.style.width = '210px';
+    [
+      ['auto', 'Auto Baton'],
+      ['eco_flash', 'Eco Flash'],
+      ['private_tee', 'Confidential TEE / ZDR'],
+      ['local_only', 'Local Only (Air-Gapped)'],
+    ].forEach(([val, label]) => {
+      const opt = doc.createElement('option');
+      opt.value = val;
+      opt.textContent = label;
+      routingSelect.appendChild(opt);
+    });
+    routingSelect.value = ['auto', 'eco_flash', 'private_tee', 'local_only'].includes(projectSettings.routing_policy)
+      ? projectSettings.routing_policy
+      : 'auto';
+    routingSelect.addEventListener('change', async () => {
+      await patchProjectSettings({ routing_policy: routingSelect.value });
+    });
+    const routingRow = makeSettingRow(
+      'project-routing-policy',
+      'Baton & Routing Policy',
+      'Coordinate turns across your local GGUF model, cloud /v1 endpoint, and OpenHands.',
+      routingSelect,
+    );
+
+    const modelList = doc.createElement('datalist');
+    modelList.id = 'greenpt-models-list';
+    [
+      'glm-5.3', 'glm-5.3-flash', 'deepseek-v4.1-flash-1017', 'kimi-k3.1-pro', 'green-r', 'green-l',
+      'glm-flash-green', 'deepseek-flash-green', 'glm-tee', 'deepseek-flash-tee',
+      'greenpt/glm-5.3', 'regolo/apertus-70b', 'regolo/qwen3.5-122b', 'regolo/gemma4-31b',
+    ].forEach((m) => {
+      const opt = doc.createElement('option');
+      opt.value = m;
+      modelList.appendChild(opt);
+    });
+
+    const modelIn = makeTextInput('project-openhands-model', {
+      value: projectSettings.openhands_model || 'glm-5.3',
+      placeholder: 'glm-5.3',
+      list: 'greenpt-models-list',
+    });
+    modelIn.addEventListener('change', async () => {
+      const nextModel = modelIn.value.trim() || 'glm-5.3';
+      modelIn.value = nextModel;
+      await patchProjectSettings({ openhands_model: nextModel });
+    });
+    const modelWrap = doc.createElement('div');
+    modelWrap.append(modelIn, modelList);
+    const modelRow = makeSettingRow(
+      'project-openhands-model',
+      'OpenHands Coding Model',
+      'Lead coding model (researcher and verifier subagents tier to flash when supported).',
+      modelWrap,
+    );
+
+    const fastModelIn = makeTextInput('project-cloud-fast-model', {
+      value: projectSettings.cloud_fast_model || '',
+      placeholder: 'Auto from endpoint',
+      list: 'greenpt-models-list',
+    });
+    fastModelIn.addEventListener('change', async () => {
+      const nextVal = fastModelIn.value.trim();
+      fastModelIn.value = nextVal;
+      await patchProjectSettings({ cloud_fast_model: nextVal });
+    });
+    const fastModelRow = makeSettingRow(
+      'project-cloud-fast-model',
+      'Fast / Subagent Model',
+      'Optional fast-tier override for cloud escalation and coding subagents (blank = auto).',
+      fastModelIn,
+    );
+
+    const visionModelIn = makeTextInput('project-cloud-vision-model', {
+      value: projectSettings.cloud_vision_model || '',
+      placeholder: 'Auto from endpoint',
+      list: 'greenpt-models-list',
+    });
+    visionModelIn.addEventListener('change', async () => {
+      const nextVal = visionModelIn.value.trim();
+      visionModelIn.value = nextVal;
+      await patchProjectSettings({ cloud_vision_model: nextVal });
+    });
+    const visionModelRow = makeSettingRow(
+      'project-cloud-vision-model',
+      'Vision Model',
+      'Optional multimodal vision override for image turns (blank = auto).',
+      visionModelIn,
+    );
+
+    const ohModeSelect = doc.createElement('select');
+    ohModeSelect.id = 'project-openhands-mode';
+    ohModeSelect.className = 'onboarding-input';
+    ohModeSelect.style.width = '200px';
+    [
+      ['auto', 'Auto (Warm Server or CLI)'],
+      ['cli', 'Headless CLI Subprocess'],
+      ['server', 'OpenHands HTTP Server (/v1)'],
+    ].forEach(([val, label]) => {
+      const opt = doc.createElement('option');
+      opt.value = val;
+      opt.textContent = label;
+      ohModeSelect.appendChild(opt);
+    });
+    ohModeSelect.value = ['auto', 'cli', 'server'].includes(projectSettings.openhands_mode)
+      ? projectSettings.openhands_mode
+      : 'auto';
+    ohModeSelect.addEventListener('change', async () => {
+      const nextMode = ['auto', 'cli', 'server'].includes(ohModeSelect.value)
+        ? ohModeSelect.value
+        : 'auto';
+      await patchProjectSettings({ openhands_mode: nextMode });
+    });
+    const ohModeRow = makeSettingRow(
+      'project-openhands-mode',
+      'OpenHands Execution Mode',
+      'Auto uses the warm /v1 server if running, otherwise an isolated headless CLI worker.',
+      ohModeSelect,
+    );
+
+    const serverControls = doc.createElement('div');
+    serverControls.style.display = 'flex';
+    serverControls.style.alignItems = 'center';
+    serverControls.style.gap = '8px';
+    serverControls.style.flexWrap = 'wrap';
+    serverControls.style.justifyContent = 'flex-end';
+
+    const autoStartLbl = doc.createElement('label');
+    autoStartLbl.style.display = 'inline-flex';
+    autoStartLbl.style.alignItems = 'center';
+    autoStartLbl.style.gap = '4px';
+    autoStartLbl.style.fontSize = '12px';
+    const autoStartChk = doc.createElement('input');
+    autoStartChk.type = 'checkbox';
+    autoStartChk.id = 'project-openhands-auto-start';
+    autoStartChk.checked = Boolean(projectSettings.openhands_auto_start_server);
+    autoStartChk.addEventListener('change', async () => {
+      await patchProjectSettings({ openhands_auto_start_server: Boolean(autoStartChk.checked) });
+    });
+    const autoStartTxt = doc.createElement('span');
+    autoStartTxt.textContent = 'Auto-start';
+    autoStartLbl.append(autoStartChk, autoStartTxt);
+
+    const serverToggleBtn = doc.createElement('button');
+    serverToggleBtn.type = 'button';
+    serverToggleBtn.id = 'openhands-server-toggle-btn';
+    serverToggleBtn.className = 'pill-btn-subtle';
+
+    const serverRow = makeSettingRow(
+      'project-openhands-auto-start',
+      'OpenHands HTTP Server (/v1)',
+      '',
+      serverControls,
+      'openhands-server-status',
+    );
+    const serverSubEl = serverRow._subEl;
+
+    const renderServerStatus = () => {
+      const port = openHandsServerInfo?.port || projectSettings.openhands_server_port || 8091;
+      const isRunning = Boolean(openHandsServerInfo?.running);
+      const endpoint = openHandsServerInfo?.openai_base_url || `http://127.0.0.1:${port}/v1`;
+      const modelId = openHandsServerInfo?.model_id || 'openhands_greenpt';
+      serverSubEl.textContent = isRunning
+        ? `Running · ${endpoint} (${modelId})`
+        : `Stopped · port ${port}`;
+      serverToggleBtn.textContent = isRunning ? 'Stop Server' : 'Start Server';
+    };
+    renderServerStatus();
+
+    serverToggleBtn.addEventListener('click', async () => {
+      const isRunning = Boolean(openHandsServerInfo?.running);
+      serverToggleBtn.disabled = true;
+      serverSubEl.textContent = isRunning ? 'Stopping server...' : 'Starting server...';
+      try {
+        const res = await controlOpenHandsServer(isRunning ? 'stop' : 'start');
+        if (res && typeof res === 'object') openHandsServerInfo = res;
+      } catch (err) {
+        serverSubEl.textContent = `Error: ${err?.message || 'request failed'}`;
+      } finally {
+        serverToggleBtn.disabled = false;
+        renderServerStatus();
+      }
+    });
+    serverControls.append(autoStartLbl, serverToggleBtn);
+
+    const advDetails = doc.createElement('details');
+    advDetails.className = 'advanced-openhands-disclosure';
+    advDetails.style.marginTop = '8px';
+    const advSummary = doc.createElement('summary');
+    advSummary.className = 'classic-card-subtext';
+    advSummary.style.cssText = 'cursor: pointer; user-select: none; padding: 6px 0; font-weight: 500;';
+    advSummary.textContent = 'Advanced OpenHands & Model Overrides';
+    advDetails.append(advSummary, modelRow, fastModelRow, visionModelRow, ohModeRow, serverRow);
+
+    progBlock.append(ph, secRow, revRow, apiKeyRow, baseUrlRow, routingRow, advDetails);
 
     // Search Settings
     const searchBlock = doc.createElement('div');
@@ -526,50 +845,123 @@ export function openSettingsModal({
     sh.className = 'modal-sub-header';
     sh.textContent = 'Search Settings';
 
-    const modeRow = doc.createElement('div');
-    modeRow.className = 'classic-setting-row';
-    const modeLbl = doc.createElement('label');
-    modeLbl.setAttribute('for', 'project-search-engine');
-    modeLbl.textContent = 'Search Mode';
-    const modeSelect = doc.createElement('select');
-    modeSelect.id = 'project-search-engine';
-    modeSelect.className = 'onboarding-input glass-select';
-    modeSelect.style.width = '210px';
-    for (const [val, text] of [['web_crawling', 'Web Crawling (Unified)'], ['wikipedia', 'Wikipedia Only']]) {
-      const opt = doc.createElement('option');
-      opt.value = val;
-      opt.textContent = text;
-      if ((projectSettings.search_engine || 'web_crawling') === val) opt.selected = true;
-      modeSelect.appendChild(opt);
+    const browserCfg = browserStore.get().searchConfig;
+    const activeProvider = normalizeSearchEngineId(
+      projectSettings.browser_search_engine || browserCfg.engine || ''
+    );
+    if (!projectSettings.browser_search_engine && activeProvider) {
+      projectSettings.browser_search_engine = activeProvider;
     }
-    modeRow.append(modeLbl, modeSelect);
+    if (!projectSettings.searxng_url && browserCfg.searxngUrl) {
+      projectSettings.searxng_url = browserCfg.searxngUrl;
+    }
+    if (!projectSettings.browser_custom_search_url && browserCfg.customTemplate) {
+      projectSettings.browser_custom_search_url = browserCfg.customTemplate;
+    }
+
+    const providerRow = doc.createElement('div');
+    providerRow.className = 'classic-setting-row';
+    const providerInfo = doc.createElement('div');
+    const providerLbl = doc.createElement('label');
+    providerLbl.setAttribute('for', 'project-browser-search-engine');
+    providerLbl.textContent = 'Browser Search Engine';
+    const providerSub = doc.createElement('p');
+    providerSub.id = 'project-browser-search-engine-help';
+    providerSub.className = 'classic-card-subtext';
+    providerSub.textContent = 'Address-bar search engine for Sanctuary Browser (Program web_search uses your Cloud /v1 endpoint or local fallback).';
+    providerInfo.append(providerLbl, providerSub);
+
+    const providerSelect = doc.createElement('select');
+    providerSelect.id = 'project-browser-search-engine';
+    providerSelect.name = 'browser_search_engine';
+    providerSelect.setAttribute('aria-describedby', providerSub.id);
+    providerSelect.className = 'onboarding-input glass-select';
+    providerSelect.style.width = '210px';
+    const noneOpt = doc.createElement('option');
+    noneOpt.value = '';
+    noneOpt.textContent = 'None (Ask when needed)';
+    if (!activeProvider) noneOpt.selected = true;
+    providerSelect.appendChild(noneOpt);
+    for (const eng of SEARCH_ENGINES) {
+      const opt = doc.createElement('option');
+      opt.value = eng.id;
+      opt.textContent = eng.alias ? `${eng.label} (${eng.alias})` : eng.label;
+      if (activeProvider === eng.id) opt.selected = true;
+      providerSelect.appendChild(opt);
+    }
+    providerSelect.value = activeProvider || '';
+    providerRow.append(providerInfo, providerSelect);
 
     const searxRow = doc.createElement('div');
     searxRow.className = 'classic-setting-row';
-    searxRow.hidden = modeSelect.value !== 'web_crawling';
+    searxRow.hidden = providerSelect.value !== 'searxng';
     const searxLbl = doc.createElement('label');
     searxLbl.setAttribute('for', 'project-searxng-url');
-    searxLbl.textContent = 'SearXNG Custom URL';
+    searxLbl.textContent = 'SearXNG Instance URL';
     const searxIn = doc.createElement('input');
-    searxIn.type = 'text';
+    searxIn.type = 'url';
     searxIn.id = 'project-searxng-url';
+    searxIn.name = 'searxng_url';
+    searxIn.setAttribute('autocorrect', 'off');
+    searxIn.setAttribute('autocapitalize', 'none');
+    searxIn.spellcheck = false;
     searxIn.className = 'onboarding-input';
     searxIn.style.width = '210px';
-    searxIn.placeholder = 'https://searx.be';
+    searxIn.placeholder = 'https://searx.example.org';
     searxIn.value = projectSettings.searxng_url || '';
     searxRow.append(searxLbl, searxIn);
 
-    modeSelect.addEventListener('change', async () => {
-      projectSettings.search_engine = modeSelect.value;
-      searxRow.hidden = modeSelect.value !== 'web_crawling';
-      await saveProjectSettings(projectSettings);
+    const customRow = doc.createElement('div');
+    customRow.className = 'classic-setting-row';
+    customRow.hidden = providerSelect.value !== 'custom';
+    const customLbl = doc.createElement('label');
+    customLbl.setAttribute('for', 'project-browser-custom-search-url');
+    customLbl.textContent = 'Custom Search Template (%s)';
+    const customIn = doc.createElement('input');
+    customIn.type = 'url';
+    customIn.id = 'project-browser-custom-search-url';
+    customIn.name = 'browser_custom_search_url';
+    customIn.setAttribute('autocorrect', 'off');
+    customIn.setAttribute('autocapitalize', 'none');
+    customIn.spellcheck = false;
+    customIn.className = 'onboarding-input';
+    customIn.style.width = '210px';
+    customIn.placeholder = 'https://example.org/search?q=%s';
+    customIn.value = projectSettings.browser_custom_search_url || '';
+    customRow.append(customLbl, customIn);
+
+    const syncBrowserFromProject = () => {
+      setSearchConfig(
+        {
+          engine: projectSettings.browser_search_engine || '',
+          searxngUrl: projectSettings.searxng_url || '',
+          customTemplate: projectSettings.browser_custom_search_url || '',
+        },
+        { syncRemote: false }
+      );
+    };
+
+    providerSelect.addEventListener('change', async () => {
+      projectSettings.browser_search_engine = providerSelect.value;
+      searxRow.hidden = providerSelect.value !== 'searxng';
+      customRow.hidden = providerSelect.value !== 'custom';
+      syncBrowserFromProject();
+      await patchProjectSettings({ browser_search_engine: providerSelect.value });
     });
     searxIn.addEventListener('change', async () => {
-      projectSettings.searxng_url = searxIn.value.trim();
-      await saveProjectSettings(projectSettings);
+      const nextSearx = searxIn.value.trim();
+      projectSettings.searxng_url = nextSearx;
+      syncBrowserFromProject();
+      await patchProjectSettings({ searxng_url: nextSearx });
+    });
+    customIn.addEventListener('change', async () => {
+      const nextCustom = customIn.value.trim();
+      projectSettings.browser_custom_search_url = nextCustom;
+      syncBrowserFromProject();
+      await patchProjectSettings({ browser_custom_search_url: nextCustom });
     });
 
-    searchBlock.append(sh, modeRow, searxRow);
+    searchBlock.append(sh, providerRow, searxRow, customRow);
 
     // Sanctuary Node Connection
     const conn = connectionStore.get();
@@ -712,13 +1104,23 @@ export function openSettingsModal({
 
     const addForm = doc.createElement('form');
     addForm.className = 'list-create-row moderation-filter-form';
+    const phraseLbl = doc.createElement('label');
+    phraseLbl.setAttribute('for', 'moderation-filter-phrase');
+    phraseLbl.className = 'visually-hidden';
+    phraseLbl.textContent = 'Keyword or phrase';
     const phraseIn = doc.createElement('input');
     phraseIn.type = 'text';
     phraseIn.id = 'moderation-filter-phrase';
+    phraseIn.name = 'phrase';
     phraseIn.className = 'onboarding-input';
     phraseIn.placeholder = 'Keyword or phrase...';
+    phraseIn.setAttribute('autocorrect', 'off');
+    phraseIn.setAttribute('autocapitalize', 'none');
+    phraseIn.setAttribute('spellcheck', 'false');
+    phraseIn.setAttribute('enterkeyhint', 'done');
     const actSelect = doc.createElement('select');
     actSelect.id = 'moderation-filter-action';
+    actSelect.name = 'filter_action';
     actSelect.className = 'onboarding-input glass-select moderation-filter-action';
     for (const [val, lbl] of [['hide', 'Hide'], ['warn', 'Warn']]) {
       const opt = doc.createElement('option');
@@ -730,7 +1132,7 @@ export function openSettingsModal({
     addFilterBtn.type = 'submit';
     addFilterBtn.className = 'btn-sleek-pill';
     addFilterBtn.textContent = '+ Filter';
-    addForm.append(phraseIn, actSelect, addFilterBtn);
+    addForm.append(phraseLbl, phraseIn, actSelect, addFilterBtn);
 
     const filtersWrap = doc.createElement('div');
     filtersWrap.className = 'moderation-filter-chips';
@@ -749,7 +1151,10 @@ export function openSettingsModal({
         return;
       }
       for (const f of rules) {
-        const phrase = f.phrase || f.title || '';
+        const kws = Array.isArray(f.keywords) ? f.keywords.filter(Boolean) : [];
+        const phrase = kws.length > 1
+          ? (f.title && !kws.includes(f.title) ? `${f.title}: ${kws.join(', ')}` : kws.join(', '))
+          : (f.phrase || kws[0] || f.title || '');
         const mode = String(f.filter_action || 'hide').toLowerCase();
         const chip = doc.createElement('div');
         chip.className = 'moderation-filter-chip';
@@ -811,7 +1216,89 @@ export function openSettingsModal({
     renderFilterChips(cachedFilters, { loading: cachedFilters.length === 0 });
     filterBlock.append(fh, fSub, addForm, filtersWrap);
 
-    // 2. Feed Algorithm (interactive immediately at 0ms)
+    // 2. Public Discovery Toggle (Mastodon discoverable/indexable + Bluesky logged-out visibility)
+    const publicBlock = doc.createElement('div');
+    publicBlock.className = 'classic-section-divider';
+    const ph = doc.createElement('h4');
+    ph.className = 'modal-sub-header';
+    ph.style.marginBlockEnd = '6px';
+    ph.textContent = 'Public Discovery';
+
+    const accounts = authStore.get().accounts || [];
+    const hasConnectedSocial = accounts.some(
+      (a) => a && (a.platform === 'fediverse' || a.platform === 'mastodon' || a.platform === 'bluesky')
+    );
+
+    const pubLabel = doc.createElement('label');
+    pubLabel.className = `switch-container${hasConnectedSocial ? '' : ' is-disabled'}`;
+    pubLabel.setAttribute('for', 'settings-public-discovery-toggle');
+
+    const pubTextCol = doc.createElement('div');
+    pubTextCol.className = 'switch-label-group';
+    const pubTitle = doc.createElement('span');
+    pubTitle.className = 'switch-title';
+    pubTitle.textContent = 'Public Commons Visibility';
+    const pubSub = doc.createElement('span');
+    pubSub.className = 'switch-subtitle';
+    pubSub.textContent = hasConnectedSocial
+      ? 'Make your public posts discoverable across unmediated Mastodon & Bluesky streams and search.'
+      : 'Connect Mastodon or Bluesky in Accounts to toggle public discovery.';
+    pubTextCol.append(pubTitle, pubSub);
+
+    const publicInput = doc.createElement('input');
+    publicInput.type = 'checkbox';
+    publicInput.id = 'settings-public-discovery-toggle';
+    publicInput.className = 'switch-input';
+    publicInput.setAttribute('switch', '');
+    const hasNativeSwitch = typeof globalThis.HTMLInputElement?.prototype === 'object'
+      && 'switch' in globalThis.HTMLInputElement.prototype;
+    if (!hasNativeSwitch) publicInput.setAttribute('role', 'switch');
+    publicInput.disabled = !hasConnectedSocial;
+    publicInput.checked = isUnifiedPublicDiscoveryEnabled(accounts);
+
+    const pubTrack = doc.createElement('span');
+    pubTrack.className = 'switch-track';
+    pubTrack.setAttribute('aria-hidden', 'true');
+    const pubThumb = doc.createElement('span');
+    pubThumb.className = 'switch-thumb';
+    pubTrack.appendChild(pubThumb);
+    pubLabel.append(pubTextCol, publicInput, pubTrack);
+
+    const pubStatus = doc.createElement('p');
+    pubStatus.className = 'classic-card-subtext public-discovery-status';
+    pubStatus.setAttribute('role', 'status');
+    pubStatus.setAttribute('aria-live', 'polite');
+    pubStatus.hidden = true;
+
+    publicInput.addEventListener('change', async () => {
+      const desired = publicInput.checked;
+      publicInput.disabled = true;
+      pubLabel.classList.add('is-disabled');
+      pubStatus.hidden = false;
+      pubStatus.textContent = 'Updating public discovery…';
+      try {
+        await setUnifiedPublicDiscovery(desired);
+        if (!closed && activeTab === 'moderation' && epoch === modTabEpoch) {
+          pubStatus.textContent = desired
+            ? 'Public discovery enabled across connected accounts.'
+            : 'Public discovery turned off.';
+        }
+      } catch (err) {
+        if (!closed && activeTab === 'moderation' && epoch === modTabEpoch) {
+          publicInput.checked = !desired;
+          pubStatus.textContent = formatApiErrorMessage(err?.message, 'Unable to update public discovery.');
+        }
+      } finally {
+        if (!closed && activeTab === 'moderation' && epoch === modTabEpoch) {
+          publicInput.disabled = !hasConnectedSocial;
+          pubLabel.classList.toggle('is-disabled', !hasConnectedSocial);
+        }
+      }
+    });
+
+    publicBlock.append(ph, pubLabel, pubStatus);
+
+    // 3. Feed Algorithm (interactive immediately at 0ms)
     const algoBlock = doc.createElement('div');
     algoBlock.className = 'classic-section-divider';
     const algoRow = doc.createElement('div');
@@ -1010,7 +1497,7 @@ export function openSettingsModal({
       })
     );
 
-    card.append(filterBlock, algoBlock, mutesHost, blocksHost);
+    card.append(filterBlock, publicBlock, algoBlock, mutesHost, blocksHost);
 
     void fetchKeywordFilters()
       .then((freshFilters) => {
@@ -1071,13 +1558,19 @@ export function openSettingsModal({
   async function loadNodeData() {
     if (connectionStore.get().mode !== 'online') return;
     try {
-      const [nat, proj] = await Promise.all([
+      const [nat, proj, ohSrv] = await Promise.all([
         Promise.resolve().then(() => fetchNativeModels()).catch(() => null),
         Promise.resolve().then(() => fetchProjectSettings()).catch(() => null),
+        Promise.resolve().then(() => fetchOpenHandsServerStatus()).catch(() => null),
       ]);
       if (closed) return;
       if (nat) nativeInfo = nat;
-      if (proj && !proj.error) projectSettings = proj;
+      if (proj && !proj.error) {
+        for (const [k, v] of Object.entries(proj)) {
+          if (!dirtyFields.has(k)) projectSettings[k] = v;
+        }
+      }
+      if (ohSrv && !ohSrv.error) openHandsServerInfo = ohSrv;
       renderBody();
     } catch {
       // Non-fatal in offline/dormant state
@@ -1097,8 +1590,17 @@ export function openSettingsModal({
     renderBody();
   });
 
-  const unsubConn = connectionStore.subscribe(() => {
+  let prevConnMode = connectionStore.get().mode;
+  const unsubConn = connectionStore.subscribe((st) => {
     syncNodeSection();
+    if (st.mode !== prevConnMode) {
+      prevConnMode = st.mode;
+      if (st.mode === 'online') {
+        void loadNodeData();
+      } else if (activeTab === 'engine') {
+        renderBody();
+      }
+    }
   });
   const unsubOut = outboxStore.subscribe(() => {
     syncNodeSection();

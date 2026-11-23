@@ -2,7 +2,17 @@ import { BlueskyAdapter } from '../adapters/bluesky/index.js';
 import { MastodonAdapter } from '../adapters/mastodon/index.js';
 import { ThreadsAdapter } from '../adapters/threads/index.js';
 import { DEFAULT_THREADS_SCOPES, PUBLIC_BSKY_API, isAllowedSocialUrl, normalizeInstanceUrl } from '../constants/endpoints.js';
-import { canonicalizeActorHandle, deduplicateUnifiedItems, isUnifiedItemModerated, plainTextToHtml, toUnifiedItem } from '../core/schema/unifiedItem.js';
+import {
+  buildSynthesizedReplyContext,
+  canonicalizeActorHandle,
+  deduplicateUnifiedItems,
+  hasRenderablePostContent,
+  isRepostUnifiedItem,
+  isUnifiedItemModerated,
+  mergeUnifiedPostMetadata,
+  plainTextToHtml,
+  toUnifiedItem,
+} from '../core/schema/unifiedItem.js';
 import { fetchWrapper } from './fetch/fetchWrapper.js';
 import { extractFirstHttpsUrl, fetchLinkPreview } from './linkPreview.js';
 import {
@@ -10,6 +20,7 @@ import {
   exchangeThreadsLongLivedToken,
   exchangeThreadsOAuthCode,
   getThreadsPostInsights,
+  getThreadsPostsInsightsBatch,
   manageThreadsReply,
   refreshThreadsLongLivedToken,
   verifyThreadsCredentials,
@@ -22,7 +33,9 @@ import {
   getBskyFollowers,
   getBskyFollows,
   getBskyMutes,
+  getBskyMutedWords,
   getBskyPostThread,
+  getBskyPostsByUris,
   getBskyPostsMetrics,
   getBskyProfile,
   hideBskyReply,
@@ -31,6 +44,7 @@ import {
   normalizeBskyActorSummary,
   searchBskyActors,
   searchBskyPosts,
+  syncBskyMutedWord,
   updateBskyNotificationsSeen,
   updateBskyProfile,
 } from './bluesky.js';
@@ -56,7 +70,9 @@ import {
   getListAccounts,
   getMutes,
   getRelationships,
+  getStatus,
   getStatusContext,
+  getTimeline,
   getUserLists,
   lookupAccountByAcct,
   muteAccount,
@@ -73,8 +89,10 @@ import { feedStore, hydrateCachedModeration, persistCachedFilters, purgeModerate
 import { connectionStore } from '../state/sanctuary/connection.js';
 import {
   deleteSanctuaryLinkedPost,
+  fetchSanctuaryKeywordFilters,
   fetchSanctuaryLinkedPosts,
   requestSocialBridge,
+  saveSanctuaryKeywordFilters,
   saveSanctuaryLinkedPost,
   syncMastodonUserProfileToSanctuary,
 } from './sanctuary.js';
@@ -263,7 +281,7 @@ export function findUniqueCrossPostMatches(primaryItems, secondaryItems) {
   for (const item of secondaryItems || []) {
     const text = crossPostText(item);
     const timestamp = crossPostTimestamp(item);
-    if (text.length < 20 || !Number.isFinite(timestamp) || !item?.id) continue;
+    if (text.length < 3 || !Number.isFinite(timestamp) || !item?.id) continue;
     const bucket = secondariesByText.get(text) || [];
     bucket.push({ item, timestamp });
     secondariesByText.set(text, bucket);
@@ -274,7 +292,7 @@ export function findUniqueCrossPostMatches(primaryItems, secondaryItems) {
   for (const item of primaryItems || []) {
     const text = crossPostText(item);
     const timestamp = crossPostTimestamp(item);
-    if (text.length < 20 || !Number.isFinite(timestamp) || !item?.id) continue;
+    if (text.length < 3 || !Number.isFinite(timestamp) || !item?.id) continue;
     const row = { item, text, timestamp };
     primaryRows.push(row);
     const bucket = primariesByText.get(text) || [];
@@ -344,29 +362,57 @@ async function fetchBlueskyRecoveryPosts(account) {
   return posts;
 }
 
-async function fetchThreadsRecoveryPosts() {
+async function fetchThreadsRecoveryPosts(limit = 100) {
   const { threads } = await getClientAdapters();
   if (!threads) return [];
-  return threads.fetchOwnPosts(100);
+  const items = await threads.fetchOwnPosts(limit, { includeInsights: false });
+  return (Array.isArray(items) ? items : []).filter((it) => hasRenderablePostContent(it) && !isRepostUnifiedItem(it));
 }
+
+const CROSSPOST_RECOVERY_REFRESH_MS = 6 * 60 * 60 * 1000;
 
 export async function recoverUniqueCrossPostLinks() {
   if (crossPostRecoveryPromise) return crossPostRecoveryPromise;
   crossPostRecoveryPromise = (async () => {
-    if (await kvGet(CROSSPOST_RECOVERY_KEY, false)) return { recovered: 0, skipped: true };
-
     const mastodon = await getAuthenticatedAccount('fediverse');
     const bluesky = await getAuthenticatedAccount('bluesky');
     const threads = await getAuthenticatedAccount('threads');
     if (!mastodon || (!bluesky && !threads)) return { recovered: 0, skipped: true };
 
+    const platformSig = ['mastodon', bluesky ? 'bluesky' : '', threads ? 'threads' : ''].filter(Boolean).join('+');
+    const prevState = await kvGet(CROSSPOST_RECOVERY_KEY, null);
+    const now = Date.now();
+    const sameSig = prevState === true || (prevState && typeof prevState === 'object' && prevState.sig === platformSig);
+    const lastRunAt = prevState && typeof prevState === 'object' ? Number(prevState.lastRunAt || 0) : 0;
+    if (sameSig && (prevState === true || (lastRunAt > 0 && now - lastRunAt < CROSSPOST_RECOVERY_REFRESH_MS))) {
+      return { recovered: 0, skipped: true };
+    }
+    const recentOnly = Boolean(sameSig && lastRunAt > 0);
+
     const requests = [
-      fetchMastodonRecoveryPosts(mastodon).then((items) => ['mastodon', items]),
+      (recentOnly
+        ? getAccountStatuses({
+            instanceUrl: mastodon.meta.instanceUrl || 'https://mastodon.social',
+            accessToken: mastodon.secrets.accessToken,
+            accountId: mastodon.meta.userId || mastodon.meta.acct || mastodon.meta.handle,
+            excludeReblogs: true,
+            limit: 40,
+          }).then((rows) => rows.map((row) => toUnifiedItem(row)))
+        : fetchMastodonRecoveryPosts(mastodon)
+      ).then((items) => ['mastodon', items]),
       ...(bluesky
-        ? [fetchBlueskyRecoveryPosts(bluesky).then((items) => ['bluesky', items])]
+        ? [(recentOnly
+            ? getBskyAuthorFeed({
+                actor: bluesky.meta.did || bluesky.meta.handle || bluesky.meta.acct,
+                limit: 40,
+                filter: 'posts_with_replies',
+                ...getBskyReadOpts(bluesky),
+              }).then((r) => (r.items || []).map((it) => toUnifiedItem(it)))
+            : fetchBlueskyRecoveryPosts(bluesky)
+          ).then((items) => ['bluesky', items])]
         : []),
       ...(threads
-        ? [fetchThreadsRecoveryPosts().then((items) => ['threads', items])]
+        ? [fetchThreadsRecoveryPosts(recentOnly ? 40 : 100).then((items) => ['threads', items])]
         : []),
     ];
     const settled = await Promise.allSettled(requests);
@@ -427,7 +473,7 @@ export async function recoverUniqueCrossPostLinks() {
       }
     }
     if (errors.length === 0) {
-      await kvSet(CROSSPOST_RECOVERY_KEY, true);
+      await kvSet(CROSSPOST_RECOVERY_KEY, { sig: platformSig, lastRunAt: Date.now() });
     }
     let serverSynced = false;
     try {
@@ -541,18 +587,10 @@ export async function enrichUnifiedItemsMetrics(items = []) {
   const threadsToken = threadsAuth?.secrets?.accessToken || '';
   if (threadsIds.size > 0 && threadsToken) {
     const tids = [...threadsIds].slice(0, 25);
-    await Promise.allSettled(
-      tids.map(async (pid) => {
-        const res = await getThreadsPostInsights({ postId: pid, accessToken: threadsToken }).catch(() => null);
-        if (res && typeof res === 'object') {
-          threadsMetrics[pid] = {
-            likes: Number(res.likes || 0),
-            replies: Number(res.replies || 0),
-            reposts: Number(res.reposts || 0),
-          };
-        }
-      })
-    );
+    const batchRes = await getThreadsPostsInsightsBatch({ postIds: tids, accessToken: threadsToken }).catch(() => ({}));
+    if (batchRes && typeof batchRes === 'object') {
+      Object.assign(threadsMetrics, batchRes);
+    }
   }
 
   return items.map((item, idx) => {
@@ -576,11 +614,13 @@ export async function enrichUnifiedItemsMetrics(items = []) {
         reposts: Number(baseMetrics.reposts || 0),
       },
     };
-    if (link.blueskyUri && bskyMetrics[link.blueskyUri]) {
-      breakdown.bluesky = { ...bskyMetrics[link.blueskyUri] };
+    const bM = link.blueskyUri ? (bskyMetrics[link.blueskyUri] || prevBd?.bluesky) : null;
+    if (bM) {
+      breakdown.bluesky = { ...bM };
     }
-    if (link.threadsPostId && threadsMetrics[link.threadsPostId]) {
-      breakdown.threads = { ...threadsMetrics[link.threadsPostId] };
+    const tM = link.threadsPostId ? (threadsMetrics[link.threadsPostId] || prevBd?.threads) : null;
+    if (tM) {
+      breakdown.threads = { ...tM };
     }
 
     const keys = Object.keys(breakdown);
@@ -1270,37 +1310,116 @@ export async function deleteUnified(itemOrId) {
   return { deleted: true, warnings, retryQueue: retries };
 }
 
+async function collectBskyMediaFromAttachments(attachments = []) {
+  const bskyMedia = [];
+  for (const att of (Array.isArray(attachments) ? attachments : []).slice(0, 4)) {
+    const mime = String(att?.mime_type || att?.mimeType || '');
+    const srcUrl = att?.url || att?.fullsize || att?.thumb || '';
+    if (srcUrl && (!mime || mime.startsWith('image/')) && isAllowedSocialUrl(srcUrl)) {
+      try {
+        const res = await fetch(srcUrl);
+        const ctype = String(res.headers?.get?.('content-type') || mime || 'image/jpeg').toLowerCase();
+        if (res.ok && ctype.startsWith('image/')) {
+          const blob = await res.blob();
+          if (blob && blob.size > 0) {
+            bskyMedia.push({ blob, mimeType: blob.type || mime || 'image/jpeg', altText: att.alt_text || att.altText || '' });
+          }
+        }
+      } catch {
+        // Skip unreachable image bytes and still republish edited text
+      }
+    }
+  }
+  return bskyMedia;
+}
+
 export async function editUnified(
-  statusId,
+  itemOrId,
   draft,
   spoilerText = '',
-  { replaceBridges = false, replaceBluesky = undefined, replaceThreads = undefined } = {}
+  { replaceBridges = true, replaceBluesky = undefined, replaceThreads = undefined } = {}
 ) {
-  const cleanId = String(statusId || '').replace(/^mastodon:/, '');
+  const item = typeof itemOrId === 'object' && itemOrId !== null ? toUnifiedItem(itemOrId) : null;
+  const rawId = typeof itemOrId === 'string' ? itemOrId : (item?.id || '');
+  const isBskyStandalone =
+    item?.protocol === 'bluesky'
+    || rawId.startsWith('bluesky:')
+    || rawId.startsWith('at://');
+
+  const { masto, bsky, threads } = await getClientAdapters();
+
+  if (isBskyStandalone) {
+    if (!bsky) throw new Error('Connect Bluesky to edit Bluesky posts.');
+    const bskyUri = String(item?._meta?.bluesky?.uri || item?.uri || rawId.replace(/^bluesky:/, '')).trim();
+    if (!bskyUri) throw new Error('Missing Bluesky post URI.');
+
+    const attachments = Array.isArray(item?.attachments) ? item.attachments : [];
+    const bskyMedia = await collectBskyMediaFromAttachments(attachments);
+    let resolvedCard = null;
+    if (bskyMedia.length === 0) {
+      const existingCard = item?._meta?.linkCard;
+      if (existingCard?.url && String(existingCard.url).startsWith('https://')) {
+        resolvedCard = { ...existingCard };
+      } else {
+        const firstUrl = extractFirstHttpsUrl(draft);
+        if (firstUrl) {
+          resolvedCard = await fetchLinkPreview(firstUrl).catch(() => null);
+        }
+      }
+    }
+
+    await bsky.delete({ uri: bskyUri });
+    const bRes = await publishBskySegments({
+      bsky,
+      textParts: [draft],
+      media: bskyMedia,
+      resolvedCard: bskyMedia.length === 0 ? resolvedCard : null,
+    });
+    const firstRef = bRes.refs?.[0] || {};
+    const firstItem = bRes.items?.[0]
+      ? toUnifiedItem(bRes.items[0])
+      : toUnifiedItem({
+          id: firstRef.uri ? `bluesky:${firstRef.uri}` : `bluesky:${bskyUri}`,
+          protocol: 'bluesky',
+          content_text: draft,
+          author: item?.author || {},
+          attachments,
+          created_at: new Date().toISOString(),
+          _meta: {
+            bluesky: { uri: firstRef.uri || bskyUri, cid: firstRef.cid || '' },
+            linkedIds: { blueskyUri: firstRef.uri || bskyUri, blueskyCid: firstRef.cid || '' },
+          },
+        });
+    firstItem._replacedId = rawId || `bluesky:${bskyUri}`;
+    return firstItem;
+  }
+
+  const cleanId = String(item?._meta?.mastodon?.statusId || rawId || '').replace(/^mastodon:/, '');
   const doBsky = replaceBluesky !== undefined ? Boolean(replaceBluesky) : Boolean(replaceBridges);
   const doThreads = replaceThreads !== undefined ? Boolean(replaceThreads) : Boolean(replaceBridges);
 
-  const { masto, bsky, threads } = await getClientAdapters();
   if (!masto) throw new Error('Connect Mastodon to edit posts.');
   const updated = await masto.edit(cleanId, draft, spoilerText);
 
   const canonId = updated.id || `mastodon:${cleanId}`;
   const group = await findLocalLinkedPostGroup(canonId);
   const rootLink = group[0] || (await findLocalLinkedPost(`mastodon:${cleanId}`)) || null;
+  const itemLinked = item?._meta?.linkedIds || {};
   const warnings = [];
   const visibility = String(updated._meta?.mastodon?.visibility || 'public').toLowerCase();
 
-  let bskyUri = rootLink?.blueskyUri || '';
-  let bskyCid = rootLink?.blueskyCid || '';
-  let threadsPostId = rootLink?.threadsPostId || '';
+  let bskyUri = rootLink?.blueskyUri || itemLinked.blueskyUri || '';
+  let bskyCid = rootLink?.blueskyCid || itemLinked.blueskyCid || '';
+  let threadsPostId = rootLink?.threadsPostId || itemLinked.threadsPostId || '';
 
-  if ((doBsky || doThreads) && visibility !== 'direct') {
-    const oldBskyUris = [...new Set(group.map((g) => g.blueskyUri).filter(Boolean))];
-    if (bskyUri && !oldBskyUris.includes(bskyUri)) oldBskyUris.unshift(bskyUri);
-    const oldBskyCid = bskyCid;
-    const oldThreadsIds = [...new Set(group.map((g) => g.threadsPostId).filter(Boolean))];
-    if (threadsPostId && !oldThreadsIds.includes(threadsPostId)) oldThreadsIds.unshift(threadsPostId);
+  const oldBskyUris = [...new Set([bskyUri, ...group.map((g) => g.blueskyUri)].filter(Boolean))];
+  const oldBskyCid = bskyCid;
+  const oldThreadsIds = [...new Set([threadsPostId, ...group.map((g) => g.threadsPostId)].filter(Boolean))];
 
+  const shouldReplaceBsky = doBsky && Boolean(bsky) && visibility !== 'direct' && oldBskyUris.length > 0;
+  const shouldReplaceThreads = doThreads && Boolean(threads) && visibility !== 'direct' && oldThreadsIds.length > 0;
+
+  if (shouldReplaceBsky || shouldReplaceThreads) {
     const attachments = Array.isArray(updated.attachments) ? updated.attachments : [];
     const mastoMediaUrls = attachments.map((att) => att?.url).filter((u) => u && isAllowedSocialUrl(u));
     const threadsMedia = attachments
@@ -1325,7 +1444,11 @@ export async function editUnified(
     }
 
     let finalBskyRefs = oldBskyUris.map((uri, i) => ({ uri, cid: i === 0 ? oldBskyCid : '' }));
-    if (doBsky && bsky) {
+    let finalThreadsIds = [...oldThreadsIds];
+    let enqueuedRetry = false;
+
+    const replaceBskyTask = async () => {
+      if (!shouldReplaceBsky) return;
       const undeletedBsky = [];
       for (const uri of oldBskyUris) {
         try {
@@ -1334,49 +1457,40 @@ export async function editUnified(
           undeletedBsky.push(uri);
           const msg = `Bluesky: ${err?.message || 'Delete failed'}`;
           if (!warnings.includes(msg)) warnings.push(msg);
+          await enqueueLocalRetry({
+            id: `retry_delete_bluesky_${Date.now()}`,
+            operation: 'delete',
+            protocol: 'bluesky',
+            payload: { uri },
+            lastError: err?.message || 'Delete failed',
+          }).catch(() => {});
+          enqueuedRetry = true;
         }
       }
       if (undeletedBsky.length > 0) {
         finalBskyRefs = [{ uri: undeletedBsky[0], cid: undeletedBsky[0] === oldBskyUris[0] ? oldBskyCid : '' }];
-      } else {
-        finalBskyRefs = [];
-        const bskyMedia = [];
-        for (const att of attachments.slice(0, 4)) {
-          const mime = String(att?.mime_type || att?.mimeType || '');
-          if (att?.url && mime.startsWith('image/') && isAllowedSocialUrl(att.url)) {
-            try {
-              const res = await fetch(att.url);
-              const ctype = String(res.headers?.get?.('content-type') || mime).toLowerCase();
-              if (res.ok && ctype.startsWith('image/')) {
-                const blob = await res.blob();
-                if (blob && blob.size > 0) {
-                  bskyMedia.push({ blob, mimeType: blob.type || mime, altText: att.alt_text || att.altText || '' });
-                }
-              }
-            } catch {
-              // Skip unreachable image bytes and still republish edited text
-            }
-          }
-        }
-        try {
-          const bRes = await publishBskySegments({
-            bsky,
-            textParts: [draft],
-            media: bskyMedia,
-            resolvedCard: attachments.length === 0 ? resolvedCard : null,
-          });
-          finalBskyRefs = bRes.refs || [];
-        } catch (err) {
-          if (err instanceof PartialBridgePublishError) {
-            finalBskyRefs = err.published;
-          }
-          warnings.push(`Bluesky: ${err?.message || 'Republish failed'}`);
-        }
+        return;
       }
-    }
+      finalBskyRefs = [];
+      const bskyMedia = await collectBskyMediaFromAttachments(attachments);
+      try {
+        const bRes = await publishBskySegments({
+          bsky,
+          textParts: [draft],
+          media: bskyMedia,
+          resolvedCard: attachments.length === 0 ? resolvedCard : null,
+        });
+        finalBskyRefs = bRes.refs || [];
+      } catch (err) {
+        if (err instanceof PartialBridgePublishError) {
+          finalBskyRefs = err.published;
+        }
+        warnings.push(`Bluesky: ${err?.message || 'Republish failed'}`);
+      }
+    };
 
-    let finalThreadsIds = [...oldThreadsIds];
-    if (doThreads && threads) {
+    const replaceThreadsTask = async () => {
+      if (!shouldReplaceThreads) return;
       const undeletedThreads = [];
       for (const tid of oldThreadsIds) {
         try {
@@ -1385,29 +1499,44 @@ export async function editUnified(
           undeletedThreads.push(tid);
           const msg = `Threads: ${err?.message || 'Delete failed'}`;
           if (!warnings.includes(msg)) warnings.push(msg);
+          await enqueueLocalRetry({
+            id: `retry_delete_threads_${Date.now()}`,
+            operation: 'delete',
+            protocol: 'threads',
+            payload: { postId: tid },
+            lastError: err?.message || 'Delete failed',
+          }).catch(() => {});
+          enqueuedRetry = true;
         }
       }
       if (undeletedThreads.length > 0) {
         finalThreadsIds = [undeletedThreads[0]];
-      } else {
-        finalThreadsIds = [];
-        try {
-          const tRes = await publishThreadsSegments({
-            threads,
-            textParts: [draft],
-            media: threadsMedia,
-            uploadedUrls: mastoMediaUrls,
-            resolvedCard: attachments.length === 0 ? resolvedCard : null,
-            visibility,
-          });
-          finalThreadsIds = tRes.ids || [];
-        } catch (err) {
-          if (err instanceof PartialBridgePublishError) {
-            finalThreadsIds = err.published;
-          }
-          warnings.push(`Threads: ${err?.message || 'Republish failed'}`);
-        }
+        return;
       }
+      finalThreadsIds = [];
+      try {
+        const tRes = await publishThreadsSegments({
+          threads,
+          textParts: [draft],
+          media: threadsMedia,
+          uploadedUrls: mastoMediaUrls,
+          resolvedCard: attachments.length === 0 ? resolvedCard : null,
+          visibility,
+        });
+        finalThreadsIds = tRes.ids || [];
+      } catch (err) {
+        if (err instanceof PartialBridgePublishError) {
+          finalThreadsIds = err.published;
+        }
+        warnings.push(`Threads: ${err?.message || 'Republish failed'}`);
+      }
+    };
+
+    await Promise.all([replaceBskyTask(), replaceThreadsTask()]);
+
+    if (enqueuedRetry) {
+      const retries = await listLocalRetries().catch(() => []);
+      authStore.set({ retryQueue: retries });
     }
 
     bskyUri = finalBskyRefs[0]?.uri || '';
@@ -1707,9 +1836,9 @@ function cleanLinkedIdsObject(row) {
   };
 }
 
-export async function fetchUnifiedNotifications({ limit = 35 } = {}) {
+export async function fetchUnifiedNotifications({ limit = 60 } = {}) {
   const { masto, bsky, threads, threadsAuth } = await getClientAdapters();
-  const linkedRows = await listLocalLinkedPosts(40).catch(() => []);
+  const linkedRows = await listLocalLinkedPosts(80).catch(() => []);
   const byCanonical = new Map();
   const byMasto = new Map();
   const byBsky = new Map();
@@ -1723,9 +1852,9 @@ export async function fetchUnifiedNotifications({ limit = 35 } = {}) {
   const trackedPostIds = linkedRows.map((r) => r?.threadsPostId).filter(Boolean);
 
   const tasks = [];
-  if (masto) tasks.push(masto.fetchNotifications('', limit));
-  if (bsky) tasks.push(bsky.fetchNotifications('', limit));
-  if (threads) tasks.push(threads.fetchNotifications('', 12, { trackedPostIds }));
+  if (masto) tasks.push(masto.fetchNotifications('', Math.min(limit, 80)));
+  if (bsky) tasks.push(bsky.fetchNotifications('', Math.min(limit, 100)));
+  if (threads) tasks.push(threads.fetchNotifications('', Math.min(limit, 30), { trackedPostIds }));
 
   const settled = await Promise.allSettled(tasks);
   const collected = [];
@@ -1747,14 +1876,11 @@ export async function fetchUnifiedNotifications({ limit = 35 } = {}) {
   const threadsInsights = {};
   const threadsToken = threadsAuth?.secrets?.accessToken || '';
   if (threadsToken && trackedPostIds.length > 0) {
-    await Promise.allSettled(
-      [...new Set(trackedPostIds)].slice(0, 12).map(async (tid) => {
-        const ins = await getThreadsPostInsights({ postId: tid, accessToken: threadsToken }).catch(() => null);
-        if (ins && typeof ins === 'object') {
-          threadsInsights[String(tid)] = ins;
-        }
-      })
-    );
+    const tids = [...new Set(trackedPostIds)].slice(0, 25);
+    const batchRes = await getThreadsPostsInsightsBatch({ postIds: tids, accessToken: threadsToken }).catch(() => ({}));
+    if (batchRes && typeof batchRes === 'object') {
+      Object.assign(threadsInsights, batchRes);
+    }
   }
 
   for (const it of collected) {
@@ -2059,6 +2185,7 @@ export async function syncConnectedBlueskyProfile(patch = {}) {
     displayName: patch.displayName,
     description: patch.note,
     fields: patch.fields,
+    publicVisible: typeof patch.publicVisible === 'boolean' ? patch.publicVisible : undefined,
     avatarBlob: patch.avatarFile || null,
     bannerBlob: patch.headerFile || null,
     removeAvatar: Boolean(patch.removeAvatar),
@@ -2080,6 +2207,7 @@ export async function syncConnectedBlueskyProfile(patch = {}) {
       note: prof.note,
       noteText: prof.noteText,
       fields: prof.fields,
+      publicVisible: prof.publicVisible !== false,
       followersCount: prof.followersCount,
       followingCount: prof.followingCount,
       statusesCount: prof.statusesCount,
@@ -2087,6 +2215,65 @@ export async function syncConnectedBlueskyProfile(patch = {}) {
     });
   }
   return { synced: true, profile: prof || null };
+}
+
+export function isUnifiedPublicDiscoveryEnabled(accounts = []) {
+  const list = Array.isArray(accounts) ? accounts : [];
+  const fedi = list.filter((a) => a && (a.platform === 'fediverse' || a.platform === 'mastodon'));
+  const bsky = list.filter((a) => a && a.platform === 'bluesky');
+  if (fedi.length === 0 && bsky.length === 0) return false;
+  return (
+    fedi.every(
+      (a) =>
+        a.discoverable !== false
+        && a.indexable !== false
+        && !a.locked
+        && String(a.defaultVisibility || 'public').toLowerCase() === 'public'
+    )
+    && bsky.every((a) => a.publicVisible !== false)
+  );
+}
+
+export async function setUnifiedPublicDiscovery(enabled) {
+  const makePublic = Boolean(enabled);
+  const [mastoAuth, bskyAuth] = await Promise.all([
+    getAuthenticatedAccount('fediverse'),
+    getAuthenticatedAccount('bluesky'),
+  ]);
+  if (!mastoAuth && !bskyAuth) {
+    throw new Error('Connect Mastodon or Bluesky first.');
+  }
+  const tasks = [];
+  if (mastoAuth) {
+    tasks.push(
+      updateCredentials({
+        instanceUrl: mastoAuth.meta.instanceUrl,
+        accessToken: mastoAuth.secrets.accessToken,
+        discoverable: makePublic,
+        indexable: makePublic,
+        ...(makePublic ? { locked: false, defaultVisibility: 'public' } : {}),
+      }).then((updated) =>
+        upsertSocialAccount({
+          ...mastoAuth.meta,
+          id: mastoAuth.meta.id,
+          platform: 'fediverse',
+          discoverable: updated.discoverable,
+          indexable: updated.indexable,
+          locked: updated.locked,
+          defaultVisibility: updated.defaultVisibility,
+        })
+      )
+    );
+  }
+  if (bskyAuth) {
+    tasks.push(syncConnectedBlueskyProfile({ publicVisible: makePublic }));
+  }
+  await Promise.all(tasks);
+  return {
+    enabled: makePublic,
+    updatedMastodon: Boolean(mastoAuth),
+    updatedBluesky: Boolean(bskyAuth),
+  };
 }
 
 async function resolveMastoClientTarget(accountId, instanceUrl = 'https://mastodon.social', acct = '') {
@@ -2155,13 +2342,135 @@ function mergePinnedAndPosts(pinnedItems = [], postItems = []) {
   return out;
 }
 
+const replyParentContextCache = new Map();
+
+function hasPopulatedReplyContext(item) {
+  const ctx = item?._meta?.replyContext;
+  return Boolean(ctx && (ctx.text || ctx.authorHandle || ctx.authorName));
+}
+
+async function hydrateReplyContexts(
+  items = [],
+  { candidatePool = [], mastoOrigin = '', mastoToken = '', bskyAuth = null } = {}
+) {
+  const list = Array.isArray(items) ? items : [];
+  if (list.length === 0) return list;
+
+  const byKey = new Map();
+  const indexItem = (raw) => {
+    if (!raw || typeof raw !== 'object') return;
+    const u = raw._meta ? raw : toUnifiedItem(raw);
+    if (u.id) byKey.set(String(u.id), u);
+    if (u._meta?.mastodon?.statusId) byKey.set(`mastodon:${String(u._meta.mastodon.statusId)}`, u);
+    if (u._meta?.bluesky?.uri) byKey.set(`bluesky:${String(u._meta.bluesky.uri)}`, u);
+  };
+  for (const row of candidatePool) indexItem(row);
+  for (const it of list) indexItem(it);
+
+  const missingMastoIds = new Set();
+  const missingBskyUris = new Set();
+
+  for (const it of list) {
+    if (hasPopulatedReplyContext(it)) continue;
+    if (it.protocol === 'mastodon') {
+      const pid = String(it._meta?.mastodon?.inReplyToId || '').trim();
+      if (pid) {
+        const key = `mastodon:${pid}`;
+        if (!byKey.has(key) && !replyParentContextCache.has(key)) {
+          missingMastoIds.add(pid);
+        }
+      }
+    } else if (it.protocol === 'bluesky') {
+      const parentUri = String(it._meta?.bluesky?.reply?.parent?.uri || '').trim();
+      if (parentUri) {
+        const key = `bluesky:${parentUri}`;
+        if (!byKey.has(key) && !replyParentContextCache.has(key)) {
+          missingBskyUris.add(parentUri);
+        }
+      }
+    }
+  }
+
+  const fetches = [];
+  if (missingMastoIds.size > 0 && mastoOrigin) {
+    for (const pid of [...missingMastoIds].slice(0, 20)) {
+      fetches.push(
+        getStatus({
+          instanceUrl: mastoOrigin,
+          accessToken: mastoToken,
+          statusId: pid,
+        })
+          .then((status) => {
+            if (!status?.id || !(status.contentHtml || status.sanitizedHtml || status.author?.username)) {
+              return;
+            }
+            const ctx = buildSynthesizedReplyContext(toUnifiedItem(status));
+            replyParentContextCache.set(`mastodon:${pid}`, ctx);
+          })
+          .catch(() => {})
+      );
+    }
+  }
+
+  if (missingBskyUris.size > 0) {
+    const authOpts = bskyAuth ? getBskyReadOpts(bskyAuth) : {};
+    fetches.push(
+      getBskyPostsByUris({
+        uris: [...missingBskyUris].slice(0, 25),
+        ...authOpts,
+      })
+        .then((postsByUri) => {
+          for (const [uri, post] of Object.entries(postsByUri || {})) {
+            if (!post?.uri || !(post.text || post.author?.handle)) continue;
+            replyParentContextCache.set(`bluesky:${uri}`, buildSynthesizedReplyContext(toUnifiedItem(post)));
+          }
+        })
+        .catch(() => {})
+    );
+  }
+
+  if (fetches.length > 0) {
+    await Promise.allSettled(fetches);
+  }
+
+  return list.map((it) => {
+    if (hasPopulatedReplyContext(it)) return it;
+    let ctx = null;
+    if (it.protocol === 'mastodon') {
+      const pid = String(it._meta?.mastodon?.inReplyToId || '').trim();
+      if (pid) {
+        const key = `mastodon:${pid}`;
+        ctx = replyParentContextCache.get(key) || (byKey.has(key) ? buildSynthesizedReplyContext(byKey.get(key)) : null);
+      }
+    } else if (it.protocol === 'bluesky') {
+      const parentUri = String(it._meta?.bluesky?.reply?.parent?.uri || '').trim();
+      if (parentUri) {
+        const key = `bluesky:${parentUri}`;
+        ctx = replyParentContextCache.get(key) || (byKey.has(key) ? buildSynthesizedReplyContext(byKey.get(key)) : null);
+      }
+    }
+    if (!ctx) return it;
+    return {
+      ...it,
+      _meta: {
+        ...(it._meta || {}),
+        replyContext: ctx,
+      },
+    };
+  });
+}
+
 async function fetchBridgeBlueskyTabItems(bskyAuth, tab) {
   const actor = bskyAuth?.meta?.did || bskyAuth?.meta?.handle || bskyAuth?.meta?.acct || '';
   if (!actor) return [];
+  const filter = tab === 'media'
+    ? 'posts_with_media'
+    : (tab === 'boosts' || tab === 'replies' ? 'posts_with_replies' : 'posts_no_replies');
+  const limit = tab === 'boosts' ? 40 : (tab === 'replies' ? 30 : 20);
   const res = await getBskyAuthorFeed({
     actor,
-    limit: tab === 'boosts' ? 40 : 30,
-    filter: 'posts_with_replies',
+    limit,
+    filter,
     ...getBskyReadOpts(bskyAuth),
   }).catch(() => ({ items: [] }));
   const unified = (res.items || []).map((r) => toUnifiedItem(r));
@@ -2170,16 +2479,116 @@ async function fetchBridgeBlueskyTabItems(bskyAuth, tab) {
     return unified.filter(isBoostUnifiedItem).map((it) => hydrateOwnBskyRepostUri(it, ownDid));
   }
   if (tab === 'replies') {
-    return unified.filter((it) => !isBoostUnifiedItem(it) && isReplyUnifiedItem(it));
+    const repliesOnly = unified.filter((it) => !isBoostUnifiedItem(it) && isReplyUnifiedItem(it));
+    return hydrateReplyContexts(repliesOnly, { candidatePool: unified, bskyAuth });
+  }
+  if (tab === 'media') {
+    return unified.filter((it) => !isBoostUnifiedItem(it) && !isReplyUnifiedItem(it) && (it.attachments?.length || 0) > 0);
+  }
+  if (tab === 'posts') {
+    return unified.filter((it) => !isBoostUnifiedItem(it) && !isReplyUnifiedItem(it));
   }
   return [];
+}
+
+async function fetchBridgeThreadsTabItems(tab) {
+  if (tab !== 'posts' && tab !== 'media') return [];
+  try {
+    const { threads } = await getClientAdapters();
+    if (!threads) return [];
+    const own = await threads.fetchOwnPosts(20, { includeInsights: false }).catch(() => []);
+    const unified = (Array.isArray(own) ? own : [])
+      .map((r) => toUnifiedItem(r))
+      .filter((it) => hasRenderablePostContent(it) && !isRepostUnifiedItem(it) && !isReplyUnifiedItem(it));
+    if (tab === 'media') {
+      return unified.filter((it) => (it.attachments?.length || 0) > 0);
+    }
+    return unified;
+  } catch {
+    return [];
+  }
+}
+
+function linkAndMergeOwnCrossPosts(mastoItems = [], bskyItems = [], threadsItems = [], instanceUrl = '', storedLinks = []) {
+  const bskyMatches = bskyItems.length > 0 ? findUniqueCrossPostMatches(mastoItems, bskyItems) : new Map();
+  const threadsMatches = threadsItems.length > 0 ? findUniqueCrossPostMatches(mastoItems, threadsItems) : new Map();
+  const consumedBsky = new Set();
+  const consumedThreads = new Set();
+  const bskyByUri = new Map();
+  for (const it of bskyItems) {
+    const uri = String(it?._meta?.bluesky?.uri || '');
+    if (uri) bskyByUri.set(uri, it);
+  }
+  const threadsById = new Map();
+  for (const it of threadsItems) {
+    const pid = String(it?._meta?.threads?.postId || '');
+    if (pid) threadsById.set(pid, it);
+  }
+  const storedByMastoId = new Map();
+  for (const rec of storedLinks || []) {
+    if (rec?.mastodonStatusId) storedByMastoId.set(String(rec.mastodonStatusId), rec);
+    if (rec?.canonicalId) storedByMastoId.set(String(rec.canonicalId), rec);
+  }
+
+  const mergedMasto = mastoItems.map((m) => {
+    const mid = String(m?.id || '');
+    const mSid = String(m?._meta?.mastodon?.statusId || mid.replace(/^mastodon:/, ''));
+    const stored = storedByMastoId.get(mSid) || storedByMastoId.get(mid) || null;
+    const bMatch = (stored?.blueskyUri ? bskyByUri.get(String(stored.blueskyUri)) : null) || bskyMatches.get(mid) || null;
+    const tMatch = (stored?.threadsPostId ? threadsById.get(String(stored.threadsPostId)) : null) || threadsMatches.get(mid) || null;
+    if (!bMatch && !tMatch && !stored) return m;
+
+    const prevLinked = m?._meta?.linkedIds || {};
+    const bUri = bMatch?._meta?.bluesky?.uri || stored?.blueskyUri || prevLinked.blueskyUri || '';
+    const bCid = bMatch?._meta?.bluesky?.cid || stored?.blueskyCid || prevLinked.blueskyCid || '';
+    const tPid = tMatch?._meta?.threads?.postId || stored?.threadsPostId || prevLinked.threadsPostId || '';
+    if (bMatch?.id) consumedBsky.add(String(bMatch.id));
+    if (tMatch?.id) consumedThreads.add(String(tMatch.id));
+
+    let nextItem = m;
+    if (bMatch) nextItem = mergeUnifiedPostMetadata(nextItem, bMatch);
+    if (tMatch) nextItem = mergeUnifiedPostMetadata(nextItem, tMatch);
+
+    const nextLinked = {
+      ...(nextItem?._meta?.linkedIds || {}),
+      ...prevLinked,
+      ...(mSid ? { mastodonStatusId: mSid } : {}),
+      ...(bUri ? { blueskyUri: bUri, ...(bCid ? { blueskyCid: bCid } : {}) } : {}),
+      ...(tPid ? { threadsPostId: tPid } : {}),
+    };
+    const isNewlyDiscovered = Boolean((bMatch || tMatch) && (
+      String(stored?.blueskyUri || '') !== String(bUri || '')
+      || String(stored?.threadsPostId || '') !== String(tPid || '')
+    ));
+    if (mid && mSid && isNewlyDiscovered && (bUri || tPid)) {
+      void saveLocalLinkedPostOnDevice({
+        canonicalId: mid,
+        mastodonStatusId: mSid,
+        mastodonInstance: String(m?._meta?.mastodon?.instanceUrl || instanceUrl || ''),
+        blueskyUri: bUri,
+        blueskyCid: bCid,
+        threadsPostId: tPid,
+      }).catch(() => {});
+    }
+    return {
+      ...nextItem,
+      _meta: {
+        ...(nextItem._meta || {}),
+        linkedIds: nextLinked,
+      },
+    };
+  });
+
+  const standaloneBsky = bskyItems.filter((it) => !consumedBsky.has(String(it?.id || '')));
+  const standaloneThreads = threadsItems.filter((it) => !consumedThreads.has(String(it?.id || '')));
+  return { mergedMasto, standaloneBsky, standaloneThreads };
 }
 
 function sortTabStatuses(items = [], tab = 'posts') {
   if (tab === 'boosts') {
     return [...items].sort((a, b) => getBoostSortMs(b) - getBoostSortMs(a));
   }
-  if (tab === 'replies') {
+  if (tab === 'replies' || tab === 'posts' || tab === 'media') {
     return [...items].sort((a, b) => (Date.parse(b?.date_published || '') || 0) - (Date.parse(a?.date_published || '') || 0));
   }
   return items;
@@ -2195,6 +2604,7 @@ export async function fetchOwnStatuses(
     acct = '',
     federatedMastodonId = '',
     includeBridges = false,
+    skipMetricsEnrichment = false,
   } = {}
 ) {
   const isThreads = protocol === 'threads' || String(accountId || '').startsWith('threads:') || String(instanceUrl || '').includes('threads.net');
@@ -2244,7 +2654,12 @@ export async function fetchOwnStatuses(
       });
       let unifiedRows = rows.map((r) => toUnifiedItem(r));
       if (tab === 'boosts') unifiedRows = unifiedRows.filter(isBoostUnifiedItem);
-      else if (tab === 'replies') unifiedRows = unifiedRows.filter((it) => !isBoostUnifiedItem(it) && isReplyUnifiedItem(it));
+      else if (tab === 'replies') {
+        unifiedRows = await hydrateReplyContexts(
+          unifiedRows.filter((it) => !isBoostUnifiedItem(it) && isReplyUnifiedItem(it)),
+          { candidatePool: rows, mastoOrigin: targetOrigin, mastoToken: token }
+        );
+      }
       else if (tab === 'posts' || tab === 'media') unifiedRows = unifiedRows.filter((it) => !isBoostUnifiedItem(it));
       return enrichUnifiedItemsMetrics(unifiedRows);
     }
@@ -2272,18 +2687,21 @@ export async function fetchOwnStatuses(
       );
     }
     if (tab === 'replies') {
-      return unified.filter((it) => !isBoostUnifiedItem(it) && isReplyUnifiedItem(it));
+      return hydrateReplyContexts(
+        unified.filter((it) => !isBoostUnifiedItem(it) && isReplyUnifiedItem(it)),
+        { candidatePool: unified, bskyAuth }
+      );
     }
     return unified.filter((it) => !isBoostUnifiedItem(it));
   }
 
   const [{ targetId, targetOrigin, token }, bskyAuth] = await Promise.all([
     resolveMastoClientTarget(accountId, instanceUrl, acct),
-    includeBridges && !maxId && (tab === 'boosts' || tab === 'replies')
+    includeBridges && !maxId && (tab === 'posts' || tab === 'media' || tab === 'boosts' || tab === 'replies')
       ? getAuthenticatedAccount('bluesky')
       : Promise.resolve(null),
   ]);
-  const [rows, pinnedRows, bskyItems] = await Promise.all([
+  const [rows, pinnedRows, bskyItems, threadsItems, storedLinks] = await Promise.all([
     getAccountStatuses({
       instanceUrl: targetOrigin,
       accessToken: token,
@@ -2305,6 +2723,12 @@ export async function fetchOwnStatuses(
         }).catch(() => [])
       : Promise.resolve([]),
     bskyAuth ? fetchBridgeBlueskyTabItems(bskyAuth, tab) : Promise.resolve([]),
+    includeBridges && !maxId && (tab === 'posts' || tab === 'media')
+      ? fetchBridgeThreadsTabItems(tab)
+      : Promise.resolve([]),
+    includeBridges && !maxId && (tab === 'posts' || tab === 'media')
+      ? listLocalLinkedPosts(100).catch(() => [])
+      : Promise.resolve([]),
   ]);
 
   let items = rows.map((r) => toUnifiedItem(r));
@@ -2312,14 +2736,26 @@ export async function fetchOwnStatuses(
     const pinnedItems = pinnedRows
       .map((r) => toUnifiedItem(r))
       .filter((it) => Boolean(it?._meta?.mastodon?.pinned) && !isBoostUnifiedItem(it));
-    items = mergePinnedAndPosts(
-      pinnedItems,
-      items.filter((it) => !isBoostUnifiedItem(it) && !isReplyUnifiedItem(it))
+    const basePosts = items.filter((it) => !isBoostUnifiedItem(it) && !isReplyUnifiedItem(it));
+    const { mergedMasto: mergedPinned } = linkAndMergeOwnCrossPosts(pinnedItems, bskyItems, threadsItems, targetOrigin, storedLinks);
+    const { mergedMasto, standaloneBsky } = linkAndMergeOwnCrossPosts(basePosts, bskyItems, threadsItems, targetOrigin, storedLinks);
+    const nonPinnedCombined = sortTabStatuses(
+      deduplicateUnifiedItems([...mergedMasto, ...standaloneBsky]),
+      'posts'
     );
+    items = mergePinnedAndPosts(mergedPinned, nonPinnedCombined);
   } else if (tab === 'media') {
-    items = items.filter((it) => !isBoostUnifiedItem(it));
+    const mediaBase = items.filter((it) => !isBoostUnifiedItem(it));
+    const { mergedMasto, standaloneBsky } = linkAndMergeOwnCrossPosts(mediaBase, bskyItems, threadsItems, targetOrigin, storedLinks);
+    items = sortTabStatuses(
+      deduplicateUnifiedItems([...mergedMasto, ...standaloneBsky]),
+      'media'
+    );
   } else if (tab === 'replies') {
-    items = items.filter((it) => !isBoostUnifiedItem(it) && isReplyUnifiedItem(it));
+    items = await hydrateReplyContexts(
+      items.filter((it) => !isBoostUnifiedItem(it) && isReplyUnifiedItem(it)),
+      { candidatePool: rows, mastoOrigin: targetOrigin, mastoToken: token, bskyAuth }
+    );
     if (bskyItems.length > 0) {
       items = sortTabStatuses(deduplicateUnifiedItems([...items, ...bskyItems]), 'replies');
     }
@@ -2331,7 +2767,7 @@ export async function fetchOwnStatuses(
     items = sortTabStatuses(items, 'boosts');
   }
 
-  return enrichUnifiedItemsMetrics(items);
+  return skipMetricsEnrichment ? items : enrichUnifiedItemsMetrics(items);
 }
 
 export async function fetchLists() {
@@ -2422,12 +2858,21 @@ export async function removeAccountFromMastodonList(listId, accountId) {
   return removeAccountsFromList({ instanceUrl: mastoAuth.meta.instanceUrl, accessToken: mastoAuth.secrets.accessToken, listId, accountIds: [accountId] });
 }
 
+function filterRuleDedupeKey(norm) {
+  const kws = Array.isArray(norm?.keywords) ? norm.keywords : [];
+  const termsKey = kws.length > 1
+    ? kws.map((k) => String(k || '').trim().toLowerCase()).filter(Boolean).sort().join('|')
+    : String(norm?.phrase || kws[0] || norm?.title || '').trim().toLowerCase();
+  return `${termsKey}:${norm?.filter_action || 'hide'}`;
+}
+
 function normalizeFilterRuleRecord(rule) {
   if (!rule || typeof rule !== 'object') return null;
   const kws = Array.isArray(rule.keywords)
     ? rule.keywords.map((k) => String(typeof k === 'string' ? k : k?.keyword || '').trim()).filter(Boolean)
     : [];
   const phrase = String(rule.phrase || kws[0] || rule.title || '').trim();
+  if (!phrase && kws.length === 0) return null;
   return {
     ...rule,
     id: String(rule.id || `local_${phrase}`),
@@ -2446,49 +2891,144 @@ function syncStoreFilters(rules) {
 }
 
 export async function fetchKeywordFilters() {
-  const { mastoAuth } = await getClientAdapters();
-  if (!mastoAuth) return syncStoreFilters(await listLocalFilterRules());
-  const rules = await getFilters({ instanceUrl: mastoAuth.meta.instanceUrl, accessToken: mastoAuth.secrets.accessToken });
-  return syncStoreFilters(rules);
+  const conn = connectionStore.get();
+  const nodeUrl = conn.mode === 'online' ? conn.nodeUrl : '';
+  const [{ mastoAuth, bskyAuth }, localRules, serverRules] = await Promise.all([
+    getClientAdapters(),
+    listLocalFilterRules().catch(() => []),
+    nodeUrl ? fetchSanctuaryKeywordFilters({ nodeUrl }).catch(() => []) : Promise.resolve([]),
+  ]);
+
+  const remoteTasks = [];
+  if (mastoAuth?.secrets?.accessToken) {
+    remoteTasks.push(
+      getFilters({
+        instanceUrl: mastoAuth.meta.instanceUrl,
+        accessToken: mastoAuth.secrets.accessToken,
+      }).catch(() => [])
+    );
+  }
+  if (bskyAuth?.secrets?.accessJwt) {
+    remoteTasks.push(
+      getBskyMutedWords(getBskyReadOpts(bskyAuth)).catch(() => [])
+    );
+  }
+  const remoteRules = remoteTasks.length > 0 ? (await Promise.all(remoteTasks)).flat() : [];
+
+  const combined = [];
+  const seen = new Set();
+  for (const r of [...remoteRules, ...serverRules, ...localRules]) {
+    const norm = normalizeFilterRuleRecord(r);
+    if (!norm) continue;
+    const key = filterRuleDedupeKey(norm);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    combined.push(norm);
+  }
+
+  // Do not overwrite hydrated KV filter rules with empty state before social auth finishes loading.
+  const existingFilters = feedStore.get().filters || [];
+  if (!mastoAuth && !bskyAuth && combined.length === 0 && existingFilters.length > 0) {
+    return existingFilters;
+  }
+
+  const synced = syncStoreFilters(combined);
+  if (nodeUrl && synced.length > serverRules.length) {
+    void saveSanctuaryKeywordFilters(synced, { nodeUrl }).catch(() => {});
+  }
+  return synced;
 }
 
 export async function addKeywordFilter({ title, phrase, filterAction = 'hide' }) {
-  let created;
-  const { mastoAuth } = await getClientAdapters();
-  if (!mastoAuth) {
-    created = { id: `local_${Date.now()}`, title: title || phrase, phrase, filter_action: filterAction };
-    await saveLocalFilterRule(created);
-  } else {
-    created = await createFilterRule({
-      instanceUrl: mastoAuth.meta.instanceUrl,
-      accessToken: mastoAuth.secrets.accessToken,
-      title: title || phrase,
+  let remoteCreated = null;
+  const { mastoAuth, bskyAuth } = await getClientAdapters();
+  if (mastoAuth) {
+    try {
+      remoteCreated = await createFilterRule({
+        instanceUrl: mastoAuth.meta.instanceUrl,
+        accessToken: mastoAuth.secrets.accessToken,
+        title: title || phrase,
+        phrase,
+        filterAction,
+      });
+    } catch {
+      remoteCreated = null;
+    }
+  }
+  if (bskyAuth?.secrets?.accessJwt && String(filterAction || 'hide').toLowerCase() === 'hide') {
+    void syncBskyMutedWord({
+      ...getBskyReadOpts(bskyAuth),
       phrase,
-      filterAction,
-    });
+      remove: false,
+    }).catch(() => {});
   }
-  const norm = normalizeFilterRuleRecord({
-    ...created,
-    phrase: created?.phrase || phrase,
-    title: created?.title || title || phrase,
-    filter_action: created?.filter_action || filterAction,
-  });
+  const localRecord = {
+    id: remoteCreated?.id ? String(remoteCreated.id) : `local_${Date.now()}`,
+    ...(remoteCreated?.mastodon_filter_id ? { mastodon_filter_id: String(remoteCreated.mastodon_filter_id) } : {}),
+    title: remoteCreated?.title || title || phrase,
+    phrase: remoteCreated?.phrase || phrase,
+    filter_action: remoteCreated?.filter_action || filterAction,
+  };
+  await saveLocalFilterRule(localRecord).catch(() => {});
+  const norm = normalizeFilterRuleRecord(localRecord);
   if (norm) {
-    const next = [...(feedStore.get().filters || []).filter((f) => String(f.id) !== String(norm.id)), norm];
-    syncStoreFilters(next);
+    const key = filterRuleDedupeKey(norm);
+    const next = [
+      ...(feedStore.get().filters || []).filter(
+        (f) => String(f.id) !== String(norm.id) && filterRuleDedupeKey(f) !== key
+      ),
+      norm,
+    ];
+    const synced = syncStoreFilters(next);
+    if (connectionStore.get().mode === 'online') {
+      void saveSanctuaryKeywordFilters(synced, { nodeUrl: connectionStore.get().nodeUrl }).catch(() => {});
+    }
   }
-  return norm || created;
+  return norm || localRecord;
 }
 
 export async function removeKeywordFilter(filterId) {
-  const { mastoAuth } = await getClientAdapters();
-  if (!mastoAuth || String(filterId).startsWith('local_')) {
-    await deleteLocalFilterRule(filterId);
-  } else {
-    await deleteFilterRule({ instanceUrl: mastoAuth.meta.instanceUrl, accessToken: mastoAuth.secrets.accessToken, filterId });
+  const idStr = String(filterId || '');
+  const existing = (feedStore.get().filters || []).find((f) => String(f.id) === idStr);
+  const { mastoAuth, bskyAuth } = await getClientAdapters();
+  if (mastoAuth && !idStr.startsWith('local_') && !idStr.startsWith('bsky_mw_')) {
+    await deleteFilterRule({
+      instanceUrl: mastoAuth.meta.instanceUrl,
+      accessToken: mastoAuth.secrets.accessToken,
+      filterId: existing?.mastodon_filter_id || idStr,
+    }).catch(() => {});
   }
-  const next = (feedStore.get().filters || []).filter((f) => String(f.id) !== String(filterId));
-  syncStoreFilters(next);
+  if (bskyAuth?.secrets?.accessJwt && existing) {
+    const termsToRemove = Array.isArray(existing.keywords) && existing.keywords.length > 0
+      ? existing.keywords
+      : [existing.phrase || existing.title].filter(Boolean);
+    for (const term of termsToRemove) {
+      void syncBskyMutedWord({
+        ...getBskyReadOpts(bskyAuth),
+        phrase: term,
+        remove: true,
+      }).catch(() => {});
+    }
+  }
+  await deleteLocalFilterRule(idStr).catch(() => {});
+  if (existing?.mastodon_filter_id && String(existing.mastodon_filter_id) !== idStr) {
+    await deleteLocalFilterRule(String(existing.mastodon_filter_id)).catch(() => {});
+  }
+  const localRows = await listLocalFilterRules().catch(() => []);
+  const normPhrase = String(existing?.phrase || existing?.title || '').trim().toLowerCase();
+  for (const row of localRows) {
+    const rId = String(row?.id || '');
+    const rMasto = String(row?.mastodon_filter_id || '');
+    const rPhrase = String(row?.phrase || row?.title || '').trim().toLowerCase();
+    if (rId === idStr || (rMasto && rMasto === idStr) || (normPhrase && rPhrase === normPhrase)) {
+      await deleteLocalFilterRule(rId).catch(() => {});
+    }
+  }
+  const next = (feedStore.get().filters || []).filter((f) => String(f.id) !== idStr);
+  const synced = syncStoreFilters(next);
+  if (connectionStore.get().mode === 'online') {
+    void saveSanctuaryKeywordFilters(synced, { nodeUrl: connectionStore.get().nodeUrl }).catch(() => {});
+  }
   return true;
 }
 
@@ -3558,6 +4098,44 @@ export async function searchAccountsAndPosts(query) {
   return { accounts, statuses, hashtags };
 }
 
+export async function fetchHashtagPosts(rawTag, { limit = 30 } = {}) {
+  const cleanTag = String(rawTag || '').replace(/^#/, '').trim();
+  if (!cleanTag) return [];
+  const { mastoAuth, bskyAuth, threads } = await getClientAdapters();
+  const origin = mastoAuth?.meta?.instanceUrl || 'https://mastodon.social';
+  const token = mastoAuth?.secrets?.accessToken || '';
+  const readOpts = getBskyReadOpts(bskyAuth);
+  const wantThreads = Boolean(threads && authStore.get().isThreadsConnected);
+  const hashQuery = `#${cleanTag}`;
+
+  const [fediRes, bskyRes, thrRes] = await Promise.allSettled([
+    getTimeline({
+      instanceUrl: origin,
+      accessToken: token,
+      stream: 'hashtag',
+      hashtag: cleanTag,
+      limit,
+    }).then((r) => (r?.items || []).map((it) => toUnifiedItem(it))),
+    searchBskyPosts({ ...readOpts, query: hashQuery, limit }).then((r) =>
+      (r?.items || []).map((it) => toUnifiedItem(it))
+    ),
+    wantThreads
+      ? threads.searchPosts(hashQuery, Math.min(limit, 20)).then((rows) =>
+          (Array.isArray(rows) ? rows : []).map((it) => toUnifiedItem(it))
+        )
+      : Promise.resolve([]),
+  ]);
+
+  const combined = [
+    ...(fediRes.status === 'fulfilled' ? fediRes.value : []),
+    ...(bskyRes.status === 'fulfilled' ? bskyRes.value : []),
+    ...(thrRes.status === 'fulfilled' ? thrRes.value : []),
+  ];
+  return deduplicateUnifiedItems(combined).sort(
+    (a, b) => (Date.parse(b?.date_published || '') || 0) - (Date.parse(a?.date_published || '') || 0)
+  );
+}
+
 export async function fetchSocialBridgeStatus() {
   const retries = await listLocalRetries().catch(() => []);
   authStore.set({ retryQueue: retries });
@@ -3739,7 +4317,7 @@ export async function syncRecentUserPostsToSanctuary({ preloadedItems = null, fr
   }
 
   const combined = [...(Array.isArray(freshItems) ? freshItems : []), ...fetched];
-  const recentPosts = [];
+  const collected = [];
   const seenTexts = new Set();
   for (const rawItem of combined) {
     if (!rawItem || typeof rawItem !== 'object') continue;
@@ -3748,12 +4326,16 @@ export async function syncRecentUserPostsToSanctuary({ preloadedItems = null, fr
     const text = String(item.content_text || item.text || '').trim();
     if (!text || seenTexts.has(text)) continue;
     seenTexts.add(text);
-    recentPosts.push({
+    const createdAt = String(item.date_published || item.createdAt || '').trim();
+    const parsedTs = Date.parse(createdAt);
+    collected.push({
       text,
-      created_at: String(item.date_published || item.createdAt || '').trim(),
+      created_at: createdAt,
+      _ts: Number.isFinite(parsedTs) ? parsedTs : 0,
     });
-    if (recentPosts.length >= 3) break;
   }
+  collected.sort((a, b) => b._ts - a._ts);
+  const recentPosts = collected.slice(0, 3).map(({ text, created_at }) => ({ text, created_at }));
 
   if (fetchFailed && recentPosts.length === 0) {
     return { synced: false, count: 0 };
@@ -3820,45 +4402,56 @@ export async function fetchSemanticFeedScores({
   dampenConcepts = [],
   positiveExamples = [],
   negativeExamples = [],
+  includeAxes = false,
+  timeoutMs = 4000,
 } = {}) {
   const boost = Array.isArray(boostConcepts) ? boostConcepts : [];
   const dampen = Array.isArray(dampenConcepts) ? dampenConcepts : [];
   const posEx = Array.isArray(positiveExamples) ? positiveExamples.slice(0, 40) : [];
   const negEx = Array.isArray(negativeExamples) ? negativeExamples.slice(0, 25) : [];
   if (
-    (boost.length === 0 && dampen.length === 0 && posEx.length === 0 && negEx.length === 0) ||
+    (!includeAxes && boost.length === 0 && dampen.length === 0 && posEx.length === 0 && negEx.length === 0) ||
     !Array.isArray(items) ||
     items.length === 0
   ) {
-    return { scores: {}, tasteScores: {} };
+    return { scores: {}, axisScores: {}, tasteScores: {} };
   }
   const payloadItems = items
-    .filter((it) => it && it.id && (it.content_text || it.text || it._meta?.linkCard?.title))
+    .filter((it) => it && it.id && (it.content_text || it.text || it._meta?.linkCard?.title || it._meta?.quotePost?.text))
     .slice(0, 120)
     .map((it) => ({
       id: String(it.id),
       text: [
         it.content_text || it.text || '',
+        it._meta?.mastodon?.spoilerText || it.spoilerText || '',
         it._meta?.linkCard?.title || '',
         it._meta?.linkCard?.description || '',
+        it._meta?.quotePost?.text || '',
+        ...(Array.isArray(it.attachments) ? it.attachments.map((a) => a?.alt_text || '').filter(Boolean) : []),
       ]
         .filter(Boolean)
         .join(' ')
         .slice(0, 600),
     }));
-  if (payloadItems.length === 0) return { scores: {}, tasteScores: {} };
-  const res = await requestSocialBridge('/feed/semantic-score', {
-    items: payloadItems,
-    boostConcepts: boost,
-    dampenConcepts: dampen,
-    positiveExamples: posEx,
-    negativeExamples: negEx,
-  });
+  if (payloadItems.length === 0) return { scores: {}, axisScores: {}, tasteScores: {} };
+  const res = await requestSocialBridge(
+    '/feed/semantic-score',
+    {
+      items: payloadItems,
+      boostConcepts: boost,
+      dampenConcepts: dampen,
+      positiveExamples: posEx,
+      negativeExamples: negEx,
+      includeAxes: Boolean(includeAxes),
+    },
+    { timeoutMs }
+  );
   if (!res?.available) {
-    return { scores: {}, tasteScores: {} };
+    return { scores: {}, axisScores: {}, tasteScores: {} };
   }
   return {
     scores: typeof res.scores === 'object' && res.scores ? res.scores : {},
+    axisScores: typeof res.axisScores === 'object' && res.axisScores ? res.axisScores : {},
     tasteScores: typeof res.tasteScores === 'object' && res.tasteScores ? res.tasteScores : {},
   };
 }

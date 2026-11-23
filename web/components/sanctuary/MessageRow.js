@@ -1,11 +1,16 @@
 import { DEFAULT_AVATAR_DATA_URI } from '../../constants/avatars.js';
-import { applyScopedProgramTheme } from '../../constants/theme.js';
+import { applyScopedProgramTheme, clearScopedProgramTheme } from '../../constants/theme.js';
 import {
   resolveProgramAvatarUrl,
   resolveSanctuaryMediaUrl,
 } from '../../queries/sanctuary.js';
 import { createFediverseShareButton } from '../FediverseShareButton.js';
-import { createPortraitGrid, openMediaLightbox, updatePortraitGridToolbar } from './PortraitGrid.js';
+import {
+  createPortraitGrid,
+  MAX_IMAGES_PER_ROW,
+  openMediaLightbox,
+  updatePortraitGridToolbar,
+} from './PortraitGrid.js';
 
 export const LIVE_ROW_SELECTOR = '.message-row:not(#welcome-message):not(.typing-row):not(.thought-row)';
 
@@ -165,7 +170,9 @@ export function formatSharedPostForLlm(sharedPost, userNote = '') {
   const sp = normalizeSharedPostCard(sharedPost);
   const cleanNote = String(userNote || '').trim();
   if (!sp) return cleanNote;
-  const byline = `[Shared post by ${sp.authorName}${sp.authorHandle ? ` (${sp.authorHandle})` : ''}]`;
+  const byline = sp.network === 'web'
+    ? `[Shared webpage from ${sp.authorName}${sp.url ? ` (${sp.url})` : ''}]`
+    : `[Shared post by ${sp.authorName}${sp.authorHandle ? ` (${sp.authorHandle})` : ''}]`;
   const parts = [byline];
   if (sp.text) parts.push(sp.text);
   if (sp.mediaUrl) {
@@ -173,6 +180,40 @@ export function formatSharedPostForLlm(sharedPost, userNote = '') {
   }
   const block = parts.join('\n');
   return cleanNote ? `${block}\n\n${cleanNote}` : block;
+}
+
+/**
+ * Recover a shared-post card + user note from a flattened LLM text block when
+ * `msg.shared_post` metadata was stripped (e.g. legacy rerolled/edited turns).
+ */
+export function parseInlineSharedPostFallback(rawText) {
+  const text = String(rawText || '');
+  if (!text.startsWith('[Shared ')) return null;
+  const match = /^\[(Shared post by|Shared webpage from)\s+([^\n\]]+?)(?:\s+\((@[^\n)]+|https:\/\/[^\n)]+)\))?\]\n([\s\S]*)$/.exec(text);
+  if (!match) return null;
+  const isWeb = match[1] === 'Shared webpage from';
+  const authorName = match[2].trim();
+  const metaParen = (match[3] || '').trim();
+  const remainder = match[4] || '';
+  const splitIdx = remainder.indexOf('\n\n');
+  const blockBody = (splitIdx >= 0 ? remainder.slice(0, splitIdx) : remainder).trim();
+  const userNote = splitIdx >= 0 ? remainder.slice(splitIdx + 2).trim() : '';
+  const bodyLines = blockBody
+    .split('\n')
+    .filter((line) => !/^\[Image(?::\s*.*|\s+attached)\]$/.test(line.trim()));
+  const postText = bodyLines.join(' ').trim();
+  const sharedPost = normalizeSharedPostCard({
+    authorName,
+    authorHandle: !isWeb && metaParen.startsWith('@') ? metaParen : '',
+    authorAvatar: '',
+    text: postText,
+    mediaUrl: '',
+    mediaAlt: '',
+    url: isWeb && metaParen.startsWith('https://') ? metaParen : '',
+    network: isWeb ? 'web' : 'fediverse',
+  });
+  if (!sharedPost) return null;
+  return { sharedPost, userNote };
 }
 
 export function createSharedPostEmbedCard(sharedPost, { onRemove } = {}) {
@@ -487,7 +528,59 @@ export function highlightQuotedDialogue(rootEl) {
   }
 }
 
-function renderMarkdownInto(element, rawText) {
+const _SPECIAL_FENCE_RE = /```(sanctuary-plan|sanctuary-widget)[ \t]*\r?\n([\s\S]*?)```/gi;
+const _WIDGET_IFRAMES = new Set();
+let _widgetResizeListenerBound = false;
+
+function ensureWidgetResizeListener() {
+  if (_widgetResizeListenerBound || typeof globalThis.window?.addEventListener !== 'function') {
+    return;
+  }
+  _widgetResizeListenerBound = true;
+  globalThis.window.addEventListener('message', (event) => {
+    // Sandboxed iframes without allow-same-origin emit opaque origin "null"
+    if (event.origin !== 'null') return;
+    const data = event.data;
+    if (!data || data.type !== 'sanctuary-widget-resize') return;
+    const rawHeight = Number(data.height);
+    if (!Number.isFinite(rawHeight) || rawHeight <= 0) return;
+    for (const iframe of [..._WIDGET_IFRAMES]) {
+      if (!iframe.isConnected) {
+        _WIDGET_IFRAMES.delete(iframe);
+        continue;
+      }
+      if (event.source && iframe.contentWindow === event.source) {
+        iframe.style.height = `${Math.min(900, Math.max(120, Math.ceil(rawHeight)))}px`;
+        break;
+      }
+    }
+  });
+}
+
+function splitSpecialFenceSegments(rawText) {
+  const source = String(rawText || '');
+  if (!source.includes('```sanctuary-')) return null;
+  _SPECIAL_FENCE_RE.lastIndex = 0;
+  const segments = [];
+  let cursor = 0;
+  for (const match of source.matchAll(_SPECIAL_FENCE_RE)) {
+    if (match.index > cursor) {
+      const prose = source.slice(cursor, match.index).trim();
+      if (prose) segments.push({ kind: 'markdown', content: prose });
+    }
+    const fenceKind = match[1].toLowerCase() === 'sanctuary-plan' ? 'plan' : 'widget';
+    segments.push({ kind: fenceKind, content: (match[2] || '').trim() });
+    cursor = match.index + match[0].length;
+  }
+  if (segments.length === 0) return null;
+  if (cursor < source.length) {
+    const tail = source.slice(cursor).trim();
+    if (tail) segments.push({ kind: 'markdown', content: tail });
+  }
+  return segments;
+}
+
+function renderMarkdownSegmentInto(element, rawText) {
   const doc = globalThis.document;
   if (typeof globalThis.marked?.parse === 'function') {
     try {
@@ -515,6 +608,177 @@ function renderMarkdownInto(element, rawText) {
   });
   element.replaceChildren(...nodes);
   highlightQuotedDialogue(element);
+}
+
+function createSanctuaryPlanCard(doc, planMarkdown, msg, ctx = {}) {
+  const card = doc.createElement('div');
+  card.className = 'sanctuary-plan-card';
+  card.setAttribute('role', 'region');
+  card.setAttribute('aria-label', 'Implementation Plan');
+  card.style.cssText = 'margin: 10px 0; border: 1px solid var(--border-color, rgba(255,255,255,0.14)); border-radius: 12px; background: rgba(255,255,255,0.03); overflow: hidden;';
+
+  const details = doc.createElement('details');
+  details.className = 'sanctuary-plan-details';
+  details.open = true;
+
+  const summary = doc.createElement('summary');
+  summary.className = 'sanctuary-plan-summary';
+  summary.style.cssText = 'list-style: none; display: flex; align-items: center; gap: 8px; padding: 10px 14px; cursor: pointer; font-weight: 600;';
+
+  const chevron = doc.createElement('span');
+  chevron.className = 'ag-item-chevron';
+  chevron.setAttribute('aria-hidden', 'true');
+  chevron.innerHTML = CHEVRON_DOWN_SVG;
+
+  const label = doc.createElement('span');
+  label.className = 'sanctuary-plan-title';
+  label.textContent = 'Implementation Plan';
+
+  summary.append(chevron, label);
+
+  const body = doc.createElement('div');
+  body.className = 'sanctuary-plan-body';
+  body.style.cssText = 'padding: 0 14px 12px 14px; border-top: 1px solid rgba(255,255,255,0.08);';
+  renderMarkdownSegmentInto(body, planMarkdown);
+
+  details.append(summary, body);
+  card.appendChild(details);
+
+  const actions = doc.createElement('div');
+  actions.className = 'sanctuary-plan-actions';
+  actions.style.cssText = 'display: flex; justify-content: flex-end; gap: 8px; padding: 8px 14px; border-top: 1px solid rgba(255,255,255,0.08);';
+
+  const reviseBtn = doc.createElement('button');
+  reviseBtn.type = 'button';
+  reviseBtn.className = 'edit-btn edit-cancel-btn plan-revise-btn';
+  reviseBtn.textContent = 'Revise';
+  reviseBtn.addEventListener('click', () => ctx.onRevisePlan?.(planMarkdown, msg));
+
+  const proceedBtn = doc.createElement('button');
+  proceedBtn.type = 'button';
+  proceedBtn.className = 'edit-btn edit-save-btn plan-proceed-btn';
+  proceedBtn.textContent = 'Proceed';
+  proceedBtn.addEventListener('click', () => ctx.onProceedPlan?.(planMarkdown, msg));
+
+  actions.append(reviseBtn, proceedBtn);
+  card.appendChild(actions);
+  return card;
+}
+
+function createSanctuaryWidgetEmbed(doc, widgetHtml) {
+  ensureWidgetResizeListener();
+  const iframe = doc.createElement('iframe');
+  iframe.className = 'sanctuary-widget-frame';
+  iframe.setAttribute('sandbox', 'allow-scripts');
+  iframe.setAttribute('loading', 'lazy');
+  iframe.setAttribute('title', 'Interactive Sanctuary widget');
+  iframe.style.cssText = 'width: 100%; height: 260px; border: 1px solid var(--border-color, rgba(255,255,255,0.14)); border-radius: 12px; margin: 8px 0; background: transparent;';
+  iframe.srcdoc = [
+    '<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">',
+    '<meta name="viewport" content="width=device-width, initial-scale=1.0">',
+    '<style>:root{--bg-color:#12131a;--card-bg:#1a1c26;--text-primary:#f0f2f8;--text-secondary:#a5acc4;--primary-accent:#9b7bff;--border-color:rgba(255,255,255,0.14);color-scheme:dark;}*{box-sizing:border-box;}body{margin:0;padding:12px;font-family:system-ui,-apple-system,sans-serif;background:var(--card-bg);color:var(--text-primary);}</style>',
+    '</head><body>',
+    widgetHtml,
+    "<script>(function(){var post=function(){parent.postMessage({type:'sanctuary-widget-resize',height:document.documentElement.scrollHeight},'*');};window.addEventListener('load',post);if(typeof ResizeObserver==='function'){new ResizeObserver(post).observe(document.documentElement);}})();<\/script>",
+    '</body></html>',
+  ].join('');
+  _WIDGET_IFRAMES.add(iframe);
+  return iframe;
+}
+
+function renderMarkdownInto(element, rawText, msg = null, ctx = {}) {
+  const segments = splitSpecialFenceSegments(rawText);
+  if (!segments) {
+    renderMarkdownSegmentInto(element, rawText);
+    return;
+  }
+  const doc = globalThis.document;
+  const nodes = [];
+  for (const seg of segments) {
+    if (seg.kind === 'plan') {
+      nodes.push(createSanctuaryPlanCard(doc, seg.content, msg, ctx));
+    } else if (seg.kind === 'widget') {
+      nodes.push(createSanctuaryWidgetEmbed(doc, seg.content));
+    } else {
+      const wrap = doc.createElement('div');
+      wrap.className = 'markdown-segment';
+      renderMarkdownSegmentInto(wrap, seg.content);
+      nodes.push(wrap);
+    }
+  }
+  element.replaceChildren(...nodes);
+}
+
+const FILE_TYPE_BADGE_MAP = Object.freeze({
+  js: 'JS',
+  mjs: 'JS',
+  cjs: 'JS',
+  ts: 'TS',
+  tsx: 'TS',
+  py: 'PY',
+  css: 'CSS',
+  json: 'JSON',
+  md: 'MD',
+  html: 'HTML',
+  htm: 'HTML',
+  sh: 'SH',
+  ps1: 'SH',
+});
+
+function resolveFileTypeBadge(target) {
+  const raw = String(target || '').trim().split(/[?#]/)[0];
+  const dotIdx = raw.lastIndexOf('.');
+  if (dotIdx < 0) return '';
+  const ext = raw.slice(dotIdx + 1).toLowerCase();
+  return FILE_TYPE_BADGE_MAP[ext] || '';
+}
+
+function summarizeTerminalCommand(rawCmd) {
+  let cmd = String(rawCmd || '').replace(/\s+/g, ' ').trim();
+  if (!cmd) return 'command';
+  cmd = cmd.replace(/^&\s+/, '');
+  cmd = cmd.replace(/(?:[A-Za-z]:)?(?:[\\/][^\\/\s]+)*[\\/]python(?:\.exe)?\b/gi, 'python');
+  const segments = cmd.split(/\s*(?:;|&&)\s*/).map((s) => s.trim()).filter(Boolean);
+  const nonCdSegments = segments.filter((s) => !/^(?:cd|Set-Location|Push-Location)\b/i.test(s));
+  const primary = nonCdSegments[0] || segments[0] || cmd;
+  if (primary.length <= 48 && !primary.includes('|')) {
+    return primary;
+  }
+
+  const pipeFirst = primary.split(/\s+\|\s+/)[0].trim();
+
+  if (/^(?:Select-String|rg|grep)\b/i.test(pipeFirst)) {
+    const patMatch = pipeFirst.match(/(?:-Pattern|-e)\s+["']([^"']{1,36})["']/i)
+      || pipeFirst.match(/^(?:rg|grep)\s+(?:-[A-Za-z]+\s+)*["']([^"']{1,36})["']/i);
+    const pathMatch = pipeFirst.match(/-Path\s+["']?([^\s"';|]+)["']?/i);
+    const pat = patMatch ? patMatch[1] : '';
+    const fileHint = pathMatch ? formatToolTargetPath(pathMatch[1]) : '';
+    if (pat) {
+      return fileHint ? `search "${pat}" in ${fileHint}` : `search "${pat}"`;
+    }
+    return fileHint ? `search ${fileHint}` : 'search files';
+  }
+
+  if (/^(?:Get-ChildItem|ls|dir)\b/i.test(pipeFirst)) {
+    const rest = pipeFirst.replace(/^(?:Get-ChildItem|ls|dir)\s*/i, '').replace(/^(?:-Path\s+)/i, '').trim();
+    const firstToken = (rest.split(/\s+/)[0] || '').replace(/^["']|["']$/g, '');
+    const base = firstToken && !firstToken.startsWith('-') ? formatToolTargetPath(firstToken) : 'workspace';
+    return `inspect ${base}`;
+  }
+
+  if (/^(?:Get-Content|cat|head|tail)\b/i.test(pipeFirst)) {
+    const rest = pipeFirst.replace(/^(?:Get-Content|cat|head|tail)\s*/i, '').replace(/^(?:-Path\s+)/i, '').trim();
+    const firstToken = (rest.split(/\s+/)[0] || '').replace(/^["']|["']$/g, '');
+    const base = firstToken && !firstToken.startsWith('-') ? formatToolTargetPath(firstToken) : 'file';
+    return `read ${base}`;
+  }
+
+  if (/^python\s+-c\b/i.test(pipeFirst)) {
+    return 'python inline script';
+  }
+
+  const compact = pipeFirst.replace(/\s+/g, ' ').trim();
+  return compact.length > 56 ? `${compact.slice(0, 53)}…` : compact;
 }
 
 function formatToolTargetPath(rawPath) {
@@ -560,16 +824,41 @@ function parseToolResultCount(toolName, responseText) {
 }
 
 function formatToolLogDescriptor(tool, { live = false } = {}) {
-  const name = String(tool?.name || 'tool');
+  const rawName = String(tool?.name || 'tool');
+  const name = rawName.replace(/^(?:openhands|antigravity):/, '');
   const args = tool?.args || {};
   let category = 'other';
   let icon = getLogIconSvg('gear');
   let action = 'Ran';
-  let target = name;
+  let target = rawName;
   let suffix = '';
   let isMutation = true;
 
-  if (name === 'read_file' || name === 'view_file' || name === 'read_webpage') {
+  if (name === 'file_editor') {
+    const cmd = String(args.command || 'view').toLowerCase();
+    target = formatToolTargetPath(args.path || '') || rawName;
+    if (cmd === 'view') {
+      category = 'file';
+      icon = getLogIconSvg('file');
+      action = live && (!tool.status || tool.status === 'running') ? 'Reading' : 'Analyzed';
+      isMutation = false;
+      if (Array.isArray(args.view_range) && args.view_range.length >= 2) {
+        suffix = ` #L${args.view_range[0]}-${args.view_range[1]}`;
+      }
+    } else {
+      category = 'edit';
+      icon = getLogIconSvg('edit');
+      const isCreate = cmd === 'create';
+      action = live && (!tool.status || tool.status === 'running')
+        ? (isCreate ? 'Writing' : 'Editing')
+        : (isCreate ? 'Created' : 'Edited');
+      const added = args.file_text
+        ? String(args.file_text).split('\n').length
+        : (args.new_str ? String(args.new_str).split('\n').length : 0);
+      const removed = args.old_str ? String(args.old_str).split('\n').length : 0;
+      if (added || removed) suffix = ` +${added} -${removed}`;
+    }
+  } else if (name === 'read_file' || name === 'view_file' || name === 'read_webpage') {
     category = 'file';
     icon = name === 'read_webpage' ? getLogIconSvg('webpage') : getLogIconSvg('file');
     action = live && (!tool.status || tool.status === 'running') ? 'Reading' : 'Analyzed';
@@ -612,6 +901,41 @@ function formatToolLogDescriptor(tool, { live = false } = {}) {
     action = live && (!tool.status || tool.status === 'running') ? 'Tuning' : 'Tuned';
     target = args.preset ? `feed algorithm (${args.preset})` : 'feed algorithm';
     isMutation = false;
+  } else if (name === 'browser_action') {
+    const bAct = String(args.action || 'snapshot').toLowerCase();
+    category = 'file';
+    icon = getLogIconSvg('webpage');
+    isMutation = ['click', 'type', 'select', 'press'].includes(bAct);
+    action = live && (!tool.status || tool.status === 'running') ? 'Browsing' : 'Browser';
+    const detailPart = args.ref ? `[${args.ref}]` : (formatToolTargetPath(args.url || '') || args.text || '');
+    target = detailPart ? `${bAct} ${detailPart}` : bAct;
+  } else if (name === 'consult_cloud') {
+    category = 'search';
+    icon = getLogIconSvg('webpage');
+    action = live && (!tool.status || tool.status === 'running') ? 'Consulting' : 'Consulted';
+    target = args.tier === 'deep' ? 'Cloud Model (deep)' : 'Cloud Model';
+    isMutation = false;
+  } else if (name === 'task') {
+    category = 'other';
+    icon = getLogIconSvg('gear');
+    action = live && (!tool.status || tool.status === 'running') ? 'Subagent' : 'Delegated';
+    const subType = String(args.subagent_type || 'subagent').trim();
+    const desc = String(args.description || '').trim();
+    target = desc ? `${subType}: ${desc}` : subType;
+    isMutation = false;
+  } else if (name === 'set_working_folder') {
+    category = 'folder';
+    icon = getLogIconSvg('folder');
+    action = live && (!tool.status || tool.status === 'running') ? 'Setting' : 'Set folder';
+    target = formatToolTargetPath(args.path || args.folder || args.directory || '') || 'workspace';
+    isMutation = true;
+  } else if (name === 'delegate_coding') {
+    category = 'other';
+    icon = getLogIconSvg('gear');
+    action = live && (!tool.status || tool.status === 'running') ? 'Building' : 'Built';
+    const rawTarget = formatToolTargetPath(args.path || '') || String(args.task || 'coding task');
+    target = rawTarget.length > 48 ? `${rawTarget.slice(0, 45)}...` : rawTarget;
+    isMutation = true;
   } else if (name === 'write_file' || name === 'write_to_file') {
     category = 'edit';
     icon = getLogIconSvg('edit');
@@ -619,30 +943,43 @@ function formatToolLogDescriptor(tool, { live = false } = {}) {
     target = formatToolTargetPath(args.path || args.TargetFile || '') || name;
     const contentVal = String(args.content || args.CodeContent || '');
     if (contentVal) suffix = ` +${contentVal.split('\n').length} -0`;
-  } else if (name === 'replace_in_file' || name === 'replace_file_content' || name === 'multi_replace_file_content') {
+  } else if (name === 'edit_file' || name === 'replace_in_file' || name === 'replace_file_content' || name === 'multi_replace_file_content') {
     category = 'edit';
     icon = getLogIconSvg('edit');
     action = live && (!tool.status || tool.status === 'running') ? 'Editing' : 'Edited';
     target = formatToolTargetPath(args.path || args.TargetFile || '') || name;
-    const added = args.ReplacementContent ? String(args.ReplacementContent).split('\n').length : 0;
-    const removed = args.TargetContent ? String(args.TargetContent).split('\n').length : 0;
+    const replText = args.replacement ?? args.ReplacementContent ?? '';
+    const tgtText = args.target ?? args.TargetContent ?? '';
+    const added = replText ? String(replText).split('\n').length : 0;
+    const removed = tgtText ? String(tgtText).split('\n').length : 0;
     if (added || removed) suffix = ` +${added} -${removed}`;
-  } else if (name === 'run_shell_command' || name === 'run_command') {
+  } else if (name === 'terminal' || name === 'run_shell_command' || name === 'run_command') {
     category = 'command';
     icon = getLogIconSvg('command');
     action = live && (!tool.status || tool.status === 'running') ? 'Running' : 'Ran';
-    const cmd = String(args.command || args.CommandLine || tool.rawArgs || name);
-    target = cmd.length > 50 ? `${cmd.slice(0, 47)}...` : cmd;
+    const cmd = String(args.command || args.CommandLine || tool.rawArgs || rawName);
+    target = summarizeTerminalCommand(cmd);
   } else if (tool.rawArgs) {
     const trimmedArgs = String(tool.rawArgs).trim();
-    target = `${name}(${trimmedArgs.length > 44 ? `${trimmedArgs.slice(0, 41)}...` : trimmedArgs})`;
+    target = `${rawName}(${trimmedArgs.length > 44 ? `${trimmedArgs.slice(0, 41)}...` : trimmedArgs})`;
   }
 
-  if (live) {
-    if (tool.status === 'failed') action = 'Failed';
-    else if (tool.status === 'cancelled') action = 'Stopped';
-    if (tool.duration) suffix = `${suffix} (${tool.duration}s)`.trimStart();
-    else if (!tool.status || tool.status === 'running') suffix = `${suffix} (running)`.trimStart();
+  const isRunning = Boolean(live && (!tool.status || tool.status === 'running'));
+  const respTrim = String(tool.response || '').trim();
+  const isErrorResp =
+    tool.status === 'failed'
+    || tool.status === 'error'
+    || respTrim.startsWith('Error:')
+    || respTrim.startsWith('Error executing tool:')
+    || respTrim.startsWith('[Tool Error]');
+  if (isErrorResp) {
+    action = 'Failed';
+    if (category === 'edit') suffix = '';
+  } else if (live && tool.status === 'cancelled') {
+    action = 'Stopped';
+  }
+  if (live && tool.duration) {
+    suffix = `${suffix} (${tool.duration}s)`.trimStart();
   }
 
   let argsBlock = '';
@@ -651,23 +988,26 @@ function formatToolLogDescriptor(tool, { live = false } = {}) {
   } else if (tool.rawArgs) {
     argsBlock = `Parameters:\n${tool.rawArgs}\n\n`;
   }
-  const responseBody = tool.response || (live && (!tool.status || tool.status === 'running') ? 'Running...' : 'No response data');
+  const responseBody = tool.response || (isRunning ? 'Running...' : 'No response data');
+  const fileBadge = (category === 'file' || category === 'edit') ? resolveFileTypeBadge(target) : '';
 
   return {
     id: tool.id || '',
     category,
     icon,
+    fileBadge,
     action,
     target,
     suffix,
     isMutation,
+    isRunning,
     detail: `${argsBlock}Response:\n${responseBody}`,
   };
 }
 
 function createToolEntryDetails(doc, descriptor) {
   const details = doc.createElement('details');
-  details.className = `antigravity-log-entry${descriptor.isMutation ? ' mutation-item' : ''}`;
+  details.className = `antigravity-log-entry${descriptor.isMutation ? ' mutation-item' : ''}${descriptor.isRunning ? ' is-running' : ''}`;
   if (descriptor.id) details.dataset.callId = descriptor.id;
 
   const summary = doc.createElement('summary');
@@ -678,11 +1018,6 @@ function createToolEntryDetails(doc, descriptor) {
   chevron.setAttribute('aria-hidden', 'true');
   chevron.innerHTML = CHEVRON_DOWN_SVG;
 
-  const iconEl = doc.createElement('span');
-  iconEl.className = 'ag-log-icon';
-  iconEl.setAttribute('aria-hidden', 'true');
-  iconEl.innerHTML = descriptor.icon;
-
   const actionEl = doc.createElement('span');
   actionEl.className = 'ag-log-action';
   actionEl.textContent = descriptor.action;
@@ -691,7 +1026,26 @@ function createToolEntryDetails(doc, descriptor) {
   targetEl.className = 'ag-log-target';
   targetEl.textContent = descriptor.target;
 
-  summary.append(chevron, iconEl, actionEl, targetEl);
+  const showGenericIcon = !(descriptor.fileBadge && descriptor.action === 'Analyzed');
+  if (showGenericIcon) {
+    const iconEl = doc.createElement('span');
+    iconEl.className = 'ag-log-icon';
+    iconEl.setAttribute('aria-hidden', 'true');
+    iconEl.innerHTML = descriptor.icon;
+    summary.append(actionEl, iconEl);
+  } else {
+    summary.append(actionEl);
+  }
+
+  if (descriptor.fileBadge) {
+    const badgeEl = doc.createElement('span');
+    badgeEl.className = 'ag-filetype-badge';
+    badgeEl.dataset.ext = descriptor.fileBadge.toLowerCase();
+    badgeEl.textContent = descriptor.fileBadge;
+    summary.appendChild(badgeEl);
+  }
+
+  summary.appendChild(targetEl);
 
   if (descriptor.suffix) {
     const suffixEl = doc.createElement('span');
@@ -699,6 +1053,8 @@ function createToolEntryDetails(doc, descriptor) {
     suffixEl.textContent = descriptor.suffix;
     summary.appendChild(suffixEl);
   }
+
+  summary.appendChild(chevron);
 
   const detailWrap = doc.createElement('div');
   detailWrap.className = 'antigravity-log-detail';
@@ -825,27 +1181,53 @@ function populateLogsBody(doc, body, descriptors) {
  */
 export function renderLiveToolLogs(typingBubble, toolCalls = []) {
   if (!typingBubble || !Array.isArray(toolCalls) || toolCalls.length === 0) return;
+  const doc = globalThis.document;
+  const nextSig = JSON.stringify(toolCalls);
+  const { card, label, body } = ensureActivityLogsCard(doc, typingBubble);
+  if (card.dataset?.logsSig === nextSig) return;
+
   const paired = pairToolCalls(toolCalls);
   if (paired.length === 0) return;
-  const doc = globalThis.document;
-  const { card, label, body } = ensureActivityLogsCard(doc, typingBubble);
   const wasOpen = Boolean(card.open);
+  const wasExploreOpen = Boolean(body.querySelector('details.antigravity-explore-container')?.open);
   const countLabel = `${paired.length} tool call${paired.length === 1 ? '' : 's'}`;
-  label.textContent = `Working... · ${countLabel}`;
+  const activePhase = [...toolCalls]
+    .reverse()
+    .map((t) => String(t?.phase || '').trim())
+    .find(Boolean) || '';
+  label.textContent = `${activePhase || 'Working'}... · ${countLabel}`;
 
   const descriptors = paired.map((tool) => formatToolLogDescriptor(tool, { live: true }));
-  const openIds = new Set(
-    [...body.querySelectorAll('details.antigravity-log-entry')]
-      .filter((el) => el.open && el.dataset.callId)
-      .map((el) => el.dataset.callId)
-  );
+  const openIds = new Set();
+  const scrollMap = new Map();
+  for (const el of body.querySelectorAll('details.antigravity-log-entry')) {
+    const cid = el.dataset?.callId;
+    if (!cid) continue;
+    if (el.open) openIds.add(cid);
+    const preEl = el.querySelector('.antigravity-log-detail pre');
+    if (preEl && preEl.scrollTop > 0) {
+      scrollMap.set(cid, preEl.scrollTop);
+    }
+  }
   populateLogsBody(doc, body, descriptors);
+  const exploreEl = body.querySelector('details.antigravity-explore-container');
+  if (exploreEl && wasExploreOpen) {
+    exploreEl.open = true;
+  }
   for (const entryEl of body.querySelectorAll('details.antigravity-log-entry')) {
-    if (entryEl.dataset.callId && openIds.has(entryEl.dataset.callId)) {
+    const cid = entryEl.dataset?.callId;
+    if (!cid) continue;
+    if (openIds.has(cid)) {
       entryEl.open = true;
+    }
+    const savedScroll = scrollMap.get(cid);
+    if (savedScroll) {
+      const preEl = entryEl.querySelector('.antigravity-log-detail pre');
+      if (preEl) preEl.scrollTop = savedScroll;
     }
   }
   card.open = wasOpen;
+  if (card.dataset) card.dataset.logsSig = nextSig;
 }
 
 function renderToolLogsAndMusic(bubble, toolCalls = [], duration = null) {
@@ -985,6 +1367,16 @@ export function buildVoiceCallRow(msg, ctx = {}) {
   return row;
 }
 
+function resolveRowAvatarSrc(speakerId, ctx = {}) {
+  const sid = String(speakerId || ctx.programId || '').trim();
+  if (sid && ctx.hasProgramProfile?.(sid) === false) {
+    return DEFAULT_AVATAR_DATA_URI;
+  }
+  return resolveProgramAvatarUrl(sid, {
+    cacheBuster: ctx.getAvatarVersion?.(sid) ?? ctx.cacheBuster,
+  }) || DEFAULT_AVATAR_DATA_URI;
+}
+
 /**
  * Construct a single Sanctuary chat row with exact 4-slot user/program action symmetry:
  * User bubbles: [Reroll, Edit, Delete, FediverseShareButton]
@@ -999,8 +1391,13 @@ export function buildMessageRow(msg, ctx = {}) {
   const doc = globalThis.document;
   const role = msg.role || 'program';
   const text = String(msg.text || '');
-  const sharedPost = msg.shared_post ? normalizeSharedPostCard(msg.shared_post) : null;
-  const visibleText = sharedPost ? String(msg.user_note ?? '') : text;
+  const fallbackShared = !msg.shared_post && role === 'user' ? parseInlineSharedPostFallback(text) : null;
+  const sharedPost = msg.shared_post
+    ? normalizeSharedPostCard(msg.shared_post)
+    : (fallbackShared?.sharedPost || null);
+  const visibleText = sharedPost
+    ? String(msg.shared_post ? (msg.user_note ?? '') : (fallbackShared?.userNote ?? ''))
+    : text;
   const msgId = msg.id || fallbackMsgId();
   const isMsgTransient = Boolean(msg.isTransient);
   const normalizedMedia = normalizeTurnMedia(msg);
@@ -1026,11 +1423,14 @@ export function buildMessageRow(msg, ctx = {}) {
     avatar.className = 'avatar program-avatar';
     if (speakerId) avatar.setAttribute('data-sender-id', speakerId);
     if (msg.sender_name) avatar.setAttribute('data-name', msg.sender_name);
-    avatar.src = resolveProgramAvatarUrl(speakerId, {
-      cacheBuster: ctx.getAvatarVersion?.(speakerId) ?? ctx.cacheBuster,
-    });
+    avatar.src = resolveRowAvatarSrc(speakerId, ctx);
     avatar.alt = msg.sender_name || 'Program';
     avatar.title = 'View Recent Media';
+    avatar.addEventListener('error', () => {
+      if (avatar.src !== DEFAULT_AVATAR_DATA_URI) {
+        avatar.src = DEFAULT_AVATAR_DATA_URI;
+      }
+    });
     avatar.addEventListener('click', () => {
       ctx.onOpenAvatarMedia?.(speakerId, msg.sender_name || ctx.programName || speakerId);
     });
@@ -1058,7 +1458,7 @@ export function buildMessageRow(msg, ctx = {}) {
 
   bubblesToCreate.forEach((item, idx) => {
     const isMediaItem = item.type === 'media';
-    const mediaList = isMediaItem ? item.content.slice(0, 3) : [];
+    const mediaList = isMediaItem ? item.content.slice(0, MAX_IMAGES_PER_ROW) : [];
     const isVideo = isMediaItem && mediaList.length === 1 && mediaList[0].type === 'video';
     const bubble = doc.createElement('div');
     bubble.className = `message ${role}${isMediaItem ? ' image-message' : ''}`;
@@ -1146,13 +1546,15 @@ export function buildMessageRow(msg, ctx = {}) {
       if (item.content && item.content.trim()) {
         const textDiv = doc.createElement('div');
         textDiv.className = 'message-text';
-        renderMarkdownInto(textDiv, item.content);
+        renderMarkdownInto(textDiv, item.content, msg, ctx);
         bubble.appendChild(textDiv);
       }
       if (Array.isArray(msg.tool_calls) && msg.tool_calls.length > 0) {
         renderToolLogsAndMusic(bubble, msg.tool_calls, msg.duration);
       }
     } else if (item.type === 'media') {
+      bubblesContainer.classList.add('has-portrait-grid');
+      bubble.classList.add('has-portrait-grid');
       const grid = createPortraitGrid(
         mediaList,
         msgId,
@@ -1295,11 +1697,18 @@ export function reconcileChat(chatContainer, history, ctx = {}) {
       || ctx.programId
       || '';
     if (!sid) continue;
-    const expectedSrc = resolveProgramAvatarUrl(sid, {
-      cacheBuster: ctx.getAvatarVersion?.(sid) ?? ctx.cacheBuster,
-    });
+    const expectedSrc = resolveRowAvatarSrc(sid, ctx);
     if (expectedSrc && avatarEl.src !== expectedSrc) {
       avatarEl.src = expectedSrc;
+    }
+  }
+  for (const progBubble of [...chatContainer.querySelectorAll('.message.program')]) {
+    const sid = progBubble.closest?.('.message-row')?.dataset?.senderId || ctx.programId || '';
+    const resolvedTheme = (sid ? ctx.getThemeForProgram?.(sid) : null) || ctx.theme;
+    if (resolvedTheme) {
+      applyScopedProgramTheme(progBubble, resolvedTheme);
+    } else {
+      clearScopedProgramTheme(progBubble);
     }
   }
   return { changed, visibleCount: messages.length };
@@ -1317,11 +1726,14 @@ export function createTypingIndicatorRow(speakerId = '', ctx = {}) {
   avatar.className = 'avatar program-avatar';
   const targetId = speakerId || ctx.programId || 'sebile';
   avatar.setAttribute('data-sender-id', targetId);
-  avatar.src = resolveProgramAvatarUrl(targetId, {
-    cacheBuster: ctx.getAvatarVersion?.(targetId) ?? ctx.cacheBuster,
-  });
+  avatar.src = resolveRowAvatarSrc(targetId, ctx);
   avatar.alt = targetId || 'Program';
   avatar.title = 'View Recent Media';
+  avatar.addEventListener('error', () => {
+    if (avatar.src !== DEFAULT_AVATAR_DATA_URI) {
+      avatar.src = DEFAULT_AVATAR_DATA_URI;
+    }
+  });
   avatar.addEventListener('click', () => {
     ctx.onOpenAvatarMedia?.(speakerId || ctx.programId || '', ctx.programName || speakerId || '');
   });

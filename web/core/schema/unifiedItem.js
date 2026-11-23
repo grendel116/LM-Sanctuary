@@ -249,6 +249,15 @@ export function toUnifiedItem(item) {
       pinned: Boolean(item._meta?.mastodon?.pinned ?? item.pinned ?? item.raw?.pinned),
       spoilerText: item._meta?.mastodon?.spoilerText || item.spoilerText || '',
       inReplyToId: item._meta?.mastodon?.inReplyToId || item.inReplyToId || null,
+      ...(item._meta?.mastodon?.bot || item.author?.bot ? { bot: true } : {}),
+      ...(item._meta?.mastodon?.filteredAction || item.filteredAction
+        ? {
+            filteredAction: String(item._meta?.mastodon?.filteredAction || item.filteredAction).toLowerCase(),
+            ...(item._meta?.mastodon?.filteredTitle || item.filteredTitle
+              ? { filteredTitle: String(item._meta?.mastodon?.filteredTitle || item.filteredTitle) }
+              : {}),
+          }
+        : {}),
       ...(item._meta?.mastodon?.inReplyToAccountId || item.inReplyToAccountId
         ? { inReplyToAccountId: String(item._meta?.mastodon?.inReplyToAccountId || item.inReplyToAccountId) }
         : {}),
@@ -293,6 +302,9 @@ export function toUnifiedItem(item) {
   } else {
     meta.threads = {
       postId: String(item._meta?.threads?.postId || nativeId || ''),
+      ...(item._meta?.threads?.mediaType ? { mediaType: String(item._meta.threads.mediaType) } : {}),
+      ...(item._meta?.threads?.isRepost ? { isRepost: true } : {}),
+      ...(item._meta?.threads?.hideStatus ? { hideStatus: String(item._meta.threads.hideStatus) } : {}),
       ...(item._meta?.threads?.parentPostId ? { parentPostId: String(item._meta.threads.parentPostId) } : {}),
       ...(item._meta?.threads?.repliedToId ? { repliedToId: String(item._meta.threads.repliedToId) } : {}),
       ...(item._meta?.threads?.rootPostId ? { rootPostId: String(item._meta.threads.rootPostId) } : {}),
@@ -308,6 +320,9 @@ export function toUnifiedItem(item) {
   }
   if (item._meta?.quotePost || item.quotePost) {
     meta.quotePost = item._meta?.quotePost || item.quotePost;
+  }
+  if (item._meta?.replyContext || item.replyContext) {
+    meta.replyContext = item._meta?.replyContext || item.replyContext;
   }
   if (item._meta?.linkedIds || item.linkedIds) {
     meta.linkedIds = item._meta?.linkedIds || item.linkedIds;
@@ -342,6 +357,10 @@ export function toUnifiedItem(item) {
       handle: String(handle),
       avatar_url: String(item.author?.avatar_url || item.author?.avatar || ''),
       url: String(item.author?.url || ''),
+      ...(item.author?.bot || item._meta?.mastodon?.bot ? { bot: true } : {}),
+      ...(item.author?.discoverable === false ? { discoverable: false } : {}),
+      ...(item.author?.indexable === false ? { indexable: false } : {}),
+      ...(item.author?.noteText ? { noteText: String(item.author.noteText) } : {}),
     },
     attachments: normalizeAttachmentsList(item.media || item.attachments),
     metrics: {
@@ -417,7 +436,7 @@ export function canonicalizeUrlForDedupe(rawUrl) {
   }
 }
 
-function normalizeNativeUri(rawUri) {
+export function normalizeNativeUri(rawUri) {
   const raw = String(rawUri || '').trim();
   if (!raw) return '';
   if (!/^https?:\/\//i.test(raw)) return raw;
@@ -476,6 +495,90 @@ function extractPrimaryUrlFromItem(item) {
 
 const FEED_SOURCE_RANK = { following: 0, second_degree: 1, discovery: 2 };
 
+function extractMetaBoosters(meta = {}) {
+  const out = [];
+  const seen = new Set();
+  const push = (raw) => {
+    if (!raw || typeof raw !== 'object') return;
+    const handle = String(raw.handle || raw.acct || raw.username || '').trim().replace(/^@/, '');
+    const id = String(raw.id || raw.did || '').trim();
+    const key = (handle || id).toLowerCase();
+    if (!key || seen.has(key)) return;
+    seen.add(key);
+    out.push({
+      id,
+      handle,
+      name: String(raw.name || raw.displayName || handle || id),
+    });
+  };
+  if (Array.isArray(meta?.boosters)) {
+    for (const b of meta.boosters) push(b);
+  }
+  push(meta?.mastodon?.rebloggedBy);
+  push(meta?.bluesky?.rebloggedBy);
+  return out;
+}
+
+function extractMetaVouchActors(meta = {}) {
+  const seen = new Set();
+  if (Array.isArray(meta?.peerVouchActors)) {
+    for (const a of meta.peerVouchActors) {
+      const k = String(a || '').trim().toLowerCase();
+      if (k) seen.add(k);
+    }
+  }
+  for (const b of extractMetaBoosters(meta)) {
+    const k = (b.handle || b.id).toLowerCase();
+    if (k) seen.add(k);
+  }
+  const endorser = String(meta?.endorsedBy || '').trim().replace(/^@/, '').toLowerCase();
+  if (endorser) seen.add(endorser);
+  return [...seen];
+}
+
+export function mergeViewerActivityMeta(primaryMeta = {}, secondaryMeta = {}) {
+  const a = primaryMeta && typeof primaryMeta === 'object' ? primaryMeta : {};
+  const b = secondaryMeta && typeof secondaryMeta === 'object' ? secondaryMeta : {};
+  const patch = {};
+  const replied = Boolean(
+    a.viewerReplied || b.viewerReplied || a.mastodon?.replied || b.mastodon?.replied || a.bluesky?.replied || b.bluesky?.replied
+  );
+
+  if (a.mastodon || b.mastodon) {
+    const am = a.mastodon || {};
+    const bm = b.mastodon || {};
+    patch.mastodon = {
+      ...am,
+      favourited: Boolean(am.favourited || bm.favourited),
+      reblogged: Boolean(am.reblogged || bm.reblogged),
+      bookmarked: Boolean(am.bookmarked || bm.bookmarked),
+      ...(replied || am.replied || bm.replied ? { replied: true } : {}),
+    };
+  }
+
+  if (a.bluesky || b.bluesky) {
+    const ab = a.bluesky || {};
+    const bb = b.bluesky || {};
+    patch.bluesky = {
+      ...ab,
+      likeUri: ab.likeUri || bb.likeUri || null,
+      repostUri: ab.repostUri || bb.repostUri || null,
+      ...(replied || ab.replied || bb.replied ? { replied: true } : {}),
+    };
+  }
+
+  if (replied) {
+    patch.viewerReplied = true;
+  }
+
+  const feedback = a.feedFeedback || b.feedFeedback;
+  if (feedback) {
+    patch.feedFeedback = feedback;
+  }
+
+  return { ...a, ...patch };
+}
+
 function mergeFeedProvenance(aMeta = {}, bMeta = {}) {
   const aSrc = aMeta?.feedSource;
   const bSrc = bMeta?.feedSource;
@@ -483,15 +586,71 @@ function mergeFeedProvenance(aMeta = {}, bMeta = {}) {
   const bR = FEED_SOURCE_RANK[bSrc] ?? 9;
   const winSrc = aR <= bR ? (aSrc || bSrc) : bSrc;
   const winEndorser = (aR <= bR ? aMeta?.endorsedBy : bMeta?.endorsedBy) || aMeta?.endorsedBy || bMeta?.endorsedBy;
-  return {
-    ...aMeta,
-    ...bMeta,
-    ...(winSrc ? { feedSource: winSrc } : {}),
-    ...(winEndorser ? { endorsedBy: winEndorser } : {}),
-  };
+
+  const mergedBoosters = [];
+  const seenBoosters = new Set();
+  for (const b of [...extractMetaBoosters(aMeta), ...extractMetaBoosters(bMeta)]) {
+    const k = (b.handle || b.id).toLowerCase();
+    if (!k || seenBoosters.has(k)) continue;
+    seenBoosters.add(k);
+    mergedBoosters.push(b);
+  }
+  const mergedVouchActors = [...new Set([...extractMetaVouchActors(aMeta), ...extractMetaVouchActors(bMeta)])];
+
+  return mergeViewerActivityMeta(
+    {
+      ...aMeta,
+      ...bMeta,
+      ...(winSrc ? { feedSource: winSrc } : {}),
+      ...(winEndorser ? { endorsedBy: winEndorser } : {}),
+      ...(mergedBoosters.length > 0 ? { boosters: mergedBoosters } : {}),
+      ...(mergedVouchActors.length > 0 ? { peerVouchActors: mergedVouchActors, peerVouches: mergedVouchActors.length } : {}),
+    },
+    aMeta
+  );
 }
 
-function buildOwnAccountKeySet(ownAccounts = []) {
+export function addActorToKeySet(actor, protocol = 'mastodon', instanceUrl = '', targetSet = new Set()) {
+  if (!actor || typeof actor !== 'object') return targetSet;
+  const proto = protocol === 'fediverse' ? 'mastodon' : String(protocol || 'mastodon').toLowerCase();
+  for (const candidate of [actor.acct, actor.handle, actor.username]) {
+    if (!candidate) continue;
+    const ck = canonicalizeActorHandle(candidate, proto);
+    if (ck && ck !== `${proto}:`) targetSet.add(ck);
+    const local = String(candidate).trim().replace(/^@/, '').toLowerCase();
+    if (proto === 'mastodon' && local && !local.includes('@') && instanceUrl) {
+      try {
+        const host = new URL(String(instanceUrl)).hostname.toLowerCase();
+        if (host) targetSet.add(`mastodon:${local}@${host}`);
+      } catch {
+        // ignore malformed instanceUrl
+      }
+    }
+  }
+  if (actor.did) {
+    const didLow = String(actor.did).trim().toLowerCase();
+    targetSet.add(`bluesky:${didLow}`);
+    targetSet.add(`bluesky:id:${didLow}`);
+  }
+  const rawId = actor.id ?? actor.userId;
+  if (rawId) {
+    const idLow = String(rawId).trim().toLowerCase();
+    targetSet.add(`${proto}:id:${idLow}`);
+    if (proto === 'bluesky') targetSet.add(`bluesky:${idLow}`);
+  }
+  return targetSet;
+}
+
+export function buildFollowedActorKeySet(actors = []) {
+  const keys = new Set();
+  for (const entry of Array.isArray(actors) ? actors : []) {
+    if (!entry || typeof entry !== 'object') continue;
+    addActorToKeySet(entry, entry.protocol || 'bluesky', entry.instanceUrl || '', keys);
+  }
+  return keys;
+}
+
+export function buildOwnAccountKeySet(ownAccounts = []) {
   const keys = new Set();
   for (const raw of Array.isArray(ownAccounts) ? ownAccounts : []) {
     const acc = raw?.meta && typeof raw.meta === 'object' ? raw.meta : raw;
@@ -526,6 +685,51 @@ function buildOwnAccountKeySet(ownAccounts = []) {
   return keys;
 }
 
+export function actorMatchesOwnAccountSet(actor, protocol = 'mastodon', instanceUrl = '', ownAccountKeys = new Set()) {
+  if (!actor || typeof actor !== 'object' || !(ownAccountKeys?.size > 0)) return false;
+  const proto = protocol === 'fediverse' ? 'mastodon' : String(protocol || 'mastodon').toLowerCase();
+  for (const candidate of [actor.acct, actor.handle, actor.username]) {
+    if (!candidate) continue;
+    const ck = canonicalizeActorHandle(candidate, proto);
+    if (ck && ck !== `${proto}:` && ownAccountKeys.has(ck)) return true;
+    const local = String(candidate).trim().replace(/^@/, '').toLowerCase();
+    if (proto === 'mastodon' && local && !local.includes('@') && instanceUrl) {
+      try {
+        const host = new URL(String(instanceUrl)).hostname.toLowerCase();
+        if (host && ownAccountKeys.has(`mastodon:${local}@${host}`)) return true;
+      } catch {
+        // ignore malformed instanceUrl
+      }
+    }
+  }
+  if (actor.did) {
+    const didLow = String(actor.did).trim().toLowerCase();
+    if (ownAccountKeys.has(`bluesky:${didLow}`) || ownAccountKeys.has(`bluesky:id:${didLow}`)) return true;
+  }
+  const rawId = actor.id ?? actor.userId;
+  if (rawId) {
+    const idLow = String(rawId).trim().toLowerCase();
+    if (ownAccountKeys.has(`${proto}:id:${idLow}`)) return true;
+    if (proto === 'bluesky' && ownAccountKeys.has(`bluesky:${idLow}`)) return true;
+  }
+  return false;
+}
+
+export function isOwnOrSelfBoostedUnifiedItem(item, ownAccountsOrKeySet) {
+  if (!item || typeof item !== 'object') return false;
+  const ownAccountKeys = ownAccountsOrKeySet instanceof Set
+    ? ownAccountsOrKeySet
+    : buildOwnAccountKeySet(ownAccountsOrKeySet);
+  if (ownAccountKeys.size === 0) return false;
+  const proto = item.protocol || 'mastodon';
+  const instUrl = item._meta?.mastodon?.instanceUrl || '';
+  const rebloggedBy = item._meta?.mastodon?.rebloggedBy || item._meta?.bluesky?.rebloggedBy || null;
+  if (rebloggedBy && actorMatchesOwnAccountSet(rebloggedBy, proto, instUrl, ownAccountKeys)) {
+    return true;
+  }
+  return actorMatchesOwnAccountSet(item.author, proto, instUrl, ownAccountKeys);
+}
+
 function extractAuthorStem(handle, protocol) {
   const clean = String(handle || '').trim().replace(/^@/, '').toLowerCase();
   if (!clean) return '';
@@ -554,6 +758,9 @@ function extractDedupeFeatures(item, ownAccountKeys) {
       isNotification: true,
       ts,
       notifSig: `${canonicalizeActorHandle(actor, item.protocol)}|${kind}|${text}`,
+      hasExplicitLinks: false,
+      explicitLinkTokens: new Set(),
+      selfLinkTokens: new Set(),
     };
   }
 
@@ -588,22 +795,12 @@ function extractDedupeFeatures(item, ownAccountKeys) {
 
   const rawHandle = String(item.author?.handle || '').trim();
   const canonActor = canonicalizeActorHandle(rawHandle, proto);
-  const authorIdLow = String(item.author?.id || '').trim().toLowerCase();
-  let isOwnAuthor = false;
-  if (!isBoost && ownAccountKeys.size > 0) {
-    if ((canonActor && ownAccountKeys.has(canonActor)) || (authorIdLow && ownAccountKeys.has(`${proto}:id:${authorIdLow}`))) {
-      isOwnAuthor = true;
-    } else if (proto === 'mastodon' && rawHandle && !rawHandle.includes('@') && item._meta?.mastodon?.instanceUrl) {
-      try {
-        const host = new URL(String(item._meta.mastodon.instanceUrl)).hostname.toLowerCase();
-        if (host && ownAccountKeys.has(`mastodon:${rawHandle.toLowerCase()}@${host}`)) {
-          isOwnAuthor = true;
-        }
-      } catch {
-        // ignore
-      }
-    }
-  }
+  const isOwnAuthor = !isBoost && actorMatchesOwnAccountSet(
+    item.author,
+    proto,
+    item._meta?.mastodon?.instanceUrl || '',
+    ownAccountKeys
+  );
 
   const authorStem = extractAuthorStem(rawHandle, proto);
   const nameClean = String(item.author?.name || '').toLowerCase().replace(/[^a-z0-9]/g, '');
@@ -769,9 +966,13 @@ function matchPostDuplicate(exFeat, candFeat, windowMs) {
 }
 
 function mergeAbsorbedMeta(target, absorbed, { mergeCrossProtocolMeta = false } = {}) {
+  const absorbedBoosters = extractMetaBoosters(absorbed._meta);
+  const absorbedVouches = extractMetaVouchActors(absorbed._meta);
   let nextMeta = mergeFeedProvenance(target._meta, {
     ...(absorbed._meta?.feedSource ? { feedSource: absorbed._meta.feedSource } : {}),
     ...(absorbed._meta?.endorsedBy ? { endorsedBy: absorbed._meta.endorsedBy } : {}),
+    ...(absorbedBoosters.length > 0 ? { boosters: absorbedBoosters } : {}),
+    ...(absorbedVouches.length > 0 ? { peerVouchActors: absorbedVouches } : {}),
   });
   let nextMetrics = target.metrics;
 
@@ -797,7 +998,19 @@ function mergeAbsorbedMeta(target, absorbed, { mergeCrossProtocolMeta = false } 
     }
   }
 
-  return { ...target, metrics: nextMetrics, _meta: nextMeta };
+  nextMeta = mergeViewerActivityMeta(nextMeta, absorbed._meta);
+
+  const nextAttachments =
+    mergeCrossProtocolMeta && (!target.attachments || target.attachments.length === 0) && Array.isArray(absorbed.attachments) && absorbed.attachments.length > 0
+      ? absorbed.attachments
+      : target.attachments;
+
+  return {
+    ...target,
+    ...(nextAttachments !== target.attachments ? { attachments: nextAttachments } : {}),
+    metrics: nextMetrics,
+    _meta: nextMeta,
+  };
 }
 
 function cloneFeatureSetWithAbsorbed(feat, mergedItem) {
@@ -805,6 +1018,7 @@ function cloneFeatureSetWithAbsorbed(feat, mergedItem) {
   if (mergedItem._meta?.linkedIds) {
     const linked = mergedItem._meta.linkedIds;
     feat.hasExplicitLinks = Object.values(linked).some(Boolean);
+    if (!feat.explicitLinkTokens) feat.explicitLinkTokens = new Set();
     if (linked.blueskyUri) feat.explicitLinkTokens.add(`bsky:${String(linked.blueskyUri).trim()}`);
     if (linked.threadsPostId) feat.explicitLinkTokens.add(`threads:${String(linked.threadsPostId).trim()}`);
     if (linked.mastodonStatusId) feat.explicitLinkTokens.add(`masto_linked:${String(linked.mastodonStatusId).trim()}`);
@@ -831,7 +1045,12 @@ export function deduplicateUnifiedItems(items = [], windowMs = 120_000, options 
     if (!prev) {
       byId.set(item.id, item);
     } else {
-      byId.set(item.id, { ...prev, ...item, _meta: mergeFeedProvenance(prev._meta, item._meta) });
+      byId.set(item.id, {
+        ...prev,
+        ...item,
+        attachments: item.attachments?.length > 0 ? item.attachments : prev.attachments,
+        _meta: mergeFeedProvenance(prev._meta, item._meta),
+      });
     }
   }
 
@@ -929,17 +1148,58 @@ function buildFilterMatcher(rawTerm) {
   const endsWord = /[\p{L}\p{N}_]$/u.test(term);
   const prefix = startsWord ? '(?<![\\p{L}\\p{N}_])' : '';
 
+  const isSingleAlphaWord = /^[\p{L}]{4,}$/u.test(term);
+  const endsWithSilentE = isSingleAlphaWord && term.length >= 5 && /e$/i.test(term);
   let body;
   if (endsWord && term.length >= 6 && /s$/i.test(term) && !/(?:ss|us|is)$/i.test(term)) {
     const stem = escapeFilterRegex(term.slice(0, -1)).replace(/\s+/g, '\\s+');
     body = `(?:${stem}s?)`;
+  } else if (endsWithSilentE) {
+    const stem = escapeFilterRegex(term.slice(0, -1));
+    body = `(?:${stem}(?:e['’]?s|e|es|ian|ians))`;
   } else {
     const base = escapeFilterRegex(term).replace(/\s+/g, '\\s+');
-    body = endsWord && term.length >= 4 ? `${base}(?:s|es)?` : base;
+    if (endsWord && term.length >= 4) {
+      body = `${base}(?:['’]?s|es|ian|ians)?`;
+    } else if (endsWord && term.length >= 2) {
+      body = `${base}(?:['’]?s)?`;
+    } else {
+      body = base;
+    }
   }
 
   const suffix = endsWord ? '(?![\\p{L}\\p{N}_])' : '';
-  return new RegExp(`${prefix}${body}${suffix}`, 'iu');
+  const parts = [`${prefix}${body}${suffix}`];
+
+  const isShortAsciiAcronym = /^[a-z]{2,5}$/i.test(term);
+  if (isShortAsciiAcronym) {
+    const dotted = term.split('').map(escapeFilterRegex).join('\\.');
+    parts.push(`${prefix}${dotted}\\.?(?:['’]?s)?${suffix}`);
+  }
+
+  const primaryRe = new RegExp(parts.join('|'), 'iu');
+  if (isShortAsciiAcronym) {
+    const upper = escapeFilterRegex(term.toUpperCase());
+    const lower = escapeFilterRegex(term.toLowerCase());
+    const compoundRe = new RegExp(
+      `(?<=[a-z0-9])${upper}(?![a-z])|(?<![A-Za-z_])${upper}(?=[A-Z0-9_])|#${lower}(?:art|gen|generated|slop|bro|bros|model|models|image|images|video|music|bot|bots|chat|code|coding|tool|tools)\\b`
+    );
+    return {
+      test: (str) => primaryRe.test(str) || compoundRe.test(str),
+    };
+  }
+
+  if (isSingleAlphaWord) {
+    const tagStem = escapeFilterRegex((endsWithSilentE ? term.slice(0, -1) : term).toLowerCase());
+    const hashtagCompoundRe = new RegExp(`#${tagStem}(?:e|ian)?[\\p{L}\\p{N}_]*`, 'iu');
+    const capStem = term[0].toUpperCase() + (endsWithSilentE ? term.slice(1, -1) : term.slice(1));
+    const camelCompoundRe = new RegExp(`(?<![A-Za-z_])${escapeFilterRegex(capStem)}(?:e|ian)?(?=[A-Z0-9_])`);
+    return {
+      test: (str) => primaryRe.test(str) || hashtagCompoundRe.test(str) || camelCompoundRe.test(str),
+    };
+  }
+
+  return primaryRe;
 }
 
 function buildModeratedActorSet(moderatedActors = []) {
@@ -1007,12 +1267,258 @@ export function isUnifiedItemModerated(rawItem, moderatedActors = []) {
   if (quote && !quote.unavailable && actorMatchesModSet(modSet, quote.authorHandle, quote.authorDid, quote.protocol || proto, quote.instanceUrl || '')) {
     return true;
   }
+  const replyCtx = item._meta?.replyContext || null;
+  if (replyCtx && !replyCtx.unavailable && actorMatchesModSet(modSet, replyCtx.authorHandle, replyCtx.authorId, replyCtx.protocol || proto, replyCtx.instanceUrl || '')) {
+    return true;
+  }
   return false;
 }
 
 /**
+ * Determine whether a UnifiedItem represents a reply to another post.
+ * @param {object} rawItem
+ * @returns {boolean}
+ */
+export function isReplyUnifiedItem(rawItem) {
+  if (!rawItem || typeof rawItem !== 'object') return false;
+  const item = rawItem._meta ? rawItem : toUnifiedItem(rawItem);
+  const m = item._meta?.mastodon || {};
+  const b = item._meta?.bluesky || {};
+  const t = item._meta?.threads || {};
+  return Boolean(m.inReplyToId || b.reply || t.repliedToId || t.parentPostId);
+}
+
+export function isRepostUnifiedItem(rawItem) {
+  if (!rawItem || typeof rawItem !== 'object') return false;
+  const item = rawItem._meta ? rawItem : toUnifiedItem(rawItem);
+  return Boolean(
+    item._meta?.mastodon?.rebloggedBy
+    || item._meta?.bluesky?.rebloggedBy
+    || item._meta?.threads?.isRepost
+    || item._meta?.threads?.mediaType === 'REPOST_FACADE'
+  );
+}
+
+export function hasRenderablePostContent(rawItem) {
+  if (!rawItem || typeof rawItem !== 'object') return false;
+  const item = rawItem._meta ? rawItem : toUnifiedItem(rawItem);
+  if (String(item.content_text || '').trim().length > 0) return true;
+  if (Array.isArray(item.attachments) && item.attachments.length > 0) return true;
+  if (item._meta?.linkCard?.url || item._meta?.quotePost) return true;
+  return false;
+}
+
+export function mergeUnifiedPostMetadata(primary, sibling) {
+  if (!primary || typeof primary !== 'object') return sibling;
+  if (!sibling || typeof sibling !== 'object') return primary;
+  return mergeAbsorbedMeta(primary, sibling, { mergeCrossProtocolMeta: true });
+}
+
+export const DEFAULT_SENSITIVE_CONTENT_TRIGGERS = Object.freeze({
+  respectAuthorSensitiveFlag: true,
+  blurLabels: Object.freeze({
+    porn: 'Adult content',
+    sexual: 'Sexual content',
+    nudity: 'Nudity',
+    'graphic-media': 'Graphic media',
+    gore: 'Graphic media',
+    corpse: 'Graphic media',
+    'self-harm': 'Graphic media',
+    torture: 'Graphic media',
+    nsfw: 'Sensitive media',
+    adult: 'Sensitive media',
+    suggestive: 'Sensitive media',
+    '!warn': 'Sensitive media',
+  }),
+  keywordRegex: '#(?:nsfw|18plus|porn|xxx|hentai|nudity|explicit|onlyfans|lewds?|erotica)\\b|\\b(?:18\\+\\s*only|nsfw\\s*warning)\\b',
+  jetstreamBlockedSelfLabels: Object.freeze(['!hide', '!takedown', 'spam']),
+});
+
+const EXPLICIT_NSFW_MEDIA_RE = new RegExp(DEFAULT_SENSITIVE_CONTENT_TRIGGERS.keywordRegex, 'i');
+
+function resolveKeywordTriggerRegex(rawPattern) {
+  if (typeof rawPattern !== 'string') return EXPLICIT_NSFW_MEDIA_RE;
+  if (!rawPattern.trim()) return null;
+  try {
+    return new RegExp(rawPattern, 'i');
+  } catch {
+    return EXPLICIT_NSFW_MEDIA_RE;
+  }
+}
+
+/**
+ * Determine whether a post's media should be blurred behind an explicit sensitive-media gate
+ * according to the user's local RankingManifest rules (external labelers cannot override local config).
+ * @param {object} rawItem
+ * @param {object | null} [rawManifest]
+ * @returns {string} Warning label or empty string when safe to display unblurred.
+ */
+export function getSensitiveMediaWarning(rawItem, rawManifest = null) {
+  if (!rawItem || typeof rawItem !== 'object') return '';
+  const u = rawItem._meta ? rawItem : toUnifiedItem(rawItem);
+  const triggers = rawManifest?.sensitiveContentTriggers || rawManifest || null;
+  const blurLabels =
+    triggers && triggers.blurLabels && typeof triggers.blurLabels === 'object' && !Array.isArray(triggers.blurLabels)
+      ? triggers.blurLabels
+      : DEFAULT_SENSITIVE_CONTENT_TRIGGERS.blurLabels;
+  const respectAuthorSensitive = triggers?.respectAuthorSensitiveFlag !== false;
+  const kwRegex = triggers && Object.prototype.hasOwnProperty.call(triggers, 'keywordRegex')
+    ? resolveKeywordTriggerRegex(triggers.keywordRegex)
+    : EXPLICIT_NSFW_MEDIA_RE;
+
+  const rawLabels = [
+    ...(Array.isArray(u._meta?.bluesky?.labels) ? u._meta.bluesky.labels : []),
+    ...(Array.isArray(rawItem.labels) ? rawItem.labels : []),
+  ];
+  for (const rawLabel of rawLabels) {
+    const key = String(rawLabel?.val ?? rawLabel ?? '').trim().toLowerCase();
+    if (key && Object.prototype.hasOwnProperty.call(blurLabels, key) && blurLabels[key]) {
+      return String(blurLabels[key]);
+    }
+  }
+  if (respectAuthorSensitive && (u._meta?.mastodon?.sensitive || rawItem.sensitive)) {
+    return String(u._meta?.mastodon?.spoilerText || rawItem.spoilerText || '').trim() || 'Sensitive media';
+  }
+  const hasVisualMedia =
+    (Array.isArray(u.attachments) && u.attachments.length > 0)
+    || Boolean(u._meta?.linkCard?.image || rawItem.linkCard?.image);
+  if (hasVisualMedia && kwRegex) {
+    const hay = `${u.content_text || ''} ${u._meta?.mastodon?.spoilerText || ''}`;
+    if (kwRegex.test(hay)) {
+      return 'Sensitive media';
+    }
+  }
+  return '';
+}
+
+export function buildSynthesizedReplyContext(rawParentRoot) {
+  const parentRoot = rawParentRoot?._meta ? rawParentRoot : toUnifiedItem(rawParentRoot);
+  const thumbAtt = (Array.isArray(parentRoot.attachments) ? parentRoot.attachments : [])
+    .find((att) => att && att.type === 'image' && (att.previewUrl || att.url));
+  const isSensitive = Boolean(parentRoot._meta?.mastodon?.sensitive || getSensitiveMediaWarning(parentRoot));
+  return {
+    id: parentRoot.id,
+    protocol: parentRoot.protocol,
+    ...(parentRoot._meta?.mastodon?.statusId ? { statusId: String(parentRoot._meta.mastodon.statusId), instanceUrl: parentRoot._meta.mastodon.instanceUrl || 'https://mastodon.social' } : {}),
+    ...(parentRoot._meta?.bluesky?.uri ? { uri: String(parentRoot._meta.bluesky.uri), cid: String(parentRoot._meta.bluesky.cid || '') } : {}),
+    ...(parentRoot._meta?.threads?.postId ? { postId: String(parentRoot._meta.threads.postId) } : {}),
+    url: parentRoot.url || '',
+    authorId: parentRoot.author?.id || '',
+    authorName: parentRoot.author?.name || parentRoot.author?.handle || '',
+    authorHandle: parentRoot.author?.handle || '',
+    authorAvatar: parentRoot.author?.avatar_url || '',
+    text: parentRoot.content_text || '',
+    createdAt: parentRoot.date_published || '',
+    ...(thumbAtt ? { thumbUrl: String(thumbAtt.previewUrl || thumbAtt.url) } : {}),
+    ...(isSensitive ? { sensitive: true } : {}),
+  };
+}
+
+function getDirectInitialParentKeys(item) {
+  if (item.protocol === 'mastodon') {
+    const pid = item._meta?.mastodon?.inReplyToId;
+    return pid ? [`mastodon:${String(pid)}`] : [];
+  }
+  if (item.protocol === 'bluesky') {
+    const parentUri = String(item._meta?.bluesky?.reply?.parent?.uri || '');
+    const rootUri = String(item._meta?.bluesky?.reply?.root?.uri || '');
+    if (!parentUri || (rootUri && parentUri !== rootUri)) return [];
+    return [`bluesky:${parentUri}`];
+  }
+  if (item.protocol === 'threads') {
+    const pid = String(item._meta?.threads?.repliedToId || item._meta?.threads?.parentPostId || '');
+    const rid = String(item._meta?.threads?.rootPostId || '');
+    if (!pid || (rid && pid !== rid)) return [];
+    return [`threads:${pid}`];
+  }
+  return [];
+}
+
+export function getThreadRootIdentityKey(rawItem) {
+  if (!rawItem || typeof rawItem !== 'object') return '';
+  const u = rawItem._meta ? rawItem : toUnifiedItem(rawItem);
+  if (u.protocol === 'bluesky') {
+    const rootUri = u._meta?.bluesky?.reply?.root?.uri || u._meta?.bluesky?.uri || '';
+    return rootUri ? `bluesky:${String(rootUri)}` : String(u.id || '');
+  }
+  if (u.protocol === 'mastodon') {
+    const rootId = u._meta?.mastodon?.inReplyToId || u._meta?.mastodon?.statusId || '';
+    return rootId ? `mastodon:${String(rootId)}` : String(u.id || '');
+  }
+  if (u.protocol === 'threads') {
+    const rootId = u._meta?.threads?.rootPostId || u._meta?.threads?.repliedToId || u._meta?.threads?.postId || '';
+    return rootId ? `threads:${String(rootId)}` : String(u.id || '');
+  }
+  return String(u.id || u.key || '');
+}
+
+/**
+ * Enforce contextful replies: never emit orphan replies without their initial post.
+ * Discovery streams ('feed') drop all replies and collapse multi-post threads to 1 card per root;
+ * Following admits initial posts or replies paired with their initial root context above them.
+ * @param {Array<object>} items
+ * @param {{ streamMode?: string }} [options]
+ * @returns {Array<object>}
+ */
+export function resolveContextualStreamItems(items = [], { streamMode = 'feed' } = {}) {
+  const normalized = (Array.isArray(items) ? items : []).filter(Boolean).map((raw) => toUnifiedItem(raw));
+  if (streamMode === 'feed') {
+    const seenRoots = new Set();
+    const collapsed = [];
+    for (const u of normalized) {
+      if (isReplyUnifiedItem(u)) continue;
+      const rootKey = getThreadRootIdentityKey(u);
+      if (rootKey) {
+        if (seenRoots.has(rootKey)) continue;
+        seenRoots.add(rootKey);
+      }
+      collapsed.push(u);
+    }
+    return collapsed;
+  }
+
+  const rootIndex = new Map();
+  for (const u of normalized) {
+    if (isReplyUnifiedItem(u)) continue;
+    if (u.id) rootIndex.set(u.id, u);
+    if (u._meta?.mastodon?.statusId) rootIndex.set(`mastodon:${String(u._meta.mastodon.statusId)}`, u);
+    if (u._meta?.bluesky?.uri) rootIndex.set(`bluesky:${String(u._meta.bluesky.uri)}`, u);
+    if (u._meta?.threads?.postId) rootIndex.set(`threads:${String(u._meta.threads.postId)}`, u);
+  }
+
+  const absorbedRootIds = new Set();
+  const resolved = normalized.map((u) => {
+    if (!isReplyUnifiedItem(u)) return u;
+
+    const existingCtx = u._meta?.replyContext;
+    if (existingCtx && (existingCtx.text || existingCtx.authorHandle || existingCtx.authorName)) {
+      if (existingCtx.id && rootIndex.has(existingCtx.id)) {
+        absorbedRootIds.add(existingCtx.id);
+      }
+      return u;
+    }
+
+    for (const parentKey of getDirectInitialParentKeys(u)) {
+      const parentRoot = rootIndex.get(parentKey);
+      if (!parentRoot) continue;
+      absorbedRootIds.add(parentRoot.id);
+      return {
+        ...u,
+        _meta: {
+          ...u._meta,
+          replyContext: buildSynthesizedReplyContext(parentRoot),
+        },
+      };
+    }
+    return null;
+  });
+
+  return resolved.filter((u) => u && !( !isReplyUnifiedItem(u) && absorbedRootIds.has(u.id) ));
+}
+
+/**
  * Enforce Mastodon and local SQLite keyword filter rules ('hide' or 'warn')
- * across post text, content warnings, link preview cards, media alt text, and author metadata.
+ * across post text, content warnings, link preview cards, media alt text, reply context, and author metadata.
  * @param {Array<object>} items
  * @param {Array<{ phrase?: string, keywords?: string[], filter_action?: string, title?: string }>} rules
  * @returns {Array<object>}
@@ -1033,43 +1539,72 @@ export function applyKeywordFilters(items = [], rules = [], moderatedActors = []
       matchers,
     });
   }
-  if (compiledRules.length === 0 && modSet.size === 0) {
-    return items.filter((raw) => !(raw?._meta?.bluesky?.viewerMuted || raw?._meta?.bluesky?.viewerBlocking || raw?.viewerState?.viewerMuted || raw?.viewerState?.viewerBlocking));
-  }
 
   const out = [];
-  for (const raw of items) {
+  for (const raw of Array.isArray(items) ? items : []) {
+    if (!raw || typeof raw !== 'object') continue;
     const item = toUnifiedItem(raw);
     if (isUnifiedItemModerated(item, modSet)) continue;
-    const linkCard = item._meta?.linkCard || {};
-    const altTexts = Array.isArray(item.attachments)
-      ? item.attachments.map((a) => a?.alt_text || '').filter(Boolean)
-      : [];
-    const quote = item._meta?.quotePost || null;
-    const haystack = [
-      item.content_text || '',
-      item._meta?.mastodon?.spoilerText || '',
-      linkCard.title || '',
-      linkCard.description || '',
-      linkCard.url || '',
-      quote?.text || '',
-      quote?.authorHandle || '',
-      ...altTexts,
-      item.author?.name || '',
-      item.author?.handle || '',
-    ].join('\n');
 
-    let hidden = false;
-    let warnTitle = '';
-    for (const r of compiledRules) {
-      if (!r.matchers.some((rx) => rx.test(haystack))) continue;
-      if (r.action === 'hide') {
-        hidden = true;
-        break;
+    const serverFilterAction = String(item._meta?.mastodon?.filteredAction || '').toLowerCase();
+    if (serverFilterAction === 'hide') continue;
+    let warnTitle = serverFilterAction === 'warn'
+      ? (item._meta?.mastodon?.filteredTitle || 'Filtered')
+      : '';
+
+    if (compiledRules.length > 0) {
+      const linkCard = item._meta?.linkCard || {};
+      const altTexts = Array.isArray(item.attachments)
+        ? item.attachments.map((a) => a?.alt_text || '').filter(Boolean)
+        : [];
+      const quote = item._meta?.quotePost || null;
+      const replyCtx = item._meta?.replyContext || null;
+      const bskyTagTokens = Array.isArray(item._meta?.bluesky?.facets)
+        ? item._meta.bluesky.facets.flatMap((f) =>
+            Array.isArray(f?.features)
+              ? f.features.map((ft) => (ft?.tag ? `#${ft.tag}` : ''))
+              : []
+          ).filter(Boolean)
+        : [];
+      const htmlPlainText = String(item.content_html || '').replace(/<[^>]+>/g, ' ').trim();
+      const haystack = [
+        item.content_text || '',
+        htmlPlainText,
+        item.url || '',
+        extractPrimaryUrlFromItem(item),
+        item._meta?.mastodon?.spoilerText || '',
+        item._meta?.threads?.topicTag || '',
+        linkCard.title || '',
+        linkCard.description || '',
+        linkCard.url || '',
+        item.linkCard?.title || '',
+        item.linkCard?.description || '',
+        quote?.text || '',
+        quote?.authorHandle || '',
+        quote?.linkCard?.title || '',
+        quote?.linkCard?.description || '',
+        replyCtx?.text || '',
+        replyCtx?.authorName || '',
+        replyCtx?.authorHandle || '',
+        ...(Array.isArray(item._meta?.bluesky?.labels) ? item._meta.bluesky.labels : []),
+        ...bskyTagTokens,
+        ...altTexts,
+        item.author?.name || '',
+        item.author?.handle || '',
+      ].join('\n');
+
+      let hidden = false;
+      for (const r of compiledRules) {
+        if (!r.matchers.some((rx) => rx.test(haystack))) continue;
+        if (r.action === 'hide') {
+          hidden = true;
+          break;
+        }
+        warnTitle = warnTitle || r.title;
       }
-      warnTitle = warnTitle || r.title;
+      if (hidden) continue;
     }
-    if (hidden) continue;
+
     if (warnTitle && !item._meta?.mastodon?.spoilerText) {
       out.push({
         ...item,

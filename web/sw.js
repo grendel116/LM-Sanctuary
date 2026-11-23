@@ -1,4 +1,4 @@
-export const CACHE_NAME = 'sanctuary-shell-v64';
+export const CACHE_NAME = 'sanctuary-shell-v114';
 
 export const APP_SHELL_ASSETS = [
   './',
@@ -18,8 +18,10 @@ export const APP_SHELL_ASSETS = [
   './constants/theme.js',
   './core/feedRanker.js',
   './core/postLanguage.js',
+  './core/urlPrivacy.js',
   './core/schema/unifiedItem.js',
   './adapters/base.js',
+  './adapters/browserBridge.js',
   './adapters/mastodon/index.js',
   './adapters/bluesky/index.js',
   './adapters/threads/index.js',
@@ -38,6 +40,7 @@ export const APP_SHELL_ASSETS = [
   './state/store.js',
   './state/activityStore.js',
   './state/authStore.js',
+  './state/browserStore.js',
   './state/feedStore.js',
   './state/composeStore.js',
   './state/sanctuary/types.js',
@@ -62,6 +65,7 @@ export const APP_SHELL_ASSETS = [
   './components/OfflineNotice.js',
   './components/PullToRefresh.js',
   './components/SearchInput.js',
+  './components/SearchSuggestions.js',
   './components/PostCard.js',
   './components/sanctuary/SanctuaryDialog.js',
   './components/sanctuary/UserModal.js',
@@ -76,6 +80,7 @@ export const APP_SHELL_ASSETS = [
   './components/sanctuary/VoiceCallOverlay.js',
   './app/_layout.js',
   './app/activity.js',
+  './app/browser.js',
   './app/composeModal.js',
   './app/postThread.js',
   './app/profile.js',

@@ -1,7 +1,9 @@
 import { createPostCard } from '../components/PostCard.js';
+import { attachSearchSuggestions } from '../components/SearchSuggestions.js';
 import { showConfirm } from '../components/sanctuary/SanctuaryDialog.js';
 import { createLoadingState } from '../components/ui/index.js';
 import { DEFAULT_AVATAR_DATA_URI } from '../constants/avatars.js';
+import { applyKeywordFilters } from '../core/schema/unifiedItem.js';
 import { fetchProgramJournals } from '../queries/sanctuary.js';
 import {
   likeUnified,
@@ -13,7 +15,7 @@ import {
 } from '../queries/socialClient.js';
 import { authStore } from '../state/authStore.js';
 import { prefillReply } from '../state/composeStore.js';
-import { applyPostInterestFeedback, removePostAcrossStreams } from '../state/feedStore.js';
+import { applyPostInterestFeedback, feedStore, removePostAcrossStreams } from '../state/feedStore.js';
 import { connectionStore } from '../state/sanctuary/connection.js';
 import { getCachedJournalsAndQuests } from '../storage/nativeStore.js';
 
@@ -65,6 +67,47 @@ export function mountSearchScreen(containerEl, {
   searchLandmark.appendChild(searchForm);
   stageHeader.appendChild(searchLandmark);
 
+  const searchSuggest = attachSearchSuggestions(input, {
+    anchorEl: searchForm,
+    debounceMs: 220,
+    minChars: 2,
+    fetchRemoteSuggestions: async (q) => {
+      const socialData = await searchAccountsAndPosts(q).catch(() => ({ accounts: [], hashtags: [] }));
+      const items = [];
+      for (const acc of (socialData.accounts || []).slice(0, 4)) {
+        const handle = String(acc?.handle || acc?.acct || '').replace(/^@/, '');
+        if (!handle) continue;
+        items.push({
+          kind: 'account',
+          label: acc.name || acc.displayName || handle,
+          sublabel: `@${handle}`,
+          value: `@${handle}`,
+          account: acc,
+        });
+      }
+      for (const tag of (socialData.hashtags || []).slice(0, 3)) {
+        const name = String(tag?.name || tag || '').replace(/^#+/, '');
+        if (!name) continue;
+        items.push({
+          kind: 'hashtag',
+          label: `#${name}`,
+          sublabel: 'Hashtag',
+          value: `#${name}`,
+        });
+      }
+      return items;
+    },
+    onSelect: (item) => {
+      if (item.kind === 'account' && item.account && onSelectAuthor) {
+        onSelectAuthor(item.account);
+        return;
+      }
+      input.value = item.value;
+      lastQuery = item.value;
+      void runSearch(item.value);
+    },
+  });
+
   const resultsEl = doc.createElement('div');
   resultsEl.className = 'search-results-list';
 
@@ -115,8 +158,14 @@ export function mountSearchScreen(containerEl, {
 
       if (destroyed || epoch !== searchEpoch) return;
 
+      const feedModState = feedStore.get();
+      const moderatedStatuses = applyKeywordFilters(
+        socialData.statuses || [],
+        feedModState.filters || [],
+        feedModState.moderatedActors || []
+      );
       results.accounts.push(...(socialData.accounts || []));
-      results.posts.push(...(socialData.statuses || []));
+      results.posts.push(...moderatedStatuses);
       results.hashtags.push(...(socialData.hashtags || []));
       results.journals.push(...journalChunks.flat());
     } catch (err) {
@@ -375,6 +424,7 @@ export function mountSearchScreen(containerEl, {
   return {
     destroy() {
       destroyed = true;
+      searchSuggest?.destroy?.();
       unsubAuth();
     },
   };

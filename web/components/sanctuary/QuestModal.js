@@ -11,10 +11,22 @@ import {
 } from './SanctuaryDialog.js';
 
 const QUEST_SVG = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--primary-accent)" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"></path></svg>`;
-const TRASH_SVG = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>`;
-const CHECK_SVG = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"></polyline></svg>`;
-const CAL_SVG = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect><line x1="16" y1="2" x2="16" y2="6"></line><line x1="8" y1="2" x2="8" y2="6"></line><line x1="3" y1="10" x2="21" y2="10"></line></svg>`;
-const ICS_SVG = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>`;
+const TRASH_SVG = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>`;
+const CHECK_SVG = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"></polyline></svg>`;
+const PIN_SVG = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"></path><circle cx="12" cy="10" r="3"></circle></svg>`;
+const CLOCK_SVG = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>`;
+const CAL_SVG = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect><line x1="16" y1="2" x2="16" y2="6"></line><line x1="8" y1="2" x2="8" y2="6"></line><line x1="3" y1="10" x2="21" y2="10"></line></svg>`;
+const ICS_SVG = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>`;
+
+function formatQuestTargetDate(rawDue) {
+  if (!rawDue) return 'Anytime';
+  const parsed = new Date(rawDue);
+  if (Number.isNaN(parsed.getTime())) return String(rawDue);
+  return new Intl.DateTimeFormat(undefined, {
+    dateStyle: 'medium',
+    timeStyle: 'short',
+  }).format(parsed);
+}
 
 function buildGoogleCalendarUrl(quest) {
   let startDate = new Date();
@@ -78,22 +90,37 @@ export function openQuestModal({ sessionId = 'default', onQuestCompleted } = {})
       listEl.replaceChildren(
         ...quests.map((q) => {
           const card = doc.createElement('div');
-          card.className = 'list-entry-row';
+          card.className = 'list-entry-row quest-card';
 
           const top = doc.createElement('div');
           top.className = 'list-entry-header';
 
           const qTitle = doc.createElement('h4');
-          qTitle.style.margin = '0';
-          qTitle.style.color = '#fbbf24';
+          qTitle.className = 'quest-card-title';
           qTitle.textContent = q.title || 'Quest';
 
           const acts = doc.createElement('div');
-          acts.className = 'classic-card-actions';
+          acts.className = 'row-icon-actions';
+
+          const doneBtn = doc.createElement('button');
+          doneBtn.type = 'button';
+          doneBtn.className = 'row-icon-btn success';
+          doneBtn.title = 'Complete Quest';
+          doneBtn.setAttribute('aria-label', `Complete ${q.title || 'quest'}`);
+          doneBtn.innerHTML = CHECK_SVG;
+          doneBtn.addEventListener('click', async () => {
+            try {
+              await completeQuest(q.id, sessionId);
+              await onQuestCompleted?.(q);
+              await refresh();
+            } catch (err) {
+              showAlert('Error', `Error completing quest: ${err?.message || 'unknown error'}`);
+            }
+          });
 
           const delBtn = doc.createElement('button');
           delBtn.type = 'button';
-          delBtn.className = 'edit-btn edit-cancel-btn';
+          delBtn.className = 'row-icon-btn danger';
           delBtn.title = 'Delete Quest';
           delBtn.setAttribute('aria-label', `Delete ${q.title || 'quest'}`);
           delBtn.innerHTML = TRASH_SVG;
@@ -108,46 +135,42 @@ export function openQuestModal({ sessionId = 'default', onQuestCompleted } = {})
             );
           });
 
-          const doneBtn = doc.createElement('button');
-          doneBtn.type = 'button';
-          doneBtn.className = 'edit-btn edit-save-btn';
-          doneBtn.title = 'Complete Quest';
-          doneBtn.setAttribute('aria-label', `Complete ${q.title || 'quest'}`);
-          doneBtn.innerHTML = CHECK_SVG;
-          doneBtn.addEventListener('click', async () => {
-            try {
-              await completeQuest(q.id, sessionId);
-              await onQuestCompleted?.(q);
-              await refresh();
-            } catch (err) {
-              showAlert('Error', `Error completing quest: ${err?.message || 'unknown error'}`);
-            }
-          });
-
-          acts.append(delBtn, doneBtn);
+          acts.append(doneBtn, delBtn);
           top.append(qTitle, acts);
           card.appendChild(top);
 
+          const metaRow = doc.createElement('div');
+          metaRow.className = 'quest-meta-row';
+
           if (q.location) {
-            const locEl = doc.createElement('div');
-            locEl.className = 'classic-card-subtext';
-            locEl.textContent = `Location: ${q.location}`;
-            card.appendChild(locEl);
+            const locPill = doc.createElement('span');
+            locPill.className = 'quest-meta-pill';
+            const locText = doc.createElement('span');
+            locText.textContent = q.location;
+            locPill.innerHTML = PIN_SVG;
+            locPill.appendChild(locText);
+            metaRow.appendChild(locPill);
           }
 
-          const parsedDue = q.due ? new Date(q.due) : null;
-          const dueLabel = parsedDue && !Number.isNaN(parsedDue.getTime())
-            ? parsedDue.toLocaleString()
-            : (q.due || 'No Target Time');
-          const dueEl = doc.createElement('div');
-          dueEl.className = 'classic-card-subtext';
-          dueEl.textContent = `Target: ${dueLabel}`;
-          card.appendChild(dueEl);
+          const duePill = doc.createElement('span');
+          duePill.className = 'quest-meta-pill';
+          const dueText = doc.createElement('span');
+          dueText.textContent = formatQuestTargetDate(q.due);
+          duePill.innerHTML = CLOCK_SVG;
+          duePill.appendChild(dueText);
+          metaRow.appendChild(duePill);
+          card.appendChild(metaRow);
 
-          if (Array.isArray(q.objectives) && q.objectives.length > 0) {
+          const objs = Array.isArray(q.objectives) ? q.objectives.filter(Boolean) : [];
+          if (objs.length === 1) {
+            const p = doc.createElement('p');
+            p.className = 'quest-objective-single';
+            p.textContent = objs[0];
+            card.appendChild(p);
+          } else if (objs.length > 1) {
             const ul = doc.createElement('ul');
             ul.className = 'classic-quest-objectives';
-            for (const obj of q.objectives) {
+            for (const obj of objs) {
               const li = doc.createElement('li');
               li.textContent = obj;
               ul.appendChild(li);
@@ -156,21 +179,19 @@ export function openQuestModal({ sessionId = 'default', onQuestCompleted } = {})
           }
 
           const calFooter = doc.createElement('div');
-          calFooter.className = 'classic-card-actions';
-          calFooter.style.marginTop = '6px';
+          calFooter.className = 'quest-card-footer';
 
           const gcalLink = doc.createElement('a');
           gcalLink.href = buildGoogleCalendarUrl(q);
           gcalLink.target = '_blank';
           gcalLink.rel = 'noopener noreferrer';
-          gcalLink.className = 'edit-btn edit-save-btn';
-          gcalLink.style.textDecoration = 'none';
-          gcalLink.innerHTML = `${CAL_SVG}<span>Add to Google</span>`;
+          gcalLink.className = 'edit-btn edit-cancel-btn';
+          gcalLink.innerHTML = `${CAL_SVG}<span>Google Calendar</span>`;
 
           const icsBtn = doc.createElement('button');
           icsBtn.type = 'button';
           icsBtn.className = 'edit-btn edit-cancel-btn';
-          icsBtn.innerHTML = `${ICS_SVG}<span>Download ICS</span>`;
+          icsBtn.innerHTML = `${ICS_SVG}<span>Export .ics</span>`;
           icsBtn.addEventListener('click', () => {
             void downloadNodeFile(`/api/quests/${encodeURIComponent(q.id)}/download`, `${q.id}.ics`);
           });

@@ -1,0 +1,33 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at http://mozilla.org/MPL/2.0/.
+
+Name:           {{ PKG_NAME }}
+Version:        {{ PKG_VERSION }}
+Release:        {{ PKG_BUILD_NUMBER }}%{?dist}
+Summary:        {{ DESCRIPTION }}
+URL:            https://github.com/grendel116/LM-Sanctuary
+Group:          Applications/Internet
+License:        MPL-2.0 AND AGPL-3.0-only WITH AdditionRef-sval-app-store
+Vendor:         LM-Sanctuary Contributors
+Source0:        %{name}.tar.xz
+Source1:        %{name}.desktop
+Source2:        %{name}.1
+
+%global __requires_exclude_from ^/usr/lib/lm-sanctuary.*/libonnxruntime\\.so$
+%global mozappdir /{{ PKG_INSTALL_PATH }}
+%global appdir %{_datadir}/applications/
+
+%description
+{{ DESCRIPTION }}
+
+%prep
+%setup -q -n lm-sanctuary
+%{__mkdir_p} %{buildroot}/%{mozappdir} %{buildroot}%{appdir} %{buildroot}%{_bindir} %{buildroot}%{_mandir}/man1/
+%{__cp} -r . %{buildroot}/%{mozappdir}
+%{__install} -m 0644 %{SOURCE1} %{buildroot}%{_datadir}/applications/io.github.grendel116.sanctuary.desktop
+%{__install} -m 0644 %{SOURCE2} %{buildroot}%{_mandir}/man1/%{name}.1
+%{__ln_s} %{mozappdir}/lm-sanctuary %{buildroot}%{_bindir}/%{name}
+%{__install} -D -m 0644 %{buildroot}%{mozappdir}/browser/chrome/icons/default/default16.png %{buildroot}%{_datadir}/icons/hicolor/16x16/apps/%{name}.png
+%{__install} -D -m 0644 %{buildroot}%{mozappdir}/browser/chrome/icons/default/default48.png %{buildroot}%{_datadir}/icons/hicolor/48x48/apps/%{name}.png
+%{__install} -D -m 0644 %{buildroot}%{mozappdir}/browser/chrome/icons/default/default128.png %{buildroot}%{_datadir}/icons/hicolor/128x128/apps/%{name}.png

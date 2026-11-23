@@ -58,10 +58,16 @@ def _sanitize_shared_post(raw) -> dict | None:
 
 
 def _format_shared_post_llm_text(sp: dict, user_note: str = "") -> str:
-    byline = f"[Shared post by {sp.get('authorName') or 'Author'}"
-    if sp.get("authorHandle"):
-        byline += f" ({sp['authorHandle']})"
-    byline += "]"
+    if sp.get("network") == "web":
+        byline = f"[Shared webpage from {sp.get('authorName') or 'Webpage'}"
+        if sp.get("url"):
+            byline += f" ({sp['url']})"
+        byline += "]"
+    else:
+        byline = f"[Shared post by {sp.get('authorName') or 'Author'}"
+        if sp.get("authorHandle"):
+            byline += f" ({sp['authorHandle']})"
+        byline += "]"
     parts = [byline]
     if sp.get("text"):
         parts.append(sp["text"])
@@ -390,7 +396,9 @@ def chat():
                 model=selected_model,
                 media_path=media_path,
                 msg_id=msg_id,
-                speaker_id=speaker_id
+                speaker_id=speaker_id,
+                shared_post=shared_post,
+                user_note=user_note,
             )
         )
         if shared_post and user_msg_id:
@@ -575,8 +583,27 @@ def update_message():
         return jsonify({'error': 'msg_id and new_text are required'}), 400
 
     try:
-        success = st.run_async(st.runner.update_message_text(session_id, msg_id, new_text))
+        existing_sp = None
+        with st.runner._lock:
+            st.runner._ensure_session_loaded(session_id)
+            for m in st.runner.sessions_history.get(session_id, []):
+                if isinstance(m, dict) and m.get('id') == msg_id and isinstance(m.get('shared_post'), dict):
+                    existing_sp = dict(m['shared_post'])
+                    break
+        effective_text = (
+            _format_shared_post_llm_text(existing_sp, str(new_text))
+            if existing_sp
+            else new_text
+        )
+        success = st.run_async(st.runner.update_message_text(session_id, msg_id, effective_text))
         if success:
+            if existing_sp:
+                with st.runner._lock:
+                    for m in st.runner.sessions_history.get(session_id, []):
+                        if isinstance(m, dict) and m.get('id') == msg_id:
+                            m['user_note'] = str(new_text)
+                            break
+                    st.runner._save_session_to_disk(session_id)
             return jsonify({'status': 'success'})
         else:
             return jsonify({'error': 'Message not found'}), 404
@@ -777,22 +804,65 @@ def get_pending_tool_call():
     pending = None
     for call_id, info in list(tools.pending_tool_calls.items()):
         if info['status'] == 'pending':
+            info_sid = info.get('session_id')
+            if info_sid and info_sid != session_id:
+                continue
             pending = {
                 'call_id': call_id,
+                'kind': info.get('kind', 'approval'),
                 'tool_name': info['tool_name'],
-                'details': info['details']
+                'details': info['details'],
+                'options': info.get('options', []),
             }
             break
     active_list = list(tools.active_running_tools.keys())
     with tools.session_tool_calls_lock:
         session_calls = list(tools.session_tool_calls.get(session_id, []))
+
+    browser_cmd = None
+    with tools.pending_browser_commands_lock:
+        for cmd_id, cinfo in list(tools.pending_browser_commands.items()):
+            if cinfo.get('status') == 'pending':
+                csid = cinfo.get('session_id')
+                if csid and csid != session_id:
+                    continue
+                browser_cmd = {
+                    'cmd_id': cmd_id,
+                    'action': cinfo.get('action'),
+                    'args': cinfo.get('args') or {},
+                }
+                break
+
     return jsonify({
         'call_id': pending['call_id'] if pending else None,
+        'kind': pending['kind'] if pending else None,
         'tool_name': pending['tool_name'] if pending else None,
         'details': pending['details'] if pending else None,
+        'options': pending['options'] if pending else [],
+        'browser_command': browser_cmd,
         'active_tools': active_list,
         'tool_calls': session_calls,
     })
+
+
+@chat_bp.route('/api/browser/command_result', methods=['POST'])
+@st.requires_auth
+def browser_command_result():
+    import tools.tools as tools
+
+    body = request.get_json(silent=True) or {}
+    cmd_id = str(body.get('cmd_id') or '').strip()
+    result = body.get('result')
+    with tools.pending_browser_commands_lock:
+        entry = tools.pending_browser_commands.get(cmd_id)
+        if not entry:
+            return jsonify({'error': 'Browser command not found'}), 404
+        entry['result'] = result if isinstance(result, dict) else {'ok': False, 'message': str(result)}
+        entry['status'] = 'done'
+        ev = entry.get('event')
+        if ev:
+            ev.set()
+    return jsonify({'status': 'success'})
 
 
 @chat_bp.route('/api/cancel_chat', methods=['POST'])
@@ -822,12 +892,21 @@ def cancel_chat():
 @st.requires_auth
 def approve_tool():
     import tools.tools as tools
-    call_id = request.json.get('call_id')
-    status = request.json.get('status')
-    
+    body = request.get_json(silent=True) or {}
+    call_id = body.get('call_id')
+    status = body.get('status')
+
     if call_id in tools.pending_tool_calls:
-        tools.pending_tool_calls[call_id]['status'] = status
-        event = tools.pending_tool_calls[call_id].get('event')
+        entry = tools.pending_tool_calls[call_id]
+        entry['status'] = status
+        if body.get('option_index') is not None:
+            try:
+                entry['option_index'] = int(body['option_index'])
+            except (TypeError, ValueError):
+                entry['option_index'] = None
+        if 'answer_text' in body:
+            entry['answer_text'] = str(body.get('answer_text') or '').strip()
+        event = entry.get('event')
         if event:
             event.set()
         return jsonify({'status': 'success'})

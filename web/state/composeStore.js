@@ -68,16 +68,54 @@ function normalizeMediaItem(item, index = 0) {
   };
 }
 
+function getReplyMentionPrefix(post) {
+  const notifActor = post?._meta?.notification?.actor;
+  const rawHandle = notifActor?.handle || post?.author?.handle || post?.author?.acct || '';
+  return rawHandle ? `@${String(rawHandle).replace(/^@/, '')} ` : '';
+}
+
 export function openCompose(patch = {}) {
+  const cur = composeStore.get();
+  const nextPatch = { ...patch };
+  if (!Object.hasOwn(nextPatch, 'replyTo')) {
+    nextPatch.replyTo = null;
+    if (cur.replyTo && !Object.hasOwn(nextPatch, 'text')) {
+      nextPatch.text = '';
+      nextPatch.spoilerText = '';
+      nextPatch.contentWarningOpen = false;
+    }
+  }
   composeStore.set({
-    ...patch,
+    ...nextPatch,
     isOpen: true,
     error: null,
   });
 }
 
 export function closeCompose() {
+  const cur = composeStore.get();
+  if (cur.replyTo) {
+    const prefix = getReplyMentionPrefix(cur.replyTo);
+    const shouldClearText = !cur.text || cur.text === prefix || cur.text.trim() === prefix.trim();
+    composeStore.set({
+      isOpen: false,
+      replyTo: null,
+      ...(shouldClearText ? { text: '', spoilerText: '', contentWarningOpen: false } : {}),
+    });
+    return;
+  }
   composeStore.set({ isOpen: false });
+}
+
+export function clearComposeReply() {
+  const cur = composeStore.get();
+  if (!cur.replyTo) return;
+  const prefix = getReplyMentionPrefix(cur.replyTo);
+  const shouldClearText = !cur.text || cur.text === prefix || cur.text.trim() === prefix.trim();
+  composeStore.set({
+    replyTo: null,
+    ...(shouldClearText ? { text: '', spoilerText: '', contentWarningOpen: false } : {}),
+  });
 }
 
 export function resetCompose() {

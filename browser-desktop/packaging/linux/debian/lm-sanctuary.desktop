@@ -1,0 +1,28 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at http://mozilla.org/MPL/2.0/.
+
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Sanctuary Browser
+GenericName=Web Browser & AI Sanctuary
+Comment=Privacy-first sovereign browser and local AI workspace
+Keywords=Internet;WWW;Browser;Web;AI;Fediverse
+Exec=lm-sanctuary %u
+Terminal=false
+X-MultipleArgs=false
+Icon=lm-sanctuary
+StartupWMClass=lm-sanctuary
+Categories=GNOME;GTK;Network;WebBrowser;
+MimeType=application/json;application/pdf;application/rdf+xml;application/rss+xml;application/x-xpinstall;application/xhtml+xml;application/xml;audio/flac;audio/ogg;audio/webm;image/avif;image/gif;image/jpeg;image/png;image/svg+xml;image/webp;text/html;text/xml;video/ogg;video/webm;x-scheme-handler/chrome;x-scheme-handler/http;x-scheme-handler/https;
+StartupNotify=true
+Actions=new-window;new-private-window;
+
+[Desktop Action new-window]
+Name=New Window
+Exec=lm-sanctuary --new-window %u
+
+[Desktop Action new-private-window]
+Name=New Private Window
+Exec=lm-sanctuary --private-window %u

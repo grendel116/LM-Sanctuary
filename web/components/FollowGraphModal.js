@@ -89,14 +89,17 @@ export function openFollowGraphModal({
     protocol: normalizedProto,
   };
 
+  doc.getElementById('follow-graph-dialog')?.remove?.();
+
   const modal = createClassicModalDialog({
     id: 'follow-graph-dialog',
-    labelledBy: 'follow-graph-title',
-    dialogClassName: 'follow-graph-modal',
     onClose: () => {
       closed = true;
+      modal.dialog.remove();
     },
   });
+  modal.dialog.classList.add('follow-graph-modal');
+  modal.dialog.setAttribute('aria-labelledby', 'follow-graph-title');
 
   const heading = doc.createElement('h2');
   heading.id = 'follow-graph-title';
@@ -130,6 +133,7 @@ export function openFollowGraphModal({
   filterIn.className = 'onboarding-input follow-graph-filter';
   filterIn.placeholder = 'Filter by name or handle...';
   filterIn.setAttribute('aria-label', 'Filter connections');
+  filterIn.setAttribute('autocomplete', 'off');
   filterIn.addEventListener('input', () => {
     filterText = filterIn.value.trim().toLowerCase();
     renderList();
@@ -521,6 +525,7 @@ export function openFollowGraphModal({
 
   updateHeadingAndControls();
   renderList();
+  modal.open();
   void loadTab(activeTab === 'requests' ? 'followers' : activeTab);
 
   if (isOwnProfile && ownMasto) {

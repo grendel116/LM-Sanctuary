@@ -1,4 +1,5 @@
 import { extractFirstHttpsUrl, parseVideoEmbedInfo } from '../queries/linkPreview.js';
+import { resolveVideoEmbedUrl } from '../queries/sanctuary.js';
 
 const PLAY_ICON_SVG = `<svg width="26" height="26" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><polygon points="6 4 20 12 6 20 6 4"></polygon></svg>`;
 
@@ -40,12 +41,13 @@ export function resolvePostEmbedCard(unifiedItem) {
       const image = rawCard.image || video?.thumbnailUrl || '';
       const embedUrl = isAllowedIframeEmbedUrl(rawCard.embedUrl) || video?.embedUrl || '';
       const provider = rawCard.provider || video?.provider || '';
-      if (embedUrl || rawCard.title || rawCard.description) {
+      const safeImage = /^https:\/\//i.test(String(image)) ? String(image) : '';
+      if (embedUrl || rawCard.title || rawCard.description || safeImage) {
         return {
           url: safe.href,
           title: String(rawCard.title || (video ? `${video.provider === 'youtube' ? 'YouTube' : 'Vimeo'} Video` : safe.host)),
           description: String(rawCard.description || ''),
-          image: /^https:\/\//i.test(String(image)) ? String(image) : '',
+          image: safeImage,
           siteName: String(rawCard.siteName || safe.host),
           provider,
           embedUrl,
@@ -80,7 +82,7 @@ export function resolvePostEmbedCard(unifiedItem) {
  * @param {object} card
  * @param {{ compact?: boolean, onDismiss?: () => void }} [opts]
  */
-export function createEmbedCard(card, { compact = false, onDismiss = null } = {}) {
+export function createEmbedCard(card, { compact = false, onDismiss = null, sensitive = false } = {}) {
   const doc = globalThis.document;
   const safe = normalizeSafeHttpUrl(card?.url);
   if (!safe) return null;
@@ -105,7 +107,7 @@ export function createEmbedCard(card, { compact = false, onDismiss = null } = {}
 
     if (/^https:\/\//i.test(thumbSrc)) {
       const thumb = doc.createElement('img');
-      thumb.className = 'post-embed-thumb';
+      thumb.className = `post-embed-thumb${sensitive ? ' is-sensitive-thumb' : ''}`;
       thumb.src = thumbSrc;
       thumb.alt = '';
       thumb.loading = 'lazy';
@@ -123,15 +125,16 @@ export function createEmbedCard(card, { compact = false, onDismiss = null } = {}
       if (e.target?.closest?.('.compose-embed-dismiss-btn') || stage.querySelector('iframe.post-embed-iframe')) return;
       e.preventDefault();
       e.stopPropagation();
+      const resolvedSrc = resolveVideoEmbedUrl(embedSrc);
       const iframe = doc.createElement('iframe');
       iframe.className = 'post-embed-iframe';
-      iframe.src = embedSrc;
+      iframe.src = resolvedSrc;
       iframe.title = titleText || 'Embedded video';
       iframe.setAttribute('loading', 'lazy');
       iframe.setAttribute('allow', 'accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture');
       iframe.setAttribute('allowfullscreen', '');
       iframe.setAttribute('referrerpolicy', 'strict-origin-when-cross-origin');
-      iframe.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-presentation allow-popups');
+      iframe.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-presentation allow-popups allow-popups-to-escape-sandbox');
       stage.replaceChildren(iframe);
     };
     playBtn.addEventListener('click', activateEmbed);
@@ -187,7 +190,7 @@ export function createEmbedCard(card, { compact = false, onDismiss = null } = {}
 
   if (/^https:\/\//i.test(thumbSrc)) {
     const thumb = doc.createElement('img');
-    thumb.className = 'post-link-card-thumb';
+    thumb.className = `post-link-card-thumb${sensitive ? ' is-sensitive-thumb' : ''}`;
     thumb.src = thumbSrc;
     thumb.alt = '';
     thumb.loading = 'lazy';

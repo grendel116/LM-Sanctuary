@@ -344,9 +344,11 @@ def run_tests():
     import tools.tools as tools_mod
 
     seen_generating = []
+    seen_counts = []
 
     def fake_portrait(*a, **kw):
         seen_generating.append(sid in st.runner.generating_sessions)
+        seen_counts.append(kw.get("count"))
         return "![Portrait](/images/portraits/test.png)"
 
     with mock.patch("routes.media.extract_portrait_tags_from_context", return_value="1girl"), \
@@ -363,8 +365,20 @@ def run_tests():
                 "msg_id": "prgm_client_456",
             },
         )
+        p_default_res = client.post(
+            "/api/portrait/generate",
+            json={
+                "session_id": sid,
+                "speaker_id": "aria",
+                "prompt": "test two up",
+                "stream": False,
+                "msg_id": "prgm_client_457",
+            },
+        )
     assert p_res.status_code == 200
-    assert seen_generating == [True]
+    assert p_default_res.status_code == 200
+    assert seen_generating == [True, True]
+    assert seen_counts == [1, 2]
     assert p_res.get_json()["program_msg_id"] == "prgm_client_456"
     assert sid not in st.runner.generating_sessions
 
@@ -428,27 +442,56 @@ def run_tests():
     assert sp_hist_item["shared_post"]["authorName"] == "Charlie"
     assert sp_hist_item["user_note"] == "Mood check"
 
+    # Rerolling the program reply via /edit preserves shared_post and user_note on the user message
+    async def fake_reroll_llm_loop(*a, **kw):
+        runner._upsert_history_message(
+            sid,
+            {
+                "id": "prgm_sp_2",
+                "role": "program",
+                "text": "Still peaceful!",
+                "sender_id": "aria",
+                "sender_name": "Aria Prime",
+                "timestamp": time.time(),
+            },
+        )
+        return "Still peaceful!", [], "prgm_sp_2"
+
+    with mock.patch.object(st.runner, "_execute_local_llm_loop", side_effect=fake_reroll_llm_loop), \
+         mock.patch.object(st, "build_generation_response", return_value=({"status": "ok"}, 200)):
+        reroll_res = client.post("/edit", json={"session_id": sid, "msg_id": "prgm_sp_1", "new_text": None})
+    assert reroll_res.status_code == 200
+    hist_after_reroll = client.get(f"/history?session_id={sid}").get_json()["history"]
+    sp_after_reroll = next(m for m in hist_after_reroll if m["id"] == "usr_sp_1")
+    assert sp_after_reroll["shared_post"]["authorName"] == "Charlie"
+    assert sp_after_reroll["user_note"] == "Mood check"
+
     # Unapproved feed tuning skill/tool & declarative /api/feed_profile sync
     fp_get = client.get("/api/feed_profile")
     assert fp_get.status_code == 200
-    assert fp_get.get_json()["sliders"]["commercial"] == 0
+    fp_get_json = fp_get.get_json()
+    assert fp_get_json["version"] == 2
+    assert "sliders" not in fp_get_json
+    assert fp_get_json["discoveryChannels"] == []
+    assert fp_get_json["discoveryInstances"] == []
 
     with mock.patch.object(tools_mod, "confirm_tool_execution", side_effect=AssertionError("Should never require approval")):
         tool_out = tools_mod.tune_feed_algorithm(
-            commercial=-100,
-            bourgeois_politics=-100,
-            mature_content=-80,
-            small_web=70,
+            add_discovery_channels=[
+                "cooperatives",
+                "at://did:plc:abc123/app.bsky.feed.generator/for-science",
+            ],
+            add_discovery_instances=["https://kolektiva.social/", "fosstodon.org"],
         )
     assert "[Feed Profile Updated]" in tool_out
 
     fp_after_tool = client.get("/api/feed_profile").get_json()
-    assert fp_after_tool["sliders"]["commercial"] == -100
-    assert fp_after_tool["sliders"]["bourgeoisPolitics"] == -100
-    assert fp_after_tool["sliders"]["matureContent"] == -80
-    assert fp_after_tool["sliders"]["smallWeb"] == 70
-    assert "boostConcepts" not in fp_after_tool
-    assert "dampenConcepts" not in fp_after_tool
+    assert "sliders" not in fp_after_tool
+    assert fp_after_tool["discoveryChannels"] == [
+        "cooperatives",
+        "at://did:plc:abc123/app.bsky.feed.generator/for-science",
+    ]
+    assert fp_after_tool["discoveryInstances"] == ["kolektiva.social", "fosstodon.org"]
     assert fp_after_tool["updatedAt"] > 0
 
     mh_after_tune = client.get("/api/mobile/health").get_json()
@@ -457,27 +500,120 @@ def run_tests():
     fp_put = client.put(
         "/api/feed_profile",
         json={
-            "sliders": {"longform": 65, "commercial": -50},
-            "discoveryChannels": ["cooperatives", "mutual aid"],
-            "discoveryInstances": ["https://kolektiva.social/", "fosstodon.org"],
+            "discoveryChannels": ["mutual aid", "#woodworking"],
+            "discoveryInstances": ["https://hachyderm.io/", "fosstodon.org"],
         },
     )
     assert fp_put.status_code == 200
     fp_put_json = fp_put.get_json()
-    assert fp_put_json["sliders"]["longform"] == 65
-    assert fp_put_json["discoveryChannels"] == ["cooperatives", "mutual aid"]
-    assert fp_put_json["discoveryInstances"] == ["kolektiva.social", "fosstodon.org"]
+    assert fp_put_json["discoveryChannels"] == ["mutual aid", "#woodworking"]
+    assert fp_put_json["discoveryInstances"] == ["hachyderm.io", "fosstodon.org"]
 
-    tool_sanctuary = tools_mod.tune_feed_algorithm(
-        preset="sanctuary",
-        add_discovery_channels=["class struggle"],
-        add_discovery_instances=["merveilles.town"],
+    tool_rm = tools_mod.tune_feed_algorithm(remove_sources=["#woodworking", "hachyderm.io"])
+    assert "[Feed Profile Updated]" in tool_rm
+    fp_after_rm = client.get("/api/feed_profile").get_json()
+    assert fp_after_rm["discoveryChannels"] == ["mutual aid"]
+    assert fp_after_rm["discoveryInstances"] == ["fosstodon.org"]
+
+    tool_reset = tools_mod.tune_feed_algorithm(action="reset")
+    assert "[Feed Profile Updated]" in tool_reset
+    fp_reset = client.get("/api/feed_profile").get_json()
+    assert fp_reset["discoveryChannels"] == []
+    assert fp_reset["discoveryInstances"] == []
+
+    flt_put = client.put(
+        "/api/social/accounts/filters",
+        json={
+            "filters": [
+                {"id": "f1", "title": "Ukraine", "phrase": "Ukraine", "filter_action": "hide"},
+                {"id": "f2", "title": "Topics", "keywords": ["AI", "Crypto"], "filter_action": "warn"},
+            ]
+        },
     )
-    assert "[Feed Profile Updated]" in tool_sanctuary
-    fp_sanctuary = client.get("/api/feed_profile").get_json()
-    assert fp_sanctuary["sliders"]["smallWeb"] == 80
-    assert "class struggle" in fp_sanctuary["discoveryChannels"]
-    assert "merveilles.town" in fp_sanctuary["discoveryInstances"]
+    assert flt_put.status_code == 200
+    assert len(flt_put.get_json()["filters"]) == 2
+    flt_get = client.get("/api/social/accounts/filters").get_json()
+    assert flt_get["filters"][0]["phrase"] == "Ukraine"
+    assert flt_get["filters"][1]["keywords"] == ["AI", "Crypto"]
+
+    # New programs without a portrait return the Profile-tab user SVG icon instead of 404
+    default_avatar_res = client.get("/programs/aria/profile.png")
+    assert default_avatar_res.status_code == 200
+    assert default_avatar_res.mimetype == "image/svg+xml"
+    assert '<circle cx="12" cy="7" r="4">' in default_avatar_res.get_data(as_text=True)
+
+    # Confirm zero remaining webbrowser.open calls across sanctuary/ and web/
+    for scan_dir in (SANCTUARY_DIR, REPO_ROOT / "web"):
+        for fpath in scan_dir.rglob("*"):
+            if fpath.suffix in (".py", ".js") and fpath.is_file():
+                assert "webbrowser.open" not in fpath.read_text(encoding="utf-8", errors="ignore"), fpath
+
+    # Sebile has zero gatekeeper restrictions: any user can edit, recolor, rename, and delete Sebile
+    seb_save = client.post(
+        "/api/programs/profile/save",
+        json={"program_id": "sebile", "name": "Sebile", "personality": "unrestricted"},
+    )
+    assert seb_save.status_code == 200
+    seb_pal = client.post("/api/programs/palette", json={"program_id": "sebile", "color": "#10b981"})
+    assert seb_pal.status_code == 200
+    seb_ren = client.post("/api/programs/rename", json={"program_id": "sebile", "new_name": "Sebile Unbound"})
+    assert seb_ren.status_code == 200
+    assert seb_ren.get_json()["new_id"] == "sebileunbound"
+    assert (TMP_PROGS / "sebileunbound" / "sebileunbound.json").is_file()
+    seb_del = client.post("/api/programs/delete", json={"program_id": "sebileunbound"})
+    assert seb_del.status_code == 200
+    assert not (TMP_PROGS / "sebileunbound").exists()
+
+    # Also verify deleting 'sebile' directly when created/active cleanly switches to remaining program ('aria')
+    (TMP_PROGS / "sebile" / "sessions").mkdir(parents=True, exist_ok=True)
+    (TMP_PROGS / "sebile" / "sebile.json").write_text(
+        json.dumps({"spec": "chara_card_v3", "data": {"name": "Sebile", "extensions": {"sanctuary": {"program_id": "sebile"}}}}),
+        encoding="utf-8",
+    )
+    assert client.post("/api/programs/select", json={"program_id": "sebile"}).status_code == 200
+    direct_del = client.post("/api/programs/delete", json={"program_id": "sebile"})
+    assert direct_del.status_code == 200
+    assert direct_del.get_json()["switched_to"] == "aria"
+    assert not (TMP_PROGS / "sebile").exists()
+    # Cleanly ensure 'aria' deletion down to 0 programs does not fabricate a phantom 'sebile' directory
+    last_del = client.post("/api/programs/delete", json={"program_id": "aria"})
+    assert last_del.status_code == 200
+    assert last_del.get_json()["switched_to"] is None
+    assert not (TMP_PROGS / "sebile").exists()
+
+    # Recent social posts: sort newest-first, render clock times, stay in load_user_instructions (not load_dynamic_runtime_context)
+    import datetime as dt_mod
+    from routes.programs import _normalize_recent_social_posts
+    cpc.USER_PROFILES_DIR = str(TMP_VARS / "user_profiles")
+    os.makedirs(cpc.USER_PROFILES_DIR, exist_ok=True)
+    now_utc = dt_mod.datetime.now(dt_mod.timezone.utc)
+    older_iso = (now_utc - dt_mod.timedelta(hours=7)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    newer_iso = (now_utc - dt_mod.timedelta(minutes=10)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    stale_iso = (now_utc - dt_mod.timedelta(hours=80)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    normalized_posts = _normalize_recent_social_posts([
+        {"text": "Pinned older post from morning", "created_at": older_iso},
+        {"text": "Brand new post from 10m ago", "created_at": newer_iso},
+    ])
+    assert normalized_posts[0]["text"] == "Brand new post from 10m ago"
+    assert normalized_posts[1]["text"] == "Pinned older post from morning"
+
+    (Path(cpc.USER_PROFILES_DIR) / "builder_recent_posts.json").write_text(
+        json.dumps([
+            {"text": "Too old stale post", "created_at": stale_iso},
+            {"text": "Morning post 7h ago", "created_at": older_iso},
+            {"text": "Newest post 10m ago", "created_at": newer_iso},
+        ]),
+        encoding="utf-8",
+    )
+    user_inst = cpc.load_user_instructions()
+    dyn_ctx = cpc.load_dynamic_runtime_context()
+    assert "### USER'S RECENT PUBLIC POSTS (Passive Background Only)" in user_inst
+    assert "### USER'S RECENT" not in dyn_ctx
+    assert "Too old stale post" not in user_inst
+    pos_new = user_inst.find("Newest post 10m ago")
+    pos_old = user_inst.find("Morning post 7h ago")
+    assert 0 < pos_new < pos_old
+    assert ("AM]" in user_inst or "PM]" in user_inst)
 
     print(f"PHASE_1_BACKEND_VERIFIED (mobile/health={elapsed_ms:.1f}ms, routes={len(rules)})")
 

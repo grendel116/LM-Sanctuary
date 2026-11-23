@@ -1,0 +1,7 @@
+# SPDX-License-Identifier: AGPL-3.0-only WITH AdditionRef-sval-app-store
+# Fast front-end & chrome iteration build fragment (downloads prebuilt Gecko binaries).
+
+ac_add_options --enable-artifact-builds
+ac_add_options --with-app-name=firefox
+mk_add_options MOZ_OBJDIR=@TOPSRCDIR@/objdir-sanctuary-artifact
+mk_add_options AUTOCLOBBER=1

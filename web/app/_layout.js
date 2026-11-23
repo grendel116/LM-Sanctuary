@@ -1,11 +1,15 @@
 import { openAuthorSheetModal } from '../components/AuthorSheetModal.js';
+import { showAlert } from '../components/sanctuary/SanctuaryDialog.js';
 import { openSettingsModal } from '../components/sanctuary/SettingsModal.js';
 import { openUserModal } from '../components/sanctuary/UserModal.js';
 import { createUserIconSvg } from '../constants/avatars.js';
 import { toUnifiedItem } from '../core/schema/unifiedItem.js';
+import { NEWTAB_URL, stripTrackingParams } from '../core/urlPrivacy.js';
+import { subscribeBrowserHostEvents } from '../adapters/browserBridge.js';
 import { exchangeOAuthCode, verifyCredentials } from '../queries/fediverse.js';
 import {
   completeThreadsOAuthFlow,
+  fetchKeywordFilters,
   fetchSocialBridgeStatus,
   recoverUniqueCrossPostLinks,
   syncLinkedPostsWithSanctuary,
@@ -18,24 +22,51 @@ import {
   upsertSocialAccount,
 } from '../state/authStore.js';
 import { activityStore, hydrateActivityStore, markActivitySeen, refreshActivityNotifications } from '../state/activityStore.js';
-import { openCompose, prefillFromUserBubble } from '../state/composeStore.js';
-import { hydrateCachedModeration, hydrateFeedTuning } from '../state/feedStore.js';
+import {
+  MAX_SANCTUARY_SPLIT_PCT,
+  MIN_SANCTUARY_SPLIT_PCT,
+  browserStore,
+  clampSanctuarySplitPct,
+  executeBrowserAgentCommand,
+  hydrateBrowserStore,
+  isStandalonePrivateWindow,
+  openBrowserTab,
+  setSanctuarySplitPct,
+  syncBrowserBookmarksWithServer,
+  syncSearchConfigWithServer,
+} from '../state/browserStore.js';
+import { openCompose, prefillFromUserBubble, syncComposeDraftsWithServer } from '../state/composeStore.js';
+import { hydrateCachedFilters, hydrateCachedModeration, hydrateFeedTuning } from '../state/feedStore.js';
 import { connectionStore, initSanctuaryConnection, onSanctuaryEvent } from '../state/sanctuary/connection.js';
 import { attachOutboxAutoFlush, hydrateOutbox } from '../state/sanctuary/outboxModel.js';
 import { kvDelete, kvGet, kvSet } from '../storage/nativeStore.js';
 import { mountActivityScreen } from './activity.js';
+import { mountBrowserScreen } from './browser.js';
 import { mountComposeModal } from './composeModal.js';
 import { mountFeedScreen } from './feed.js';
-import { mountMessagesScreen } from './messages.js';
+import {
+  getDirectConvoKey,
+  mountDirectMessageThread,
+  mountMessagesScreen,
+  resolveDirectConversationTarget,
+} from './messages.js';
 import { renderPostThreadView } from './postThread.js';
 import { mountProfileScreen, openEditPostDialog } from './profile.js';
 import { mountProgramThread } from './programThread.js';
 import { mountSearchScreen } from './search.js';
 
+const GLOBE_SVG = `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"></circle><line x1="2" y1="12" x2="22" y2="12"></line><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path></svg>`;
+
 const NAV_ITEMS = [
+  {
+    id: 'browser',
+    label: 'Browser',
+    iconSvg: GLOBE_SVG,
+  },
   {
     id: 'home',
     label: 'Home',
+    desktopOnly: true,
     iconSvg: `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path><polyline points="9 22 9 12 15 12 15 22"></polyline></svg>`,
   },
   {
@@ -48,6 +79,12 @@ const NAV_ITEMS = [
     id: 'messages',
     label: 'Messages',
     iconSvg: `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg>`,
+  },
+  {
+    id: 'home',
+    label: 'Home',
+    mobileOnly: true,
+    iconSvg: `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path><polyline points="9 22 9 12 15 12 15 22"></polyline></svg>`,
   },
   {
     id: 'activity',
@@ -71,11 +108,12 @@ const SETTINGS_SVG = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none
 const PLUS_SVG = `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>`;
 
 const TAB_TITLES = {
-  home: 'Home | Sanctuary',
-  search: 'Search | Sanctuary',
-  messages: 'Messages | Sanctuary',
-  activity: 'Activity | Sanctuary',
-  profile: 'Profile | Sanctuary',
+  browser: 'Browser',
+  home: 'Home',
+  search: 'Search',
+  messages: 'Messages',
+  activity: 'Activity',
+  profile: 'Profile',
   sanctuary: 'Sanctuary',
 };
 
@@ -157,17 +195,36 @@ async function handlePendingOAuthCallback() {
  * 2) Center hairline social column (`main#main-content`)
  * 3) Persistent right Sanctuary companion dock (`aside.sanctuary-right-dock`)
  */
-export function createAppShell(rootEl, { initialTab = 'home', skipBackgroundInit = false } = {}) {
+export function createAppShell(
+  rootEl,
+  { initialTab = 'home', skipBackgroundInit = false, privateWindow = isStandalonePrivateWindow() } = {}
+) {
   const doc = globalThis.document;
   rootEl.replaceChildren();
 
-  let activeTab = TAB_TITLES[initialTab] ? initialTab : 'home';
+  const isPrivateWindow = Boolean(privateWindow);
+  let activeTab = isPrivateWindow ? 'browser' : (TAB_TITLES[initialTab] ? initialTab : 'home');
   let feedScreenHandle = null;
+  let browserScreenHandle = null;
   let activeScreenHandle = null;
   let threadScreenHandle = null;
   let savedHomeScrollTop = 0;
   let savedScreenScrollTop = 0;
   let msgNavPayload = {};
+  let resolveStartupReady = null;
+  let startupCapTimer = null;
+  const startupReadyPromise = skipBackgroundInit
+    ? null
+    : new Promise((resolve) => {
+        resolveStartupReady = () => {
+          if (startupCapTimer) {
+            clearTimeout(startupCapTimer);
+            startupCapTimer = null;
+          }
+          resolve();
+        };
+        startupCapTimer = setTimeout(resolveStartupReady, 2500);
+      });
 
   const shell = doc.createElement('div');
   shell.className = 'app-shell-frame';
@@ -214,7 +271,9 @@ export function createAppShell(rootEl, { initialTab = 'home', skipBackgroundInit
     btn.addEventListener('click', () => navigateToTab(item.id));
     li.appendChild(btn);
     navList.appendChild(li);
-    navButtons.set(item.id, btn);
+    const list = navButtons.get(item.id) || [];
+    list.push(btn);
+    navButtons.set(item.id, list);
   }
 
   const railDivider = doc.createElement('div');
@@ -300,11 +359,15 @@ export function createAppShell(rootEl, { initialTab = 'home', skipBackgroundInit
   const feedHostEl = doc.createElement('div');
   feedHostEl.className = 'stage-feed-host';
 
+  const browserHostEl = doc.createElement('div');
+  browserHostEl.className = 'stage-browser-host';
+  browserHostEl.hidden = true;
+
   const subScreenHostEl = doc.createElement('div');
   subScreenHostEl.className = 'stage-subscreen-host';
   subScreenHostEl.hidden = true;
 
-  screenHostEl.append(feedHostEl, subScreenHostEl);
+  screenHostEl.append(feedHostEl, browserHostEl, subScreenHostEl);
 
   const threadHostEl = doc.createElement('div');
   threadHostEl.className = 'stage-thread-host';
@@ -314,11 +377,65 @@ export function createAppShell(rootEl, { initialTab = 'home', skipBackgroundInit
 
   centerWrap.append(mobileBar, mainEl);
 
+  const splitResizerEl = doc.createElement('div');
+  splitResizerEl.className = 'workspace-split-resizer';
+  splitResizerEl.setAttribute('role', 'separator');
+  splitResizerEl.setAttribute('aria-orientation', 'vertical');
+  splitResizerEl.setAttribute('aria-label', 'Resize Sanctuary sidebar');
+  splitResizerEl.setAttribute('aria-valuemin', String(MIN_SANCTUARY_SPLIT_PCT));
+  splitResizerEl.setAttribute('aria-valuemax', String(MAX_SANCTUARY_SPLIT_PCT));
+  splitResizerEl.setAttribute('aria-valuenow', String(browserStore.get().sanctuarySplitPct));
+  splitResizerEl.tabIndex = 0;
+
   // Column 3: Collapsible Sanctuary Companion Right Dock
   const rightDockEl = doc.createElement('aside');
   rightDockEl.id = 'sanctuary-right-dock';
   rightDockEl.className = 'sanctuary-right-dock';
   rightDockEl.setAttribute('aria-label', 'Sanctuary Companion');
+
+  function applySanctuarySplitWidth(pct) {
+    const clamped = clampSanctuarySplitPct(pct);
+    shell.style.setProperty('--sanctuary-dock-w', `${clamped}%`);
+    splitResizerEl.setAttribute('aria-valuenow', String(clamped));
+    return clamped;
+  }
+
+  let draggingSplit = false;
+  splitResizerEl.addEventListener('pointerdown', (e) => {
+    if (e.button && e.button !== 0) return;
+    draggingSplit = true;
+    splitResizerEl.setPointerCapture?.(e.pointerId);
+    splitResizerEl.classList.add('is-dragging');
+  });
+  splitResizerEl.addEventListener('pointermove', (e) => {
+    if (!draggingSplit) return;
+    const rect = shell.getBoundingClientRect?.();
+    if (!rect || rect.width <= 0) return;
+    const rawPct = ((rect.right - e.clientX) / rect.width) * 100;
+    applySanctuarySplitWidth(rawPct);
+  });
+  const finishSplitDrag = (e) => {
+    if (!draggingSplit) return;
+    draggingSplit = false;
+    splitResizerEl.releasePointerCapture?.(e?.pointerId);
+    splitResizerEl.classList.remove('is-dragging');
+    const current = Number(splitResizerEl.getAttribute('aria-valuenow'));
+    setSanctuarySplitPct(current);
+  };
+  splitResizerEl.addEventListener('pointerup', finishSplitDrag);
+  splitResizerEl.addEventListener('pointercancel', finishSplitDrag);
+  splitResizerEl.addEventListener('keydown', (e) => {
+    const current = Number(splitResizerEl.getAttribute('aria-valuenow') || browserStore.get().sanctuarySplitPct);
+    let next = null;
+    if (e.key === 'ArrowLeft') next = current + 2;
+    else if (e.key === 'ArrowRight') next = current - 2;
+    else if (e.key === 'Home') next = MIN_SANCTUARY_SPLIT_PCT;
+    else if (e.key === 'End') next = MAX_SANCTUARY_SPLIT_PCT;
+    if (next === null) return;
+    e.preventDefault();
+    const applied = applySanctuarySplitWidth(next);
+    setSanctuarySplitPct(applied);
+  });
 
   let isSanctuaryCollapsed = false;
   const sanctuaryToggleBtn = doc.createElement('button');
@@ -328,6 +445,7 @@ export function createAppShell(rootEl, { initialTab = 'home', skipBackgroundInit
 
   function syncSanctuaryCollapseUi() {
     shell.classList.toggle('is-sanctuary-collapsed', isSanctuaryCollapsed);
+    splitResizerEl.hidden = isSanctuaryCollapsed;
     sanctuaryToggleBtn.setAttribute('aria-expanded', isSanctuaryCollapsed ? 'false' : 'true');
     const lbl = isSanctuaryCollapsed ? 'Expand Sanctuary' : 'Collapse Sanctuary';
     sanctuaryToggleBtn.setAttribute('aria-label', lbl);
@@ -343,19 +461,120 @@ export function createAppShell(rootEl, { initialTab = 'home', skipBackgroundInit
 
   sanctuaryToggleBtn.addEventListener('click', () => setSanctuaryCollapsed(!isSanctuaryCollapsed));
   syncSanctuaryCollapseUi();
+  applySanctuarySplitWidth(browserStore.get().sanctuarySplitPct);
 
   const modalHost = doc.createElement('div');
   modalHost.className = 'compose-modal-host';
 
-  shell.append(nav, centerWrap, rightDockEl, sanctuaryToggleBtn, mobileComposeBtn, modalHost);
+  shell.append(nav, centerWrap, splitResizerEl, rightDockEl, sanctuaryToggleBtn, mobileComposeBtn, modalHost);
+  if (isPrivateWindow) {
+    if (!browserStore.get().isPrivateWindow) {
+      browserStore.set((prev) => ({
+        isPrivateWindow: true,
+        tabs: prev.tabs.map((t) => ({ ...t, isPrivate: true })),
+      }));
+    }
+    shell.classList.add('is-private-browser-window', 'is-sanctuary-collapsed');
+    isSanctuaryCollapsed = true;
+    nav.hidden = true;
+    rightDockEl.hidden = true;
+    sanctuaryToggleBtn.hidden = true;
+    splitResizerEl.hidden = true;
+    mobileComposeBtn.hidden = true;
+  }
   rootEl.appendChild(shell);
 
-  const sanctuaryCtrl = mountProgramThread(rightDockEl, {
+  function ensureBrowserScreenMounted() {
+    if (!browserScreenHandle) {
+      browserScreenHandle = mountBrowserScreen(browserHostEl, {
+        onAskSanctuaryPage: (pageCard) => askSanctuaryAboutPost(pageCard),
+        onShareToFediverse: ({ title, url } = {}) => {
+          prefillFromUserBubble({
+            text: [title, url].filter(Boolean).join('\n'),
+          });
+        },
+      });
+    }
+    return browserScreenHandle;
+  }
+
+  function openExternalInBrowser(rawUrl, { activate = true, inSplit = false } = {}) {
+    const useStrip = browserStore.get().privacy.stripTrackingParams !== false;
+    const cleanUrl = useStrip ? stripTrackingParams(rawUrl) : String(rawUrl || '').trim();
+    if (!cleanUrl) return;
+    ensureBrowserScreenMounted();
+    openBrowserTab(cleanUrl, { activate, inSplit });
+    if (activate) {
+      navigateToTab('browser');
+    }
+  }
+
+  const sanctuaryDockPane = doc.createElement('div');
+  sanctuaryDockPane.className = 'sanctuary-dock-pane sanctuary-program-dock-pane';
+
+  const dmDockPane = doc.createElement('div');
+  dmDockPane.className = 'sanctuary-dock-pane sanctuary-dm-dock-pane';
+  dmDockPane.hidden = true;
+  dmDockPane.setAttribute('inert', '');
+
+  rightDockEl.append(sanctuaryDockPane, dmDockPane);
+
+  const sanctuaryCtrl = mountProgramThread(sanctuaryDockPane, {
     onOpenCompose: () => openCompose({}),
     onProgramChanged: () => {
       if (activeTab === 'messages') renderActiveScreen();
     },
+    onClientAction: (action) => {
+      if (action?.type === 'open_browser_tab' && action.url) {
+        openExternalInBrowser(action.url, { activate: true, inSplit: Boolean(action.split) });
+      }
+    },
+    onBrowserCommand: (cmd) =>
+      executeBrowserAgentCommand(cmd, {
+        onActivateBrowser: () => {
+          ensureBrowserScreenMounted();
+          navigateToTab('browser');
+        },
+      }),
   });
+
+  let activeDmDockHandle = null;
+  let activeDirectConvoKey = '';
+
+  function closeDirectConvoInDock() {
+    if (!activeDmDockHandle && dmDockPane.hidden) return;
+    activeDmDockHandle?.destroy?.();
+    activeDmDockHandle = null;
+    activeDirectConvoKey = '';
+    dmDockPane.replaceChildren();
+    dmDockPane.hidden = true;
+    dmDockPane.setAttribute('inert', '');
+    sanctuaryDockPane.hidden = false;
+    sanctuaryDockPane.removeAttribute('inert');
+    rightDockEl.setAttribute('aria-label', 'Sanctuary Companion');
+    activeScreenHandle?.setSelectedDirectConvo?.(null);
+  }
+
+  function openDirectConvoInDock(convo) {
+    if (!convo) return;
+    if (isSanctuaryCollapsed) setSanctuaryCollapsed(false);
+    activeDmDockHandle?.destroy?.();
+    activeDirectConvoKey = getDirectConvoKey(convo);
+    sanctuaryDockPane.hidden = true;
+    sanctuaryDockPane.setAttribute('inert', '');
+    dmDockPane.hidden = false;
+    dmDockPane.removeAttribute('inert');
+    rightDockEl.setAttribute('aria-label', 'Direct Messages');
+    activeDmDockHandle = mountDirectMessageThread(dmDockPane, {
+      convo,
+      onBack: () => closeDirectConvoInDock(),
+    });
+    activeScreenHandle?.setSelectedDirectConvo?.(convo);
+    if (Number(globalThis.innerWidth || 1280) < 1024) {
+      navigateToTab('sanctuary');
+    }
+    activeDmDockHandle.focusInput?.();
+  }
 
   const composeCtrl = mountComposeModal(modalHost, {
     onPublished() {
@@ -426,10 +645,25 @@ export function createAppShell(rootEl, { initialTab = 'home', skipBackgroundInit
       author,
       instanceUrl: item?._meta?.mastodon?.instanceUrl || primary?.instanceUrl || 'https://mastodon.social',
       item,
+      onMessageAuthor: openDirectMessageToAuthor,
       onOpenPostThread: openPostThread,
       onAskSanctuary: askSanctuaryAboutPost,
       onEditPost: (p, onDone) => openEditPostDialog(p, { onSaved: onDone }),
     });
+  }
+
+  async function openDirectMessageToAuthor(target) {
+    if (!target) return;
+    if (activeTab === 'messages' && typeof activeScreenHandle?.openDirectRecipient === 'function') {
+      await activeScreenHandle.openDirectRecipient(target);
+      return;
+    }
+    try {
+      const convo = await resolveDirectConversationTarget(target);
+      if (convo) openDirectConvoInDock(convo);
+    } catch (err) {
+      showAlert('Direct Message Failed', err?.message || 'Unable to open direct conversation.');
+    }
   }
 
   function openGlobalSettingsModal() {
@@ -450,11 +684,13 @@ export function createAppShell(rootEl, { initialTab = 'home', skipBackgroundInit
   mobileSettingsBtn.addEventListener('click', openGlobalSettingsModal);
 
   function syncNavIndicators() {
-    for (const [id, btn] of navButtons.entries()) {
+    for (const [id, btns] of navButtons.entries()) {
       const isCurrent = id === activeTab;
-      btn.classList.toggle('is-active', isCurrent);
-      if (isCurrent) btn.setAttribute('aria-current', 'page');
-      else btn.removeAttribute('aria-current');
+      for (const btn of btns) {
+        btn.classList.toggle('is-active', isCurrent);
+        if (isCurrent) btn.setAttribute('aria-current', 'page');
+        else btn.removeAttribute('aria-current');
+      }
     }
     const isProfile = activeTab === 'profile';
     railUserBtn.classList.toggle('is-active', isProfile);
@@ -466,25 +702,30 @@ export function createAppShell(rootEl, { initialTab = 'home', skipBackgroundInit
     if (isSearch) mobileSearchBtn.setAttribute('aria-current', 'page');
     else mobileSearchBtn.removeAttribute('aria-current');
 
+    const isBrowser = activeTab === 'browser';
     shell.classList.toggle('is-mobile-sanctuary-active', activeTab === 'sanctuary');
-    doc.title = TAB_TITLES[activeTab] || 'LM-Sanctuary';
+    shell.classList.toggle('is-browser-stage-active', isBrowser);
+    mobileBar.hidden = isBrowser;
+    doc.title = isPrivateWindow ? 'Private Browsing — Sanctuary Browser' : (TAB_TITLES[activeTab] || 'Sanctuary Browser');
     syncActivityUnreadBadge();
   }
 
   function syncActivityUnreadBadge() {
-    const actBtn = navButtons.get('activity');
-    if (!actBtn) return;
+    const actBtns = navButtons.get('activity') || [];
     const showDot = Boolean(activityStore.get().hasUnread && activeTab !== 'activity');
-    actBtn.classList.toggle('has-unread-activity', showDot);
-    actBtn.setAttribute('aria-label', showDot ? 'Activity (unread notifications)' : 'Activity');
-    const dot = actBtn.querySelector('.nav-unread-dot');
-    if (dot) dot.hidden = !showDot;
+    for (const actBtn of actBtns) {
+      actBtn.classList.toggle('has-unread-activity', showDot);
+      actBtn.setAttribute('aria-label', showDot ? 'Activity (unread notifications)' : 'Activity');
+      const dot = actBtn.querySelector('.nav-unread-dot');
+      if (dot) dot.hidden = !showDot;
+    }
   }
   const unsubActivityBadge = activityStore.subscribe(() => syncActivityUnreadBadge());
 
   function askSanctuaryAboutPost(post) {
+    closeDirectConvoInDock();
     if (isSanctuaryCollapsed) setSanctuaryCollapsed(false);
-    sanctuaryCtrl.attachSharedPost(toUnifiedItem(post));
+    sanctuaryCtrl.attachSharedPost(post?.network === 'web' ? post : toUnifiedItem(post));
     if (Number(globalThis.innerWidth || 1280) < 1024) {
       navigateToTab('sanctuary');
     }
@@ -536,6 +777,9 @@ export function createAppShell(rootEl, { initialTab = 'home', skipBackgroundInit
       activeScreenHandle = null;
       subScreenHostEl.replaceChildren();
       subScreenHostEl.hidden = true;
+      browserHostEl.hidden = true;
+      browserHostEl.setAttribute('inert', '');
+      browserScreenHandle?.syncViewport?.();
       feedHostEl.hidden = false;
       feedHostEl.removeAttribute('inert');
       if (!feedScreenHandle) {
@@ -544,6 +788,7 @@ export function createAppShell(rootEl, { initialTab = 'home', skipBackgroundInit
           onAskSanctuary: askSanctuaryAboutPost,
           onOpenAccounts: () => openUserAccountsModal(),
           onSelectAuthor: handleSelectAuthor,
+          startupReadyPromise,
         });
       }
       centerWrap.scrollTop = savedHomeScrollTop;
@@ -555,8 +800,26 @@ export function createAppShell(rootEl, { initialTab = 'home', skipBackgroundInit
       return;
     }
 
+    if (activeTab === 'browser') {
+      activeScreenHandle?.destroy?.();
+      activeScreenHandle = null;
+      subScreenHostEl.replaceChildren();
+      subScreenHostEl.hidden = true;
+      feedHostEl.hidden = true;
+      feedHostEl.setAttribute('inert', '');
+      browserHostEl.hidden = false;
+      browserHostEl.removeAttribute('inert');
+      centerWrap.scrollTop = 0;
+      ensureBrowserScreenMounted();
+      browserScreenHandle?.syncViewport?.();
+      return;
+    }
+
     feedHostEl.hidden = true;
     feedHostEl.setAttribute('inert', '');
+    browserHostEl.hidden = true;
+    browserHostEl.setAttribute('inert', '');
+    browserScreenHandle?.syncViewport?.();
     centerWrap.scrollTop = 0;
     activeScreenHandle?.destroy?.();
     activeScreenHandle = null;
@@ -576,13 +839,16 @@ export function createAppShell(rootEl, { initialTab = 'home', skipBackgroundInit
         activeUser: sanctuaryCtrl.getActiveUser(),
         currentProgramId: sanctuaryCtrl.getCurrentProgramId(),
         currentSessionId: sanctuaryCtrl.getCurrentSessionId(),
+        activeDirectConvoKey,
         onSwitchProgram: (progId, sessId) => {
+          closeDirectConvoInDock();
           if (isSanctuaryCollapsed) setSanctuaryCollapsed(false);
           sanctuaryCtrl.switchProgram(progId, sessId);
           if (Number(globalThis.innerWidth || 1280) < 1024) {
             navigateToTab('sanctuary');
           }
         },
+        onOpenDirectConvo: (convo) => openDirectConvoInDock(convo),
         onOpenCompose: (patch) => openCompose(patch || {}),
         onOpenAccounts: () => openUserAccountsModal(),
         onProgramChanged: () => void sanctuaryCtrl.refresh(),
@@ -628,6 +894,9 @@ export function createAppShell(rootEl, { initialTab = 'home', skipBackgroundInit
       openGlobalSettingsModal();
       return;
     }
+    if (isPrivateWindow && tabId !== 'browser') {
+      return;
+    }
     const targetTab = (tabId === 'user' || tabId === 'profile')
       ? 'profile'
       : (TAB_TITLES[tabId] ? tabId : 'home');
@@ -666,9 +935,19 @@ export function createAppShell(rootEl, { initialTab = 'home', skipBackgroundInit
     void syncRecentUserPostsToSanctuary().catch(() => {});
   });
   const offSocialVaultSync = onSanctuaryEvent('sanctuary:online', () => {
-    void syncSocialAccountsWithServer().catch((err) => {
-      console.error('[social vault] Could not sync accounts with Sanctuary:', err);
-    });
+    void syncSocialAccountsWithServer()
+      .then(() => {
+        if (authStore.get().accounts.length > 0) {
+          return refreshActivityNotifications().catch(() => {});
+        }
+        return undefined;
+      })
+      .catch((err) => {
+        console.error('[social vault] Could not sync accounts with Sanctuary:', err);
+      });
+  });
+  const offDraftsSync = onSanctuaryEvent('sanctuary:online', () => {
+    void syncComposeDraftsWithServer().catch(() => {});
   });
   const offLinkedPostSync = onSanctuaryEvent('sanctuary:online', () => {
     void (async () => {
@@ -680,17 +959,36 @@ export function createAppShell(rootEl, { initialTab = 'home', skipBackgroundInit
       }
     })();
   });
+  const offBookmarkSync = onSanctuaryEvent('sanctuary:online', () => {
+    void syncBrowserBookmarksWithServer().catch(() => {});
+    void syncSearchConfigWithServer().catch(() => {});
+  });
   const initPromise = skipBackgroundInit
     ? Promise.resolve()
     : (async () => {
-        const [savedCollapsed] = await Promise.all([
+        if (isPrivateWindow) {
+          await hydrateBrowserStore();
+          await initSanctuaryConnection();
+          resolveStartupReady?.();
+          await Promise.allSettled([
+            syncSearchConfigWithServer(),
+            syncBrowserBookmarksWithServer(),
+          ]);
+          return;
+        }
+        const [savedCollapsed, hydratedBrowser] = await Promise.all([
           kvGet('sanctuary_dock_collapsed', false),
+          hydrateBrowserStore(),
           hydrateAuthStore(),
           hydrateActivityStore(),
           hydrateOutbox(),
           hydrateFeedTuning(),
           hydrateCachedModeration().catch(() => {}),
+          hydrateCachedFilters().catch(() => {}),
         ]);
+        if (hydratedBrowser?.sanctuarySplitPct) {
+          applySanctuarySplitWidth(hydratedBrowser.sanctuarySplitPct);
+        }
         if (savedCollapsed === true) {
           isSanctuaryCollapsed = true;
           syncSanctuaryCollapseUi();
@@ -703,7 +1001,12 @@ export function createAppShell(rootEl, { initialTab = 'home', skipBackgroundInit
           await syncSocialAccountsWithServer();
         } catch (err) {
           console.error('[social vault] Could not sync accounts with Sanctuary:', err);
+        } finally {
+          resolveStartupReady?.();
         }
+        void fetchKeywordFilters().catch(() => {});
+        void syncBrowserBookmarksWithServer().catch(() => {});
+        void syncSearchConfigWithServer().catch(() => {});
         void (async () => {
           try {
             await syncLinkedPostsWithSanctuary();
@@ -792,6 +1095,35 @@ export function createAppShell(rootEl, { initialTab = 'home', skipBackgroundInit
         }
       })();
 
+  function extractHashtagFromAnchor(anchor, parsed) {
+    const cls = String(anchor.className || '');
+    const rel = String(anchor.getAttribute('rel') || '');
+    const text = String(anchor.textContent || '').trim();
+    const isTaggedEl =
+      /\bhashtag\b/i.test(cls)
+      || rel.split(/\s+/).some((t) => t.toLowerCase() === 'tag');
+    const pathMatch = parsed.pathname.match(/^\/(?:tags?|hashtag)\/([^/?#]+)/i);
+    const threadsQ = parsed.hostname.toLowerCase().includes('threads.net')
+      ? String(parsed.searchParams.get('q') || '').trim()
+      : '';
+    if (!isTaggedEl && !pathMatch && !threadsQ.startsWith('#')) return '';
+    let raw = '';
+    if (pathMatch?.[1]) {
+      try {
+        raw = decodeURIComponent(pathMatch[1]);
+      } catch {
+        raw = pathMatch[1];
+      }
+    } else if (threadsQ.startsWith('#')) {
+      raw = threadsQ;
+    } else if (text.startsWith('#')) {
+      raw = text;
+    }
+    const clean = raw.replace(/^#+/, '').trim();
+    if (!clean || /\s/.test(clean)) return '';
+    return clean;
+  }
+
   function handleExternalLinkClick(event) {
     const targetEl = event.target?.nodeType === 1 ? event.target : event.target?.parentElement;
     const anchor = targetEl?.closest?.('a[href]');
@@ -805,49 +1137,128 @@ export function createAppShell(rootEl, { initialTab = 'home', skipBackgroundInit
       return;
     }
     const scheme = parsed.protocol.toLowerCase();
-    if (scheme !== 'https:' && scheme !== 'http:' && scheme !== 'mailto:') return;
+    if (scheme !== 'https:' && scheme !== 'http:') return;
     const curOrigin = globalThis.location?.origin || '';
-    if (scheme !== 'mailto:' && curOrigin && parsed.origin === curOrigin) return;
+    if (curOrigin && parsed.origin === curOrigin) return;
 
-    anchor.setAttribute('target', '_blank');
-    anchor.setAttribute('rel', 'noopener noreferrer');
-
-    if (typeof globalThis.pywebview?.api?.open_external === 'function') {
+    const hashtag = extractHashtagFromAnchor(anchor, parsed);
+    if (hashtag) {
       event.preventDefault();
-      Promise.resolve(globalThis.pywebview.api.open_external(parsed.href))
-        .then((opened) => {
-          if (opened === false) {
-            globalThis.open?.(parsed.href, '_blank', 'noopener,noreferrer');
-          }
-        })
-        .catch(() => {
-          globalThis.open?.(parsed.href, '_blank', 'noopener,noreferrer');
-        });
+      navigateToTab('home');
+      doc.dispatchEvent(new CustomEvent('sanctuary:open-hashtag', { detail: { tag: hashtag } }));
+      return;
     }
+
+    event.preventDefault();
+    const activate = !(event.ctrlKey || event.metaKey || event.button === 1);
+    openExternalInBrowser(parsed.href, { activate });
   }
   doc.addEventListener('click', handleExternalLinkClick, true);
+  const handleOpenDmEvent = (e) => {
+    if (e?.detail) openDirectMessageToAuthor(e.detail);
+  };
+  doc.addEventListener('sanctuary:open-dm', handleOpenDmEvent);
+  const hostOpenInBrowser = (url, opts) => openExternalInBrowser(url, { activate: true, ...opts });
+  globalThis.__sanctuaryOpenInBrowser = hostOpenInBrowser;
+  const unsubBrowserHostNav = subscribeBrowserHostEvents((evt) => {
+    if (!evt) return;
+    if (evt.type === 'context-action') {
+      if (evt.action === 'search-selection' && evt.text) {
+        ensureBrowserScreenMounted();
+        browserScreenHandle?.submitSearchOrUrl?.(evt.text);
+        if (activeTab !== 'browser') {
+          navigateToTab('browser');
+        }
+        browserScreenHandle?.syncViewport?.();
+        return;
+      }
+      if (isPrivateWindow) return;
+      if (evt.action === 'toggle-bookmark') {
+        ensureBrowserScreenMounted();
+        void browserScreenHandle?.toggleBookmarkForTab?.(evt.tabId, {
+          url: evt.url,
+          title: evt.title,
+        });
+        return;
+      }
+      if (evt.action === 'ask-sanctuary') {
+        if (evt.isShell && evt.text) {
+          askSanctuaryAboutPost({
+            authorName: 'Selected Text',
+            authorHandle: 'sanctuary',
+            text: String(evt.text).slice(0, 1200),
+            mediaUrl: '',
+            mediaAlt: '',
+            url: '',
+            network: 'web',
+          });
+          return;
+        }
+        ensureBrowserScreenMounted();
+        void browserScreenHandle?.askSanctuaryForTab?.(evt.tabId, {
+          selectionText: evt.text || '',
+        });
+        return;
+      }
+      if (evt.action === 'clip-databank') {
+        ensureBrowserScreenMounted();
+        void browserScreenHandle?.clipTabToDataBankById?.(evt.tabId, {
+          selectionText: evt.text || '',
+        });
+        return;
+      }
+      return;
+    }
+    if (evt.type !== 'open-tab' || (!evt.url && !evt.nativeReady)) return;
+    const wasMounted = Boolean(browserScreenHandle);
+    ensureBrowserScreenMounted();
+    if (!wasMounted) {
+      const rawUrl = String(evt.url || '').trim();
+      const clean = rawUrl ? stripTrackingParams(rawUrl) : NEWTAB_URL;
+      openBrowserTab(clean, {
+        id: evt.tabId ? String(evt.tabId) : '',
+        activate: evt.activate !== false,
+        inSplit: Boolean(evt.split),
+        nativePending: Boolean(evt.nativeReady && clean === NEWTAB_URL),
+      });
+    }
+    if (evt.activate !== false && activeTab !== 'browser') {
+      navigateToTab('browser');
+    }
+    browserScreenHandle?.syncViewport?.();
+  });
 
   return {
     navigateToTab,
+    openInBrowser: (url, opts) => openExternalInBrowser(url, opts),
     toggleSanctuaryCollapsed: () => setSanctuaryCollapsed(!isSanctuaryCollapsed),
     composeCtrl,
     sanctuaryCtrl,
     initPromise,
     destroy() {
+      if (globalThis.__sanctuaryOpenInBrowser === hostOpenInBrowser) {
+        delete globalThis.__sanctuaryOpenInBrowser;
+      }
+      unsubBrowserHostNav();
       doc.removeEventListener('click', handleExternalLinkClick, true);
+      doc.removeEventListener('sanctuary:open-dm', handleOpenDmEvent);
       if (onVisibilityActivityCheck) doc.removeEventListener?.('visibilitychange', onVisibilityActivityCheck);
       if (activityPollTimer) clearInterval(activityPollTimer);
       unsubAuthActivity();
       unsubActivityBadge();
       closePostThread({ restoreScroll: false });
       feedScreenHandle?.destroy?.();
+      browserScreenHandle?.destroy?.();
       activeScreenHandle?.destroy?.();
+      activeDmDockHandle?.destroy?.();
       sanctuaryCtrl.destroy();
       composeCtrl.destroy();
       detachOutbox();
       offRecentPostsSync();
       offSocialVaultSync();
+      offDraftsSync();
       offLinkedPostSync();
+      offBookmarkSync();
     },
   };
 }

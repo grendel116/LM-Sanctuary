@@ -1,213 +1,19 @@
-import { canonicalizeActorHandle } from './schema/unifiedItem.js';
-
-export const SLIDER_SPECS = Object.freeze({
-  recencyHalfLifeHours: { min: 0, max: 48, step: 1, defaultValue: 0 },
-  smallWeb: { min: -100, max: 100, step: 5, defaultValue: 0 },
-  authorDiversity: { min: 0, max: 100, step: 5, defaultValue: 0 },
-  reposts: { min: -100, max: 100, step: 5, defaultValue: 0 },
-  longform: { min: -100, max: 100, step: 5, defaultValue: 0 },
-  media: { min: -100, max: 100, step: 5, defaultValue: 0 },
-  reciprocity: { min: 0, max: 100, step: 5, defaultValue: 0 },
-  commercial: { min: -100, max: 100, step: 5, defaultValue: 0 },
-  bourgeoisPolitics: { min: -100, max: 100, step: 5, defaultValue: 0 },
-  matureContent: { min: -100, max: 100, step: 5, defaultValue: 0 },
-});
-
-export const SLIDER_DEFINITIONS = Object.freeze([
-  {
-    key: 'recencyHalfLifeHours',
-    group: 'Stream Structure',
-    label: 'Recency Window',
-    description: '0 keeps newest-first order; higher hours give older high-match posts room to rise.',
-    zeroLabel: 'Strict',
-    unit: 'h',
-  },
-  {
-    key: 'smallWeb',
-    group: 'Stream Structure',
-    label: 'Small Web vs Viral',
-    description: 'Positive lifts quieter personal accounts and penalizes mega-viral outrage or dunk bait.',
-  },
-  {
-    key: 'authorDiversity',
-    group: 'Stream Structure',
-    label: 'Author Diversity',
-    description: 'Spreads consecutive posts from the same author apart across the stream.',
-  },
-  {
-    key: 'reciprocity',
-    group: 'Stream Structure',
-    label: 'Local Reciprocity',
-    description: 'Boosts authors you have liked, replied to, bookmarked, or shared to chat.',
-  },
-  {
-    key: 'reposts',
-    group: 'Format & Activity',
-    label: 'Boosts & Reposts',
-    description: '-100 hides boosts/reposts completely; positive lifts shared posts.',
-    hideAtMin: true,
-  },
-  {
-    key: 'longform',
-    group: 'Format & Activity',
-    label: 'Long-Form & Articles',
-    description: 'Positive favors multi-sentence writing and linked articles over one-liners.',
-  },
-  {
-    key: 'media',
-    group: 'Format & Activity',
-    label: 'Media & Visuals',
-    description: 'Negative favors text-first posts; positive lifts photos and videos (bonus for alt text).',
-  },
-  {
-    key: 'commercial',
-    group: 'Content Balances',
-    label: 'Commercial',
-    description: 'Sponsored promos, storefronts, affiliate links, and hustle pitches (-100 hides).',
-    hideAtMin: true,
-  },
-  {
-    key: 'bourgeoisPolitics',
-    group: 'Content Balances',
-    label: 'Bourgeois Politics',
-    description: 'Electoral horse-race punditry, establishment party spectacle, and campaign spin (-100 hides).',
-    hideAtMin: true,
-  },
-  {
-    key: 'matureContent',
-    group: 'Content Balances',
-    label: 'Mature Content',
-    description: 'Sensitive CWs, NSFW flags, and adult-labeled media (-100 hides).',
-    hideAtMin: true,
-  },
-]);
+import {
+  DEFAULT_SENSITIVE_CONTENT_TRIGGERS,
+  canonicalizeActorHandle,
+  isReplyUnifiedItem,
+  toUnifiedItem,
+} from './schema/unifiedItem.js';
 
 export const DEFAULT_FEED_TUNING = Object.freeze({
-  version: 1,
+  version: 2,
   updatedAt: 0,
   updatedBy: 'default',
-  sliders: Object.freeze({
-    recencyHalfLifeHours: 0,
-    smallWeb: 0,
-    authorDiversity: 0,
-    reposts: 0,
-    longform: 0,
-    media: 0,
-    reciprocity: 0,
-    commercial: 0,
-    bourgeoisPolitics: 0,
-    matureContent: 0,
-  }),
   discoveryChannels: Object.freeze([]),
   discoveryInstances: Object.freeze([]),
 });
 
-export const FEED_TUNING_PRESETS = Object.freeze([
-  {
-    id: 'chronological',
-    label: 'Chronological',
-    sliders: {
-      recencyHalfLifeHours: 0,
-      smallWeb: 0,
-      authorDiversity: 0,
-      reposts: 0,
-      longform: 0,
-      media: 0,
-      reciprocity: 0,
-      commercial: 0,
-      bourgeoisPolitics: 0,
-      matureContent: 0,
-    },
-  },
-  {
-    id: 'sanctuary',
-    label: 'Sanctuary',
-    sliders: {
-      recencyHalfLifeHours: 10,
-      smallWeb: 80,
-      authorDiversity: 65,
-      reposts: -40,
-      longform: 35,
-      media: 0,
-      reciprocity: 55,
-      commercial: -100,
-      bourgeoisPolitics: -100,
-      matureContent: 0,
-    },
-  },
-  {
-    id: 'small_web',
-    label: 'Small Web',
-    sliders: {
-      recencyHalfLifeHours: 8,
-      smallWeb: 75,
-      authorDiversity: 60,
-      reposts: -35,
-      longform: 25,
-      media: 0,
-      reciprocity: 50,
-      commercial: -70,
-      bourgeoisPolitics: -50,
-      matureContent: 0,
-    },
-  },
-  {
-    id: 'deep_reading',
-    label: 'Deep Reading',
-    sliders: {
-      recencyHalfLifeHours: 16,
-      smallWeb: 45,
-      authorDiversity: 50,
-      reposts: -50,
-      longform: 80,
-      media: -25,
-      reciprocity: 25,
-      commercial: -80,
-      bourgeoisPolitics: -40,
-      matureContent: 0,
-    },
-  },
-  {
-    id: 'anti_noise',
-    label: 'No Ads / Pundits',
-    sliders: {
-      recencyHalfLifeHours: 6,
-      smallWeb: 55,
-      authorDiversity: 65,
-      reposts: -60,
-      longform: 20,
-      media: 0,
-      reciprocity: 35,
-      commercial: -100,
-      bourgeoisPolitics: -100,
-      matureContent: 0,
-    },
-  },
-  {
-    id: 'visual_art',
-    label: 'Visual Focus',
-    sliders: {
-      recencyHalfLifeHours: 12,
-      smallWeb: 35,
-      authorDiversity: 45,
-      reposts: 0,
-      longform: -30,
-      media: 85,
-      reciprocity: 25,
-      commercial: -60,
-      bourgeoisPolitics: -40,
-      matureContent: 0,
-    },
-  },
-]);
-
-function clampInt(raw, min, max, fallback) {
-  const num = Number(raw);
-  if (!Number.isFinite(num)) return fallback;
-  return Math.max(min, Math.min(max, Math.round(num)));
-}
-
-function cleanConceptArray(raw, maxItems = 16) {
+function cleanConceptArray(raw, maxItems = 24) {
   const arr = Array.isArray(raw)
     ? raw
     : typeof raw === 'string'
@@ -216,7 +22,7 @@ function cleanConceptArray(raw, maxItems = 16) {
   const out = [];
   const seen = new Set();
   for (const entry of arr) {
-    const clean = String(entry ?? '').replace(/\s+/g, ' ').slice(0, 80).trim();
+    const clean = String(entry ?? '').replace(/\s+/g, ' ').slice(0, 160).trim();
     if (!clean) continue;
     const low = clean.toLowerCase();
     if (seen.has(low)) continue;
@@ -250,20 +56,14 @@ function cleanInstanceArray(raw, maxItems = 12) {
 }
 
 export function normalizeFeedTuning(raw) {
-  const sliders = {};
-  const rawSliders = raw?.sliders && typeof raw.sliders === 'object' ? raw.sliders : {};
-  for (const [key, spec] of Object.entries(SLIDER_SPECS)) {
-    sliders[key] = clampInt(rawSliders[key], spec.min, spec.max, spec.defaultValue);
-  }
-  const discoveryChannels = cleanConceptArray(raw?.discoveryChannels, 16);
+  const discoveryChannels = cleanConceptArray(raw?.discoveryChannels, 24);
   const discoveryInstances = cleanInstanceArray(raw?.discoveryInstances, 12);
   const updatedAt = Math.max(0, Math.round(Number(raw?.updatedAt) || 0));
   const updatedBy = String(raw?.updatedBy || 'default').trim().slice(0, 64) || 'default';
   return {
-    version: 1,
+    version: 2,
     updatedAt,
     updatedBy,
-    sliders,
     discoveryChannels,
     discoveryInstances,
   };
@@ -271,13 +71,7 @@ export function normalizeFeedTuning(raw) {
 
 export function isDefaultFeedTuning(rawProfile) {
   const profile = normalizeFeedTuning(rawProfile);
-  if (
-    profile.discoveryChannels.length > 0
-    || profile.discoveryInstances.length > 0
-  ) {
-    return false;
-  }
-  return Object.values(profile.sliders).every((v) => Number(v) === 0);
+  return profile.discoveryChannels.length === 0 && profile.discoveryInstances.length === 0;
 }
 
 const COMMERCIAL_DOMAINS = [
@@ -355,6 +149,265 @@ function getLinkDomains(item) {
   return hosts;
 }
 
+/**
+ * Determine whether a UnifiedItem carries an external URL (excluding its own native permalink).
+ */
+export function hasPostExternalLink(item) {
+  if (!item || typeof item !== 'object') return false;
+  if (item._meta?.linkCard?.url || item.linkCard?.url) return true;
+  if (/https?:\/\/\S+/i.test(String(item.content_text || item.text || ''))) return true;
+  const facets = Array.isArray(item._meta?.bluesky?.facets) ? item._meta.bluesky.facets : [];
+  return facets.some(
+    (f) => Array.isArray(f?.features) && f.features.some((ft) => ft?.$type === 'app.bsky.richtext.facet#link' && ft?.uri)
+  );
+}
+
+function isVisualAttachment(att) {
+  if (!att || typeof att !== 'object') return false;
+  const t = String(att.type || 'image').toLowerCase();
+  const mime = String(att.mime_type || att.mimeType || '').toLowerCase();
+  if (t === 'audio' || mime.startsWith('audio/')) return false;
+  return true;
+}
+
+/**
+ * Determine whether a UnifiedItem (or its quoted post) carries any image, video, or GIF attachment.
+ */
+export function hasVisualMediaAttachment(item) {
+  if (!item || typeof item !== 'object') return false;
+  if (Array.isArray(item.attachments) && item.attachments.some(isVisualAttachment)) return true;
+  const quote = item._meta?.quotePost || item.quotePost || null;
+  if (quote && typeof quote === 'object') {
+    if (quote.thumbUrl || quote.image || (Array.isArray(quote.attachments) && quote.attachments.some(isVisualAttachment))) {
+      return true;
+    }
+  }
+  const replyCtx = item._meta?.replyContext || item.replyContext || null;
+  if (replyCtx && typeof replyCtx === 'object') {
+    if (replyCtx.thumbUrl || replyCtx.image || (Array.isArray(replyCtx.attachments) && replyCtx.attachments.some(isVisualAttachment))) {
+      return true;
+    }
+  }
+  return false;
+}
+
+const NEWSLETTER_FUNNEL_DOMAINS = [
+  'substack.com', 'beehiiv.com', 'buttondown.email', 'buttondown.com',
+  'medium.com', 'ghost.io', 'revue.email', 'mailchi.mp', 'convertkit.com',
+  'linkedin.com', 'flipboard.com',
+];
+
+const NEWSLETTER_FUNNEL_RE = /\b(my\s+substack|new\s+substack|on\s+substack|subscribe\s+to\s+my\s+newsletter|new\s+newsletter|new\s+post\s+(?:is\s+)?(?:up|live|out)|new\s+essay\s+(?:is\s+)?(?:up|live|out)|read\s+(?:the\s+rest|more|my\s+latest)\s+(?:at|on|here|below))\b/i;
+
+const SYNDICATION_HOST_RE = /(?:^|[@.])(?:rss\.|anyfeed\.cc|press\.coop|flipboard\.com|newsmast\.|newsbots?\.|botsin\.space|rssbridge\.|dlvr\.it|ifttt\.com|zapier\.com|federatedreader\.)/i;
+const BOT_HANDLE_LOCAL_RE = /(?:^|[_.-])(?:rss|newsbot|feedbot|autobot|mirrorbot|federated[_.-]?reader|reader[_.-]?bot|syndicat(?:e|or))(?:$|[_.-])/i;
+const SYNDICATION_NAME_RE = /\b(?:federated\s+reader|rss\s*(?:feed|bot|reader|bridge)|feed\s*(?:bot|reader)|news\s*(?:bot|wire|feed)|auto\s*post(?:er)?|mirror\s*bot|syndicat(?:or|ion))\b/i;
+const NEWS_WIRE_TEXT_RE = /#(?:news|breaking|breakingnews|worldnews|ukrainewar|politics)\b|\b(?:breaking:|wire\s+report)\b/i;
+
+export const DEFAULT_RANKING_MANIFEST = Object.freeze({
+  version: 1,
+  name: 'Sanctuary Default Commons Manifest',
+  weights: Object.freeze({
+    freshnessScale: 4.0,
+    defaultHalfLifeHours: 18,
+    followingProvenanceBonus: 0.4,
+    secondDegreeProvenanceBonus: 0.6,
+    peerVouchWeight: 2.8,
+    commercialPenaltyWeight: 2.6,
+    rageDunkPenaltyWeight: 2.4,
+    linkSpamPenaltyWeight: 4.8,
+    replyAndQuotePenaltyWeight: 3.2,
+    textOnlyFeedBonus: 1.2,
+    maxPositiveAuthorAffinity: 1.35,
+    maxNegativeAuthorAffinity: 2.8,
+    tasteScoreWeight: 2.6,
+    velocityWeight: 0.45,
+    diversityPriorAuthorPenalty: 1.45,
+    diversityConsecutivePenalty: 1.25,
+  }),
+  caps: Object.freeze({
+    maxDiscoveryPerAuthor: 2,
+    maxBoostsPerBooster: 2,
+    maxFollowingPerAuthor: 6,
+    maxDiscoveryLinksPerAuthor: 1,
+    maxDiscoveryLinkShare: 0.08,
+    minDiscoveryLinkBudget: 1,
+    minUnfollowedLinkProseChars: 45,
+    linkSyndicatorBurstThreshold: 3,
+    consecutiveAuthorScanWindow: 24,
+    filterDiscoveryBotsByDefault: true,
+  }),
+  syndicationBotPatterns: Object.freeze({
+    respectBotAccountFlag: true,
+    hostRegex: SYNDICATION_HOST_RE.source,
+    handleLocalRegex: BOT_HANDLE_LOCAL_RE.source,
+    displayNameRegex: SYNDICATION_NAME_RE.source,
+    newsWireZeroEngRegex: NEWS_WIRE_TEXT_RE.source,
+  }),
+  sensitiveContentTriggers: DEFAULT_SENSITIVE_CONTENT_TRIGGERS,
+});
+
+const manifestRegexCache = new Map();
+
+function compileManifestRegex(pattern, fallbackRegex) {
+  if (typeof pattern !== 'string') return fallbackRegex;
+  if (!pattern.trim()) return null;
+  if (manifestRegexCache.has(pattern)) return manifestRegexCache.get(pattern);
+  try {
+    const compiled = new RegExp(pattern, 'i');
+    if (manifestRegexCache.size > 64) manifestRegexCache.clear();
+    manifestRegexCache.set(pattern, compiled);
+    return compiled;
+  } catch {
+    return fallbackRegex;
+  }
+}
+
+function clampManifestNumber(raw, fallback, min, max, integer = false) {
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return fallback;
+  const clamped = Math.max(min, Math.min(max, n));
+  return integer ? Math.round(clamped) : Number(clamped.toFixed(4));
+}
+
+/**
+ * Normalize a user-editable / forkable RankingManifest JSON object onto safe defaults.
+ * Preserves intentional empty regex strings ("") and empty blurLabels ({}) so users
+ * retain full sovereign control over all ranking and moderation rules.
+ * @param {object | null} [raw]
+ * @returns {object}
+ */
+export function normalizeRankingManifest(raw) {
+  const src = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+  const dw = DEFAULT_RANKING_MANIFEST.weights;
+  const dc = DEFAULT_RANKING_MANIFEST.caps;
+  const db = DEFAULT_RANKING_MANIFEST.syndicationBotPatterns;
+  const ds = DEFAULT_RANKING_MANIFEST.sensitiveContentTriggers;
+
+  const rw = src.weights && typeof src.weights === 'object' ? src.weights : {};
+  const rc = src.caps && typeof src.caps === 'object' ? src.caps : {};
+  const rb = src.syndicationBotPatterns && typeof src.syndicationBotPatterns === 'object' ? src.syndicationBotPatterns : {};
+  const rs = src.sensitiveContentTriggers && typeof src.sensitiveContentTriggers === 'object' ? src.sensitiveContentTriggers : {};
+
+  let blurLabels;
+  if (rs.blurLabels && typeof rs.blurLabels === 'object' && !Array.isArray(rs.blurLabels)) {
+    blurLabels = {};
+    for (const [k, v] of Object.entries(rs.blurLabels)) {
+      const cleanKey = String(k || '').trim().toLowerCase();
+      const cleanVal = String(v || '').trim();
+      if (cleanKey && cleanVal) blurLabels[cleanKey] = cleanVal;
+    }
+  } else {
+    blurLabels = { ...ds.blurLabels };
+  }
+
+  const blockedSelf = Array.isArray(rs.jetstreamBlockedSelfLabels)
+    ? [...new Set(rs.jetstreamBlockedSelfLabels.map((l) => String(l || '').trim().toLowerCase()).filter(Boolean))]
+    : [...ds.jetstreamBlockedSelfLabels];
+
+  return {
+    version: Number(src.version) === 1 ? 1 : 1,
+    name: typeof src.name === 'string' && src.name.trim() ? src.name.trim().slice(0, 80) : DEFAULT_RANKING_MANIFEST.name,
+    weights: {
+      freshnessScale: clampManifestNumber(rw.freshnessScale, dw.freshnessScale, 0, 20),
+      defaultHalfLifeHours: clampManifestNumber(rw.defaultHalfLifeHours, dw.defaultHalfLifeHours, 1, 72),
+      followingProvenanceBonus: clampManifestNumber(rw.followingProvenanceBonus, dw.followingProvenanceBonus, 0, 10),
+      secondDegreeProvenanceBonus: clampManifestNumber(rw.secondDegreeProvenanceBonus, dw.secondDegreeProvenanceBonus, 0, 10),
+      peerVouchWeight: clampManifestNumber(rw.peerVouchWeight, dw.peerVouchWeight, 0, 10),
+      commercialPenaltyWeight: clampManifestNumber(rw.commercialPenaltyWeight, dw.commercialPenaltyWeight, 0, 10),
+      rageDunkPenaltyWeight: clampManifestNumber(rw.rageDunkPenaltyWeight, dw.rageDunkPenaltyWeight, 0, 10),
+      linkSpamPenaltyWeight: clampManifestNumber(rw.linkSpamPenaltyWeight, dw.linkSpamPenaltyWeight, 0, 10),
+      replyAndQuotePenaltyWeight: clampManifestNumber(rw.replyAndQuotePenaltyWeight, dw.replyAndQuotePenaltyWeight, 0, 10),
+      textOnlyFeedBonus: clampManifestNumber(rw.textOnlyFeedBonus, dw.textOnlyFeedBonus, 0, 10),
+      maxPositiveAuthorAffinity: clampManifestNumber(rw.maxPositiveAuthorAffinity, dw.maxPositiveAuthorAffinity, 0, 10),
+      maxNegativeAuthorAffinity: clampManifestNumber(rw.maxNegativeAuthorAffinity, dw.maxNegativeAuthorAffinity, 0, 10),
+      tasteScoreWeight: clampManifestNumber(rw.tasteScoreWeight, dw.tasteScoreWeight, 0, 10),
+      velocityWeight: clampManifestNumber(rw.velocityWeight, dw.velocityWeight, 0, 5),
+      diversityPriorAuthorPenalty: clampManifestNumber(rw.diversityPriorAuthorPenalty, dw.diversityPriorAuthorPenalty, 0, 10),
+      diversityConsecutivePenalty: clampManifestNumber(rw.diversityConsecutivePenalty, dw.diversityConsecutivePenalty, 0, 10),
+    },
+    caps: {
+      maxDiscoveryPerAuthor: clampManifestNumber(rc.maxDiscoveryPerAuthor, dc.maxDiscoveryPerAuthor, 1, 25, true),
+      maxBoostsPerBooster: clampManifestNumber(rc.maxBoostsPerBooster, dc.maxBoostsPerBooster, 1, 25, true),
+      maxFollowingPerAuthor: clampManifestNumber(rc.maxFollowingPerAuthor, dc.maxFollowingPerAuthor, 1, 50, true),
+      maxDiscoveryLinksPerAuthor: clampManifestNumber(rc.maxDiscoveryLinksPerAuthor, dc.maxDiscoveryLinksPerAuthor, 0, 25, true),
+      maxDiscoveryLinkShare: clampManifestNumber(rc.maxDiscoveryLinkShare, dc.maxDiscoveryLinkShare, 0, 1),
+      minDiscoveryLinkBudget: clampManifestNumber(rc.minDiscoveryLinkBudget, dc.minDiscoveryLinkBudget, 0, 50, true),
+      minUnfollowedLinkProseChars: clampManifestNumber(rc.minUnfollowedLinkProseChars, dc.minUnfollowedLinkProseChars, 0, 500, true),
+      linkSyndicatorBurstThreshold: clampManifestNumber(rc.linkSyndicatorBurstThreshold, dc.linkSyndicatorBurstThreshold, 2, 20, true),
+      consecutiveAuthorScanWindow: clampManifestNumber(rc.consecutiveAuthorScanWindow, dc.consecutiveAuthorScanWindow, 1, 100, true),
+      filterDiscoveryBotsByDefault: rc.filterDiscoveryBotsByDefault !== false,
+    },
+    syndicationBotPatterns: {
+      respectBotAccountFlag: rb.respectBotAccountFlag !== false,
+      hostRegex: typeof rb.hostRegex === 'string' ? rb.hostRegex : db.hostRegex,
+      handleLocalRegex: typeof rb.handleLocalRegex === 'string' ? rb.handleLocalRegex : db.handleLocalRegex,
+      displayNameRegex: typeof rb.displayNameRegex === 'string' ? rb.displayNameRegex : db.displayNameRegex,
+      newsWireZeroEngRegex: typeof rb.newsWireZeroEngRegex === 'string' ? rb.newsWireZeroEngRegex : db.newsWireZeroEngRegex,
+    },
+    sensitiveContentTriggers: {
+      respectAuthorSensitiveFlag: rs.respectAuthorSensitiveFlag !== false,
+      blurLabels,
+      keywordRegex: typeof rs.keywordRegex === 'string' ? rs.keywordRegex : ds.keywordRegex,
+      jetstreamBlockedSelfLabels: blockedSelf,
+    },
+  };
+}
+
+/**
+ * Score how strongly a post pushes external newsletter / Substack / essay link funnels (0..1).
+ */
+export function scoreLinkAndSubstackSignal(item) {
+  if (!item || typeof item !== 'object') return 0;
+  const hosts = getLinkDomains(item);
+  const text = buildItemSignalText(item);
+  let score = 0;
+  if (hosts.some((h) => NEWSLETTER_FUNNEL_DOMAINS.some((dom) => h === dom || h.endsWith(`.${dom}`)))) {
+    score += 0.7;
+  }
+  if (NEWSLETTER_FUNNEL_RE.test(text)) {
+    score += 0.55;
+  }
+  if (hasPostExternalLink(item)) {
+    const proseLen = String(item.content_text || item.text || '').replace(/https?:\/\/\S+/gi, '').trim().length;
+    score += proseLen < 90 ? 0.45 : 0.25;
+  }
+  return Math.min(1, score);
+}
+
+/**
+ * Detect automated RSS/news-wire/mirror bots unsuited for a human-first discovery Feed
+ * using the user's editable local RankingManifest rules.
+ */
+export function isAutomatedSyndicationOrBotItem(rawItem, rawManifest = null) {
+  if (!rawItem || typeof rawItem !== 'object') return false;
+  const item = rawItem._meta ? rawItem : toUnifiedItem(rawItem);
+  const botCfg = normalizeRankingManifest(rawManifest).syndicationBotPatterns;
+  if (botCfg.respectBotAccountFlag && (item.author?.bot || item._meta?.mastodon?.bot)) return true;
+
+  const hostRe = compileManifestRegex(botCfg.hostRegex, SYNDICATION_HOST_RE);
+  const localRe = compileManifestRegex(botCfg.handleLocalRegex, BOT_HANDLE_LOCAL_RE);
+  const nameRe = compileManifestRegex(botCfg.displayNameRegex, SYNDICATION_NAME_RE);
+  const newsWireRe = compileManifestRegex(botCfg.newsWireZeroEngRegex, NEWS_WIRE_TEXT_RE);
+
+  const handle = String(item.author?.handle || '').trim().replace(/^@/, '').toLowerCase();
+  const localPart = handle.split('@')[0] || '';
+  if ((hostRe && hostRe.test(handle)) || (localRe && localRe.test(localPart))) return true;
+  const authorName = String(item.author?.name || '').trim();
+  if (nameRe && (nameRe.test(authorName) || nameRe.test(handle))) return true;
+  const authorUrl = String(item.author?.url || '').toLowerCase();
+  if (hostRe && authorUrl && hostRe.test(authorUrl)) return true;
+  const feedSource = item._meta?.feedSource || '';
+  if (newsWireRe && feedSource === 'discovery' && hasPostExternalLink(item)) {
+    const m = item.metrics || {};
+    const totalEng = Number(m.likes || 0) + Number(m.replies || 0) + Number(m.reposts || 0);
+    if (totalEng === 0 && newsWireRe.test(buildItemSignalText(item))) {
+      return true;
+    }
+  }
+  return false;
+}
+
 export function scoreCommercialSignal(item) {
   const text = buildItemSignalText(item);
   const hosts = getLinkDomains(item);
@@ -367,6 +420,10 @@ export function scoreCommercialSignal(item) {
   }
   if (COMMERCIAL_MEDIUM_RE.test(text)) {
     score += 0.35;
+  }
+  const newsletterSig = scoreLinkAndSubstackSignal(item);
+  if (newsletterSig >= 0.7 && (NEWSLETTER_FUNNEL_RE.test(text) || hosts.some((h) => NEWSLETTER_FUNNEL_DOMAINS.some((dom) => h === dom || h.endsWith(`.${dom}`))))) {
+    score = Math.max(score, 0.55);
   }
   return Math.min(1, score);
 }
@@ -412,13 +469,28 @@ export function isLowEffortRageDunk(item) {
   return replies >= 14 && replies > Math.max(likes, 1) * 1.6;
 }
 
-export function scoreMatureSignal(item) {
+export function scoreMatureSignal(item, rawManifest = null) {
   let score = 0;
+  const triggers = rawManifest?.sensitiveContentTriggers;
+  const labelMap =
+    triggers?.blurLabels && typeof triggers.blurLabels === 'object' && !Array.isArray(triggers.blurLabels)
+      ? triggers.blurLabels
+      : null;
+  const respectSensitive = triggers ? triggers.respectAuthorSensitiveFlag !== false : true;
+  const kwRe = triggers && Object.prototype.hasOwnProperty.call(triggers, 'keywordRegex')
+    ? compileManifestRegex(triggers.keywordRegex, MATURE_STRONG_RE)
+    : MATURE_STRONG_RE;
+
   const bskyLabels = Array.isArray(item?._meta?.bluesky?.labels) ? item._meta.bluesky.labels : [];
-  if (bskyLabels.some((l) => MATURE_LABELS.has(String(l).toLowerCase()))) {
+  if (
+    bskyLabels.some((l) => {
+      const k = String(l).toLowerCase();
+      return labelMap ? Object.prototype.hasOwnProperty.call(labelMap, k) : MATURE_LABELS.has(k);
+    })
+  ) {
     score = Math.max(score, 1);
   }
-  const mastoSensitive = Boolean(item?._meta?.mastodon?.sensitive);
+  const mastoSensitive = respectSensitive && Boolean(item?._meta?.mastodon?.sensitive);
   const spoilerText = String(item?._meta?.mastodon?.spoilerText || item?.spoilerText || '');
   if (mastoSensitive) {
     score += MATURE_CW_RE.test(spoilerText) ? 0.9 : 0.55;
@@ -426,10 +498,81 @@ export function scoreMatureSignal(item) {
     score += 0.65;
   }
   const text = buildItemSignalText(item);
-  if (MATURE_STRONG_RE.test(text)) {
+  if (kwRe && kwRe.test(text)) {
     score += 0.65;
   }
   return Math.min(1, score);
+}
+
+export function resolvePoleCoordinates(item, semEntry = null, rawManifest = null) {
+  const sem = semEntry && typeof semEntry === 'object' ? semEntry : null;
+  const lexComm = scoreCommercialSignal(item);
+  const lexNews = scoreBourgeoisPoliticsSignal(item);
+  const lexMat = scoreMatureSignal(item, rawManifest);
+
+  const commercial = sem && Number.isFinite(Number(sem.commercial))
+    ? Math.max(-1, Math.min(1, Math.max(Number(sem.commercial), lexComm)))
+    : lexComm;
+
+  const newsPolitics = sem && Number.isFinite(Number(sem.newsPolitics))
+    ? Math.max(-1, Math.min(1, Math.max(Number(sem.newsPolitics), lexNews)))
+    : lexNews;
+
+  const matureContent = sem && Number.isFinite(Number(sem.matureContent))
+    ? Math.max(-1, Math.min(1, Math.max(Number(sem.matureContent), lexMat)))
+    : lexMat;
+
+  let scienceTheory;
+  if (sem && Number.isFinite(Number(sem.scienceTheory))) {
+    scienceTheory = Math.max(-1, Math.min(1, Number(sem.scienceTheory)));
+  } else {
+    const rawText = String(item?.content_text || item?.text || '').trim();
+    const charLen = rawText.length;
+    const hasParagraphs = rawText.includes('\n');
+    const hasNonCommercialArticle = Boolean(item?._meta?.linkCard?.url) && lexComm < 0.45 && scoreLinkAndSubstackSignal(item) < 0.7;
+    const sigText = buildItemSignalText(item);
+    const hasMaterialist = MATERIALIST_ANALYSIS_RE.test(sigText);
+    const hasScienceTerms = /\b(?:study|methodology|experiment|research|scientific?|physics|quantum|biology|chemistry|mathematics|engineering|algorithm|empirical|calibration|observator(?:y|ies)|hypothesis)\b/i.test(sigText);
+    scienceTheory = Math.max(
+      -1,
+      Math.min(
+        1,
+        (charLen >= 220 ? 0.55 : charLen >= 100 ? 0.2 : -0.35) +
+          (hasParagraphs ? 0.2 : 0) +
+          (hasNonCommercialArticle ? 0.35 : 0) +
+          (hasMaterialist ? 0.4 : 0) +
+          (hasScienceTerms ? 0.45 : 0) -
+          lexComm * 0.4
+      )
+    );
+  }
+
+  let everydayChatter;
+  if (sem && Number.isFinite(Number(sem.everydayChatter))) {
+    const m = item?.metrics || {};
+    const likes = Number(m.likes || 0);
+    const replies = Number(m.replies || 0);
+    const dunkPenalty = isLowEffortRageDunk(item) || (replies >= 6 && replies > Math.max(likes, 1) * 1.35) ? 0.65 : 0;
+    everydayChatter = Math.max(-1, Math.min(1, Number(sem.everydayChatter) - dunkPenalty));
+  } else {
+    const rawText = String(item?.content_text || item?.text || '').trim();
+    const tagCount = (rawText.match(/(?:^|\s)#[\p{L}\p{N}_]+/gu) || []).length;
+    const m = item?.metrics || {};
+    const likes = Number(m.likes || 0);
+    const replies = Number(m.replies || 0);
+    const dunkPenalty = isLowEffortRageDunk(item) || (replies >= 6 && replies > Math.max(likes, 1) * 1.35) ? 0.8 : 0;
+    const isConversational =
+      !isAutomatedSyndicationOrBotItem(item, rawManifest) &&
+      !hasPostExternalLink(item) &&
+      rawText.length >= 18 &&
+      rawText.length <= 320 &&
+      tagCount <= 2 &&
+      lexComm < 0.4 &&
+      lexNews < 0.35;
+    everydayChatter = Math.max(-1, Math.min(1, (isConversational ? 0.65 : -0.1) - dunkPenalty));
+  }
+
+  return { everydayChatter, scienceTheory, newsPolitics, commercial, matureContent };
 }
 
 const TASTE_STOPWORDS = new Set([
@@ -522,11 +665,15 @@ export function scoreConversationVelocity(item, nowMs = Date.now()) {
   if (replies >= 8 && replies > Math.max(likes, 1) * 1.35) {
     return -0.7;
   }
+  if (replies >= 4 && replies > likes) {
+    return 0;
+  }
   const publishedMs = parseTimestampMs(item);
   const ageHours = Math.max(0.5, publishedMs > 0 ? (nowMs - publishedMs) / 3_600_000 : 1);
-  const replyDepth = replies > 0 ? Math.min(1.35, Math.log2(1 + replies) * 0.42) : 0;
-  const velocity = replies >= 2 ? Math.min(0.55, (replies / ageHours) * 0.14) : 0;
-  const organic = Math.min(0.45, Math.log10(1 + likes + reposts) * 0.22);
+  const healthyReplies = Math.min(replies, Math.max(2, likes * 0.5));
+  const replyDepth = healthyReplies > 0 ? Math.min(1.0, Math.log2(1 + healthyReplies) * 0.36) : 0;
+  const velocity = healthyReplies >= 2 ? Math.min(0.45, (healthyReplies / ageHours) * 0.12) : 0;
+  const organic = Math.min(0.8, Math.log10(1 + likes * 1.4 + reposts) * 0.34);
   return Math.max(-0.9, Math.min(2.0, replyDepth + velocity + organic));
 }
 
@@ -545,6 +692,15 @@ function isItemRepost(item) {
   );
 }
 
+function isViewerAlreadyInteracted(item) {
+  return Boolean(
+    item?._meta?.mastodon?.favourited ||
+    item?._meta?.mastodon?.reblogged ||
+    item?._meta?.bluesky?.likeUri ||
+    item?._meta?.bluesky?.repostUri
+  );
+}
+
 /**
  * Nudge feed tuning sliders slightly from explicit "Interested" or "Not Interested" post feedback.
  * @param {Record<string, number>} [rawSliders]
@@ -552,47 +708,6 @@ function isItemRepost(item) {
  * @param {'interested' | 'not_interested'} [direction]
  * @returns {Record<string, number>}
  */
-export function computeFeedbackSliderNudge(rawSliders = {}, rawItem = null, direction = 'interested') {
-  const next = { ...normalizeFeedTuning({ sliders: rawSliders }).sliders };
-  const sign = direction === 'not_interested' ? -1 : 1;
-  const bump = (key, delta) => {
-    const spec = SLIDER_SPECS[key];
-    next[key] = clampInt((next[key] || 0) + delta, spec.min, spec.max, spec.defaultValue);
-  };
-
-  if (next.recencyHalfLifeHours === 0) next.recencyHalfLifeHours = 4;
-  if (next.reciprocity < 25) bump('reciprocity', 10);
-
-  if (rawItem && typeof rawItem === 'object') {
-    if (isItemRepost(rawItem)) bump('reposts', sign * 5);
-    const commSig = scoreCommercialSignal(rawItem);
-    if (commSig >= 0.35) bump('commercial', sign * 10);
-    if (scoreBourgeoisPoliticsSignal(rawItem) >= 0.3) bump('bourgeoisPolitics', sign * 10);
-    if (scoreMatureSignal(rawItem) >= 0.4) bump('matureContent', sign * 10);
-
-    const hasMedia = Array.isArray(rawItem.attachments) && rawItem.attachments.length > 0;
-    if (hasMedia) bump('media', sign * 5);
-
-    const charLen = String(rawItem.content_text || rawItem.text || '').trim().length;
-    const hasArticle = Boolean(rawItem._meta?.linkCard?.url || rawItem.linkCard?.url) && commSig < 0.45;
-    if (charLen >= 200 || hasArticle) {
-      bump('longform', sign * 5);
-    } else if (charLen > 0 && charLen < 90 && !hasMedia) {
-      bump('longform', -sign * 5);
-    }
-
-    const m = rawItem.metrics || {};
-    const reach = Number(m.likes || 0) + Number(m.reposts || 0) * 2 + Number(m.replies || 0);
-    if (reach >= 150 || isLowEffortRageDunk(rawItem)) {
-      bump('smallWeb', -sign * 5);
-    } else if (reach <= 25) {
-      bump('smallWeb', sign * 5);
-    }
-  }
-
-  return next;
-}
-
 export function getCanonicalAuthorKey(item) {
   if (!item?.author) return String(item?.id || '');
   const proto = item.protocol || 'mastodon';
@@ -601,204 +716,251 @@ export function getCanonicalAuthorKey(item) {
   return `${proto}:${item.author.id || item.author.name || item.id || ''}`;
 }
 
+export function getCanonicalBoosterKey(item) {
+  if (!item || typeof item !== 'object') return '';
+  const proto = item.protocol || 'mastodon';
+  const booster =
+    item._meta?.mastodon?.rebloggedBy
+    || item._meta?.bluesky?.rebloggedBy
+    || (Array.isArray(item._meta?.boosters) ? item._meta.boosters[0] : null);
+  const raw = booster?.handle || booster?.acct || booster?.id || booster?.did || item._meta?.endorsedBy || '';
+  if (!raw) return '';
+  const canon = canonicalizeActorHandle(String(raw), proto);
+  return canon && canon !== `${proto}:` ? canon : `${proto}:${String(raw).toLowerCase()}`;
+}
+
 /**
- * Deterministically filter and re-rank UnifiedItem[] according to local feed tuning weights,
- * social graph provenance, personal MiniLM/lexical taste, and conversation velocity.
+ * Prevent back-to-back items from the same author or booster using a bounded lookahead window.
  * @param {Array<object>} items
- * @param {object} rawProfile
- * @param {{
- *   nowMs?: number,
- *   streamMode?: string,
- *   interactedAuthors?: Record<string, number>,
- *   implicitAuthors?: Record<string, number>,
- *   semanticScores?: Record<string, number>,
- *   tasteScores?: Record<string, number>,
- *   tasteMemory?: { positive?: Array<object>, negative?: Array<object> } | null,
- * }} [context]
+ * @param {number} [scanWindow]
  * @returns {Array<object>}
+ */
+export function spreadConsecutiveAuthors(items = [], scanWindow = 24) {
+  const pool = Array.isArray(items) ? items.filter(Boolean) : [];
+  if (pool.length <= 2) return pool;
+  const remaining = [...pool];
+  const out = [];
+  let lastAuthorKey = '';
+  let lastBoosterKey = '';
+  while (remaining.length > 0) {
+    let pickIdx = 0;
+    const firstKey = getCanonicalAuthorKey(remaining[0]);
+    const firstBooster = getCanonicalBoosterKey(remaining[0]);
+    const conflicts = (ak, bk) =>
+      Boolean((lastAuthorKey && ak && ak === lastAuthorKey) || (lastBoosterKey && bk && bk === lastBoosterKey));
+    if (conflicts(firstKey, firstBooster)) {
+      const limit = Math.min(remaining.length, scanWindow);
+      for (let i = 1; i < limit; i += 1) {
+        const candKey = getCanonicalAuthorKey(remaining[i]);
+        const candBooster = getCanonicalBoosterKey(remaining[i]);
+        if (!conflicts(candKey, candBooster)) {
+          pickIdx = i;
+          break;
+        }
+      }
+    }
+    const [picked] = remaining.splice(pickIdx, 1);
+    out.push(picked);
+    const k = getCanonicalAuthorKey(picked);
+    if (k) lastAuthorKey = k;
+    lastBoosterKey = getCanonicalBoosterKey(picked);
+  }
+  return out;
+}
+
+function computeSeededJitter(id, seed) {
+  const seedStr = String(seed || '').trim();
+  if (!seedStr) return 0;
+  const input = `${seedStr}:${String(id || '')}`;
+  let hash = 2166136261;
+  for (let i = 0; i < input.length; i += 1) {
+    hash ^= input.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0) / 4294967295 - 0.5;
+}
+
+/**
+ * Distribute external-link posts evenly through the text stream (after a leading
+ * run of pure text posts) so deweighted links never clump into a consecutive block.
+ */
+function interleaveLinkClusters(items = []) {
+  const list = Array.isArray(items) ? items : [];
+  if (list.length <= 2) return list;
+  const nonLinks = [];
+  const links = [];
+  for (const item of list) {
+    if (hasPostExternalLink(item)) links.push(item);
+    else nonLinks.push(item);
+  }
+  if (links.length === 0 || nonLinks.length < 3) return list;
+
+  const lead = Math.min(Math.max(3, Math.floor(nonLinks.length / (links.length + 1))), nonLinks.length);
+  const stride = Math.max(1, Math.floor((nonLinks.length - lead) / links.length));
+  const out = [];
+  let linkIdx = 0;
+  for (let i = 0; i < nonLinks.length; i += 1) {
+    out.push(nonLinks[i]);
+    if (linkIdx < links.length && i + 1 >= lead && ((i + 1 - lead) % stride === 0)) {
+      out.push(links[linkIdx]);
+      linkIdx += 1;
+    }
+  }
+  while (linkIdx < links.length) {
+    out.push(links[linkIdx]);
+    linkIdx += 1;
+  }
+  return out;
+}
+
+/**
+ * Deterministically filter and re-rank UnifiedItem[] for Discovery (`Feed`) using an 18h
+ * recency half-life, 2-hop peer vouches with mega-viral dampening, baseline spam/rage
+ * guardrails, explicit taste memory, and author/booster diversity. Non-discovery streams
+ * preserve chronological order.
  */
 export function rankFeedItems(items = [], rawProfile = null, context = {}) {
   const list = Array.isArray(items) ? items.filter(Boolean) : [];
   if (list.length === 0) return [];
-  const profile = normalizeFeedTuning(rawProfile);
-  const s = profile.sliders;
+  normalizeFeedTuning(rawProfile);
+  const manifest = normalizeRankingManifest(context.manifest);
+  const w = manifest.weights;
+  const shuffleSeed = typeof context.shuffleSeed === 'string' ? context.shuffleSeed.trim() : '';
+  const deprioritizeSet = context.deprioritizeIds instanceof Set
+    ? (context.deprioritizeIds.size > 0 ? context.deprioritizeIds : null)
+    : (Array.isArray(context.deprioritizeIds) && context.deprioritizeIds.length > 0
+        ? new Set(context.deprioritizeIds.map((id) => String(id || '')).filter(Boolean))
+        : null);
+  const isFeedMode = (context.streamMode || 'feed') === 'feed';
+  const partitionDeprioritized = (ranked) => {
+    const hasDeprioritize = Boolean(deprioritizeSet && deprioritizeSet.size > 0);
+    if (ranked.length <= 1 || (!hasDeprioritize && !isFeedMode)) return ranked;
+    const unseen = [];
+    const seen = [];
+    for (const item of ranked) {
+      const k = String(item?.id || item?.key || '');
+      if ((k && deprioritizeSet?.has(k)) || (isFeedMode && isViewerAlreadyInteracted(item))) {
+        seen.push(item);
+      } else {
+        unseen.push(item);
+      }
+    }
+    return unseen.length > 0 ? [...unseen, ...seen] : ranked;
+  };
+
+  if (!isFeedMode) {
+    return partitionDeprioritized(list);
+  }
+
   const interactedAuthors = context.interactedAuthors && typeof context.interactedAuthors === 'object'
     ? context.interactedAuthors
     : {};
-  const implicitAuthors = context.implicitAuthors && typeof context.implicitAuthors === 'object'
-    ? context.implicitAuthors
+  const tasteScores = context.tasteScores && typeof context.tasteScores === 'object'
+    ? context.tasteScores
     : {};
   const semanticScores = context.semanticScores && typeof context.semanticScores === 'object'
     ? context.semanticScores
-    : {};
-  const tasteScores = context.tasteScores && typeof context.tasteScores === 'object'
-    ? context.tasteScores
     : {};
   const tasteMemory = context.tasteMemory && typeof context.tasteMemory === 'object'
     ? context.tasteMemory
     : null;
 
-  const isExplicitChronological =
-    profile.updatedBy === 'preset:chronological' &&
-    Object.values(s).every((v) => Number(v) === 0);
-  if (isExplicitChronological) {
-    return [...list].sort(
-      (a, b) => (Date.parse(b?.date_published || '') || 0) - (Date.parse(a?.date_published || '') || 0)
-    );
-  }
-  if (context.streamMode === 'following' && isDefaultFeedTuning(profile)) {
-    return list;
-  }
-
-  const isFeedMode = context.streamMode === 'feed';
-  const hasPersonalTaste =
-    Object.keys(implicitAuthors).length > 0 ||
-    Object.keys(tasteScores).length > 0 ||
-    (Array.isArray(tasteMemory?.positive) && tasteMemory.positive.length > 0) ||
-    (Array.isArray(tasteMemory?.negative) && tasteMemory.negative.length > 0);
-  if (!isFeedMode && !hasPersonalTaste && isDefaultFeedTuning(profile)) {
-    return list;
-  }
-
   const nowMs = Number(context.nowMs) || Date.now();
-  const effectiveHalfLife = s.recencyHalfLifeHours > 0
-    ? s.recencyHalfLifeHours
-    : (isFeedMode ? 8 : 6);
-  const diversityStrength = (isFeedMode && s.authorDiversity === 0 ? 55 : s.authorDiversity) / 100;
-  const reciprocityScale = (isFeedMode && s.reciprocity === 0 ? 60 : s.reciprocity) / 100;
-  const usePersonalSignals = isFeedMode || hasPersonalTaste;
+  const effectiveHalfLife = w.defaultHalfLifeHours || 18;
+  const filterBots = manifest.caps.filterDiscoveryBotsByDefault !== false;
+  const isTextFeed = !context.discoveryMode || context.discoveryMode === 'default' || context.discoveryMode === 'feed';
 
   const scored = [];
   for (const item of list) {
-    const repost = isItemRepost(item);
-    if (s.reposts <= -100 && repost) continue;
+    const feedSource = item?._meta?.feedSource || '';
+    if (filterBots && feedSource !== 'following' && isAutomatedSyndicationOrBotItem(item, manifest)) continue;
+    if (isTextFeed && hasVisualMediaAttachment(item)) continue;
 
-    const commercialSig = scoreCommercialSignal(item);
-    if (s.commercial <= -100 && commercialSig >= 0.45) continue;
-
-    const politicsSig = scoreBourgeoisPoliticsSignal(item);
-    if (s.bourgeoisPolitics <= -100 && politicsSig >= 0.35) continue;
-
-    const matureSig = scoreMatureSignal(item);
-    if (s.matureContent <= -100 && matureSig >= 0.4) continue;
+    const semRaw = semanticScores[item.id] ?? semanticScores[item.key] ?? null;
+    const sem = semRaw && typeof semRaw === 'object' ? semRaw : null;
+    const semChannel = typeof semRaw === 'number' ? semRaw : Number(sem?.channelMatch ?? NaN);
 
     const publishedMs = parseTimestampMs(item);
     const ageHours = Math.max(0, (nowMs - publishedMs) / 3_600_000);
-    const freshness = Math.pow(0.5, ageHours / effectiveHalfLife) * 4.0;
+    const freshness = Math.pow(0.5, ageHours / effectiveHalfLife) * w.freshnessScale;
 
     let delta = 0;
 
-    // 0. Graph inventory provenance (blended Following + 2nd-degree endorsements)
-    const feedSource = item?._meta?.feedSource || '';
-    if (usePersonalSignals) {
-      if (feedSource === 'following') delta += 1.35;
-      else if (feedSource === 'second_degree') delta += 0.95;
+    // 1. 2-Hop Peer Vouches with Mega-Viral Dampening: peerVouches / log2(10 + globalLikes)
+    const rawVouches = Math.max(
+      Number(item?._meta?.peerVouches || 0),
+      Array.isArray(item?._meta?.boosters) ? item._meta.boosters.length : 0,
+      feedSource === 'second_degree' ? 1 : 0
+    );
+    if (rawVouches > 0) {
+      const globalLikes = Math.max(0, Number(item?.metrics?.likes || 0));
+      delta += ((1 + Math.log2(rawVouches)) / Math.log2(10 + globalLikes)) * Math.log2(10) * w.peerVouchWeight;
     }
 
-    // 1. Small Web vs Viral (boost quieter accounts, penalize viral scale & rage/dunk ratio)
-    if (s.smallWeb !== 0) {
-      const m = item.metrics || {};
-      const likes = Number(m.likes || 0);
-      const replies = Number(m.replies || 0);
-      const repostsCount = Number(m.reposts || 0);
-      const totalReach = likes + repostsCount * 2 + replies;
-      const viralScale = Math.min(2.2, Math.log10(1 + totalReach / 35));
-      const dunkRatio = replies >= 8 && replies > likes * 1.35 ? 1.2 : 0;
-      const smallSignal = 1.0 - viralScale - dunkRatio;
-      delta += (s.smallWeb / 100) * smallSignal * 2.2;
+    // 2. Always-on Baseline Guardrails (commercial spam, rage-dunks, bare link funnels)
+    const commSig = scoreCommercialSignal(item);
+    if (commSig >= 0.35) {
+      delta -= commSig * w.commercialPenaltyWeight;
+    }
+    if (isLowEffortRageDunk(item)) {
+      delta -= w.rageDunkPenaltyWeight;
+    }
+    const hasExtLink = hasPostExternalLink(item);
+    const substackLinkSig = scoreLinkAndSubstackSignal(item);
+    const proseLen = String(item.content_text || '').replace(/https?:\/\/\S+/gi, '').trim().length;
+    const hasQuotePost = Boolean(item._meta?.quotePost || item.quotePost);
+    const isReply = isReplyUnifiedItem(item);
+    if (isReply || hasQuotePost) {
+      delta -= w.replyAndQuotePenaltyWeight;
+    }
+    if (hasExtLink || substackLinkSig >= 0.45) {
+      const linkMult = proseLen < 140 ? 1.0 : 0.75;
+      delta -= w.linkSpamPenaltyWeight * linkMult + substackLinkSig;
+    } else if (isTextFeed && proseLen > 0 && !isReply && !hasQuotePost) {
+      delta += w.textOnlyFeedBonus;
     }
 
-    // 2. Boosts & Reposts
-    if (s.reposts !== 0 && repost) {
-      delta += (s.reposts / 100) * 2.2;
+    // 3. Custom Channel Semantic Match
+    if (Number.isFinite(semChannel) && semChannel !== 0) {
+      delta += semChannel * 1.8;
     }
 
-    // 3. Long-Form & Linked Writing
-    if (s.longform !== 0) {
-      const charLen = String(item.content_text || '').trim().length;
-      const hasParagraphs = String(item.content_text || '').includes('\n');
-      const hasNonCommercialArticle = Boolean(item._meta?.linkCard?.url) && commercialSig < 0.45;
-      const depthSignal =
-        (charLen >= 220 ? 0.9 : charLen >= 130 ? 0.3 : -0.6) +
-        (hasParagraphs ? 0.3 : 0) +
-        (hasNonCommercialArticle ? 0.7 : 0);
-      delta += (s.longform / 100) * depthSignal * 1.4;
+    // 4. Explicit Learned Taste (lexical + vector) & Explicit Author Affinity
+    const lexTaste = scorePersonalTasteLexical(item, tasteMemory);
+    const rawVecTaste = tasteScores[item.id] ?? tasteScores[item.key];
+    const vecTaste = rawVecTaste !== undefined && rawVecTaste !== null ? Number(rawVecTaste) : NaN;
+    let tasteSig = lexTaste;
+    if (Number.isFinite(vecTaste) && vecTaste !== 0) {
+      tasteSig = lexTaste !== 0 ? lexTaste * 0.2 + vecTaste * 0.8 : vecTaste;
+    }
+    if (tasteSig !== 0) {
+      delta += tasteSig * w.tasteScoreWeight;
     }
 
-    // 4. Media & Accessibility Balance
-    if (s.media !== 0) {
-      const atts = Array.isArray(item.attachments) ? item.attachments : [];
-      if (atts.length > 0) {
-        const allAlt = atts.every((a) => String(a?.alt_text || '').trim().length > 0);
-        delta += (s.media / 100) * (allAlt ? 2.1 : 1.7);
-      } else {
-        delta -= (s.media / 100) * 0.6;
-      }
+    if (feedSource === 'second_degree') {
+      delta += w.secondDegreeProvenanceBonus;
     }
 
-    // 5. Combined Explicit + Implicit Author Affinity
     const authorKey = getCanonicalAuthorKey(item);
     if (authorKey) {
       const explicitAff = Number(interactedAuthors[authorKey] || 0);
-      const implicitAff = Number(implicitAuthors[authorKey] || 0) * 0.65;
-      const totalAffinity = explicitAff + implicitAff;
-      if (totalAffinity > 0 && (reciprocityScale > 0 || (isFeedMode && implicitAff > 0))) {
-        const posScale = reciprocityScale > 0 ? reciprocityScale : 0.6;
-        delta += posScale * Math.min(2.8, Math.log2(1 + totalAffinity) * 1.25);
-      } else if (totalAffinity < 0) {
-        const negScale = Math.max(0.45, reciprocityScale);
-        delta -= negScale * Math.min(2.8, Math.log2(1 + Math.abs(totalAffinity)) * 1.35);
+      if (explicitAff > 0) {
+        delta += Math.min(w.maxPositiveAuthorAffinity, Math.log2(1 + explicitAff) * 0.45);
+      } else if (explicitAff < 0) {
+        delta -= Math.min(w.maxNegativeAuthorAffinity, Math.log2(1 + Math.abs(explicitAff)) * 0.9);
       }
     }
 
-    // 6. Content Balances (Commercial, Bourgeois Politics, Mature Content)
-    if (s.commercial !== 0 && commercialSig > 0) {
-      delta += (s.commercial / 100) * commercialSig * 3.2;
-    } else if (isFeedMode && s.commercial === 0 && commercialSig >= 0.45) {
-      delta -= commercialSig * 2.0;
-    }
+    // 5. Healthy Conversation Velocity
+    delta += scoreConversationVelocity(item, nowMs) * w.velocityWeight;
 
-    if (s.bourgeoisPolitics !== 0 && politicsSig > 0) {
-      delta += (s.bourgeoisPolitics / 100) * politicsSig * 3.2;
-    } else if (isFeedMode && s.bourgeoisPolitics === 0 && politicsSig >= 0.45) {
-      delta -= politicsSig * 1.6;
-    }
-
-    if (s.matureContent !== 0 && matureSig > 0) {
-      delta += (s.matureContent / 100) * matureSig * 3.2;
-    }
-
-    // 7. Personal Taste Exemplars (lexical taste blend) & Conversation Velocity
-    if (usePersonalSignals) {
-      const lexTaste = scorePersonalTasteLexical(item, tasteMemory);
-      const rawVecTaste = tasteScores[item.id];
-      const vecTaste = rawVecTaste !== undefined && rawVecTaste !== null ? Number(rawVecTaste) : NaN;
-      let tasteSig = lexTaste;
-      if (Number.isFinite(vecTaste) && vecTaste !== 0) {
-        tasteSig = lexTaste !== 0 ? lexTaste * 0.35 + vecTaste * 0.65 : vecTaste;
-      }
-      if (tasteSig !== 0) {
-        delta += tasteSig * 2.6;
-      }
-      delta += scoreConversationVelocity(item, nowMs) * 0.85;
-    }
-
-    let shuffleJitter = 0;
-    if (isFeedMode && context.shuffleSeed) {
-      const seedText = `${context.shuffleSeed}:${item.id || item.key || ''}`;
-      let hash = 2166136261;
-      for (let i = 0; i < seedText.length; i += 1) {
-        hash ^= seedText.charCodeAt(i);
-        hash = Math.imul(hash, 16777619);
-      }
-      const unit = ((hash >>> 0) % 10000) / 10000;
-      shuffleJitter = (unit - 0.5) * 1.8;
-    }
     scored.push({
       item,
       authorKey,
+      boosterKey: getCanonicalBoosterKey(item),
+      hasExtLink,
       publishedMs,
-      baseScore: freshness + delta + shuffleJitter,
+      baseScore: freshness + delta + (shuffleSeed ? computeSeededJitter(item?.id || item?.key || '', shuffleSeed) * 0.35 : 0),
     });
   }
 
@@ -808,15 +970,19 @@ export function rankFeedItems(items = [], rawProfile = null, context = {}) {
     return String(b.item.id || '').localeCompare(String(a.item.id || ''));
   });
 
-  if (diversityStrength <= 0 || scored.length <= 2) {
-    return scored.map((entry) => entry.item);
+  if (scored.length <= 2) {
+    return partitionDeprioritized(scored.map((entry) => entry.item));
   }
 
-  // Iterative greedy diversity pass to prevent prolific accounts from clustering
+  // Iterative greedy diversity pass: prevent prolific authors, prolific boosters, and consecutive links from clustering
+  const diversityStrength = 0.55;
   const remaining = [...scored];
   const ordered = [];
   const seenAuthorCounts = new Map();
+  const seenBoosterCounts = new Map();
   let lastAuthorKey = '';
+  let lastBoosterKey = '';
+  let lastWasLink = false;
 
   while (remaining.length > 0) {
     let bestIdx = 0;
@@ -824,10 +990,23 @@ export function rankFeedItems(items = [], rawProfile = null, context = {}) {
     const scanLimit = Math.min(remaining.length, 60);
     for (let i = 0; i < scanLimit; i += 1) {
       const candidate = remaining[i];
-      const priorCount = seenAuthorCounts.get(candidate.authorKey) || 0;
-      const consecutivePenalty = candidate.authorKey && candidate.authorKey === lastAuthorKey ? 1.15 : 0;
+      const priorAuthorCount = seenAuthorCounts.get(candidate.authorKey) || 0;
+      const priorBoosterCount = candidate.boosterKey ? (seenBoosterCounts.get(candidate.boosterKey) || 0) : 0;
+      const consecutiveAuthorPenalty =
+        candidate.authorKey && candidate.authorKey === lastAuthorKey ? w.diversityConsecutivePenalty : 0;
+      const consecutiveBoosterPenalty =
+        candidate.boosterKey && candidate.boosterKey === lastBoosterKey ? w.diversityConsecutivePenalty : 0;
+      const consecutiveLinkPenalty =
+        lastWasLink && candidate.hasExtLink ? w.diversityConsecutivePenalty * 2 : 0;
       const adjusted =
-        candidate.baseScore - diversityStrength * (priorCount * 1.45 + consecutivePenalty);
+        candidate.baseScore
+        - diversityStrength * (
+          priorAuthorCount * w.diversityPriorAuthorPenalty
+          + priorBoosterCount * w.diversityPriorAuthorPenalty
+          + consecutiveAuthorPenalty
+          + consecutiveBoosterPenalty
+        )
+        - consecutiveLinkPenalty;
       if (adjusted > bestAdjusted) {
         bestAdjusted = adjusted;
         bestIdx = i;
@@ -835,11 +1014,19 @@ export function rankFeedItems(items = [], rawProfile = null, context = {}) {
     }
     const [picked] = remaining.splice(bestIdx, 1);
     ordered.push(picked.item);
+    lastWasLink = Boolean(picked.hasExtLink);
     if (picked.authorKey) {
       seenAuthorCounts.set(picked.authorKey, (seenAuthorCounts.get(picked.authorKey) || 0) + 1);
       lastAuthorKey = picked.authorKey;
     }
+    if (picked.boosterKey) {
+      seenBoosterCounts.set(picked.boosterKey, (seenBoosterCounts.get(picked.boosterKey) || 0) + 1);
+      lastBoosterKey = picked.boosterKey;
+    } else {
+      lastBoosterKey = '';
+    }
   }
 
-  return ordered;
+  const spaced = isTextFeed ? interleaveLinkClusters(ordered) : ordered;
+  return partitionDeprioritized(spaced);
 }

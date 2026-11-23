@@ -49,7 +49,7 @@ for _candidate_env in (project_root.parent / ".env", project_root / ".env"):
 LOCAL_SERVER_URL = os.environ.get("LOCAL_SERVER_URL")
 
 # --- PRE-COMPILED REGULAR EXPRESSIONS ---
-MAX_IMAGES_PER_ROW = 3
+MAX_IMAGES_PER_ROW = 2
 MARKDOWN_MEDIA_RE = re.compile(r"!\[[^\]]*\]\([^)]+\)")
 IMAGE_EMBED_RE = re.compile(r"(?<!\!)(\[[^\]]*\]\(/images/(?:portraits|media|uploads)/[^)]+\))")
 RAW_IMAGE_PATH_RE = re.compile(
@@ -189,6 +189,182 @@ def clean_group_speaker_response(text: str, speaker_id: str = None, group_meta: 
     return text
 
 
+_SKIP_PREFETCH_HOSTS = {"localhost", "127.0.0.1", "::1", "0.0.0.0"}
+_SKIP_PREFETCH_EXTS = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".mp4", ".webm", ".mp3", ".wav", ".pdf", ".ico")
+_URL_DELIM_TRANS = str.maketrans({ch: " " for ch in "<>()\"'[]"})
+
+
+def _extract_http_urls(text: str) -> list[str]:
+    if not text:
+        return []
+    return [
+        tok for tok in text.translate(_URL_DELIM_TRANS).split()
+        if tok.startswith(("http://", "https://"))
+    ]
+
+
+def _score_turn_semantics(utterance: str) -> dict[str, float]:
+    """Score an utterance against cached semantic pole exemplars using local CPU embeddings."""
+    from core.transmission import score_utterance_pedals
+
+    return score_utterance_pedals(utterance)
+
+
+def _normalize_web_url(raw_url: str) -> str | None:
+    if not raw_url:
+        return None
+    cleaned = str(raw_url).strip().rstrip(".,;:!?)]\"'")
+    if not cleaned:
+        return None
+    from urllib.parse import urlparse
+    parsed = urlparse(cleaned)
+    host = (parsed.hostname or "").lower()
+    if parsed.scheme not in ("http", "https") or not host or host in _SKIP_PREFETCH_HOSTS:
+        return None
+    if parsed.path.lower().endswith(_SKIP_PREFETCH_EXTS):
+        return None
+    return cleaned
+
+
+def _resolve_turn_webpage_urls(history: list, new_message_text: str, shared_post: dict | None = None) -> list[str]:
+    """Extracts external webpage URLs from the current turn or recent history on webpage follow-ups."""
+    candidates: list[str] = []
+    if isinstance(shared_post, dict):
+        if shared_post.get("post_type") == "link" or "[Shared webpage from" in (new_message_text or ""):
+            for key in ("embed_url", "url"):
+                if shared_post.get(key):
+                    candidates.append(str(shared_post[key]))
+
+    candidates.extend(_extract_http_urls(new_message_text or ""))
+
+    if not candidates:
+        scores = _score_turn_semantics(new_message_text or "")
+        if scores.get("webpage_followup", 0.0) >= 0.45 and scores.get("webpage_followup", 0.0) > scores.get("casual", 0.0):
+            inspected = 0
+            for msg in reversed(history[:-1] if history else []):
+                msg_id = str(msg.get("id") or "")
+                if msg_id.startswith(("tool_", "itm_")):
+                    continue
+                inspected += 1
+                sp = msg.get("shared_post")
+                if isinstance(sp, dict):
+                    for key in ("embed_url", "url"):
+                        if sp.get(key):
+                            candidates.append(str(sp[key]))
+                candidates.extend(_extract_http_urls(str(msg.get("text") or "")))
+                if candidates or inspected >= 8:
+                    break
+
+    urls: list[str] = []
+    seen: set[str] = set()
+    for raw in candidates:
+        norm = _normalize_web_url(raw)
+        if norm and norm not in seen:
+            seen.add(norm)
+            urls.append(norm)
+            if len(urls) >= 2:
+                break
+    return urls
+
+
+def _extract_user_utterance(new_message_text: str, shared_post: dict | None = None, history: list | None = None) -> str:
+    """Return the user's own utterance, excluding quoted third-party shared post bodies."""
+    text = (new_message_text or "").strip()
+    if text.startswith(("[Shared post by ", "[Shared webpage from ")):
+        if history and history[-1].get("role") == "user":
+            note = history[-1].get("user_note")
+            if note is not None:
+                return str(note).strip()
+        if isinstance(shared_post, dict) and shared_post.get("user_note"):
+            return str(shared_post.get("user_note") or "").strip()
+        if "\n\n" in text:
+            return text.split("\n\n")[-1].strip()
+        return ""
+    return text
+
+
+def _has_prior_turn_tool_error(history: list) -> bool:
+    if not history:
+        return False
+    saw_current_user = False
+    saw_clean_final = False
+    for msg in reversed(history):
+        msg_id = str(msg.get("id") or "")
+        if not saw_current_user:
+            if msg.get("role") == "user" and not msg_id.startswith("tool_"):
+                saw_current_user = True
+            continue
+        if msg.get("role") == "user" and not msg_id.startswith("tool_"):
+            break
+        msg_text = str(msg.get("text") or "")
+        if msg.get("role") == "program" and not msg_id.startswith("itm_"):
+            if msg_text.strip() and not msg_text.startswith(("Error:", "[Tool Error]")):
+                saw_clean_final = True
+            elif msg_text.startswith(("Error:", "[Tool Error]")):
+                return True
+        if saw_clean_final:
+            continue
+        if msg_text.startswith(("Error:", "[Tool Error]")) or (
+            "[Tool Response from " in msg_text and ("\nError:" in msg_text or "[Tool Error]" in msg_text)
+        ):
+            return True
+        for tc in msg.get("tool_calls") or []:
+            tc_out = str(tc.get("output") or tc.get("result") or "")
+            if tc_out.startswith(("Error:", "[Tool Error]")):
+                return True
+    return False
+
+
+def _extract_fenced_sanctuary_plan(text: str) -> str:
+    """Extract the body of a ```sanctuary-plan fenced block without regex."""
+    lower = text.lower()
+    marker = "```sanctuary-plan"
+    start = lower.find(marker)
+    if start == -1:
+        return ""
+    nl = text.find("\n", start + len(marker))
+    if nl == -1:
+        return ""
+    end = text.find("```", nl + 1)
+    if end == -1:
+        return ""
+    return text[nl + 1 : end].strip()
+
+
+def _execute_native_tool_call(tool_name: str, args_dict: dict) -> tuple[dict, str]:
+    """Execute a native JSON tool_call through the normalized Sanctuary tool registry."""
+    normalized_name = _normalize_tool_name(tool_name)
+    kwargs = dict(args_dict) if isinstance(args_dict, dict) else {}
+    func = getattr(tools, normalized_name, None)
+    if not func:
+        return {"args": [], "kwargs": kwargs}, f"Error: Tool '{normalized_name}' not found."
+    try:
+        output = func(**kwargs)
+    except Exception as exc:
+        output = f"Error executing tool: {exc}"
+    return {"args": [], "kwargs": kwargs}, str(output)
+
+
+def _assess_cloud_gear_escalation(
+    history: list,
+    new_message_text: str,
+    shared_post: dict | None = None,
+    has_active_research: bool = False,
+) -> tuple[str | None, str]:
+    """Assess whether the turn should automatically gear up to Cloud (`deep` or `fast`)."""
+    from core.transmission import TransmissionController
+
+    utterance = _extract_user_utterance(new_message_text, shared_post=shared_post, history=history)
+    ctrl = TransmissionController(
+        utterance=utterance,
+        is_plan_turn=utterance.lower().startswith("/plan"),
+        is_proceed_turn=("proceed with the implementation plan" in utterance.lower() or "[approved_sanctuary_plan]" in utterance.lower()),
+        prior_tool_error=_has_prior_turn_tool_error(history),
+        has_active_research=has_active_research,
+    )
+    return ctrl.throttle_tier, ctrl.throttle_reason
+
+
 class BaseProgramRunner:
     def __init__(self, app_name: str = "Sanctuary", program_id: str = None):
         self.app_name = app_name
@@ -202,6 +378,7 @@ class BaseProgramRunner:
         self.generating_sessions: set[str] = set()
         self._generating_counts: dict[str, int] = {}
         self._memory_pipeline_sessions: set[str] = set()
+        self._sys_prompt_cache: dict[tuple, str] = {}
 
     def mark_generating(self, session_id: str):
         with self._lock:
@@ -230,6 +407,10 @@ class BaseProgramRunner:
             if msg_id:
                 for idx, existing in enumerate(history):
                     if existing.get("id") == msg_id:
+                        if isinstance(existing.get("shared_post"), dict) and "shared_post" not in msg:
+                            msg["shared_post"] = copy.deepcopy(existing["shared_post"])
+                        if "user_note" in existing and "user_note" not in msg:
+                            msg["user_note"] = existing["user_note"]
                         history[idx] = msg
                         return msg
             history.append(msg)
@@ -565,6 +746,7 @@ class BaseProgramRunner:
         new_message_text: str,
         invocation_id: str,
         speaker_id: str = None,
+        shared_post: dict | None = None,
     ) -> tuple[str, list, str | None]:
         max_iterations = 8
         iteration = 0
@@ -580,15 +762,106 @@ class BaseProgramRunner:
         sys_instructions = self._get_system_instructions(session_id, speaker_id=speaker_id)
         memory_block = self._get_memory_block(session_id)
         turn_directive = self._get_turn_inversion_directive(session_id, inversion_directive)
-
-        while iteration < max_iterations:
-            iteration += 1
-            # --- STAGE 1: LOCAL PREPROCESSING ---
-            messages = adapter.get_openai_messages(
-                sys_instructions, rag_context, memory_context=memory_block, turn_directive=turn_directive
+        msg_stripped = (new_message_text or "").strip()
+        is_plan_turn = msg_stripped.lower().startswith("/plan")
+        is_proceed_turn = (
+            "proceed with the implementation plan" in msg_stripped.lower()
+            or "[approved_sanctuary_plan]" in msg_stripped.lower()
+        )
+        approved_plan_md = ""
+        if is_plan_turn:
+            plan_rule = (
+                "[PLAN MODE ACTIVE]: The user requested `/plan`. Inspect the repository read-only using "
+                "`list_dir`, `grep_search`, and `read_file` first, then present the plan inside a ```sanctuary-plan fenced block "
+                "so the user can review and click Proceed. Do NOT modify files or run mutating commands in this turn."
             )
+            turn_directive = f"{turn_directive}\n{plan_rule}".strip() if turn_directive else plan_rule
 
-            # --- STAGE 2: LOCAL PROCESSING PASS ---
+        from core.program_config import is_story_mode
+        active_story_mode = is_story_mode(speaker_id or self.program_id)
+        if not is_plan_turn and not active_story_mode:
+            history_snapshot = self.sessions_history.get(session_id, [])
+            prefetch_urls = _resolve_turn_webpage_urls(history_snapshot, new_message_text, shared_post=shared_post)
+            if prefetch_urls:
+                tools.current_speaker_id.set(speaker_id)
+                loop = asyncio.get_running_loop()
+                pre_results = []
+                for url in prefetch_urls:
+                    if session_id in cancelled_sessions:
+                        raise asyncio.CancelledError("Session cancelled by user request.")
+                    escaped_url = url.replace('"', '\\"')
+                    parsed_args, output = await loop.run_in_executor(
+                        None,
+                        contextvars.copy_context().run,
+                        _execute_emulated_tool,
+                        "read_webpage",
+                        f'url="{escaped_url}"',
+                    )
+                    t_args = (parsed_args or {}).get("kwargs") or {"url": url}
+                    pre_results.append(("read_webpage", t_args, output))
+                    all_tool_calls.extend(_build_tool_calls_pair("read_webpage", t_args, output, len(all_tool_calls)))
+                if pre_results:
+                    adapter.append_assistant_message("", all_tool_calls, invocation_id, intermediate=True, speaker_id=speaker_id)
+                    adapter.append_tool_events(pre_results, invocation_id)
+
+        from core import greenpt_client
+        from core.transmission import TransmissionController
+
+        history_now = self.sessions_history.get(session_id, [])
+        utterance = _extract_user_utterance(new_message_text, shared_post=shared_post, history=history_now)
+        cloud_cfg = greenpt_client.get_greenpt_settings()
+        transmission = TransmissionController(
+            utterance=utterance,
+            is_plan_turn=is_plan_turn,
+            is_proceed_turn=is_proceed_turn,
+            active_story_mode=active_story_mode,
+            prior_tool_error=_has_prior_turn_tool_error(history_now),
+            has_active_research=bool(all_tool_calls),
+            routing_policy=cloud_cfg.get("routing_policy", "auto"),
+        )
+
+        while iteration < (18 if transmission.coding_engaged else max_iterations):
+            iteration += 1
+            # --- STAGE 1: PREPROCESSING & SINGLE-PASS TRANSMISSION SHIFT ---
+            img_data_url = (
+                adapter.get_latest_image_data_url()
+                if iteration == 1 and hasattr(adapter, "get_latest_image_data_url")
+                else ""
+            )
+            has_vision_attachment = bool(img_data_url and not os.getenv("LOCAL_MMPROJ", "").strip())
+            est_tokens = (
+                adapter.estimate_turn_tokens()
+                if hasattr(adapter, "estimate_turn_tokens")
+                else 0
+            )
+            shift = transmission.shift(
+                iteration=iteration,
+                estimated_tokens=est_tokens,
+                local_budget=adapter._get_chat_budget(),
+                has_vision_attachment=has_vision_attachment,
+                cloud_available=greenpt_client.is_cloud_enabled(),
+            )
+            eff_directive = (
+                f"{turn_directive}\n\n{shift.directive}".strip()
+                if shift.directive and turn_directive
+                else (shift.directive or turn_directive)
+            )
+            messages = adapter.get_openai_messages(
+                sys_instructions,
+                rag_context,
+                memory_context=memory_block,
+                turn_directive=eff_directive,
+                cloud_gear=(shift.gear != "park"),
+            )
+            if is_proceed_turn and iteration == 1 and not approved_plan_md:
+                for hist_msg in reversed(messages):
+                    if hist_msg.get("role") == "assistant":
+                        extracted = _extract_fenced_sanctuary_plan(str(hist_msg.get("content") or ""))
+                        if extracted:
+                            approved_plan_md = extracted
+                            break
+
+            # --- STAGE 2: MODEL EXECUTION PASS ---
             temperature = self._load_temperature_setting()
             url = LOCAL_SERVER_URL
             headers = get_local_server_headers()
@@ -616,15 +889,135 @@ class BaseProgramRunner:
                 payload["logit_bias"] = logit_bias
 
             bot_response_text = ""
-            try:
-                response = await self._post_llm_request(url, payload, headers, timeout=120.0, session_id=session_id)
-                if response.status_code == 200:
-                    bot_response_text = response.json()["choices"][0]["message"]["content"]
-                else:
-                    bot_response_text = f"Error: {response.text}"
-                print(f"[DEBUG STATUS] {response.status_code}", flush=True)
-            except Exception as e:
-                bot_response_text = f"Error: Could not connect to LLM ({e}). Ensure local llama-server is running."
+            native_tool_calls: list[dict] = []
+            truncated_tool_call = False
+            used_cloud_gear = False
+            primary_skill = (
+                adapter.matched_skill_records[0]
+                if getattr(adapter, "matched_skill_records", None)
+                else None
+            )
+
+            async def _invoke_cloud_gear(
+                cloud_msgs: list[dict],
+                cloud_tier: str = "fast",
+                native_tools: list[dict] | None = None,
+                timeout_s: float = 60.0,
+            ) -> dict:
+                loop = asyncio.get_running_loop()
+                is_sensitive = bool(getattr(adapter, "has_sensitive_context", False))
+                return await loop.run_in_executor(
+                    None,
+                    lambda: greenpt_client.chat_completion_step(
+                        cloud_msgs,
+                        tier=cloud_tier,
+                        temperature=temperature,
+                        max_tokens=max_tokens_limit,
+                        skill_record=primary_skill,
+                        sensitive=is_sensitive,
+                        tools=native_tools,
+                        timeout=timeout_s,
+                    ),
+                )
+
+            if shift.gear == "vision" and img_data_url:
+                vision_msgs = [dict(m) for m in messages]
+                for m_idx in range(len(vision_msgs) - 1, -1, -1):
+                    if vision_msgs[m_idx].get("role") == "user":
+                        prev_c = vision_msgs[m_idx].get("content", "")
+                        text_part = prev_c if isinstance(prev_c, str) else ""
+                        vision_msgs[m_idx] = {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": text_part},
+                                {"type": "image_url", "image_url": {"url": img_data_url}},
+                            ],
+                        }
+                        break
+                vision_tools = None
+                if transmission.coding_engaged or any(
+                    r.get("name") == "auto_programming"
+                    for r in (getattr(adapter, "matched_skill_records", None) or [])
+                ):
+                    from tools.coding_tools import READ_BAND_SCHEMAS, WRITE_BAND_SCHEMAS
+
+                    vision_tools = list(READ_BAND_SCHEMAS) + ([] if is_plan_turn else list(WRITE_BAND_SCHEMAS))
+                try:
+                    step_res = await _invoke_cloud_gear(vision_msgs, cloud_tier="vision", native_tools=vision_tools)
+                    bot_response_text = step_res.get("content", "")
+                    native_tool_calls = step_res.get("tool_calls") or []
+                    truncated_tool_call = bool(step_res.get("truncated_tool_call"))
+                    used_cloud_gear = bool(bot_response_text or native_tool_calls)
+                except Exception as vision_exc:
+                    print(f"[Gear 2 Vision] Falling back to local LLM ({vision_exc})", flush=True)
+
+            if not bot_response_text and not native_tool_calls and shift.gear in ("first", "second") and shift.cloud_tier:
+                try:
+                    step_res = await _invoke_cloud_gear(
+                        messages,
+                        cloud_tier=shift.cloud_tier,
+                        native_tools=shift.native_tools,
+                        timeout_s=120.0 if shift.gear == "second" else 60.0,
+                    )
+                    bot_response_text = step_res.get("content", "")
+                    native_tool_calls = step_res.get("tool_calls") or []
+                    truncated_tool_call = bool(step_res.get("truncated_tool_call"))
+                    if bot_response_text or native_tool_calls:
+                        used_cloud_gear = True
+                        print(
+                            f"[Transmission] gear={shift.gear} phase={shift.phase} tier={shift.cloud_tier} "
+                            f"reason={shift.reason} load={shift.engine_load}",
+                            flush=True,
+                        )
+                except Exception as upscale_exc:
+                    print(f"[Transmission] Cloud gear unavailable, falling back to local LLM ({upscale_exc})", flush=True)
+
+            if not bot_response_text and not native_tool_calls and not truncated_tool_call:
+                local_error_msg = ""
+                local_messages = (
+                    adapter.get_openai_messages(
+                        sys_instructions,
+                        rag_context,
+                        memory_context=memory_block,
+                        turn_directive=eff_directive,
+                        cloud_gear=False,
+                    )
+                    if shift.gear != "park"
+                    else messages
+                )
+                local_payload = {**payload, "messages": local_messages}
+                try:
+                    response = await self._post_llm_request(url, local_payload, headers, timeout=120.0, session_id=session_id)
+                    if response.status_code == 200:
+                        bot_response_text = response.json()["choices"][0]["message"]["content"]
+                    else:
+                        local_error_msg = f"Error: {response.text}"
+                    print(f"[DEBUG STATUS] {response.status_code}", flush=True)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    local_error_msg = f"Error: Could not connect to LLM ({e}). Ensure local llama-server is running."
+
+                # Automatic Park -> Cloud Failover when llama-server is unloaded/offline
+                if not bot_response_text and greenpt_client.is_cloud_enabled():
+                    try:
+                        failover_tier = shift.cloud_tier or "fast"
+                        step_res = await _invoke_cloud_gear(
+                            messages,
+                            cloud_tier=failover_tier,
+                            native_tools=shift.native_tools,
+                            timeout_s=120.0 if shift.gear == "second" else 60.0,
+                        )
+                        bot_response_text = step_res.get("content", "")
+                        native_tool_calls = step_res.get("tool_calls") or []
+                        if bot_response_text or native_tool_calls:
+                            used_cloud_gear = True
+                            print("[Gear 2 Failover] Routed chat turn via Cloud /v1 endpoint while local LLM is offline.", flush=True)
+                    except Exception as cloud_exc:
+                        print(f"[Gear 2 Failover] Cloud fallback failed: {cloud_exc}", flush=True)
+
+                if not bot_response_text and not native_tool_calls:
+                    bot_response_text = local_error_msg or "Error: Empty LLM response."
 
             # --- STAGE 3: POST-PROCESSING (TOOLS & CLEANUP) ---
             bot_response_text = self._sanitize_thinking_tags(bot_response_text)
@@ -632,7 +1025,11 @@ class BaseProgramRunner:
             matches = _extract_tool_calls(bot_response_text)
             matches, bot_response_text = self._filter_story_mode_matches(matches, bot_response_text, speaker_id or self.program_id)
 
-            if matches:
+            if shift.halt_tools:
+                native_tool_calls = []
+                matches = []
+
+            if matches or native_tool_calls:
                 if session_id in cancelled_sessions:
                     raise asyncio.CancelledError("Session cancelled by user request.")
 
@@ -640,9 +1037,12 @@ class BaseProgramRunner:
 
                 tools.current_speaker_id.set(speaker_id)
                 budget_token = tools.current_turn_image_budget.set(turn_image_budget)
+                plan_token = tools.current_plan_mode.set(is_plan_turn)
+                write_token = tools.current_write_disengaged.set(shift.write_disengaged)
+                approved_token = tools.current_approved_plan.set(approved_plan_md)
                 loop = asyncio.get_running_loop()
                 try:
-                    tasks = [
+                    exec_tasks = [
                         loop.run_in_executor(
                             None,
                             contextvars.copy_context().run,
@@ -652,16 +1052,32 @@ class BaseProgramRunner:
                         )
                         for m in matches
                     ]
-                    raw_results = await asyncio.gather(*tasks)
+                    for nt in native_tool_calls:
+                        exec_tasks.append(
+                            loop.run_in_executor(
+                                None,
+                                contextvars.copy_context().run,
+                                _execute_native_tool_call,
+                                nt["name"],
+                                nt.get("args") or {},
+                            )
+                        )
+                    raw_results = await asyncio.gather(*exec_tasks)
                 finally:
+                    tools.current_approved_plan.reset(approved_token)
+                    tools.current_write_disengaged.reset(write_token)
+                    tools.current_plan_mode.reset(plan_token)
                     tools.current_turn_image_budget.reset(budget_token)
 
                 if session_id in cancelled_sessions:
                     raise asyncio.CancelledError("Session cancelled by user request.")
 
+                call_names = [_normalize_tool_name(m.group(1)) for m in matches] + [
+                    _normalize_tool_name(nt["name"]) for nt in native_tool_calls
+                ]
                 results = [
-                    (_normalize_tool_name(m.group(1)), parsed_args["kwargs"], output)
-                    for m, (parsed_args, output) in zip(matches, raw_results)
+                    (t_name, parsed_args["kwargs"], output)
+                    for t_name, (parsed_args, output) in zip(call_names, raw_results)
                 ]
 
                 # Check guest tool restrictions for group sessions
@@ -677,6 +1093,10 @@ class BaseProgramRunner:
 
                 tool_calls = []
                 for idx, (t_name, t_args, t_output) in enumerate(results):
+                    if t_name == "delegate_coding":
+                        from tools import openhands_job
+
+                        tool_calls.extend(openhands_job.consume_delegated_tool_calls(session_id))
                     tool_calls.extend(_build_tool_calls_pair(t_name, t_args, t_output, len(all_tool_calls) + idx))
                 all_tool_calls.extend(tool_calls)
 
@@ -710,16 +1130,19 @@ class BaseProgramRunner:
                     completed_final_turn = True
                     break
 
-                group_meta = getattr(self, "sessions_group_meta", {}).get(session_id)
-                clean_text = clean_group_speaker_response(clean_text, speaker_id, group_meta)
-                bot_msg = adapter.append_assistant_message(clean_text, tool_calls, invocation_id, intermediate=True, speaker_id=speaker_id)
+                transmission.record_tool_results(results)
+
+                adapter.append_assistant_message("", tool_calls, invocation_id, intermediate=True, speaker_id=speaker_id)
                 adapter.append_tool_events(results, invocation_id)
 
-                if bot_msg and isinstance(bot_msg, dict) and bot_msg.get("text"):
-                    final_response_text = bot_msg["text"]
-                elif clean_text:
-                    final_response_text = clean_text
-
+                continue
+            elif truncated_tool_call and iteration < (18 if transmission.coding_engaged else max_iterations):
+                trunc_notice = (
+                    "Your tool call was cut off by output length before closing. "
+                    "Re-issue the tool call with a smaller, targeted block."
+                )
+                adapter.append_assistant_message(bot_response_text.strip(), [], invocation_id, intermediate=True, speaker_id=speaker_id)
+                adapter.append_tool_events([("system", {}, trunc_notice)], invocation_id)
                 continue
             else:
                 group_meta = getattr(self, "sessions_group_meta", {}).get(session_id)
@@ -730,6 +1153,12 @@ class BaseProgramRunner:
                     from core.banned_words import replace_banned_words_async
 
                     async def _llm_rewrite_wrapper(prompt: str, model: str = None, temperature: float = 0.4, **kwargs) -> str:
+                        if used_cloud_gear:
+                            try:
+                                rw_step = await _invoke_cloud_gear([{"role": "user", "content": prompt}], cloud_tier="fast")
+                                return self._sanitize_thinking_tags(rw_step.get("content", ""))
+                            except Exception:
+                                return ""
                         rw_payload = {
                             "messages": [{"role": "user", "content": prompt}],
                             "temperature": temperature,
@@ -790,7 +1219,7 @@ class BaseProgramRunner:
         prog = getattr(self, "program_id", None) or get_active_program()
         prog_dir = os.path.join(project_root, "core", "programs", prog)
         path = os.path.join(prog_dir, "sessions")
-        if os.path.isdir(prog_dir) and (prog == "sebile" or os.path.isfile(os.path.join(prog_dir, f"{prog}.json"))):
+        if os.path.isdir(prog_dir) and os.path.isfile(os.path.join(prog_dir, f"{prog}.json")):
             os.makedirs(path, exist_ok=True)
         return path
 
@@ -1162,8 +1591,10 @@ class BaseProgramRunner:
         return f"# PERSONALITY INVERSION DIRECTIVE\n{replace_placeholders(inversion_directive)}"
 
     def _get_system_instructions(self, session_id: str, speaker_id: str = None) -> str:
-        """Builds the static system prompt. Its text is identical on every turn of a session."""
-        from core.program_config import get_compiled_instructions, get_program_name
+        """Builds and pins the static system prompt per session so KV prefix caches stay intact."""
+        from core.program_config import get_compiled_instructions, get_program_name, is_story_mode
+        from runners.program import get_active_program, get_active_user
+        from variables.settings import PROGRAMS_DIR, USER_PROFILES_DIR
 
         try:
             program_name = get_program_name()
@@ -1175,30 +1606,46 @@ class BaseProgramRunner:
 
         if is_voice:
             instructions = self._build_voice_prompt(session_id, program_name)
-        else:
-            if group_meta and group_meta.get("is_group"):
-                from core.program_config import compile_speaker_instructions
-                host_id = group_meta.get("host_id")
-                instructions = compile_speaker_instructions(
-                    speaker_id or host_id, host_id, group_meta.get("guest_ids", [])
-                )
-            else:
-                instructions = get_compiled_instructions()
+            instructions += (
+                "\n\n# CONTENT\n"
+                "Anarchist-communist ethics. Explicit/NSFW content is permitted.\n"
+            )
+            print(f"\n[VOICE CALL DEBUG] Active Voice Prompt:\n{instructions}\n[VOICE CALL DEBUG] END PROMPT\n", flush=True)
+            return instructions
 
-            if "CONCISENESS" not in instructions and "brief, succinct, and natural" not in instructions:
-                instructions += (
-                    "\n\n# STYLE\n"
-                    "Be brief and natural. No monologues, lectures, or forced questions. Ask questions only if contextually natural.\n"
-                )
+        active_prog = get_active_program()
+        active_user = get_active_user()
+        target_prog = speaker_id or active_prog
+        story_active = is_story_mode(target_prog)
+        card_path = os.path.join(PROGRAMS_DIR, target_prog, f"{target_prog}.json")
+        user_path = os.path.join(USER_PROFILES_DIR, f"{active_user}.md")
+        card_mtime = os.path.getmtime(card_path) if os.path.isfile(card_path) else 0.0
+        user_mtime = os.path.getmtime(user_path) if os.path.isfile(user_path) else 0.0
+        cache_key = (session_id, active_prog, active_user, speaker_id or "", story_active, card_mtime, user_mtime)
+        cached_prompt = self._sys_prompt_cache.get(cache_key)
+        if cached_prompt is not None:
+            return cached_prompt
+
+        if group_meta and group_meta.get("is_group"):
+            from core.program_config import compile_speaker_instructions
+            host_id = group_meta.get("host_id")
+            instructions = compile_speaker_instructions(
+                speaker_id or host_id, host_id, group_meta.get("guest_ids", [])
+            )
+        else:
+            instructions = get_compiled_instructions()
+
+        if "CONCISENESS" not in instructions and "brief, succinct, and natural" not in instructions:
+            instructions += (
+                "\n\n# STYLE\n"
+                "Be brief and natural. No monologues, lectures, or forced questions. Ask questions only if contextually natural.\n"
+            )
 
         instructions += (
             "\n\n# CONTENT\n"
             "Anarchist-communist ethics. Explicit/NSFW content is permitted.\n"
         )
-
-        if is_voice:
-            print(f"\n[VOICE CALL DEBUG] Active Voice Prompt:\n{instructions}\n[VOICE CALL DEBUG] END PROMPT\n", flush=True)
-
+        self._sys_prompt_cache[cache_key] = instructions
         return instructions
 
 class OpenSourceRunner(BaseProgramRunner):
@@ -1309,10 +1756,7 @@ class OpenSourceRunner(BaseProgramRunner):
                     sessions_dir = os.path.dirname(target_path)
                     prog_dir = os.path.dirname(sessions_dir)
                     prog_folder_name = os.path.basename(prog_dir)
-                    if not os.path.isdir(prog_dir) or (
-                        prog_folder_name != "sebile"
-                        and not os.path.isfile(os.path.join(prog_dir, f"{prog_folder_name}.json"))
-                    ):
+                    if not os.path.isdir(prog_dir) or not os.path.isfile(os.path.join(prog_dir, f"{prog_folder_name}.json")):
                         return
 
                     memory_meta = self._get_memory_meta(session_id)
@@ -1581,7 +2025,7 @@ class OpenSourceRunner(BaseProgramRunner):
                 except Exception:
                     sender_name = sender_name or sender_id.title()
 
-            return {
+            normalized = {
                 "id": msg.get("id", ""),
                 "role": role,
                 "text": clean_text,
@@ -1597,6 +2041,10 @@ class OpenSourceRunner(BaseProgramRunner):
                 "editable": role in ("user", "program"),
                 "deletable": True,
             }
+            if isinstance(msg.get("shared_post"), dict):
+                normalized["shared_post"] = msg["shared_post"]
+                normalized["user_note"] = str(msg.get("user_note") or "")
+            return normalized
 
         async def get_history(self, session_id: str):
             with self._lock:
@@ -1651,6 +2099,8 @@ class OpenSourceRunner(BaseProgramRunner):
             media_path: str = None,
             msg_id: str = None,
             speaker_id: str = None,
+            shared_post: dict = None,
+            user_note: str = None,
         ) -> tuple:
             async with self._get_async_session_lock(session_id):
                 self._ensure_session_loaded(session_id)
@@ -1666,6 +2116,8 @@ class OpenSourceRunner(BaseProgramRunner):
                         media_path=media_path,
                         msg_id=msg_id,
                         speaker_id=speaker_id,
+                        shared_post=shared_post,
+                        user_note=user_note,
                     )
                 finally:
                     self.unmark_generating(session_id)
@@ -1682,6 +2134,8 @@ class OpenSourceRunner(BaseProgramRunner):
             msg_id: str = None,
             speaker_id: str = None,
             persist_user_msg: bool = True,
+            shared_post: dict = None,
+            user_note: str = None,
         ) -> tuple:
             self._ensure_session_loaded(session_id)
             self._ensure_first_message(session_id)
@@ -1731,6 +2185,9 @@ class OpenSourceRunner(BaseProgramRunner):
                 else (f"data:{image_mime};base64,{image_data}" if image_data else None),
                 "timestamp": time.time(),
             }
+            if isinstance(shared_post, dict):
+                user_msg["shared_post"] = shared_post
+                user_msg["user_note"] = str(user_note or "")
             self._upsert_history_message(session_id, user_msg)
             if persist_user_msg:
                 self._save_session_to_disk(session_id)
@@ -1776,6 +2233,7 @@ class OpenSourceRunner(BaseProgramRunner):
                 new_message_text=new_message_text,
                 invocation_id="",
                 speaker_id=speaker_id,
+                shared_post=shared_post if isinstance(shared_post, dict) else None,
             )
 
             bot_response_text, tool_calls, program_msg_id = res
@@ -1859,6 +2317,9 @@ class OpenSourceRunner(BaseProgramRunner):
                             is_group_chain_reroll = True
                             speaker_id = speaker
 
+                    orig_shared_post = copy.deepcopy(orig_msg.get("shared_post")) if isinstance(orig_msg.get("shared_post"), dict) else None
+                    orig_user_note = str(orig_msg.get("user_note") or "") if orig_shared_post is not None else None
+
                     # The truncation stays in memory until generation succeeds; any failure
                     # or cancellation restores the prior snapshot intact.
                     original_history = copy.deepcopy(history)
@@ -1895,6 +2356,8 @@ class OpenSourceRunner(BaseProgramRunner):
                         msg_id=msg_id,
                         speaker_id=speaker_id,
                         persist_user_msg=False,
+                        shared_post=orig_shared_post,
+                        user_note=orig_user_note,
                     )
                 except BaseException:
                     with self._lock:

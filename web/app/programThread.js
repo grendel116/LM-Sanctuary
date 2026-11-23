@@ -12,6 +12,7 @@ import {
   findLiveRowById,
   formatSharedPostForLlm,
   normalizeSharedPostCard,
+  parseInlineSharedPostFallback,
   reconcileChat,
 } from '../components/sanctuary/MessageRow.js';
 import { createMoodHeart } from '../components/sanctuary/MoodHeart.js';
@@ -47,6 +48,7 @@ import {
 import { enqueueTurn, flushOutbox, outboxStore } from '../state/sanctuary/outboxModel.js';
 import { loadProgramSession, sessionStore } from '../state/sanctuary/sessionModel.js';
 import { syncFeedTuningFromSanctuary } from '../state/feedStore.js';
+import { executeBrowserAgentCommand } from '../state/browserStore.js';
 import { createProgramMessageId, createUserMessageId } from '../state/sanctuary/types.js';
 
 const VOICE_CALL_SVG = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"></path></svg>`;
@@ -71,16 +73,22 @@ export function mountProgramThread(containerEl, {
   onBack = null,
   onOpenCompose = null,
   onProgramChanged = null,
+  onClientAction = null,
+  onBrowserCommand = null,
 } = {}) {
   const doc = globalThis.document;
   containerEl.replaceChildren();
 
-  let currentProgramId = programId || connectionStore.get().activeProgram || 'sebile';
+  const initConn = connectionStore.get();
+  let hasExplicitProgram = Boolean(programId);
+  let currentProgramId = programId || initConn.activeProgram || initConn.programs?.[0]?.id || '';
   let currentSessionId = sessionId || 'default';
   let currentTemperature = 0.95;
   let selectedModel = '';
   let activeUserName = 'User';
-  let activeDisplayName = currentProgramId;
+  let activeDisplayName = currentProgramId || 'Sanctuary';
+  let attachedFile = null;
+  let attachedPreviewUrl = '';
   let attachedMediaPath = null;
   let attachedMime = null;
   let attachedFilename = '';
@@ -119,12 +127,12 @@ export function mountProgramThread(containerEl, {
 
   const h1 = doc.createElement('h1');
   h1.className = 'sr-only';
-  h1.textContent = `Sanctuary — ${currentProgramId}`;
+  h1.textContent = `Sanctuary — ${currentProgramId || 'Chat'}`;
 
   const headerStatus = doc.createElement('div');
   headerStatus.className = 'header-status';
 
-  const moodHeart = createMoodHeart({ programName: currentProgramId });
+  const moodHeart = createMoodHeart({ programName: currentProgramId || 'Sanctuary' });
   const statusText = doc.createElement('span');
   statusText.id = 'header-status-text';
   headerStatus.append(moodHeart.buttonEl, statusText);
@@ -352,9 +360,33 @@ export function mountProgramThread(containerEl, {
       : `Ask ${activeDisplayName}`;
   }
 
+  function formatAttachmentSize(bytes) {
+    const n = Number(bytes);
+    if (!Number.isFinite(n) || n <= 0) return 'Ready to send';
+    if (n < 1024) return `${n} B`;
+    if (n < 1024 * 1024) return `${Math.max(1, Math.round(n / 1024))} KB`;
+    return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+  }
+
+  function clearStagedAttachment({ revoke = true } = {}) {
+    if (revoke && attachedPreviewUrl && typeof globalThis.URL?.revokeObjectURL === 'function' && attachedPreviewUrl.startsWith('blob:')) {
+      try {
+        globalThis.URL.revokeObjectURL(attachedPreviewUrl);
+      } catch {
+        // Ignore revoke errors
+      }
+    }
+    attachedFile = null;
+    attachedPreviewUrl = '';
+    attachedMediaPath = null;
+    attachedMime = null;
+    attachedFilename = '';
+  }
+
   function renderAttachmentPreview() {
     previewArea.replaceChildren();
-    if (!attachedMediaPath && !attachedSharedPost) {
+    const hasMedia = Boolean(attachedFile || attachedMediaPath);
+    if (!hasMedia && !attachedSharedPost) {
       previewArea.hidden = true;
       return;
     }
@@ -372,21 +404,33 @@ export function mountProgramThread(containerEl, {
       );
     }
 
-    if (attachedMediaPath) {
+    if (hasMedia) {
       const item = doc.createElement('div');
       item.className = 'preview-item';
 
-      if (attachedMime?.startsWith('image/')) {
+      if ((attachedMime || '').startsWith('image/')) {
         const thumb = doc.createElement('img');
-        thumb.src = resolveSanctuaryMediaUrl(attachedMediaPath);
+        thumb.className = 'preview-item-thumb';
+        thumb.src = attachedPreviewUrl || resolveSanctuaryMediaUrl(attachedMediaPath);
         thumb.alt = attachedFilename || 'Attachment preview';
         item.appendChild(thumb);
       } else {
         const tag = doc.createElement('span');
         tag.className = 'preview-file-badge';
-        tag.textContent = attachedFilename || attachedMediaPath;
+        tag.textContent = attachedFilename || attachedMediaPath || 'Attachment';
         item.appendChild(tag);
       }
+
+      const meta = doc.createElement('div');
+      meta.className = 'preview-item-meta';
+      const nameEl = doc.createElement('span');
+      nameEl.className = 'preview-item-name';
+      nameEl.textContent = attachedFilename || 'Pasted image';
+      const subEl = doc.createElement('span');
+      subEl.className = 'preview-item-sub';
+      subEl.textContent = formatAttachmentSize(attachedFile?.size);
+      meta.append(nameEl, subEl);
+      item.appendChild(meta);
 
       const removeBtn = doc.createElement('button');
       removeBtn.type = 'button';
@@ -394,9 +438,7 @@ export function mountProgramThread(containerEl, {
       removeBtn.setAttribute('aria-label', 'Remove attachment');
       removeBtn.textContent = '×';
       removeBtn.addEventListener('click', () => {
-        attachedMediaPath = null;
-        attachedMime = null;
-        attachedFilename = '';
+        clearStagedAttachment();
         renderAttachmentPreview();
       });
       item.appendChild(removeBtn);
@@ -419,16 +461,51 @@ export function mountProgramThread(containerEl, {
     active.stop();
   }
 
+  function dispatchClientActionOnce(dispatchedKeys, action) {
+    if (destroyed || typeof onClientAction !== 'function' || !action?.type) return;
+    const key = `${action.type}:${action.url || ''}:${Boolean(action.split)}`;
+    if (dispatchedKeys.has(key)) return;
+    dispatchedKeys.add(key);
+    onClientAction(action);
+  }
+
+  function handleCompletedTurnTools(res, dispatchedKeys = new Set()) {
+    const calls = Array.isArray(res?.message?.tool_calls)
+      ? res.message.tool_calls
+      : (Array.isArray(res?.tool_calls) ? res.tool_calls : []);
+    if (calls.some((tc) => tc?.name === 'tune_feed_algorithm')) {
+      void syncFeedTuningFromSanctuary();
+    }
+    for (const tc of calls) {
+      if (tc?.type === 'response' || tc?.type === 'result') continue;
+      if (tc?.name === 'open_in_browser' && tc?.args?.url) {
+        dispatchClientActionOnce(dispatchedKeys, {
+          type: 'open_browser_tab',
+          url: String(tc.args.url),
+          split: Boolean(tc.args.split),
+        });
+      }
+    }
+  }
+
   function startReattachedMonitor() {
     if (reattachedMonitor || generating || activeTurnPromise || activeCancelPromise || destroyed) return;
     let stopped = false;
     let pollTimer = null;
+    const reattachDispatched = new Set();
     pinnedToBottom = true;
     setBusy(true);
     const { row: typingRow, bubble: typingBubble } = createTypingIndicatorRow(currentProgramId, buildRowContext());
     chatContainer.insertBefore(typingRow, bottomSentinel);
     scrollToBottom(true);
-    const stopToolMonitor = startTurnToolMonitor({ sessionId: currentSessionId, chatContainer, typingBubble });
+    const stopToolMonitor = startTurnToolMonitor({
+      sessionId: currentSessionId,
+      chatContainer,
+      typingBubble,
+      onClientAction: (action) => dispatchClientActionOnce(reattachDispatched, action),
+      onBrowserCommand: (cmd) =>
+        typeof onBrowserCommand === 'function' ? onBrowserCommand(cmd) : executeBrowserAgentCommand(cmd),
+    });
 
     const cleanup = () => {
       if (stopped) return;
@@ -512,15 +589,23 @@ export function mountProgramThread(containerEl, {
     pinnedToBottom = true;
     setBusy(true);
     sessionStore.set({ generating: true });
+    const turnDispatched = new Set();
     const { row: typingRow, bubble: typingBubble } = createTypingIndicatorRow(speakerId, buildRowContext());
     chatContainer.insertBefore(typingRow, bottomSentinel);
     scrollToBottom(true);
-    const stopMonitor = startTurnToolMonitor({ sessionId: currentSessionId, chatContainer, typingBubble });
+    const stopMonitor = startTurnToolMonitor({
+      sessionId: currentSessionId,
+      chatContainer,
+      typingBubble,
+      onClientAction: (action) => dispatchClientActionOnce(turnDispatched, action),
+      onBrowserCommand: (cmd) =>
+        typeof onBrowserCommand === 'function' ? onBrowserCommand(cmd) : executeBrowserAgentCommand(cmd),
+    });
     abortController = new AbortController();
 
     const execute = (async () => {
       try {
-        return await runFn(abortController.signal, typingRow);
+        return await runFn(abortController.signal, typingRow, turnDispatched);
       } finally {
         if (activeCancelPromise) {
           await activeCancelPromise.catch(() => null);
@@ -544,8 +629,10 @@ export function mountProgramThread(containerEl, {
     if (!bubble || bubble.classList.contains('editing')) return;
     const targetRow = row || bubble.closest?.('.message-row') || null;
     const originalChildren = [...bubble.childNodes];
-    const original = msg.shared_post
-      ? String(msg.user_note ?? '')
+    const fallbackShared = !msg.shared_post && msg.role === 'user' ? parseInlineSharedPostFallback(msg.text) : null;
+    const activeSharedPost = msg.shared_post || fallbackShared?.sharedPost || null;
+    const original = activeSharedPost
+      ? String(msg.shared_post ? (msg.user_note ?? '') : (fallbackShared?.userNote ?? ''))
       : (bubble.dataset.rawText ?? msg.text ?? '');
 
     bubble.classList.add('editing');
@@ -605,46 +692,12 @@ export function mountProgramThread(containerEl, {
       if (saving) return;
       const nextText = ta.value;
 
-      if (msg.role !== 'user') {
-        if (nextText === original) {
-          closeEditor({ restoreOriginal: true });
-          return;
-        }
-        if (connectionStore.get().mode !== 'online') {
-          showAlert('Offline', 'Cannot edit messages while Sanctuary is offline.');
-          return;
-        }
-        saving = true;
-        ta.disabled = true;
-        saveBtn.disabled = true;
-        cancelBtn.disabled = true;
-        try {
-          await updateMessageText({
-            session_id: currentSessionId,
-            msg_id: msg.id,
-            new_text: nextText,
-          });
-          if (destroyed) return;
-          closeEditor({ restoreOriginal: false });
-          sessionStore.set((prev) => ({
-            messages: (Array.isArray(prev.messages) ? prev.messages : []).map((m) =>
-              m?.id === msg.id ? { ...m, text: nextText } : m
-            ),
-          }));
-          await refreshSession();
-        } catch (err) {
-          showAlert('Update Failed', err?.message || 'Unable to save edited message.');
-        } finally {
-          saving = false;
-          ta.disabled = false;
-          saveBtn.disabled = false;
-          cancelBtn.disabled = false;
-        }
+      if (nextText === original) {
+        closeEditor({ restoreOriginal: true });
         return;
       }
-
       if (connectionStore.get().mode !== 'online') {
-        showAlert('Offline', 'Cannot save edited prompt while Sanctuary is offline.');
+        showAlert('Offline', 'Cannot edit messages while Sanctuary is offline.');
         return;
       }
 
@@ -653,89 +706,35 @@ export function mountProgramThread(containerEl, {
       saveBtn.disabled = true;
       cancelBtn.disabled = true;
       try {
-        if (generating || reattachedMonitor) {
-          turnCounter += 1;
-          await stopActiveGeneration();
-          if (destroyed) return;
-        }
-
-        const prevMessages = Array.isArray(sessionStore.get().messages) ? sessionStore.get().messages : [];
-        const targetIdx = prevMessages.findIndex((m) => m?.id === msg.id);
-
+        await updateMessageText({
+          session_id: currentSessionId,
+          msg_id: msg.id,
+          new_text: nextText,
+        });
+        if (destroyed) return;
         closeEditor({ restoreOriginal: false });
-        if (targetIdx >= 0) {
-          const baseMsg = prevMessages[targetIdx];
-          const updatedUserMsg = {
-            ...baseMsg,
-            ...(baseMsg.shared_post
-              ? {
-                  user_note: nextText,
-                  text: formatSharedPostForLlm(baseMsg.shared_post, nextText),
-                }
-              : { text: nextText }),
-          };
-          sessionStore.set({
-            messages: [...prevMessages.slice(0, targetIdx), updatedUserMsg],
-          });
-        } else {
-          renderSnapshot();
-        }
-
-        const turnGen = turnCounter + 1;
-        try {
-          await withTurnMonitor(currentProgramId, async (signal, typingRow) => {
-            const res = await editTurn(
-              {
-                session_id: currentSessionId,
-                msg_id: msg.id,
-                new_text: nextText,
-                model: selectedModel || undefined,
-              },
-              { signal }
-            );
-            typingRow.remove();
-            if (res?.cancelled) {
-              return;
+        sessionStore.set((prev) => ({
+          messages: (Array.isArray(prev.messages) ? prev.messages : []).map((m) => {
+            if (m?.id !== msg.id) return m;
+            if (activeSharedPost) {
+              return {
+                ...m,
+                shared_post: activeSharedPost,
+                user_note: nextText,
+                text: formatSharedPostForLlm(activeSharedPost, nextText),
+              };
             }
-            if (res?.message) {
-              const msgObj = res.message;
-              sessionStore.set((prev) => ({
-                messages: [
-                  ...(Array.isArray(prev.messages) ? prev.messages : []).filter((m) => m?.id !== msgObj.id),
-                  msgObj,
-                ],
-              }));
-              scrollToBottom(false);
-            }
-            if (res?.message?.tool_calls?.some((tc) => tc?.name === 'tune_feed_algorithm')) {
-              void syncFeedTuningFromSanctuary();
-            }
-          });
-          if (!destroyed && turnCounter === turnGen) {
-            await refreshSession();
-          }
-        } catch (err) {
-          if (err?.isAborted || err?.name === 'AbortError') {
-            if (!destroyed && turnCounter === turnGen) {
-              await refreshSession().catch(() => {});
-            }
-            return;
-          }
-          sessionStore.set({ messages: prevMessages });
-          await refreshSession().catch(() => {});
-          showAlert('Update Failed', err?.message || 'Unable to save edited message.');
-          if (!destroyed) {
-            const restoredRow = findLiveRowById(chatContainer, msg.id);
-            const restoredBubble =
-              restoredRow?.querySelector?.('.message:not(.image-message)')
-              || restoredRow?.querySelector?.('.message');
-            if (restoredBubble) {
-              startInlineEdit(msg, restoredRow, restoredBubble, nextText);
-            }
-          }
-        }
+            return { ...m, text: nextText };
+          }),
+        }));
+        await refreshSession();
+      } catch (err) {
+        showAlert('Update Failed', err?.message || 'Unable to save edited message.');
       } finally {
         saving = false;
+        ta.disabled = false;
+        saveBtn.disabled = false;
+        cancelBtn.disabled = false;
       }
     };
 
@@ -807,21 +806,63 @@ export function mountProgramThread(containerEl, {
 
   function buildRowContext() {
     const state = sessionStore.get();
+    const conn = connectionStore.get();
+    const summary = conn.programs.find((p) => p.id === currentProgramId);
+    const isSessionForCurrentProgram =
+      !state.activeProgramId || state.activeProgramId === currentProgramId;
+    const resolvedTheme =
+      (isSessionForCurrentProgram && state.theme) ||
+      summary?.theme ||
+      summary?.accent_color ||
+      summary?.theme_color ||
+      null;
     return {
       programId: currentProgramId,
       sessionId: currentSessionId,
       programName: state.characterName || currentProgramId,
-      theme: state.theme,
+      theme: resolvedTheme,
+      getThemeForProgram: (sid) => {
+        const tid = sid || currentProgramId;
+        if (tid === currentProgramId && resolvedTheme) return resolvedTheme;
+        const p = conn.programs.find((x) => x.id === tid);
+        return p?.theme || p?.accent_color || p?.theme_color || resolvedTheme;
+      },
       cacheBuster: getProgramAvatarVersion(currentProgramId),
       getAvatarVersion: (sid) => getProgramAvatarVersion(sid || currentProgramId),
+      hasProgramProfile: (sid) => {
+        const tid = sid || currentProgramId;
+        if (getProgramAvatarVersion(tid) > 0) return true;
+        const p = connectionStore.get().programs.find((x) => x.id === tid);
+        return p ? Boolean(p.has_profile) : true;
+      },
       onOpenCompose,
       onOpenAvatarMedia: (speakerId, speakerName) => openRecentMedia(speakerId || currentProgramId, speakerName),
       onOpenGallery: (speakerId, speakerName) => openGallery(speakerId || currentProgramId, speakerName),
       onRefreshHistory: () => refreshSession(),
       onReroll: async (msg) => {
-        if (generating) return;
+        if (connectionStore.get().mode !== 'online') {
+          showAlert('Offline', 'Cannot reroll responses while Sanctuary is offline.');
+          return;
+        }
+        if (generating || reattachedMonitor) {
+          turnCounter += 1;
+          await stopActiveGeneration();
+          if (destroyed) return;
+        }
+
+        const prevMessages = Array.isArray(sessionStore.get().messages) ? sessionStore.get().messages : [];
+        const targetIdx = prevMessages.findIndex((m) => m?.id === msg.id);
+        if (targetIdx >= 0) {
+          const keptMessages =
+            msg.role === 'user'
+              ? prevMessages.slice(0, targetIdx + 1)
+              : prevMessages.slice(0, targetIdx);
+          sessionStore.set({ messages: keptMessages });
+        }
+
         const turnGen = turnCounter + 1;
-        await withTurnMonitor(msg.sender_id || currentProgramId, async (signal, typingRow) => {
+        let failed = false;
+        await withTurnMonitor(msg.sender_id || currentProgramId, async (signal, typingRow, turnDispatched) => {
           try {
             const res = await editTurn(
               {
@@ -833,16 +874,29 @@ export function mountProgramThread(containerEl, {
               { signal }
             );
             if (!signal.aborted) {
-              typingRow.remove();
-              if (res?.message?.tool_calls?.some((tc) => tc?.name === 'tune_feed_algorithm')) {
-                void syncFeedTuningFromSanctuary();
+              if (res?.message && !res?.cancelled) {
+                const msgObj = res.message;
+                sessionStore.set((prev) => ({
+                  messages: [
+                    ...(Array.isArray(prev.messages) ? prev.messages : []).filter((m) => m?.id !== msgObj.id),
+                    msgObj,
+                  ],
+                }));
+                scrollToBottom(false);
               }
+              typingRow.remove();
+              handleCompletedTurnTools(res, turnDispatched);
             }
-          } catch {
-            // Handled cleanly after cancellation settles
+          } catch (err) {
+            if (!signal.aborted && err?.name !== 'AbortError' && !err?.isAborted) {
+              failed = true;
+            }
           }
         });
         if (!destroyed && turnCounter === turnGen) {
+          if (failed) {
+            sessionStore.set({ messages: prevMessages });
+          }
           await refreshSession().catch(() => {});
         }
       },
@@ -852,6 +906,17 @@ export function mountProgramThread(containerEl, {
         await refreshSession();
       },
       onSpeak: (msg, btn) => void handleSpeak(msg, btn),
+      onProceedPlan: () => {
+        if (generating) return;
+        textarea.value = 'Proceed with the implementation plan above.';
+        syncComposerHeight();
+        void submitTurn();
+      },
+      onRevisePlan: () => {
+        textarea.value = "Let's revise the plan: ";
+        syncComposerHeight();
+        textarea.focus?.();
+      },
     };
   }
 
@@ -883,7 +948,13 @@ export function mountProgramThread(containerEl, {
       statusText.textContent = '';
     }
 
-    const theme = state.theme || summary?.theme || summary?.accent_color;
+    const isSessionForCurrentProgram =
+      !state.activeProgramId || state.activeProgramId === currentProgramId;
+    const theme =
+      (isSessionForCurrentProgram && state.theme) ||
+      summary?.theme ||
+      summary?.accent_color ||
+      summary?.theme_color;
     applyScopedProgramTheme(root, theme);
     applyRootProgramTheme(theme);
     moodHeart.updateMood(state.moodState, state.inversionActive, state.inversionState, displayName, state.messages);
@@ -947,7 +1018,55 @@ export function mountProgramThread(containerEl, {
 
   async function refreshSession() {
     if (destroyed) return;
+    if (!currentProgramId) {
+      const conn = connectionStore.get();
+      const resolved = conn.activeProgram || conn.programs?.[0]?.id || '';
+      if (resolved) {
+        currentProgramId = resolved;
+      } else if (conn.mode === 'dormant') {
+        return;
+      }
+    }
     await loadProgramSession(currentProgramId, currentSessionId);
+  }
+
+  function reconcileActiveProgramWithConnection() {
+    if (destroyed) return false;
+    const conn = connectionStore.get();
+    const roster = Array.isArray(conn.programs) ? conn.programs : [];
+    const fallbackId = conn.activeProgram || roster[0]?.id || '';
+    if (!fallbackId) {
+      if (conn.mode === 'online' && roster.length === 0 && currentProgramId) {
+        currentProgramId = '';
+        currentSessionId = 'default';
+        hasExplicitProgram = false;
+        sessionStore.set({
+          activeProgramId: '',
+          activeSessionId: 'default',
+          characterName: '',
+          messages: [],
+          welcomeMessage: '',
+          loading: false,
+        });
+      }
+      return false;
+    }
+    const existsInRoster = roster.length === 0 || roster.some((p) => p.id === currentProgramId);
+    if (!currentProgramId || (!existsInRoster && (conn.mode === 'online' || !hasExplicitProgram))) {
+      if (fallbackId !== currentProgramId) {
+        currentProgramId = fallbackId;
+        currentSessionId = 'default';
+        hasExplicitProgram = false;
+        pinnedToBottom = true;
+        needsInitialScroll = true;
+        lastSessionScrollKey = `${currentProgramId}:${currentSessionId}`;
+        if (!generating) {
+          void refreshSession();
+        }
+        return true;
+      }
+    }
+    return false;
   }
 
   async function refreshModelsAndConfig() {
@@ -982,16 +1101,17 @@ export function mountProgramThread(containerEl, {
 
   function switchProgram(nextProgramId, nextSessionId = 'default', draft = '') {
     stopReattachedMonitor();
-    if (nextProgramId) currentProgramId = nextProgramId;
+    if (nextProgramId) {
+      hasExplicitProgram = true;
+      currentProgramId = nextProgramId;
+    }
     if (nextSessionId) currentSessionId = nextSessionId;
     pinnedToBottom = true;
     needsInitialScroll = true;
     lastSessionScrollKey = `${currentProgramId}:${currentSessionId}`;
     if (draft) textarea.value = String(draft);
     syncComposerHeight();
-    attachedMediaPath = null;
-    attachedMime = null;
-    attachedFilename = '';
+    clearStagedAttachment();
     attachedSharedPost = null;
     renderAttachmentPreview();
     syncPlaceholder();
@@ -1004,15 +1124,17 @@ export function mountProgramThread(containerEl, {
   async function submitTurn() {
     if (generating) return;
     const text = textarea.value.trim();
-    const mediaPath = attachedMediaPath;
+    const stagedFile = attachedFile;
+    const stagedPreviewUrl = attachedPreviewUrl;
+    let mediaPath = attachedMediaPath;
     const mime = attachedMime;
     const sharedPost = attachedSharedPost;
     const conn = connectionStore.get();
 
-    if (!text && !mediaPath && !sharedPost) {
+    if (!text && !stagedFile && !mediaPath && !sharedPost) {
       if (conn.mode !== 'online' || !chatContainer.querySelector(LIVE_ROW_SELECTOR)) return;
       const turnGen = turnCounter + 1;
-      await withTurnMonitor(currentProgramId, async (signal, typingRow) => {
+      await withTurnMonitor(currentProgramId, async (signal, typingRow, turnDispatched) => {
         try {
           const contData = await continueGeneration(
             { session_id: currentSessionId, model: selectedModel || undefined },
@@ -1020,9 +1142,7 @@ export function mountProgramThread(containerEl, {
           );
           if (!signal.aborted) {
             typingRow.remove();
-            if (contData?.message?.tool_calls?.some((tc) => tc?.name === 'tune_feed_algorithm')) {
-              void syncFeedTuningFromSanctuary();
-            }
+            handleCompletedTurnTools(contData, turnDispatched);
           }
         } catch {
           // Handled cleanly after cancellation settles
@@ -1038,9 +1158,7 @@ export function mountProgramThread(containerEl, {
     const outboundMessage = sharedPost ? formatSharedPostForLlm(sharedPost, text) : text;
     textarea.value = '';
     syncComposerHeight();
-    attachedMediaPath = null;
-    attachedMime = null;
-    attachedFilename = '';
+    clearStagedAttachment({ revoke: false });
     attachedSharedPost = null;
     renderAttachmentPreview();
     syncPlaceholder();
@@ -1060,11 +1178,12 @@ export function mountProgramThread(containerEl, {
       return;
     }
 
+    const optimisticUrl = mediaPath || stagedPreviewUrl;
     const optimisticUserMsg = {
       id: userMsgId,
       role: 'user',
       text: outboundMessage,
-      media: mediaPath ? [{ url: mediaPath, type: mime?.startsWith('video/') ? 'video' : 'image' }] : [],
+      media: optimisticUrl ? [{ url: optimisticUrl, type: mime?.startsWith('video/') ? 'video' : 'image' }] : [],
       timestamp: Date.now() / 1000,
       ...(sharedPost ? { shared_post: sharedPost, user_note: text } : {}),
     };
@@ -1077,8 +1196,19 @@ export function mountProgramThread(containerEl, {
     }));
 
     const turnGen = turnCounter + 1;
-    await withTurnMonitor(currentProgramId, async (signal, typingRow) => {
+    await withTurnMonitor(currentProgramId, async (signal, typingRow, turnDispatched) => {
       try {
+        if (stagedFile && !mediaPath) {
+          const upRes = await uploadSanctuaryMedia(stagedFile, { signal });
+          mediaPath = upRes.file_path;
+          sessionStore.set((prev) => ({
+            messages: (Array.isArray(prev.messages) ? prev.messages : []).map((m) =>
+              m?.id === userMsgId
+                ? { ...m, media: [{ url: mediaPath, type: mime?.startsWith('video/') ? 'video' : 'image' }] }
+                : m
+            ),
+          }));
+        }
         const data = await sendChat(
           {
             session_id: currentSessionId,
@@ -1106,12 +1236,18 @@ export function mountProgramThread(containerEl, {
           if (data?.state) {
             moodHeart.updateMood(data.state, data.inversion_active, data.inversion_state);
           }
-          if (data?.message?.tool_calls?.some((tc) => tc?.name === 'tune_feed_algorithm')) {
-            void syncFeedTuningFromSanctuary();
-          }
+          handleCompletedTurnTools(data, turnDispatched);
         }
       } catch {
         // Handled cleanly after cancellation settles
+      } finally {
+        if (stagedPreviewUrl && typeof globalThis.URL?.revokeObjectURL === 'function' && stagedPreviewUrl.startsWith('blob:')) {
+          try {
+            globalThis.URL.revokeObjectURL(stagedPreviewUrl);
+          } catch {
+            // Ignore revoke errors
+          }
+        }
       }
     });
     if (!destroyed && turnCounter === turnGen) {
@@ -1140,22 +1276,56 @@ export function mountProgramThread(containerEl, {
     void stopActiveGeneration();
   });
 
-  fileInput.addEventListener('change', async () => {
-    const file = fileInput.files?.[0];
+  const dataTransferFiles = (event) => {
+    const items = event?.clipboardData?.items || event?.dataTransfer?.items || [];
+    return [...items]
+      .filter((item) => item?.kind === 'file' && typeof item.getAsFile === 'function')
+      .map((item) => item.getAsFile())
+      .filter((file) => file && (file.type?.startsWith('image/') || file.type?.startsWith('video/')));
+  };
+
+  const stageIncomingFile = (file) => {
     if (!file || connectionStore.get().mode !== 'online') return;
-    previewArea.hidden = false;
-    previewArea.textContent = `Uploading ${file.name}...`;
-    try {
-      const res = await uploadSanctuaryMedia(file);
-      attachedMediaPath = res.file_path;
-      attachedMime = file.type || 'image/png';
-      attachedFilename = file.name;
-      renderAttachmentPreview();
-    } catch (err) {
-      previewArea.textContent = err?.message || 'Upload failed';
-    } finally {
-      fileInput.value = '';
+    clearStagedAttachment();
+    attachedFile = file;
+    attachedMime = file.type || 'image/png';
+    attachedFilename = file.name || 'Pasted image';
+    if (
+      typeof globalThis.URL?.createObjectURL === 'function'
+      && typeof globalThis.Blob !== 'undefined'
+      && file instanceof globalThis.Blob
+    ) {
+      attachedPreviewUrl = globalThis.URL.createObjectURL(file);
+    } else {
+      attachedPreviewUrl = 'blob:staged-preview';
     }
+    renderAttachmentPreview();
+  };
+
+  textarea.addEventListener('paste', (e) => {
+    // No upload path offline, so clipboard stays native exactly like the attach button
+    if (connectionStore.get().mode !== 'online') return;
+    const pastedFiles = dataTransferFiles(e);
+    if (pastedFiles.length === 0) return;
+    // Text-bearing pastes (e.g. web image + caption) keep native text insertion
+    if (!e.clipboardData?.getData?.('text/plain')) {
+      e.preventDefault();
+    }
+    stageIncomingFile(pastedFiles[0]);
+  });
+
+  textarea.addEventListener('drop', (e) => {
+    const droppedFiles = dataTransferFiles(e);
+    if (droppedFiles.length === 0) return;
+    e.preventDefault();
+    stageIncomingFile(droppedFiles[0]);
+  });
+
+  fileInput.addEventListener('change', () => {
+    const file = fileInput.files?.[0];
+    if (!file) return;
+    stageIncomingFile(file);
+    fileInput.value = '';
   });
 
   impersonateBtn.addEventListener('click', async () => {
@@ -1179,27 +1349,35 @@ export function mountProgramThread(containerEl, {
     if (connectionStore.get().mode !== 'online' || generating) return;
     pinnedToBottom = true;
     setBusy(true);
+    sessionStore.set({ generating: true });
+    const ctx = buildRowContext();
     try {
       await streamPortraitGeneration(chatContainer, {
         sessionId: currentSessionId,
         prompt: textarea.value.trim(),
         speakerId: currentProgramId,
         msgId: createProgramMessageId(),
-        ctx: buildRowContext(),
+        ctx,
+        createTypingRow: () => createTypingIndicatorRow(currentProgramId, ctx),
       });
       await refreshSession();
       scrollToBottom(true);
     } finally {
+      sessionStore.set({ generating: false });
       setBusy(false);
     }
   });
 
   const unsubSession = sessionStore.subscribe(renderSnapshot);
-  const unsubConn = connectionStore.subscribe(renderSnapshot);
+  const unsubConn = connectionStore.subscribe(() => {
+    reconcileActiveProgramWithConnection();
+    renderSnapshot();
+  });
   const unsubOutbox = outboxStore.subscribe(renderSnapshot);
   const offOnline = onSanctuaryEvent('sanctuary:online', () => {
     void refreshModelsAndConfig();
-    if (!generating) {
+    const switched = reconcileActiveProgramWithConnection();
+    if (!generating && !switched) {
       void refreshSession();
     }
   });
@@ -1228,6 +1406,7 @@ export function mountProgramThread(containerEl, {
     getActiveUser: () => activeUserName,
     destroy() {
       destroyed = true;
+      clearStagedAttachment();
       stopReattachedMonitor();
       abortController?.abort();
       activeAudio?.pause?.();

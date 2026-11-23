@@ -7,11 +7,12 @@ import {
 } from '../queries/socialClient.js';
 import { kvGet, kvSet } from '../storage/nativeStore.js';
 import { authStore } from './authStore.js';
-import { feedStore, hydrateCachedModeration } from './feedStore.js';
+import { feedStore, hydrateCachedFilters, hydrateCachedModeration } from './feedStore.js';
 import { createStore } from './store.js';
 
 const LAST_SEEN_TS_KEY = 'activity_last_seen_ts_v1';
 const SEEN_THREADS_METRICS_KEY = 'activity_seen_threads_metrics_v1';
+const ACTIVITY_ITEMS_CACHE_KEY = 'activity_items_cache_v1';
 
 const KIND_NORMALIZE = {
   favourite: 'like',
@@ -43,6 +44,8 @@ function createInitialActivityState() {
     lastFetchedAt: 0,
     lastSeenTs: 0,
     seenThreadsMetrics: {},
+    sessionUnreadCutoffTs: 0,
+    sessionUnreadThreadsMetrics: {},
     hasUnread: false,
   };
 }
@@ -396,6 +399,12 @@ export function groupActivityNotifications(items = []) {
       || primaryItem?._meta?.notification?.targetPost?.text
       || ''
     ).trim();
+    const rawTargetText = String(primaryItem?._meta?.notification?.targetPost?.text || '').trim();
+    const targetSnippetText = (bucket.kind === 'reply' || bucket.kind === 'mention' || bucket.kind === 'quote')
+      && rawTargetText
+      && rawTargetText !== snippetText
+      ? rawTargetText
+      : '';
 
     groups.push({
       groupKey: bucket.groupKey,
@@ -412,6 +421,7 @@ export function groupActivityNotifications(items = []) {
       primaryItem,
       threadTargetItem,
       snippetText,
+      targetSnippetText,
       thumbUrl: extractThumbUrl(primaryItem),
       postMetrics,
       metricsBreakdown: Object.keys(breakdown).length > 0 ? breakdown : null,
@@ -543,24 +553,55 @@ export function computeActivityTotals(items = []) {
   return { likes, reposts, comments, follows, byPlatform };
 }
 
+export function isActivityGroupUnread(group, state = activityStore.get()) {
+  if (!group || !state) return false;
+  const cutoffTs = state.hasUnread ? Number(state.lastSeenTs || 0) : Number(state.sessionUnreadCutoffTs || 0);
+  const seenThreads = state.hasUnread ? (state.seenThreadsMetrics || {}) : (state.sessionUnreadThreadsMetrics || {});
+  if (cutoffTs <= 0 && Object.keys(seenThreads).length === 0) return false;
+
+  for (const it of group.items || []) {
+    if (!it || typeof it !== 'object') continue;
+    if (isSyntheticThreadsInsightItem(it)) {
+      const nm = it._meta?.notification || {};
+      const tid = String(nm.threadsPostId || it._meta?.threads?.postId || '').trim();
+      const kind = normalizeNotificationKind(nm.type);
+      const rawTotal = Number(nm.rawInsightsTotal ?? nm.aggregateCount ?? 0) || 0;
+      const seenVal = Number(seenThreads?.[tid]?.[kind === 'repost' ? 'reposts' : 'likes'] || 0);
+      if (rawTotal > seenVal) return true;
+      continue;
+    }
+    const ts = parseItemTimeMs(it);
+    if (cutoffTs > 0 && ts > cutoffTs) return true;
+  }
+  return false;
+}
+
 export async function hydrateActivityStore() {
-  const [lastSeenRaw, seenThreadsRaw] = await Promise.all([
+  const [lastSeenRaw, seenThreadsRaw, cachedItemsRaw] = await Promise.all([
     kvGet(LAST_SEEN_TS_KEY, 0).catch(() => 0),
     kvGet(SEEN_THREADS_METRICS_KEY, {}).catch(() => ({})),
+    kvGet(ACTIVITY_ITEMS_CACHE_KEY, []).catch(() => []),
   ]);
   const lastSeenTs = Number(lastSeenRaw || 0) || 0;
   const seenThreadsMetrics = seenThreadsRaw && typeof seenThreadsRaw === 'object' ? seenThreadsRaw : {};
+  const cachedItems = Array.isArray(cachedItemsRaw) ? cachedItemsRaw : [];
   const cur = activityStore.get();
+  const nextItems = cur.items.length > 0 ? cur.items : cachedItems;
   activityStore.set({
     hydrated: true,
+    items: nextItems,
     lastSeenTs,
     seenThreadsMetrics,
-    hasUnread: computeUnreadFromItems(cur.items, lastSeenTs, seenThreadsMetrics),
+    hasUnread: computeUnreadFromItems(nextItems, lastSeenTs, seenThreadsMetrics),
   });
 }
 
 export async function markActivitySeen() {
   const cur = activityStore.get();
+  const prevSeenTs = Number(cur.lastSeenTs || 0);
+  const prevSeenThreads = cur.seenThreadsMetrics && typeof cur.seenThreadsMetrics === 'object'
+    ? { ...cur.seenThreadsMetrics }
+    : {};
   let newestMs = Date.now();
   for (const it of cur.items) {
     if (isSyntheticThreadsInsightItem(it)) continue;
@@ -576,9 +617,13 @@ export async function markActivitySeen() {
       reposts: Math.max(Number(prev.reposts || 0), Number(counts.reposts || 0)),
     };
   }
+  const preserveCutoff = (cur.hasUnread || (prevSeenTs > 0 && cur.sessionUnreadCutoffTs === 0))
+    ? { sessionUnreadCutoffTs: prevSeenTs, sessionUnreadThreadsMetrics: prevSeenThreads }
+    : {};
   activityStore.set({
     lastSeenTs: newestMs,
     seenThreadsMetrics: nextSeenThreads,
+    ...preserveCutoff,
     hasUnread: false,
   });
   await Promise.allSettled([
@@ -588,7 +633,7 @@ export async function markActivitySeen() {
   ]);
 }
 
-export async function refreshActivityNotifications({ limit = 40, markSeen = false, background = false } = {}) {
+export async function refreshActivityNotifications({ limit = 60, markSeen = false, background = false } = {}) {
   const cur = activityStore.get();
   if (!cur.hydrated) {
     await hydrateActivityStore();
@@ -603,9 +648,14 @@ export async function refreshActivityNotifications({ limit = 40, markSeen = fals
     activityStore.set({ loading: true, error: null });
   }
   try {
-    await hydrateCachedModeration().catch(() => {});
+    await Promise.allSettled([hydrateCachedModeration(), hydrateCachedFilters()]);
     const { items: rawItems = [], warnings = [] } = await fetchUnifiedNotifications({ limit });
-    const filtered = applyKeywordFilters(rawItems, [], feedStore.get().moderatedActors || []);
+    const feedState = feedStore.get();
+    const filtered = applyKeywordFilters(
+      rawItems,
+      feedState.filters || [],
+      feedState.moderatedActors || []
+    );
     const state = activityStore.get();
     if (markSeen) {
       activityStore.set({
@@ -626,6 +676,7 @@ export async function refreshActivityNotifications({ limit = 40, markSeen = fals
         hasUnread: computeUnreadFromItems(filtered, state.lastSeenTs, state.seenThreadsMetrics),
       });
     }
+    void kvSet(ACTIVITY_ITEMS_CACHE_KEY, filtered.slice(0, 80)).catch(() => {});
     return { items: filtered, warnings };
   } catch (err) {
     activityStore.set({
@@ -649,6 +700,7 @@ export async function dismissActivityGroup(group) {
     items: nextItems,
     hasUnread: computeUnreadFromItems(nextItems, cur.lastSeenTs, cur.seenThreadsMetrics),
   });
+  void kvSet(ACTIVITY_ITEMS_CACHE_KEY, nextItems.slice(0, 80)).catch(() => {});
   await dismissUnifiedNotifications({
     ids: group.notificationIds || [],
     mastodonNotifIds: group.mastodonNotifIds || [],
@@ -656,27 +708,80 @@ export async function dismissActivityGroup(group) {
   });
 }
 
-export function removeActivityByActor(actor, protocol = 'threads') {
+function extractActorMatchKeys(actor, protocol = 'mastodon') {
   const handle = String(actor?.handle || actor?.acct || actor?.username || '').trim().replace(/^@/, '').toLowerCase();
   const aid = String(actor?.id || '').trim().toLowerCase();
   const canon = handle ? canonicalizeActorHandle(handle, protocol) : '';
-  if (!handle && !aid && !canon) return;
+  return { handle, aid, canon };
+}
+
+function doesActivityItemMatchActor(item, { handle, aid, canon }) {
+  const itActor = item?._meta?.notification?.actor || item?.author || {};
+  const itProto = String(item?.protocol || 'mastodon').toLowerCase();
+  const itHandle = String(itActor.handle || '').trim().replace(/^@/, '').toLowerCase();
+  const itId = String(itActor.id || '').trim().toLowerCase();
+  const itCanon = itHandle ? canonicalizeActorHandle(itHandle, itProto) : '';
+  return Boolean(
+    (canon && itCanon && canon === itCanon)
+    || (handle && itHandle && handle === itHandle)
+    || (aid && itId && aid === itId)
+  );
+}
+
+export function removeActivityByActor(actor, protocol = 'threads') {
+  const keys = extractActorMatchKeys(actor, protocol);
+  if (!keys.handle && !keys.aid && !keys.canon) return;
   const cur = activityStore.get();
-  const nextItems = (cur.items || []).filter((it) => {
-    const itActor = it?._meta?.notification?.actor || it?.author || {};
-    const itProto = String(it?.protocol || 'mastodon').toLowerCase();
-    const itHandle = String(itActor.handle || '').trim().replace(/^@/, '').toLowerCase();
-    const itId = String(itActor.id || '').trim().toLowerCase();
-    const itCanon = itHandle ? canonicalizeActorHandle(itHandle, itProto) : '';
-    if (canon && itCanon && canon === itCanon) return false;
-    if (handle && itHandle && handle === itHandle) return false;
-    if (aid && itId && aid === itId) return false;
-    return true;
-  });
+  const nextItems = (cur.items || []).filter((it) => !doesActivityItemMatchActor(it, keys));
   activityStore.set({
     items: nextItems,
     hasUnread: computeUnreadFromItems(nextItems, cur.lastSeenTs, cur.seenThreadsMetrics),
   });
+  void kvSet(ACTIVITY_ITEMS_CACHE_KEY, nextItems.slice(0, 80)).catch(() => {});
+}
+
+/**
+ * Sync the cached follow state across matching Activity notification rows
+ * (following, requested, Bluesky followUri) without waiting for a network refetch.
+ */
+export function updateActivityActorFollowState(
+  actor,
+  protocol = 'mastodon',
+  { following = false, requested = false, followUri = '' } = {}
+) {
+  const keys = extractActorMatchKeys(actor, protocol);
+  if (!keys.handle && !keys.aid && !keys.canon) return;
+
+  const cur = activityStore.get();
+  const items = Array.isArray(cur.items) ? cur.items : [];
+  let changed = false;
+  const followPatch = {
+    following: Boolean(following),
+    requested: Boolean(requested),
+    followUri: followUri ? String(followUri) : '',
+  };
+
+  const nextItems = items.map((it) => {
+    if (!doesActivityItemMatchActor(it, keys)) return it;
+    changed = true;
+    const nextAuthor = it?.author ? { ...it.author, ...followPatch } : it?.author;
+    const prevNm = it?._meta?.notification;
+    const nextNm = prevNm
+      ? {
+          ...prevNm,
+          ...(prevNm.actor ? { actor: { ...prevNm.actor, ...followPatch } } : {}),
+        }
+      : prevNm;
+    return {
+      ...it,
+      ...(nextAuthor ? { author: nextAuthor } : {}),
+      ...(nextNm ? { _meta: { ...it._meta, notification: nextNm } } : {}),
+    };
+  });
+
+  if (changed) {
+    activityStore.set({ items: nextItems });
+  }
 }
 
 export async function clearAllActivity() {
@@ -690,6 +795,7 @@ export async function clearAllActivity() {
   });
   await Promise.allSettled([
     kvSet(LAST_SEEN_TS_KEY, nowMs),
+    kvSet(ACTIVITY_ITEMS_CACHE_KEY, []),
     clearUnifiedNotifications({ threadsWatermarks }),
   ]);
 }

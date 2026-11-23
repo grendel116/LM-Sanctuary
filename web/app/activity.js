@@ -1,5 +1,5 @@
 import { createOfflineNotice } from '../components/OfflineNotice.js';
-import { getPostActionCapabilities } from '../components/PostCard.js';
+import { getPostActionCapabilities, PROTOCOL_LOGO_SVGS } from '../components/PostCard.js';
 import { showAlert, showConfirm } from '../components/sanctuary/SanctuaryDialog.js';
 import { createLoadingState } from '../components/ui/index.js';
 import { DEFAULT_AVATAR_DATA_URI } from '../constants/avatars.js';
@@ -15,8 +15,11 @@ import {
   computeActivityTotals,
   dismissActivityGroup,
   groupActivityNotifications,
+  hydrateActivityStore,
+  isActivityGroupUnread,
   refreshActivityNotifications,
   removeActivityByActor,
+  updateActivityActorFollowState,
 } from '../state/activityStore.js';
 import { authStore, getAuthenticatedAccount } from '../state/authStore.js';
 import { prefillReply } from '../state/composeStore.js';
@@ -244,9 +247,9 @@ export function mountActivityScreen(containerEl, {
     const totals = computeActivityTotals(state.items);
     const filters = [
       { id: 'all', label: `All (${groups.length})`, title: 'Show all notifications' },
+      { id: 'comment', label: `💬 ${totals.comments}`, aria: `${totals.comments} total comments`, title: formatPlatformTotalTitle(totals, 'comments') || 'Conversations' },
       { id: 'like', label: `♥ ${totals.likes}`, aria: `${totals.likes} total likes`, title: formatPlatformTotalTitle(totals, 'likes') || 'Likes' },
       { id: 'repost', label: `↻ ${totals.reposts}`, aria: `${totals.reposts} total reposts`, title: formatPlatformTotalTitle(totals, 'reposts') || 'Reposts' },
-      { id: 'comment', label: `💬 ${totals.comments}`, aria: `${totals.comments} total comments`, title: formatPlatformTotalTitle(totals, 'comments') || 'Comments' },
     ];
     if (totals.follows > 0) {
       filters.push({ id: 'follow', label: `Follows (${totals.follows})`, title: 'Follows' });
@@ -291,17 +294,31 @@ export function mountActivityScreen(containerEl, {
   }
 
   function buildGroupRow(group) {
+    const isUnread = isActivityGroupUnread(group, activityStore.get());
     const row = doc.createElement('div');
-    row.className = `activity-row activity-row--${group.kind}`;
+    row.className = `activity-row activity-row--${group.kind}${isUnread ? ' is-unread' : ''}`;
     row.dataset.groupKey = group.groupKey;
 
     const actor = group.primaryActor || {};
     const primaryItem = group.primaryItem;
     const targetItem = group.threadTargetItem;
 
-    // 1. Leading avatar + colored action badge
+    // 1. Leading avatar + optional facepile + colored action badge
+    const hasFacepile = !group.isSyntheticOnly && Array.isArray(group.actors) && group.actors.length > 1;
     const avatarWrap = doc.createElement('div');
-    avatarWrap.className = 'activity-avatar-wrap';
+    avatarWrap.className = `activity-avatar-wrap${hasFacepile ? ' has-facepile' : ''}`;
+
+    if (hasFacepile) {
+      for (const extraActor of group.actors.slice(1, 3)) {
+        const mini = doc.createElement('img');
+        mini.className = 'activity-facepile-mini';
+        mini.src = extraActor.avatar_url || extraActor.avatar || DEFAULT_AVATAR_DATA_URI;
+        mini.alt = '';
+        mini.loading = 'lazy';
+        mini.setAttribute('aria-hidden', 'true');
+        avatarWrap.appendChild(mini);
+      }
+    }
 
     const avatar = doc.createElement('img');
     avatar.className = 'post-avatar activity-avatar';
@@ -371,6 +388,12 @@ export function mountActivityScreen(containerEl, {
       protoList.appendChild(pBadge);
     }
     headline.appendChild(protoList);
+    if (isUnread) {
+      const newBadge = doc.createElement('span');
+      newBadge.className = 'activity-new-badge';
+      newBadge.textContent = 'New';
+      headline.appendChild(newBadge);
+    }
     mainCol.appendChild(headline);
 
     const openThread = () => {
@@ -378,6 +401,13 @@ export function mountActivityScreen(containerEl, {
         onOpenPostThread?.(targetItem);
       }
     };
+
+    if (group.targetSnippetText) {
+      const targetQuote = doc.createElement('div');
+      targetQuote.className = 'activity-target-quote';
+      targetQuote.textContent = `↳ ${group.targetSnippetText}`;
+      mainCol.appendChild(targetQuote);
+    }
 
     if (group.kind !== 'follow' && (group.snippetText || group.thumbUrl)) {
       const snippet = doc.createElement('div');
@@ -395,6 +425,30 @@ export function mountActivityScreen(containerEl, {
       mainCol.appendChild(snippet);
     }
 
+    if (!group.isSyntheticOnly && (group.kind === 'like' || group.kind === 'repost') && group.actors.length > 1) {
+      const peopleDetails = doc.createElement('details');
+      peopleDetails.className = 'activity-actors-disclosure';
+      const peopleSummary = doc.createElement('summary');
+      peopleSummary.className = 'activity-actors-summary';
+      peopleSummary.textContent = group.aggregateExtraCount > 0
+        ? `People (${group.actors.length} + ${group.aggregateExtraCount} on Threads)`
+        : `People (${group.actors.length})`;
+      const peopleList = doc.createElement('div');
+      peopleList.className = 'activity-actors-list';
+      for (const a of group.actors.slice(0, 12)) {
+        const chip = doc.createElement('button');
+        chip.type = 'button';
+        chip.className = 'activity-actor-chip';
+        chip.textContent = a.name || (a.handle ? `@${String(a.handle).replace(/^@/, '')}` : 'User');
+        chip.addEventListener('click', () => {
+          if (a.id || a.handle) onSelectAuthor?.(a, primaryItem);
+        });
+        peopleList.appendChild(chip);
+      }
+      peopleDetails.append(peopleSummary, peopleList);
+      mainCol.appendChild(peopleDetails);
+    }
+
     const subFooter = doc.createElement('div');
     subFooter.className = 'activity-subfooter';
 
@@ -405,6 +459,36 @@ export function mountActivityScreen(containerEl, {
       const bdTitle = formatBreakdownTitle(group.metricsBreakdown);
       if (bdTitle) metricsRow.title = bdTitle;
       subFooter.appendChild(metricsRow);
+
+      if (group.metricsBreakdown && typeof group.metricsBreakdown === 'object') {
+        const bdEntries = ['mastodon', 'bluesky', 'threads']
+          .filter((p) => group.metricsBreakdown[p] && typeof group.metricsBreakdown[p] === 'object')
+          .map((p) => ({
+            proto: p,
+            total: Number(group.metricsBreakdown[p].likes || 0)
+              + Number(group.metricsBreakdown[p].reposts || 0)
+              + Number(group.metricsBreakdown[p].replies || 0),
+          }))
+          .filter((e) => e.total > 0);
+        if (bdEntries.length >= 2) {
+          const bdStrip = doc.createElement('span');
+          bdStrip.className = 'post-network-resonance activity-network-resonance';
+          for (const e of bdEntries) {
+            const chip = doc.createElement('span');
+            chip.className = `post-resonance-chip post-resonance-chip--${e.proto}`;
+            const ic = doc.createElement('span');
+            ic.className = 'post-resonance-icon';
+            ic.setAttribute('aria-hidden', 'true');
+            ic.innerHTML = PROTOCOL_LOGO_SVGS[e.proto] || '';
+            const cnt = doc.createElement('span');
+            cnt.className = 'post-resonance-count';
+            cnt.textContent = String(e.total);
+            chip.append(ic, cnt);
+            bdStrip.appendChild(chip);
+          }
+          subFooter.appendChild(bdStrip);
+        }
+      }
     }
 
     const authState = authStore.get();
@@ -431,15 +515,32 @@ export function mountActivityScreen(containerEl, {
       });
       subFooter.appendChild(replyBtn);
     } else if (canFollowBack) {
+      const isFollowing = Boolean(actor.following);
+      const isRequested = Boolean(actor.requested && !isFollowing);
+      const isActiveFollow = isFollowing || isRequested;
       const followBtn = doc.createElement('button');
       followBtn.type = 'button';
-      followBtn.className = 'btn-sleek-pill activity-follow-btn';
-      followBtn.textContent = 'Follow Back';
+      followBtn.className = `btn-sleek-pill activity-follow-btn${isActiveFollow ? ' is-following' : ''}`;
+      followBtn.setAttribute('aria-pressed', isActiveFollow ? 'true' : 'false');
+      followBtn.textContent = isFollowing ? 'Following' : (isRequested ? 'Requested' : 'Follow Back');
       followBtn.addEventListener('click', async () => {
         followBtn.disabled = true;
+        const shouldUnfollow = isActiveFollow;
         try {
-          await toggleFollowAuthor(actor.id, false, { protocol: primaryItem.protocol });
-          followBtn.textContent = 'Following';
+          const res = await toggleFollowAuthor(actor.id, shouldUnfollow, {
+            protocol: primaryItem.protocol,
+            followUri: actor.followUri || null,
+          });
+          const nextRequested = !shouldUnfollow && Boolean(res?.requested && !res?.following);
+          const nextFollowing = typeof res?.following === 'boolean'
+            ? res.following
+            : (!shouldUnfollow && !nextRequested);
+          const nextFollowUri = nextFollowing ? String(res?.followUri || res?.uri || '') : '';
+          updateActivityActorFollowState(actor, primaryItem.protocol, {
+            following: nextFollowing,
+            requested: nextRequested,
+            followUri: nextFollowUri,
+          });
         } catch {
           followBtn.disabled = false;
         }
@@ -612,6 +713,10 @@ export function mountActivityScreen(containerEl, {
 
   async function loadNotifications() {
     if (destroyed) return;
+    if (!activityStore.get().hydrated) {
+      await hydrateActivityStore().catch(() => {});
+      if (destroyed) return;
+    }
     const [fedi, bsky, thr] = await Promise.all([
       getAuthenticatedAccount('fediverse'),
       getAuthenticatedAccount('bluesky'),
@@ -622,7 +727,7 @@ export function mountActivityScreen(containerEl, {
       renderFromStore();
       return;
     }
-    await refreshActivityNotifications({ limit: 40, markSeen: true, background: false }).catch(() => {});
+    await refreshActivityNotifications({ limit: 60, markSeen: true, background: false }).catch(() => {});
   }
 
   refreshBtn.addEventListener('click', () => void loadNotifications());

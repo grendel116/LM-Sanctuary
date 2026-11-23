@@ -9,6 +9,15 @@ import {
 } from '../../queries/sanctuary.js';
 import { createClassicModalDialog } from './SanctuaryDialog.js';
 
+const PHONE_TITLE_SVG = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--primary-accent)" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"></path></svg>`;
+const MIC_SPEAK_SVG = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"></path><path d="M19 10v2a7 7 0 0 1-14 0v-2"></path><line x1="12" y1="19" x2="12" y2="23"></line><line x1="8" y1="23" x2="16" y2="23"></line></svg>`;
+const STOP_SEND_SVG = `<svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2"></rect></svg>`;
+const MIC_ON_SVG = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"></path><path d="M19 10v2a7 7 0 0 1-14 0v-2"></path></svg>`;
+const MIC_OFF_SVG = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="1" y1="1" x2="23" y2="23"></line><path d="M9 9v3a3 3 0 0 0 5.12 2.12M15 9.34V4a3 3 0 0 0-5.94-.6"></path><path d="M17 16.95A7 7 0 0 1 5 12v-2m14 0v2a7 7 0 0 1-.11 1.23"></path><line x1="12" y1="19" x2="12" y2="23"></line></svg>`;
+const SPEAKER_ON_SVG = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"></path></svg>`;
+const SPEAKER_OFF_SVG = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><line x1="23" y1="9" x2="17" y2="15"></line><line x1="17" y1="9" x2="23" y2="15"></line></svg>`;
+const HANGUP_SVG = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10.68 13.31a16 16 0 0 0 3.41 2.6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7 2 2 0 0 1 1.72 2v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.42 19.42 0 0 1-3.33-2.67m-2.67-3.34a19.79 19.79 0 0 1-3.07-8.63A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91"></path><line x1="23" y1="1" x2="1" y2="23"></line></svg>`;
+
 /**
  * Real-time Kokoro ONNX + faster-whisper Voice Call modal dialog.
  */
@@ -24,15 +33,20 @@ export function openVoiceCallOverlay({
 
   const modal = createClassicModalDialog({
     id: 'voice-call-dialog',
-    title: `Voice Call — ${programName}`,
-    maxWidth: '440px',
+    maxWidth: '420px',
     onClose: () => {
       if (!closed) {
         closed = true;
         cleanupAudioHardware();
       }
+      modal.dialog.remove();
     },
   });
+
+  const heading = doc.createElement('h3');
+  heading.id = modal.titleId;
+  heading.className = 'classic-modal-title';
+  heading.innerHTML = `${PHONE_TITLE_SVG}<span>Voice Call</span>`;
 
   const container = doc.createElement('div');
   container.className = 'voice-call-card';
@@ -77,26 +91,36 @@ export function openVoiceCallOverlay({
 
   const controls = doc.createElement('div');
   controls.className = 'voice-call-controls';
+  controls.setAttribute('role', 'group');
+  controls.setAttribute('aria-label', 'Call controls');
 
-  const recordBtn = doc.createElement('button');
-  recordBtn.type = 'button';
-  recordBtn.className = 'voice-call-btn';
-  recordBtn.textContent = 'Hold / Tap to Speak';
+  function makeCallControl({ label, svg, discClass = '', toggleKey = '', pressed = null }) {
+    const btn = doc.createElement('button');
+    btn.type = 'button';
+    btn.className = 'voice-call-action';
+    if (toggleKey) {
+      btn.dataset.callToggle = toggleKey;
+      btn.setAttribute('aria-pressed', pressed ? 'true' : 'false');
+    }
+    const disc = doc.createElement('span');
+    disc.className = discClass ? `voice-call-btn-disc ${discClass}` : 'voice-call-btn-disc';
+    disc.setAttribute('aria-hidden', 'true');
+    disc.innerHTML = svg;
+    const lbl = doc.createElement('span');
+    lbl.className = 'voice-call-btn-label';
+    lbl.textContent = label;
+    btn.append(disc, lbl);
+    return { btn, disc, lbl };
+  }
 
-  const muteBtn = doc.createElement('button');
-  muteBtn.type = 'button';
-  muteBtn.className = 'voice-call-btn';
-  muteBtn.textContent = 'Mute';
-
-  const speakerBtn = doc.createElement('button');
-  speakerBtn.type = 'button';
-  speakerBtn.className = 'voice-call-btn';
-  speakerBtn.textContent = 'Speaker: On';
-
-  const hangupBtn = doc.createElement('button');
-  hangupBtn.type = 'button';
-  hangupBtn.className = 'voice-call-btn hangup';
-  hangupBtn.textContent = 'End Call';
+  const recordCtrl = makeCallControl({ label: 'Tap to Speak', svg: MIC_SPEAK_SVG });
+  const muteCtrl = makeCallControl({ label: 'Mute', svg: MIC_ON_SVG, toggleKey: 'mute', pressed: false });
+  const speakerCtrl = makeCallControl({ label: 'Speaker', svg: SPEAKER_ON_SVG, toggleKey: 'speaker', pressed: true });
+  const hangupCtrl = makeCallControl({ label: 'End Call', svg: HANGUP_SVG, discClass: 'hangup' });
+  const recordBtn = recordCtrl.btn;
+  const muteBtn = muteCtrl.btn;
+  const speakerBtn = speakerCtrl.btn;
+  const hangupBtn = hangupCtrl.btn;
 
   controls.appendChild(recordBtn);
   controls.appendChild(muteBtn);
@@ -109,7 +133,7 @@ export function openVoiceCallOverlay({
   container.appendChild(canvas);
   container.appendChild(transcriptBox);
   container.appendChild(controls);
-  modal.card.appendChild(container);
+  modal.card.append(heading, container);
 
   let isMuted = false;
   let speakerOn = true;
@@ -127,6 +151,7 @@ export function openVoiceCallOverlay({
 
   function appendTurn(speaker, text) {
     turns.push({ speaker, text });
+    transcriptBox.classList.add('is-visible');
     const line = doc.createElement('p');
     line.className = 'voice-call-transcript-turn';
     const who = doc.createElement('span');
@@ -248,25 +273,31 @@ export function openVoiceCallOverlay({
       };
       recorder.start();
       isRecording = true;
-      recordBtn.textContent = 'Stop & Send Turn';
+      recordCtrl.lbl.textContent = 'Send Turn';
+      recordCtrl.disc.innerHTML = STOP_SEND_SVG;
+      recordCtrl.disc.classList.add('is-recording');
       statusEl.textContent = 'Recording...';
     } else {
       recorder?.stop?.();
       isRecording = false;
-      recordBtn.textContent = 'Tap to Speak';
+      recordCtrl.lbl.textContent = 'Tap to Speak';
+      recordCtrl.disc.innerHTML = MIC_SPEAK_SVG;
+      recordCtrl.disc.classList.remove('is-recording');
     }
   });
 
   muteBtn.addEventListener('click', () => {
     isMuted = !isMuted;
     mediaStream?.getAudioTracks?.().forEach((t) => { t.enabled = !isMuted; });
-    muteBtn.textContent = isMuted ? 'Unmute' : 'Mute';
+    muteBtn.setAttribute('aria-pressed', isMuted ? 'true' : 'false');
+    muteCtrl.disc.innerHTML = isMuted ? MIC_OFF_SVG : MIC_ON_SVG;
   });
 
   speakerBtn.addEventListener('click', () => {
     speakerOn = !speakerOn;
     if (!speakerOn) activeAudio?.pause?.();
-    speakerBtn.textContent = speakerOn ? 'Speaker: On' : 'Speaker: Muted';
+    speakerBtn.setAttribute('aria-pressed', speakerOn ? 'true' : 'false');
+    speakerCtrl.disc.innerHTML = speakerOn ? SPEAKER_ON_SVG : SPEAKER_OFF_SVG;
   });
 
   async function endAndSave() {

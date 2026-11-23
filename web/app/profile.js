@@ -2,12 +2,13 @@ import { createEmojiPicker } from '../components/EmojiPickerPopover.js';
 import { createEmbedCard, resolvePostEmbedCard } from '../components/EmbedCard.js';
 import { openFollowGraphModal } from '../components/FollowGraphModal.js';
 import { createOfflineNotice } from '../components/OfflineNotice.js';
-import { createPostCard } from '../components/PostCard.js';
+import { createPostCard, PROTOCOL_LOGO_SVGS, syncPostCardReactions } from '../components/PostCard.js';
 import { createClassicModalDialog, showAlert, showConfirm } from '../components/sanctuary/SanctuaryDialog.js';
 import { createLoadingState } from '../components/ui/index.js';
 import { DEFAULT_AVATAR_DATA_URI } from '../constants/avatars.js';
 import { MASTODON_MAX_CHARS } from '../constants/endpoints.js';
 import { formatApiErrorMessage } from '../queries/fetch/fetchWrapper.js';
+import { hasRenderablePostContent } from '../core/schema/unifiedItem.js';
 import {
   cleanMastodonMediaUrl,
   decodeHtmlEntities,
@@ -21,6 +22,7 @@ import {
   deleteUnified,
   dismissBridgeRetry,
   editUnified,
+  enrichUnifiedItemsMetrics,
   fetchAuthorWithRelationship,
   fetchOwnStatuses,
   likeUnified,
@@ -35,7 +37,10 @@ import { authStore, getAuthenticatedAccount, upsertSocialAccount } from '../stat
 import { computeRemainingCounts, prefillReply } from '../state/composeStore.js';
 import { applyPostInterestFeedback, mutatePostAcrossStreams, removePostAcrossStreams } from '../state/feedStore.js';
 import { connectionStore } from '../state/sanctuary/connection.js';
+import { findLocalLinkedPostGroup, kvGet, kvSet } from '../storage/nativeStore.js';
 import { summarizeAccountIdentity, syncAutoHeight } from './composeModal.js';
+
+const PROFILE_TABS_CACHE_KV_KEY = 'profile_tabs_cache_v1';
 
 const PROFILE_TABS = [
   ['posts', 'Posts'],
@@ -78,6 +83,7 @@ export function openEditMastodonProfileModal({ accountMeta, onSaved } = {}) {
   const doc = globalThis.document;
   const meta = accountMeta || {};
   const isBskyConnected = Boolean(authStore.get().isBlueskyConnected);
+  const bskyAccountMeta = (authStore.get().accounts || []).find((a) => a.platform === 'bluesky') || null;
   let closed = false;
   let activeTab = 'media';
   const objectUrls = [];
@@ -185,6 +191,10 @@ export function openEditMastodonProfileModal({ accountMeta, onSaved } = {}) {
     input.type = 'checkbox';
     input.id = id;
     input.className = 'switch-input';
+    input.setAttribute('switch', '');
+    const hasNativeSwitch = typeof globalThis.HTMLInputElement?.prototype === 'object'
+      && 'switch' in globalThis.HTMLInputElement.prototype;
+    if (!hasNativeSwitch) input.setAttribute('role', 'switch');
     input.checked = Boolean(checked);
 
     const track = doc.createElement('span');
@@ -535,6 +545,14 @@ export function openEditMastodonProfileModal({ accountMeta, onSaved } = {}) {
     subtitle: 'Allow Mastodon full-text search to index your public posts.',
     checked: meta.indexable !== false,
   });
+  const bskyPubSw = isBskyConnected
+    ? mkSwitchRow({
+        id: 'edit-bsky-public-visible',
+        title: 'Allow logged-out & Jetstream public visibility (Bluesky)',
+        subtitle: 'Let unauthenticated readers and public Bluesky streams view your profile and posts.',
+        checked: bskyAccountMeta?.publicVisible !== false,
+      })
+    : null;
   const hideCollSw = mkSwitchRow({
     id: 'edit-masto-hide-collections',
     title: 'Hide follower and following lists',
@@ -554,6 +572,7 @@ export function openEditMastodonProfileModal({ accountMeta, onSaved } = {}) {
     lockedSw.row,
     discSw.row,
     indexSw.row,
+    ...(bskyPubSw ? [bskyPubSw.row] : []),
     hideCollSw.row,
     botSw.row
   );
@@ -728,6 +747,7 @@ export function openEditMastodonProfileModal({ accountMeta, onSaved } = {}) {
             displayName: nameIn.value,
             note: bioIn.value,
             fields: submittedFields,
+            publicVisible: bskyPubSw ? bskyPubSw.input.checked : undefined,
             avatarFile,
             headerFile,
             removeAvatar,
@@ -764,11 +784,13 @@ export function openEditMastodonProfileModal({ accountMeta, onSaved } = {}) {
 export function openEditPostDialog(post, { onSaved } = {}) {
   const doc = globalThis.document;
   let emojiPicker = null;
+  let closed = false;
   const modal = createClassicModalDialog({
     id: 'edit-post-dialog',
     maxWidth: '560px',
     closedBy: 'any',
     onClose: () => {
+      closed = true;
       emojiPicker?.close?.();
       modal.dialog.remove();
     },
@@ -777,15 +799,30 @@ export function openEditPostDialog(post, { onSaved } = {}) {
   modal.card.classList.add('compose-sheet-card');
 
   const authState = authStore.get();
-  const { handle, avatarUrl } = summarizeAccountIdentity(authState.accounts || []);
+  const fallbackIdentity = summarizeAccountIdentity(authState.accounts || []);
   const mastoMeta = post?._meta?.mastodon || {};
+  const isBskyPost = post?.protocol === 'bluesky' || String(post?.id || '').startsWith('bluesky:');
+  const matchingAccount = (authState.accounts || []).find((a) =>
+    isBskyPost ? a.platform === 'bluesky' : (a.platform === 'fediverse' || a.platform === 'mastodon')
+  ) || null;
+  const handle = String(
+    post?.author?.acct
+    || post?.author?.handle
+    || matchingAccount?.acct
+    || matchingAccount?.handle
+    || fallbackIdentity.handle
+    || 'You'
+  ).replace(/^@/, '');
+  const avatarUrl = post?.author?.avatar || matchingAccount?.avatar || fallbackIdentity.avatarUrl;
+
   const spoiler = String(mastoMeta.spoilerText || post?.spoilerText || '');
   const visibility = String(mastoMeta.visibility || 'public').toLowerCase();
   const linked = post?._meta?.linkedIds || {};
-  const hasBsky = Boolean(linked.blueskyUri || authState.isBlueskyConnected);
-  const hasThreads = Boolean(linked.threadsPostId || authState.isThreadsConnected);
-  const canReplaceBridges = visibility !== 'direct' && (hasBsky || hasThreads);
+  let hasLinkedBsky = Boolean(linked.blueskyUri);
+  let hasLinkedThreads = Boolean(linked.threadsPostId);
   const attachments = Array.isArray(post?.attachments) ? post.attachments : [];
+  const initialText = String(post?.content_text || '');
+  let submitting = false;
 
   const form = doc.createElement('form');
   form.className = 'compose-sheet-form';
@@ -850,7 +887,7 @@ export function openEditPostDialog(post, { onSaved } = {}) {
   ta.rows = 3;
   ta.className = 'compose-seamless-textarea';
   ta.placeholder = 'Edit post...';
-  ta.value = post?.content_text || '';
+  ta.value = initialText;
   ta.setAttribute('autofocus', '');
 
   let caretStart = ta.value.length;
@@ -925,79 +962,6 @@ export function openEditPostDialog(post, { onSaved } = {}) {
   const footer = doc.createElement('footer');
   footer.className = 'compose-sheet-footer';
 
-  const footerLeft = doc.createElement('div');
-  footerLeft.className = 'compose-footer-left';
-
-  let replaceCheckbox = null;
-  let replaceLabel = null;
-  let bskyCheckbox = null;
-  let bskyLabel = null;
-  let threadsCheckbox = null;
-  let threadsLabel = null;
-  let bridgeHintEl = null;
-
-  if (canReplaceBridges) {
-    replaceCheckbox = doc.createElement('input');
-    replaceCheckbox.type = 'checkbox';
-    replaceCheckbox.id = 'edit-post-replace-bridges';
-    replaceCheckbox.name = 'replace_bridges';
-    replaceCheckbox.className = 'visually-hidden';
-    replaceCheckbox.checked = true;
-
-    replaceLabel = doc.createElement('label');
-    replaceLabel.setAttribute('for', 'edit-post-replace-bridges');
-    replaceLabel.className = 'compose-bridge-toggle-pill is-active';
-
-    const dot = doc.createElement('span');
-    dot.className = 'compose-bridge-toggle-dot';
-    dot.setAttribute('aria-hidden', 'true');
-    const lblText = doc.createElement('span');
-    lblText.textContent = 'Update bridges';
-    replaceLabel.append(dot, lblText);
-    footerLeft.append(replaceCheckbox, replaceLabel);
-
-    const makeSubBridgeToggle = (id, name, labelText) => {
-      const cb = doc.createElement('input');
-      cb.type = 'checkbox';
-      cb.id = id;
-      cb.name = name;
-      cb.className = 'visually-hidden';
-      cb.checked = true;
-      const lbl = doc.createElement('label');
-      lbl.setAttribute('for', id);
-      lbl.className = 'compose-bridge-toggle-pill is-active';
-      const subDot = doc.createElement('span');
-      subDot.className = 'compose-bridge-toggle-dot';
-      subDot.setAttribute('aria-hidden', 'true');
-      const txt = doc.createElement('span');
-      txt.textContent = labelText;
-      lbl.append(subDot, txt);
-      footerLeft.append(cb, lbl);
-      return [cb, lbl];
-    };
-
-    if (hasBsky && hasThreads) {
-      [bskyCheckbox, bskyLabel] = makeSubBridgeToggle('edit-post-replace-bluesky', 'replace_bluesky', 'Bluesky');
-      [threadsCheckbox, threadsLabel] = makeSubBridgeToggle('edit-post-replace-threads', 'replace_threads', 'Threads');
-    }
-
-    bridgeHintEl = doc.createElement('span');
-    bridgeHintEl.className = 'compose-edit-bridge-hint';
-    footerLeft.appendChild(bridgeHintEl);
-
-    replaceCheckbox.addEventListener('change', () => {
-      if (bskyCheckbox) bskyCheckbox.checked = replaceCheckbox.checked;
-      if (threadsCheckbox) threadsCheckbox.checked = replaceCheckbox.checked;
-      updateComposerMetrics();
-    });
-    const syncMaster = () => {
-      replaceCheckbox.checked = Boolean(bskyCheckbox?.checked || threadsCheckbox?.checked);
-      updateComposerMetrics();
-    };
-    bskyCheckbox?.addEventListener('change', syncMaster);
-    threadsCheckbox?.addEventListener('change', syncMaster);
-  }
-
   const statusEl = doc.createElement('p');
   statusEl.className = 'compose-status-msg';
   statusEl.setAttribute('role', 'status');
@@ -1005,47 +969,43 @@ export function openEditPostDialog(post, { onSaved } = {}) {
 
   const saveBtn = doc.createElement('button');
   saveBtn.type = 'submit';
-  saveBtn.className = 'compose-publish-btn is-ready';
-  saveBtn.textContent = 'Save';
+  saveBtn.className = 'compose-publish-btn';
+  saveBtn.textContent = 'Update';
 
-  footer.append(footerLeft, statusEl, saveBtn);
+  footer.append(statusEl, saveBtn);
   form.append(header, body, footer);
 
   function updateComposerMetrics() {
     syncAutoHeight(ta, 68, 340);
-    const masterActive = Boolean(replaceCheckbox?.checked);
-    const doBsky = hasBsky && Boolean(bskyCheckbox ? bskyCheckbox.checked : masterActive);
-    const doThreads = hasThreads && Boolean(threadsCheckbox ? threadsCheckbox.checked : masterActive);
-    const anyBridge = doBsky || doThreads;
+    const syncBsky = !isBskyPost && visibility !== 'direct' && hasLinkedBsky && Boolean(authState.isBlueskyConnected);
+    const syncThreads = !isBskyPost && visibility !== 'direct' && hasLinkedThreads && Boolean(authState.isThreadsConnected);
 
-    if (replaceLabel) replaceLabel.classList.toggle('is-active', masterActive);
-    if (bskyLabel) bskyLabel.classList.toggle('is-active', doBsky);
-    if (threadsLabel) threadsLabel.classList.toggle('is-active', doThreads);
-    if (bridgeHintEl) {
-      bridgeHintEl.textContent = anyBridge ? 'Deletes & reposts checked bridges' : 'In-place Fediverse edit';
-    }
-
-    if (visibility === 'direct') {
+    if (isBskyPost) {
+      destEl.textContent = 'Bluesky';
+    } else if (visibility === 'direct') {
       destEl.textContent = 'Direct message';
-    } else if (canReplaceBridges && anyBridge) {
-      destEl.textContent = ['Fediverse', doBsky ? 'Bluesky' : '', doThreads ? 'Threads' : '']
+    } else {
+      destEl.textContent = ['Fediverse', syncBsky ? 'Bluesky' : '', syncThreads ? 'Threads' : '']
         .filter(Boolean)
         .join(' · ');
-    } else {
-      destEl.textContent = 'Fediverse';
     }
 
     const counts = computeRemainingCounts(
       { text: ta.value, spoilerText: spoiler },
-      { isBlueskyConnected: doBsky, isThreadsConnected: doThreads }
+      { isBlueskyConnected: isBskyPost || syncBsky, isThreadsConnected: syncThreads }
     );
-    const remaining = counts.tightestRemaining;
+    const remaining = isBskyPost ? counts.bluesky : counts.tightestRemaining;
     countsEl.textContent = String(remaining);
     countsEl.classList.toggle('is-over-limit', remaining < 0);
 
-    const overMastodon = [...(ta.value || '')].length + [...spoiler].length > MASTODON_MAX_CHARS;
+    const overLimit = isBskyPost
+      ? counts.bluesky < 0
+      : ([...(ta.value || '')].length + [...spoiler].length > MASTODON_MAX_CHARS);
     const hasContent = Boolean(ta.value.trim() || attachments.length > 0);
-    saveBtn.classList.toggle('is-ready', hasContent && !overMastodon && !saveBtn.disabled);
+    const isChanged = ta.value !== initialText;
+    const isReady = !submitting && hasContent && !overLimit && isChanged;
+    saveBtn.disabled = !isReady;
+    saveBtn.classList.toggle('is-ready', isReady);
   }
 
   ta.addEventListener('input', () => {
@@ -1053,22 +1013,30 @@ export function openEditPostDialog(post, { onSaved } = {}) {
     updateComposerMetrics();
   });
 
+  if (!isBskyPost && visibility !== 'direct') {
+    const canonId = post?.id || (mastoMeta.statusId ? `mastodon:${mastoMeta.statusId}` : '');
+    if (canonId) {
+      void findLocalLinkedPostGroup(canonId).then((group) => {
+        if (closed || !Array.isArray(group) || group.length === 0) return;
+        const foundBsky = group.some((g) => Boolean(g?.blueskyUri));
+        const foundThreads = group.some((g) => Boolean(g?.threadsPostId));
+        if (foundBsky !== hasLinkedBsky || foundThreads !== hasLinkedThreads) {
+          hasLinkedBsky = hasLinkedBsky || foundBsky;
+          hasLinkedThreads = hasLinkedThreads || foundThreads;
+          updateComposerMetrics();
+        }
+      }).catch(() => {});
+    }
+  }
+
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
-    if (saveBtn.disabled) return;
-    saveBtn.disabled = true;
+    if (saveBtn.disabled || submitting) return;
+    submitting = true;
     statusEl.textContent = '';
     updateComposerMetrics();
     try {
-      const masterActive = Boolean(replaceCheckbox?.checked);
-      const doBsky = hasBsky && Boolean(bskyCheckbox ? bskyCheckbox.checked : masterActive);
-      const doThreads = hasThreads && Boolean(threadsCheckbox ? threadsCheckbox.checked : masterActive);
-      const sid = post?._meta?.mastodon?.statusId || post?.id;
-      const updated = await editUnified(sid, ta.value, spoiler, {
-        replaceBridges: doBsky || doThreads,
-        replaceBluesky: doBsky,
-        replaceThreads: doThreads,
-      });
+      const updated = await editUnified(post, ta.value, spoiler);
       const warnings = Array.isArray(updated?._bridgeWarnings) ? updated._bridgeWarnings : [];
       modal.close();
       await onSaved?.(updated);
@@ -1078,7 +1046,7 @@ export function openEditPostDialog(post, { onSaved } = {}) {
     } catch (err) {
       statusEl.textContent = err?.message || 'Edit failed.';
     } finally {
-      saveBtn.disabled = false;
+      submitting = false;
       updateComposerMetrics();
     }
   });
@@ -1186,6 +1154,7 @@ export function mountProfileScreen(containerEl, {
     const s = authStore.get();
     return s.accounts.find((a) => a.id === s.activeFediverseId)
       || s.accounts.find((a) => a.platform === 'fediverse' || a.platform === 'mastodon')
+      || s.accounts.find((a) => a.platform === 'bluesky')
       || null;
   }
 
@@ -1260,6 +1229,7 @@ export function mountProfileScreen(containerEl, {
             header: prof.banner || prof.header || bskyAuth.meta.header || '',
             url: prof.url || bskyAuth.meta.url || '',
             noteText: prof.noteText || bskyAuth.meta.noteText || '',
+            publicVisible: prof.publicVisible !== false,
             followersCount: Number(prof.followersCount ?? 0),
             followingCount: Number(prof.followingCount ?? 0),
             statusesCount: Number(prof.statusesCount ?? 0),
@@ -1276,6 +1246,7 @@ export function mountProfileScreen(containerEl, {
 
   let loadPostsEpoch = 0;
   const ownItemsByTab = new Map();
+  const profileCardCache = new Map();
 
   function getCachedTabItems(tab = activeSubTab) {
     return ownItemsByTab.get(tab) || [];
@@ -1283,35 +1254,201 @@ export function mountProfileScreen(containerEl, {
 
   function syncActiveTabCache() {
     ownItemsByTab.set(activeSubTab, [...ownItems]);
+    const primary = getPrimaryAccount();
+    if (primary?.id) {
+      void persistProfileTabCache(primary.id, activeSubTab, ownItems);
+    }
+  }
+
+  async function readPersistentProfileTabCache(accountKey, tab) {
+    if (!accountKey) return [];
+    const all = await kvGet(PROFILE_TABS_CACHE_KV_KEY, null).catch(() => null);
+    const list = all && typeof all === 'object' ? all[`${accountKey}:${tab}`] : null;
+    return Array.isArray(list) ? list.filter(hasRenderablePostContent) : [];
+  }
+
+  async function persistProfileTabCache(accountKey, tab, items) {
+    if (!accountKey || !Array.isArray(items)) return;
+    const prev = await kvGet(PROFILE_TABS_CACHE_KV_KEY, null).catch(() => null);
+    const next = prev && typeof prev === 'object' && !Array.isArray(prev) ? { ...prev } : {};
+    next[`${accountKey}:${tab}`] = items.slice(0, 30);
+    await kvSet(PROFILE_TABS_CACHE_KV_KEY, next).catch(() => {});
+  }
+
+  function buildProfileCard(item, idx) {
+    const showSanctuary = connectionStore.get().mode === 'online' || connectionStore.get().programs.length > 0;
+    return createPostCard(item, {
+      onReply: (p) => prefillReply(p),
+      onToggleLike: async (p) => {
+        const updated = await likeUnified(p);
+        ownItems = ownItems.map((it) => (it.id === updated.id ? updated : it));
+        syncActiveTabCache();
+        renderPosts();
+      },
+      onToggleRepost: async (p) => {
+        const updated = await repostUnified(p);
+        mutatePostAcrossStreams(updated.id, () => updated);
+        const stillBoosted = Boolean(updated?._meta?.mastodon?.reblogged || updated?._meta?.bluesky?.repostUri);
+        ownItems = activeSubTab === 'boosts' && !stillBoosted
+          ? ownItems.filter((it) => it.id !== updated.id)
+          : ownItems.map((it) => (it.id === updated.id ? updated : it));
+        syncActiveTabCache();
+        renderPosts();
+      },
+      onOpenThread: onOpenPostThread,
+      onAskSanctuary,
+      onSelectAuthor,
+      onInterested: async (p) => {
+        const updated = await applyPostInterestFeedback(p, 'interested');
+        if (updated && !destroyed) {
+          ownItems = ownItems.map((it) => (it.id === updated.id ? updated : it));
+          syncActiveTabCache();
+          renderPosts();
+        }
+      },
+      onNotInterested: async (p) => {
+        await applyPostInterestFeedback(p, 'not_interested');
+        if (!destroyed) {
+          ownItems = ownItems.filter((it) => it.id !== p.id);
+          syncActiveTabCache();
+          renderPosts();
+        }
+      },
+      onEditPost: (p) => {
+        openEditPostDialog(p, {
+          onSaved: (updated) => {
+            ownItems = ownItems.map((it) => (it.id === p.id || it.id === updated.id ? updated : it));
+            syncActiveTabCache();
+            mutatePostAcrossStreams((it) => it?.id === p.id || it?.id === updated.id, () => updated);
+            renderPosts();
+          },
+        });
+      },
+      onRetryBridge: (retryEntry) => {
+        void runBridgeRetry(retryEntry.id)
+          .then(() => loadOwnPosts())
+          .catch((err) => showAlert('Bridge Retry Failed', formatApiErrorMessage(err?.message, 'Retry failed.')));
+      },
+      onTogglePin: async (p) => {
+        const pinnedNow = Boolean(p._meta?.mastodon?.pinned);
+        const updated = await pinUnified(p, pinnedNow);
+        const nextList = ownItems.map((it) => (it.id === updated.id ? updated : it));
+        ownItems = activeSubTab === 'posts' ? sortOwnPostsPinnedFirst(nextList) : nextList;
+        syncActiveTabCache();
+        mutatePostAcrossStreams(updated.id, () => updated);
+        renderPosts();
+      },
+      onDeletePost: (p) => {
+        showConfirm(
+          'Delete Post',
+          p._meta?.linkedIds?.blueskyUri || p._meta?.linkedIds?.threadsPostId
+            ? 'Delete this post from Mastodon and all linked bridges?'
+            : 'Delete this Mastodon post?',
+          async () => {
+            const res = await deleteUnified(p);
+            ownItems = ownItems.filter((it) => it.id !== p.id);
+            syncActiveTabCache();
+            removePostAcrossStreams(p.id);
+            if (activeSubTab === 'posts') {
+              void syncRecentUserPostsToSanctuary({ preloadedItems: ownItems }).catch(() => {});
+            }
+            renderPosts();
+            if (res?.warnings?.length > 0) {
+              showAlert('Bridge Delete Warning', res.warnings.join('\n\n'));
+            }
+          }
+        );
+      },
+      showSanctuaryAction: showSanctuary,
+      mediaPriority: idx === 0 ? 'high' : (idx < 3 ? 'eager' : 'lazy'),
+    });
+  }
+
+  function applyEnrichedMetricsInPlace(enrichedItems) {
+    if (!Array.isArray(enrichedItems) || enrichedItems.length === 0) return;
+    const byId = new Map(enrichedItems.filter((it) => it?.id).map((it) => [String(it.id), it]));
+    ownItems = ownItems.map((it) => byId.get(String(it?.id)) || it);
+    for (const [key, entry] of profileCardCache.entries()) {
+      const nextItem = byId.get(key);
+      if (!nextItem || !entry?.card) continue;
+      entry.item = nextItem;
+      entry.sig = computeProfileItemStructSig(nextItem);
+      syncPostCardReactions(entry.card, nextItem);
+    }
   }
 
   async function loadOwnPosts() {
     if (destroyed) return;
     const primary = getPrimaryAccount();
-    if (!primary?.userId) {
+    const isPrimaryBsky = primary?.platform === 'bluesky';
+    const targetId = isPrimaryBsky
+      ? (primary.did || primary.handle || primary.acct || '')
+      : (primary?.userId || primary?.acct || primary?.handle || '');
+    if (!primary || !targetId) {
       ownItems = [];
       renderPosts();
       return;
     }
     const tab = activeSubTab;
     const epoch = ++loadPostsEpoch;
-    const cached = getCachedTabItems(tab);
+    let cached = getCachedTabItems(tab);
+    if (cached.length === 0 && primary.id) {
+      cached = await readPersistentProfileTabCache(primary.id, tab);
+      if (destroyed || epoch !== loadPostsEpoch || activeSubTab !== tab) return;
+      if (cached.length > 0) ownItemsByTab.set(tab, cached);
+    }
     ownItems = cached;
     loadingPosts = cached.length === 0;
     postError = '';
     renderPosts();
     try {
-      const fetched = await fetchOwnStatuses(primary.userId, {
+      const baseItems = await fetchOwnStatuses(targetId, {
         tab,
-        instanceUrl: primary.instanceUrl || 'https://mastodon.social',
-        includeBridges: true,
+        protocol: isPrimaryBsky ? 'bluesky' : 'mastodon',
+        acct: primary.acct || primary.handle || '',
+        instanceUrl: isPrimaryBsky ? 'https://bsky.app' : (primary.instanceUrl || 'https://mastodon.social'),
+        includeBridges: !isPrimaryBsky,
+        skipMetricsEnrichment: true,
       });
       if (destroyed) return;
-      ownItemsByTab.set(tab, fetched);
+      const cachedById = new Map(
+        (Array.isArray(cached) ? cached : [])
+          .filter((it) => it?.id)
+          .map((it) => [String(it.id), it])
+      );
+      const mergedBaseItems = (Array.isArray(baseItems) ? baseItems : []).map((it) => {
+        const prev = it?.id ? cachedById.get(String(it.id)) : null;
+        if (!prev?._meta?.metricsBreakdown || it?._meta?.metricsBreakdown) return it;
+        return {
+          ...it,
+          metrics: prev.metrics || it.metrics,
+          _meta: {
+            ...(it._meta || {}),
+            metricsBreakdown: prev._meta.metricsBreakdown,
+          },
+        };
+      });
+      ownItemsByTab.set(tab, mergedBaseItems);
+      if (primary.id) void persistProfileTabCache(primary.id, tab, mergedBaseItems);
       if (epoch !== loadPostsEpoch || activeSubTab !== tab) return;
-      ownItems = fetched;
+      ownItems = mergedBaseItems;
+      loadingPosts = false;
+      renderPosts();
       if (tab === 'posts') {
         void syncRecentUserPostsToSanctuary({ preloadedItems: ownItems }).catch(() => {});
+      }
+
+      if (mergedBaseItems.length > 0) {
+        void enrichUnifiedItemsMetrics(mergedBaseItems)
+          .then((enriched) => {
+            if (destroyed || !Array.isArray(enriched)) return;
+            ownItemsByTab.set(tab, enriched);
+            if (primary.id) void persistProfileTabCache(primary.id, tab, enriched);
+            if (activeSubTab === tab) {
+              applyEnrichedMetricsInPlace(enriched);
+            }
+          })
+          .catch(() => {});
       }
     } catch (err) {
       if (destroyed || epoch !== loadPostsEpoch || activeSubTab !== tab) return;
@@ -1319,11 +1456,8 @@ export function mountProfileScreen(containerEl, {
         postError = err?.message || 'Unable to load posts.';
         ownItems = [];
       }
-    } finally {
-      if (!destroyed && epoch === loadPostsEpoch && activeSubTab === tab) {
-        loadingPosts = false;
-        renderPosts();
-      }
+      loadingPosts = false;
+      renderPosts();
     }
   }
 
@@ -1374,15 +1508,26 @@ export function mountProfileScreen(containerEl, {
     const dn = doc.createElement('h2');
     dn.className = 'profile-display-name';
     dn.textContent = primary.displayName || primary.handle || primary.acct;
+    const isPrimaryBsky = primary.platform === 'bluesky';
+    const primaryProto = isPrimaryBsky ? 'bluesky' : 'mastodon';
     const acctEl = doc.createElement('span');
-    acctEl.className = 'post-author-handle';
-    acctEl.textContent = primary.acct ? `@${primary.acct.replace(/^@/, '')}` : '';
+    acctEl.className = 'post-author-handle profile-primary-handle';
+    if (PROTOCOL_LOGO_SVGS[primaryProto]) {
+      const pIcon = doc.createElement('span');
+      pIcon.className = 'profile-primary-handle-icon';
+      pIcon.setAttribute('aria-hidden', 'true');
+      pIcon.innerHTML = PROTOCOL_LOGO_SVGS[primaryProto];
+      acctEl.appendChild(pIcon);
+    }
+    const acctText = doc.createElement('span');
+    acctText.textContent = primary.acct ? `@${primary.acct.replace(/^@/, '')}` : '';
+    acctEl.appendChild(acctText);
     names.append(dn, acctEl);
-
     const editBtn = doc.createElement('button');
     editBtn.type = 'button';
     editBtn.className = 'btn-sleek-pill profile-edit-btn';
     editBtn.textContent = 'Edit Profile';
+    editBtn.hidden = isPrimaryBsky;
     editBtn.addEventListener('click', () => {
       openEditMastodonProfileModal({
         accountMeta: primary,
@@ -1393,7 +1538,10 @@ export function mountProfileScreen(containerEl, {
       });
     });
 
-    topRow.append(av, names, editBtn);
+    topRow.append(av, names);
+    if (!isPrimaryBsky) {
+      topRow.append(editBtn);
+    }
     card.appendChild(topRow);
 
     const badges = doc.createElement('div');
@@ -1432,9 +1580,16 @@ export function mountProfileScreen(containerEl, {
       }
     }
 
-    const bskyAccount = (s.accounts || []).find((a) => a.platform === 'bluesky');
+    const bskyAccount = isPrimaryBsky ? null : (s.accounts || []).find((a) => a.platform === 'bluesky');
     const totalFollowing = Number(primary.followingCount ?? 0) + Number(bskyAccount?.followingCount ?? 0);
     const totalFollowers = Number(primary.followersCount ?? 0) + Number(bskyAccount?.followersCount ?? 0);
+
+    const primaryAccountId = isPrimaryBsky
+      ? (primary.did || primary.handle || primary.acct || '')
+      : (primary.userId || primary.acct || primary.handle || '');
+    const primaryAcct = primary.acct || primary.handle || '';
+    const primaryInstanceUrl = isPrimaryBsky ? 'https://bsky.app' : (primary.instanceUrl || 'https://mastodon.social');
+    const primaryProtocol = isPrimaryBsky ? 'bluesky' : 'mastodon';
 
     const stats = doc.createElement('div');
     stats.className = 'profile-stats-row';
@@ -1449,11 +1604,11 @@ export function mountProfileScreen(containerEl, {
     }
     followingBtn.addEventListener('click', () => {
       openFollowGraphModal({
-        accountId: primary.userId,
-        acct: primary.acct,
-        displayName: primary.displayName || primary.acct,
-        instanceUrl: primary.instanceUrl || 'https://mastodon.social',
-        protocol: 'mastodon',
+        accountId: primaryAccountId,
+        acct: primaryAcct,
+        displayName: primary.displayName || primaryAcct,
+        instanceUrl: primaryInstanceUrl,
+        protocol: primaryProtocol,
         initialTab: 'following',
         isOwnProfile: true,
         onSelectAuthor,
@@ -1470,11 +1625,11 @@ export function mountProfileScreen(containerEl, {
     }
     followersBtn.addEventListener('click', () => {
       openFollowGraphModal({
-        accountId: primary.userId,
-        acct: primary.acct,
-        displayName: primary.displayName || primary.acct,
-        instanceUrl: primary.instanceUrl || 'https://mastodon.social',
-        protocol: 'mastodon',
+        accountId: primaryAccountId,
+        acct: primaryAcct,
+        displayName: primary.displayName || primaryAcct,
+        instanceUrl: primaryInstanceUrl,
+        protocol: primaryProtocol,
         initialTab: 'followers',
         isOwnProfile: true,
         onSelectAuthor,
@@ -1484,6 +1639,33 @@ export function mountProfileScreen(containerEl, {
 
     stats.append(postsStat, followingBtn, followersBtn);
     card.appendChild(stats);
+
+    const bridgeAccounts = (s.accounts || []).filter((a) => {
+      if (!a) return false;
+      const proto = a.platform === 'bluesky' ? 'bluesky' : (a.platform === 'threads' ? 'threads' : (a.platform === 'fediverse' || a.platform === 'mastodon' ? 'mastodon' : ''));
+      if (!proto) return false;
+      if (a.id && primary.id && a.id === primary.id) return false;
+      return proto !== primaryProto;
+    });
+    if (bridgeAccounts.length > 0) {
+      const pillsRow = doc.createElement('div');
+      pillsRow.className = 'profile-connected-pills';
+      for (const acc of bridgeAccounts) {
+        const proto = acc.platform === 'bluesky' ? 'bluesky' : (acc.platform === 'threads' ? 'threads' : 'mastodon');
+        const pill = doc.createElement('span');
+        pill.className = `profile-connected-pill profile-connected-pill--${proto}`;
+        const iconSpan = doc.createElement('span');
+        iconSpan.className = 'profile-connected-pill-icon';
+        iconSpan.setAttribute('aria-hidden', 'true');
+        iconSpan.innerHTML = PROTOCOL_LOGO_SVGS[proto] || '';
+        const textSpan = doc.createElement('span');
+        const cleanH = String(acc.acct || acc.handle || '').replace(/^@/, '');
+        textSpan.textContent = cleanH ? `@${cleanH}` : proto;
+        pill.append(iconSpan, textSpan);
+        pillsRow.appendChild(pill);
+      }
+      card.appendChild(pillsRow);
+    }
 
     heroHost.appendChild(card);
   }
@@ -1532,119 +1714,102 @@ export function mountProfileScreen(containerEl, {
     }
   }
 
+  function computeProfileItemStructSig(item) {
+    const m = item?._meta?.mastodon || {};
+    const b = item?._meta?.bluesky || {};
+    const retryCount = (authStore.get()?.retryQueue || []).length;
+    return [
+      item?.id || '',
+      item?.content_html || item?.content_text || '',
+      Boolean(m.pinned),
+      Boolean(m.favourited || b.likeUri),
+      Boolean(m.reblogged || b.repostUri),
+      m.spoilerText || '',
+      item?._meta?.replyContext?.id || item?._meta?.replyContext?.text || '',
+      JSON.stringify(item?._meta?.linkedIds || null),
+      retryCount,
+    ].join('\u001f');
+  }
+
   function renderPosts() {
     if (destroyed) return;
-    postsList.replaceChildren();
     postsList.removeAttribute('tabindex');
-    if (!getPrimaryAccount()) return;
+    if (!getPrimaryAccount()) {
+      profileCardCache.clear();
+      postsList.replaceChildren();
+      return;
+    }
 
     if (loadingPosts && ownItems.length === 0) {
-      postsList.appendChild(createLoadingState(`Loading ${activeSubTab}…`));
+      profileCardCache.clear();
+      postsList.replaceChildren(createLoadingState(`Loading ${activeSubTab}…`));
       return;
     }
 
     if (postError) {
-      postsList.appendChild(createOfflineNotice({ variant: 'error', message: postError }));
+      profileCardCache.clear();
+      postsList.replaceChildren(createOfflineNotice({ variant: 'error', message: postError }));
       return;
     }
 
     if (ownItems.length === 0) {
+      profileCardCache.clear();
       postsList.tabIndex = 0;
       const empty = doc.createElement('p');
       empty.className = 'empty-state';
       empty.textContent = `No ${activeSubTab} yet.`;
-      postsList.appendChild(empty);
+      postsList.replaceChildren(empty);
       return;
     }
 
-    const showSanctuary = connectionStore.get().mode === 'online' || connectionStore.get().programs.length > 0;
-    for (const item of ownItems) {
-      postsList.appendChild(
-        createPostCard(item, {
-          onReply: (p) => prefillReply(p),
-          onToggleLike: async (p) => {
-            const updated = await likeUnified(p);
-            ownItems = ownItems.map((it) => (it.id === updated.id ? updated : it));
-            syncActiveTabCache();
-            renderPosts();
-          },
-          onToggleRepost: async (p) => {
-            const updated = await repostUnified(p);
-            mutatePostAcrossStreams(updated.id, () => updated);
-            const stillBoosted = Boolean(updated?._meta?.mastodon?.reblogged || updated?._meta?.bluesky?.repostUri);
-            ownItems = activeSubTab === 'boosts' && !stillBoosted
-              ? ownItems.filter((it) => it.id !== updated.id)
-              : ownItems.map((it) => (it.id === updated.id ? updated : it));
-            syncActiveTabCache();
-            renderPosts();
-          },
-          onOpenThread: onOpenPostThread,
-          onAskSanctuary,
-          onSelectAuthor,
-          onInterested: async (p) => {
-            const updated = await applyPostInterestFeedback(p, 'interested');
-            if (updated && !destroyed) {
-              ownItems = ownItems.map((it) => (it.id === updated.id ? updated : it));
-              syncActiveTabCache();
-              renderPosts();
-            }
-          },
-          onNotInterested: async (p) => {
-            await applyPostInterestFeedback(p, 'not_interested');
-            if (!destroyed) {
-              ownItems = ownItems.filter((it) => it.id !== p.id);
-              syncActiveTabCache();
-              renderPosts();
-            }
-          },
-          onEditPost: (p) => {
-            openEditPostDialog(p, {
-              onSaved: (updated) => {
-                ownItems = ownItems.map((it) => (it.id === updated.id ? updated : it));
-                syncActiveTabCache();
-                mutatePostAcrossStreams(updated.id, () => updated);
-                renderPosts();
-              },
-            });
-          },
-          onRetryBridge: (retryEntry) => {
-            void runBridgeRetry(retryEntry.id)
-              .then(() => loadOwnPosts())
-              .catch((err) => showAlert('Bridge Retry Failed', formatApiErrorMessage(err?.message, 'Retry failed.')));
-          },
-          onTogglePin: async (p) => {
-            const pinnedNow = Boolean(p._meta?.mastodon?.pinned);
-            const updated = await pinUnified(p, pinnedNow);
-            const nextList = ownItems.map((it) => (it.id === updated.id ? updated : it));
-            ownItems = activeSubTab === 'posts' ? sortOwnPostsPinnedFirst(nextList) : nextList;
-            syncActiveTabCache();
-            mutatePostAcrossStreams(updated.id, () => updated);
-            renderPosts();
-          },
-          onDeletePost: (p) => {
-            showConfirm(
-              'Delete Post',
-              p._meta?.linkedIds?.blueskyUri || p._meta?.linkedIds?.threadsPostId
-                ? 'Delete this post from Mastodon and all linked bridges?'
-                : 'Delete this Mastodon post?',
-              async () => {
-                const res = await deleteUnified(p);
-                ownItems = ownItems.filter((it) => it.id !== p.id);
-                syncActiveTabCache();
-                removePostAcrossStreams(p.id);
-                if (activeSubTab === 'posts') {
-                  void syncRecentUserPostsToSanctuary({ preloadedItems: ownItems }).catch(() => {});
-                }
-                renderPosts();
-                if (res?.warnings?.length > 0) {
-                  showAlert('Bridge Delete Warning', res.warnings.join('\n\n'));
-                }
-              }
-            );
-          },
-          showSanctuaryAction: showSanctuary,
-        })
-      );
+    for (const child of [...postsList.children]) {
+      if (child.tagName !== 'ARTICLE') {
+        child.remove();
+      }
+    }
+
+    const activeKeys = new Set();
+    const keyed = ownItems.map((item, idx) => {
+      const key = String(item?.id || item?.key || `prof-${idx}`);
+      activeKeys.add(key);
+      return { item, key, idx };
+    });
+
+    for (const [cachedKey, entry] of [...profileCardCache.entries()]) {
+      if (!activeKeys.has(cachedKey)) {
+        entry.card.remove();
+        profileCardCache.delete(cachedKey);
+      }
+    }
+
+    const canMoveBefore =
+      Object.hasOwn(globalThis.Element?.prototype || {}, 'moveBefore') &&
+      typeof postsList.moveBefore === 'function';
+
+    for (const { item, key, idx } of keyed) {
+      const sig = computeProfileItemStructSig(item);
+      const existing = profileCardCache.get(key);
+      let cardEl = existing?.card || null;
+      if (!existing || existing.sig !== sig) {
+        const nextCard = buildProfileCard(item, idx);
+        if (existing?.card && existing.card.parentNode === postsList) {
+          postsList.replaceChild(nextCard, existing.card);
+        }
+        cardEl = nextCard;
+        profileCardCache.set(key, { sig, card: nextCard, item });
+      } else {
+        existing.item = item;
+        syncPostCardReactions(existing.card, item);
+      }
+      cardEl.classList.toggle('is-below-fold', idx >= 5);
+      const currentAtIdx = postsList.children[idx] || null;
+      if (currentAtIdx !== cardEl) {
+        if (canMoveBefore && cardEl.parentNode === postsList) {
+          postsList.moveBefore(cardEl, currentAtIdx);
+        } else {
+          postsList.insertBefore(cardEl, currentAtIdx);
+        }
+      }
     }
   }
 
@@ -1674,6 +1839,29 @@ export function mountProfileScreen(containerEl, {
     }
   });
 
+  let wasNodeOnline = connectionStore.get().mode === 'online';
+  const unsubConn = connectionStore.select(
+    (st) => st.mode === 'online',
+    (isOnline) => {
+      const becameOnline = Boolean(isOnline && !wasNodeOnline);
+      wasNodeOnline = Boolean(isOnline);
+      if (!becameOnline || destroyed || ownItems.length === 0) return;
+      const tab = activeSubTab;
+      const primary = getPrimaryAccount();
+      const snapshot = ownItems;
+      void enrichUnifiedItemsMetrics(snapshot)
+        .then((enriched) => {
+          if (destroyed || !Array.isArray(enriched)) return;
+          ownItemsByTab.set(tab, enriched);
+          if (primary?.id) void persistProfileTabCache(primary.id, tab, enriched);
+          if (activeSubTab === tab) {
+            applyEnrichedMetricsInPlace(enriched);
+          }
+        })
+        .catch(() => {});
+    }
+  );
+
   renderHero();
   renderSubTabs();
   renderRetryBanner();
@@ -1692,7 +1880,9 @@ export function mountProfileScreen(containerEl, {
     },
     destroy() {
       destroyed = true;
+      profileCardCache.clear();
       unsubAuth();
+      unsubConn();
     },
   };
 }

@@ -559,26 +559,22 @@ test('programThread closes user edit immediately, stops active turn before savin
     await new Promise((r) => setTimeout(r, 15));
     assert.ok(host.querySelector('#stop-btn').hidden === false);
 
-    // Edit usr_1 and click Save WHILE /chat is still generating
+    // Reroll usr_1 while /chat is still generating
     const usrRow = host.querySelector('[data-msg-id="usr_1"]');
-    usrRow.querySelector('[aria-label="Edit message"]').click();
-    assert.ok(usrRow.querySelector('.edit-textarea'));
-    usrRow.querySelector('.edit-textarea').value = 'Edited prompt while busy';
-    usrRow.querySelector('.edit-save-btn').click();
+    usrRow.querySelector('[aria-label="Reroll prompt"]').click();
     await new Promise((r) => setTimeout(r, 15));
 
     // /api/cancel_chat must be initiated before /edit starts
     assert.ok(events.includes('cancel:start'));
     assert.equal(events.includes('edit:start'), false);
 
-    // Finish /api/cancel_chat for the previous turn -> editor closes immediately and /edit begins
+    // Finish /api/cancel_chat for the previous turn -> /edit begins cleanly
     cancelDeferred.resolve();
     await new Promise((r) => setTimeout(r, 30));
 
     assert.equal(editBodySeen?.msg_id, 'usr_1');
-    assert.equal(editBodySeen?.new_text, 'Edited prompt while busy');
+    assert.equal(editBodySeen?.new_text, null);
     assert.equal(host.querySelector('.edit-textarea'), null);
-    assert.ok(host.querySelector('[data-msg-id="usr_1"] .message-text').textContent.includes('Edited prompt while busy'));
     assert.ok(host.querySelector('.typing-row'));
 
     // Now click #stop-btn while /edit is in flight: /history must NOT fire until /api/cancel_chat completes

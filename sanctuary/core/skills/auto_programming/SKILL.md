@@ -1,24 +1,15 @@
 ---
 name: auto_programming
-description: Delegate coding, debugging, refactoring, codebase inspection, testing, and shell or server execution to the orchestrated Antigravity pipeline.
-summary: "Delegate coding, debugging, refactoring, codebase inspection, and shell verification to Antigravity using [delegate_coding(task=\"...\", path=\"...\", model=\"...\", resume=True)]"
+title: In-Process Coding & Automatic Gear Transmission
+description: Inspect, edit, and verify workspace repositories in-process with automatic gear-shifting across Local Park, Fast Cruise, and Deep Planning/Recovery.
+summary: "In-process coding tools: [list_dir(path=\"...\")], [grep_search(query=\"...\", path=\"...\")], [read_file(path=\"...\", start_line=1, end_line=250)], [edit_file(path=\"...\", target=\"...\", replacement=\"...\")], [write_file(path=\"...\", content=\"...\")], [run_command(command=\"...\")], [set_working_folder(path=\"...\")]; optional isolated worktree: [delegate_coding(task=\"...\", isolate=True)]."
 retrieval: vector
-triggers: script, code, coding, python, debug, refactor, codebase, repo, repository, workspace, terminal, shell, command, localhost, directory, folder, audit, review, bug, test, build, antigravity, delegate_coding, implement, fix, feature
+triggers: script, code, coding, python, javascript, debug, refactor, codebase, repo, repository, workspace, terminal, shell, command, localhost, directory, folder, audit, review, bug, test, build, openhands, cloud, subagent, delegate_coding, consult_cloud, implement, fix, feature, architecture, plan, complex, analyze, analysis, explain, accuracy, accurate, verify, fact check, deep dive, compare, tradeoff, tradeoffs, synthesis, urgent, wrong, mistake, incorrect
 ---
-# SKILL: Antigravity Coding Delegation
-You direct coding work through Antigravity instead of editing files or running shell commands directly on limited local hardware.
-
-1. **Delegate Every Coding Request**:
-   - Call `[delegate_coding(task="...", path="...")]` whenever the user asks to inspect a repository, implement a feature, fix a bug, refactor code, audit files, run tests, or execute workspace commands.
-   - Use forward slashes `/` for paths (for example `path="C:/LLM/LM-Sanctuary"`). Omit `path` to target the active workspace folder.
-   - Leave `model` empty to use the default orchestrated model (`Orchestrator (Neon)`). Pass `model="..."` only if the user asks for a specific model or tier (such as `Orchestrator (Argon)` or `flash`).
-   - Keep `resume=True` (default) for follow-up requests in the same project so Antigravity keeps its session context. Pass `resume=False` only when starting a clean task.
-2. **State Concrete Scope**:
-   - Put the user's exact goal, relevant file paths, and acceptance criteria into `task`.
-   - You act as the user's proxy during execution: if Antigravity raises a design choice or question, the system consults you automatically and logs your decision.
-3. **Report Back to the User**:
-   - Read the returned `ANTIGRAVITY DELEGATION DIGEST` carefully and report in your own voice:
-     - What root issue or requirement was addressed and which files changed.
-     - Which verification commands/tests ran and whether they passed or failed.
-     - Any decisions you made on the user's behalf and why.
-   - Never invent file paths, edits, or test results that do not appear in the returned digest.
+# SKILL: In-Process Coding & Automatic Gear Transmission
+- **Automatic Transmission**: Planning (`/plan`, initial codebase reconnaissance, and post-strike re-planning) and error recovery always run on the Deep Cloud model (`2nd`), steady cruising edits can use Fast (`1st`), and casual chat stays Local (`Park`).
+- **Read First (`read_band`)**: Inspect real files with `list_dir`, `grep_search`, and `read_file` before editing.
+- **Edit & Verify (`write_band`)**: Patch exact unique lines with `edit_file(path, target, replacement)`, create files with `write_file(path, content)`, and run targeted tests with `run_command(command)`. Switch workspace root via `set_working_folder(path)`.
+- **2-Strike Rule**: After 2 consecutive failures on the same error or target, write tools disengage for 1 mandatory read-only step—inspect the target file, state a 2-sentence root-cause hypothesis, and pivot. Never repeat the same failing edit or command.
+- **`/plan` Mode**: Keep edits disabled and present a concise plan inside a ```` ```sanctuary-plan ```` fenced block.
+- **Isolated Worktree (Optional)**: Only use `delegate_coding(task, isolate=True)` when the user explicitly asks for an isolated git worktree branch.

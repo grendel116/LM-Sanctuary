@@ -89,6 +89,7 @@ def test_route_surface() -> None:
     assert social_rules == {
         "/api/social/accounts",
         "/api/social/accounts/<account_id>",
+        "/api/social/accounts/filters",
         "/api/social/drafts",
         "/api/social/drafts/<draft_id>",
         "/api/social/linked-posts",
@@ -96,7 +97,9 @@ def test_route_surface() -> None:
         "/api/social/link-preview",
         "/api/social/translate",
         "/api/social/feed/semantic-score",
+        "/api/social/threads-insights-batch",
         "/api/social/threads-proxy",
+        "/api/social/video-embed",
     }, f"Unexpected /api/social routes: {sorted(social_rules)}"
 
     client = app_mod.app.test_client()
@@ -245,6 +248,39 @@ def test_semantic_scorer() -> None:
     assert taste_res["tasteScores"]["t_crypto"] < -0.4
     assert abs(taste_res["tasteScores"]["t_neutral"]) < 0.01
 
+    reset_semantic_scorer_cache()
+
+    def fake_axes_encode(texts):
+        out = []
+        for t in texts:
+            tl = t.lower()
+            if "bread" in tl or "cat" in tl or "silly" in tl or "hobby" in tl or "shed" in tl:
+                out.append([1.0, 0.0, 0.0, 0.0, 0.0])
+            elif "scientific" in tl or "materialist" in tl or "research" in tl or "quantum" in tl:
+                out.append([0.0, 1.0, 0.0, 0.0, 0.0])
+            elif "senate" in tl or "cable news" in tl or "campaign" in tl or "polling" in tl:
+                out.append([0.0, 0.0, 1.0, 0.0, 0.0])
+            elif "promo" in tl or "merch" in tl or "affiliate" in tl or "saas" in tl:
+                out.append([0.0, 0.0, 0.0, 1.0, 0.0])
+            else:
+                out.append([0.0, 0.0, 0.0, 0.0, 1.0])
+        return out
+
+    axes_res = score_items_for_concepts(
+        [
+            {"id": "ax_chatter", "text": "Planing cedar in the shed"},
+            {"id": "ax_science", "text": "Quantum measurement notes"},
+            {"id": "ax_news", "text": "Midterm polling numbers"},
+        ],
+        include_axes=True,
+        encode_fn=fake_axes_encode,
+    )
+    assert axes_res["available"] is True
+    assert axes_res["axisScores"]["ax_chatter"]["everydayChatter"] > 0.4
+    assert axes_res["axisScores"]["ax_chatter"]["scienceTheory"] < 0.0
+    assert axes_res["axisScores"]["ax_science"]["scienceTheory"] > 0.4
+    assert axes_res["axisScores"]["ax_news"]["newsPolitics"] > 0.4
+
 
 def test_llm_translate() -> None:
     def _ok_handler(request: httpx.Request) -> httpx.Response:
@@ -378,12 +414,92 @@ def test_threads_proxy() -> None:
     assert bad_method
 
 
+def test_video_embed_route() -> None:
+    client = app_mod.app.test_client()
+    ok_res = client.get(
+        "/api/social/video-embed?src=https%3A%2F%2Fwww.youtube-nocookie.com%2Fembed%2FdQw4w9WgXcQ%3Fautoplay%3D1%26rel%3D0%26bad%3Dxss"
+    )
+    assert ok_res.status_code == 200
+    body = ok_res.get_data(as_text=True)
+    assert 'src="https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ?autoplay=1&amp;rel=0"' in body
+    assert 'bad=xss' not in body
+    assert ok_res.headers.get("Referrer-Policy") == "strict-origin-when-cross-origin"
+    csp = ok_res.headers.get("Content-Security-Policy", "")
+    assert "frame-ancestors" in csp and "http://127.0.0.1:*" in csp
+
+    vimeo_res = client.get(
+        "/api/social/video-embed?src=https%3A%2F%2Fplayer.vimeo.com%2Fvideo%2F1234567%3Fautoplay%3D1"
+    )
+    assert vimeo_res.status_code == 200
+
+    for bad in (
+        "",
+        "https://evil.example/embed/dQw4w9WgXcQ",
+        "http://www.youtube-nocookie.com/embed/dQw4w9WgXcQ",
+        "https://www.youtube-nocookie.com/watch?v=dQw4w9WgXcQ",
+        'https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ" onclick="alert(1)',
+    ):
+        from urllib.parse import quote
+        bad_res = client.get(f"/api/social/video-embed?src={quote(bad, safe='')}")
+        assert bad_res.status_code == 400, f"Expected 400 for {bad!r}, got {bad_res.status_code}"
+
+
+def test_threads_insights_batch() -> None:
+    client = app_mod.app.test_client()
+
+    bad = client.post("/api/social/threads-insights-batch", json={"postIds": ["123"]})
+    assert bad.status_code == 400
+
+    empty_res = client.post("/api/social/threads-insights-batch", json={"accessToken": "tok_1", "postIds": ["bad id!", ""]})
+    assert empty_res.status_code == 200
+    assert empty_res.get_json() == {"results": {}}
+
+    seen_urls: list[str] = []
+
+    def _fake_relay(raw_url: str, *, method: str = "GET", body: str = "", http_client=None):
+        seen_urls.append(raw_url)
+        if "/th_1/insights" in raw_url:
+            return {
+                "status": 200,
+                "body": {
+                    "data": [
+                        {"name": "likes", "total_value": {"value": 4}},
+                        {"name": "replies", "total_value": {"value": 1}},
+                        {"name": "reposts", "total_value": {"value": 2}},
+                        {"name": "quotes", "total_value": {"value": 1}},
+                    ]
+                },
+            }
+        return {"status": 500, "body": {"error": "transient"}}
+
+    import routes.social_bridge as sb
+
+    orig_relay = sb._relay_threads_request
+    sb._relay_threads_request = _fake_relay
+    try:
+        ok = client.post(
+            "/api/social/threads-insights-batch",
+            json={"accessToken": "tok_1", "postIds": ["threads:th_1", "th_1", "th_2"]},
+        )
+        assert ok.status_code == 200
+        assert ok.get_json() == {
+            "results": {
+                "th_1": {"likes": 4, "replies": 1, "reposts": 3},
+            }
+        }
+        assert len(seen_urls) == 2
+    finally:
+        sb._relay_threads_request = orig_relay
+
+
 def run_tests() -> None:
     test_route_surface()
     test_link_preview()
     test_semantic_scorer()
     test_llm_translate()
     test_threads_proxy()
+    test_threads_insights_batch()
+    test_video_embed_route()
     print("SOCIAL_BRIDGE_VERIFIED")
 
 

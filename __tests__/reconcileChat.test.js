@@ -1,3 +1,6 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -12,9 +15,14 @@ import {
 } from '../web/components/sanctuary/MessageRow.js';
 import {
   createPortraitGrid,
+  MAX_IMAGES_PER_ROW,
+  streamPortraitGeneration,
   updatePortraitGridToolbar,
 } from '../web/components/sanctuary/PortraitGrid.js';
+import { createToolApprovalCard } from '../web/components/sanctuary/ToolApprovalCard.js';
 import { connectionStore } from '../web/state/sanctuary/connection.js';
+
+const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 test('reconcileChat is idempotent, deduplicates IDs, preserves busy/transient rows, and clears queued badge', () => {
   const dom = installMockDom();
@@ -212,6 +220,63 @@ test('renderLiveToolLogs preserves open state of card across polling ticks', () 
     assert.equal(card.querySelector('.ag-timer-text')?.textContent, 'Working... · 3 tool calls');
     const actions = Array.from(bubble.querySelectorAll('.ag-log-action')).map((el) => el.textContent);
     assert.ok(actions.includes('Stopped'));
+
+    // Identical poll tick must skip DOM rebuild so open entries, animations, and pre scrollTop stay intact
+    const snapshot = [
+      { id: 'live_1', name: 'web_search', args: { query: 'skyrim shaders' }, status: 'completed', duration: 1.4, response: 'Res 1' },
+      { id: 'live_2', name: 'read_webpage', args: { url: 'https://example.com/a' }, status: 'running' },
+      { id: 'live_3', name: 'antigravity:run_command', args: { CommandLine: 'pytest' }, status: 'cancelled', duration: 0.4 },
+    ];
+    const firstEntry = bubble.querySelector('details.antigravity-log-entry');
+    const firstPre = firstEntry?.querySelector('.antigravity-log-detail pre');
+    if (firstPre) firstPre.scrollTop = 42;
+    renderLiveToolLogs(bubble, snapshot);
+    assert.equal(bubble.querySelector('details.antigravity-log-entry'), firstEntry);
+    if (firstPre) assert.equal(firstPre.scrollTop, 42);
+  } finally {
+    dom.restore();
+  }
+});
+
+test('renderLiveToolLogs formats OpenHands file_editor, terminal, and task sub-steps', () => {
+  const dom = installMockDom();
+  try {
+    const bubble = dom.document.createElement('div');
+    bubble.className = 'message program';
+
+    renderLiveToolLogs(bubble, [
+      { id: 'oh_1', name: 'openhands:file_editor', args: { command: 'view', path: 'sanctuary/tools/openhands_job.py', view_range: [1, 40] }, status: 'done', duration: 0.3 },
+      { id: 'oh_2', name: 'openhands:file_editor', args: { command: 'str_replace', path: 'sanctuary/tools/openhands_job.py', old_str: 'a\nb', new_str: 'x\ny\nz' }, status: 'done', duration: 0.4 },
+      { id: 'oh_3', name: 'openhands:terminal', args: { command: 'pytest -q' }, status: 'done', duration: 1.2 },
+      { id: 'oh_4', name: 'openhands:task', args: { subagent_type: 'verifier', description: 'Run smoke tests' }, status: 'running' },
+    ]);
+
+    const card = bubble.querySelector('details.antigravity-logs-card');
+    assert.ok(card);
+    assert.equal(card.querySelector('.ag-timer-text')?.textContent, 'Working... · 4 tool calls');
+    const actions = Array.from(bubble.querySelectorAll('.ag-log-action')).map((el) => el.textContent);
+    const targets = Array.from(bubble.querySelectorAll('.ag-log-target')).map((el) => el.textContent);
+    const suffixes = Array.from(bubble.querySelectorAll('.ag-log-suffix')).map((el) => el.textContent);
+    assert.deepEqual(actions, ['Analyzed', 'Subagent', 'Edited', 'Ran']);
+    assert.ok(targets[0].includes('openhands_job.py'));
+    assert.equal(targets[1], 'verifier: Run smoke tests');
+    assert.ok(targets[3].includes('pytest -q'));
+    assert.ok(suffixes.some((d) => d.includes('#L1-40')));
+    assert.ok(suffixes.some((d) => d.includes('+3 -2')));
+
+    // Failed edit_file response renders Failed without misleading +0 -7 diff suffix
+    const failBubble = dom.document.createElement('div');
+    renderLiveToolLogs(failBubble, [
+      {
+        id: 'tc_fail_edit',
+        name: 'edit_file',
+        args: { path: 'web/assets/css/shell.css', target: 'a\nb\nc\nd\ne\nf\ng' },
+        status: 'completed',
+        response: 'Error: Target block not found in web/assets/css/shell.css.',
+      },
+    ]);
+    assert.equal(failBubble.querySelector('.ag-log-action')?.textContent, 'Failed');
+    assert.equal(failBubble.querySelector('.ag-log-suffix'), null);
   } finally {
     dom.restore();
   }
@@ -306,6 +371,264 @@ test('PortraitGrid renders trash delete icon, concise Regenerate toolbar label, 
   } finally {
     connectionStore.set({ nodeUrl: prevNodeUrl });
     globalThis.fetch = origFetch;
+    dom.restore();
+  }
+});
+
+test('portrait image stack caps at 2 per row and spans full row width', async () => {
+  const dom = installMockDom();
+  const origFetch = globalThis.fetch;
+  const prevNodeUrl = connectionStore.get().nodeUrl;
+  connectionStore.set({ nodeUrl: 'http://127.0.0.1:5000' });
+  try {
+    assert.equal(MAX_IMAGES_PER_ROW, 2);
+
+    const doc = dom.document;
+    const gridTwo = createPortraitGrid(
+      [
+        { url: '/images/portraits/p1.png', prompt: 'first' },
+        { url: '/images/portraits/p2.png', prompt: 'second' },
+        { url: '/images/portraits/p3.png', prompt: 'third' },
+      ],
+      'msg_p2',
+      'program',
+      'sebile',
+      'two up',
+      { sessionId: 'default' }
+    );
+    assert.equal(gridTwo.querySelectorAll('.message-image-container').length, 2);
+    assert.equal(gridTwo.dataset.deletedCount, undefined);
+
+    const gridOne = createPortraitGrid(
+      [{ url: '/images/portraits/p1.png', prompt: 'only one' }],
+      'msg_p1_rem',
+      'program',
+      'sebile',
+      'one left',
+      { sessionId: 'default' }
+    );
+    assert.equal(gridOne.querySelectorAll('.message-image-container').length, 1);
+    assert.equal(gridOne.dataset.deletedCount, '1');
+
+    const chat = doc.createElement('div');
+    chat.id = 'chat-container';
+    const sentinel = doc.createElement('div');
+    sentinel.id = 'bottom-sentinel';
+    chat.appendChild(sentinel);
+
+    let pendingSlotsCount = 0;
+    let hasFallbackContainer = false;
+    let hasFallbackBubble = false;
+    globalThis.fetch = async (_url, opts) => {
+      const body = JSON.parse(opts.body);
+      assert.equal(body.count, 2);
+      const placeholder = chat.querySelector('.portrait-stream-placeholder');
+      pendingSlotsCount = placeholder?.querySelectorAll('.is-pending-slot').length || 0;
+      hasFallbackContainer = Boolean(placeholder?.querySelector('.message-bubbles-container.has-portrait-grid'));
+      hasFallbackBubble = Boolean(placeholder?.querySelector('.message.image-message.has-portrait-grid'));
+      return new Response(JSON.stringify({ status: 'success' }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    };
+
+    await streamPortraitGeneration(chat, {
+      sessionId: 'default',
+      prompt: 'moonlit lake',
+      speakerId: 'sebile',
+      msgId: 'prgm_stream_2up',
+    });
+    assert.equal(pendingSlotsCount, 2);
+    assert.equal(hasFallbackContainer, true);
+    assert.equal(hasFallbackBubble, true);
+
+    const css = fs.readFileSync(path.join(REPO_ROOT, 'web', 'assets', 'css', 'sanctuary.css'), 'utf8');
+    assert.match(css, /\.portrait-grid\s*\{[^}]*grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\);/s);
+    assert.match(css, /\.message-bubbles-container:has\(\.portrait-grid\)[^{]*\{[^}]*flex:\s*1\s+1\s+0%;[^}]*max-inline-size:\s*70%;/s);
+    assert.match(css, /@supports\s+not\s+selector\(:has\(\*\)\)\s*\{[\s\S]*?\.message-bubbles-container\.has-portrait-grid/);
+    assert.match(css, /\.user\s*\{[^}]*background:\s*var\(--user-bubble,\s*#1f1f22\);[^}]*border:\s*none;/s);
+
+    // Theme changes update existing .message.program bubbles in place while keeping .message.user neutral
+    const themeChat = doc.createElement('div');
+    const themeSentinel = doc.createElement('div');
+    themeSentinel.id = 'bottom-sentinel';
+    themeChat.appendChild(themeSentinel);
+    const sampleHistory = [
+      { id: 'u1', role: 'user', text: 'Hello, Robin.' },
+      { id: 'p1', role: 'program', sender_id: 'robin', text: 'Hello! *waves*' },
+    ];
+    reconcileChat(themeChat, sampleHistory, {
+      programId: 'robin',
+      theme: { primary_accent: '#f43f5e' },
+    });
+    const userBubble = themeChat.querySelector('.message.user');
+    const progBubble = themeChat.querySelector('.message.program');
+    assert.equal(userBubble.style.getPropertyValue('--program-bubble'), '');
+    assert.equal(progBubble.style.getPropertyValue('--program-bubble-border'), 'rgba(244, 63, 94, 0.12)');
+
+    reconcileChat(themeChat, sampleHistory, {
+      programId: 'robin',
+      theme: { primary_accent: '#eab308' },
+    });
+    assert.equal(themeChat.querySelector('.message.program'), progBubble);
+    assert.equal(progBubble.style.getPropertyValue('--program-bubble-border'), 'rgba(234, 179, 8, 0.12)');
+    assert.ok(progBubble.style.getPropertyValue('--program-bubble').includes('34, 31, 26'));
+  } finally {
+    connectionStore.set({ nodeUrl: prevNodeUrl });
+    globalThis.fetch = origFetch;
+    dom.restore();
+  }
+});
+
+test('MessageRow renders sanctuary-plan Proceed/Revise card and sandboxed sanctuary-widget iframe', () => {
+  const dom = installMockDom();
+  try {
+    const chat = dom.document.createElement('div');
+    let proceededText = '';
+    let revisedCalled = false;
+
+    const msg = {
+      id: 'p_plan_1',
+      role: 'program',
+      sender_id: 'sebile',
+      text: [
+        'Here is our cooperative plan and simulator:',
+        '```sanctuary-plan',
+        '## Goal',
+        '- Consolidate GreenPT websearch and reranking.',
+        '```',
+        '```sanctuary-widget',
+        '<div><button type="button">Simulate</button></div>',
+        '```',
+      ].join('\n'),
+      tool_calls: [
+        { id: 'cc_1', type: 'call', name: 'consult_cloud', args: { prompt: 'Check trade-offs', tier: 'deep' } },
+        { id: 'cc_1', type: 'response', name: 'consult_cloud', response: '[CLOUD SYNTHESIS]' },
+      ],
+    };
+
+    const row = renderMessage(chat, msg, {
+      programId: 'sebile',
+      onProceedPlan: (planMd) => {
+        proceededText = planMd;
+      },
+      onRevisePlan: () => {
+        revisedCalled = true;
+      },
+    });
+
+    const planCard = row.querySelector('.sanctuary-plan-card');
+    assert.ok(planCard);
+    const planDetails = planCard.querySelector('details.sanctuary-plan-details');
+    assert.ok(planDetails && planDetails.open);
+    const planSummary = planDetails.querySelector('summary.sanctuary-plan-summary');
+    assert.equal(planSummary.querySelectorAll('button, h1, h2, h3, h4').length, 0);
+
+    const proceedBtn = planCard.querySelector('.plan-proceed-btn');
+    const reviseBtn = planCard.querySelector('.plan-revise-btn');
+    assert.ok(proceedBtn && reviseBtn);
+    proceedBtn.click();
+    reviseBtn.click();
+    assert.match(proceededText, /Consolidate GreenPT websearch/);
+    assert.equal(revisedCalled, true);
+
+    const iframe = row.querySelector('iframe.sanctuary-widget-frame');
+    assert.ok(iframe);
+    assert.equal(iframe.getAttribute('sandbox'), 'allow-scripts');
+    assert.equal(iframe.getAttribute('title'), 'Interactive Sanctuary widget');
+    assert.equal(iframe.getAttribute('aria-hidden'), null);
+    assert.match(iframe.srcdoc, /--primary-accent/);
+
+    assert.equal(row.querySelector('.sanctuary-task-checklist'), null);
+
+    const targets = Array.from(row.querySelectorAll('.ag-log-target')).map((el) => el.textContent);
+    assert.ok(targets.includes('Cloud Model (deep)'));
+  } finally {
+    dom.restore();
+  }
+});
+
+test('ToolApprovalCard renders interactive choice buttons when ask_user escalates to user', async () => {
+  const dom = installMockDom();
+  const origFetch = globalThis.fetch;
+  const prevNodeUrl = connectionStore.get().nodeUrl;
+  connectionStore.set({ nodeUrl: 'http://127.0.0.1:5000' });
+  try {
+    let postedBody = null;
+    globalThis.fetch = async (_url, init) => {
+      postedBody = JSON.parse(init.body);
+      return new Response(JSON.stringify({ status: 'success' }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    };
+
+    let resolvedStatus = '';
+    const card = createToolApprovalCard({
+      callId: 'choice_99',
+      kind: 'choice',
+      toolName: 'openhands:ask_user',
+      details: 'Which cooperative forge should we push to?',
+      options: ['Codeberg', 'Self-hosted Forgejo'],
+      onResolved: (st) => {
+        resolvedStatus = st;
+      },
+    });
+    dom.document.body.appendChild(card);
+
+    assert.equal(card.querySelector('.tool-approval-badge')?.textContent, 'Decision Requested');
+    const optBtns = card.querySelectorAll('.tool-choice-option-btn');
+    assert.equal(optBtns.length, 2);
+    optBtns[1].click();
+    await new Promise((r) => setTimeout(r, 15));
+
+    assert.deepEqual(postedBody, {
+      call_id: 'choice_99',
+      status: 'approved',
+      option_index: 1,
+      answer_text: 'Self-hosted Forgejo',
+    });
+    assert.equal(resolvedStatus, 'approved');
+  } finally {
+    connectionStore.set({ nodeUrl: prevNodeUrl });
+    globalThis.fetch = origFetch;
+    dom.restore();
+  }
+});
+
+test('renderLiveToolLogs renders file-type badges and single-line terminal summaries', () => {
+  const dom = installMockDom();
+  try {
+    const bubble = dom.document.createElement('div');
+    bubble.className = 'message program';
+
+    renderLiveToolLogs(bubble, [
+      { id: 'f1', name: 'openhands:file_editor', phase: 'Implementing', args: { command: 'view', path: 'web/queries/threads.js', view_range: [1, 140] }, status: 'done', duration: 0.2 },
+      { id: 'f2', name: 'openhands:file_editor', phase: 'Implementing', args: { command: 'view', path: 'sanctuary/routes/social_bridge.py', view_range: [1, 110] }, status: 'done', duration: 0.2 },
+      {
+        id: 'c1',
+        name: 'openhands:terminal',
+        phase: 'Implementing',
+        args: { command: 'Select-String -Path C:\\LLM\\LM-Sanctuary\\sanctuary\\state.py -Pattern "SANCTUARY_DIR|base_dir" | ForEach-Object { $_.Line }' },
+        status: 'done',
+        duration: 0.1,
+      },
+    ]);
+
+    assert.equal(bubble.querySelector('.ag-timer-text')?.textContent, 'Implementing... · 3 tool calls');
+
+    const badges = Array.from(bubble.querySelectorAll('.ag-filetype-badge')).map((el) => el.textContent);
+    assert.deepEqual(badges, ['JS', 'PY']);
+
+    const targets = Array.from(bubble.querySelectorAll('.ag-log-target')).map((el) => el.textContent);
+    assert.ok(targets.some((t) => t === 'search "SANCTUARY_DIR|base_dir" in state.py'));
+    const cmdDetail = Array.from(bubble.querySelectorAll('.antigravity-log-detail pre code'))
+      .map((el) => el.textContent)
+      .find((txt) => txt.includes('ForEach-Object'));
+    assert.ok(cmdDetail, 'Full raw command must remain in expandable detail');
+    assert.equal(bubble.querySelector('.sanctuary-task-checklist-card'), null);
+    assert.equal(bubble.querySelector('details.antigravity-logs-card').open, false);
+  } finally {
     dom.restore();
   }
 });

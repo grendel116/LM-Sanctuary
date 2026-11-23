@@ -169,10 +169,18 @@ export function cancelChat(sessionId = 'default', opts = {}) {
 }
 
 export function approveToolCall(callId, status, opts = {}) {
+  const { optionIndex, answerText, ...reqOpts } = opts || {};
+  const payload = { call_id: callId, status };
+  if (optionIndex !== undefined && optionIndex !== null) {
+    payload.option_index = optionIndex;
+  }
+  if (answerText !== undefined) {
+    payload.answer_text = String(answerText);
+  }
   return requestNode('/approve_tool', {
     method: 'POST',
-    json: { call_id: callId, status },
-    ...opts,
+    json: payload,
+    ...reqOpts,
   });
 }
 
@@ -684,6 +692,19 @@ export function saveProjectSettings(settings, opts = {}) {
   });
 }
 
+export function fetchOpenHandsServerStatus(opts = {}) {
+  return requestNode('/api/openhands/server', opts);
+}
+
+export function controlOpenHandsServer(action, opts = {}) {
+  return requestNode('/api/openhands/server', {
+    method: 'POST',
+    json: { action },
+    timeoutMs: 30000,
+    ...opts,
+  });
+}
+
 export function saveGenerationParams(temperature, opts = {}) {
   return requestNode('/api/save_generation_params', {
     method: 'POST',
@@ -793,6 +814,36 @@ export function deleteSanctuarySocialAccount(accountId, opts = {}) {
   });
 }
 
+export async function fetchSanctuaryKeywordFilters(opts = {}) {
+  const nodeUrl = opts.nodeUrl ?? getSanctuaryNodeUrl();
+  if (!nodeUrl || (connectionStore.get().mode !== 'online' && !opts.nodeUrl)) return [];
+  try {
+    const res = await requestNode('/api/social/accounts/filters', {
+      timeoutMs: 8000,
+      ...opts,
+    });
+    return Array.isArray(res?.filters) ? res.filters : [];
+  } catch {
+    return [];
+  }
+}
+
+export async function saveSanctuaryKeywordFilters(filters = [], opts = {}) {
+  const nodeUrl = opts.nodeUrl ?? getSanctuaryNodeUrl();
+  if (!nodeUrl || (connectionStore.get().mode !== 'online' && !opts.nodeUrl)) return [];
+  try {
+    const res = await requestNode('/api/social/accounts/filters', {
+      method: 'PUT',
+      json: { filters: Array.isArray(filters) ? filters : [] },
+      timeoutMs: 8000,
+      ...opts,
+    });
+    return Array.isArray(res?.filters) ? res.filters : [];
+  } catch {
+    return [];
+  }
+}
+
 export function fetchSanctuarySocialDrafts(opts = {}) {
   return requestNode('/api/social/drafts', {
     timeoutMs: 20000,
@@ -873,4 +924,96 @@ export async function requestThreadsProxy({ url, method = 'GET', body = '', time
   } catch {
     return null;
   }
+}
+
+export async function requestThreadsInsightsBatch({ postIds = [], accessToken = '', timeoutMs = 15000 } = {}) {
+  if (connectionStore.get().mode !== 'online') return null;
+  const ids = Array.isArray(postIds) ? postIds.filter(Boolean) : [];
+  if (ids.length === 0 || !accessToken) return null;
+  try {
+    const res = await requestNode('/api/social/threads-insights-batch', {
+      method: 'POST',
+      json: { postIds: ids, accessToken },
+      timeoutMs,
+    });
+    if (res && typeof res.results === 'object' && !Array.isArray(res.results)) {
+      return res.results;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+export function resolveVideoEmbedUrl(embedSrc) {
+  const cleanSrc = String(embedSrc || '').trim();
+  if (!cleanSrc) return '';
+  const loc = globalThis.location;
+  const host = String(loc?.hostname || '').toLowerCase();
+  if (host === '127.0.0.1' || host === '[::1]') {
+    const proto = loc.protocol === 'https:' ? 'https:' : 'http:';
+    const port = loc.port ? `:${loc.port}` : '';
+    return `${proto}//localhost${port}/api/social/video-embed?src=${encodeURIComponent(cleanSrc)}`;
+  }
+  return cleanSrc;
+}
+
+// Browser Bookmark Sync & Reader Fallback
+
+export function fetchSanctuaryBrowserBookmarks(opts = {}) {
+  return requestNode('/api/browser/bookmarks', {
+    timeoutMs: 10000,
+    ...opts,
+  });
+}
+
+export function saveSanctuaryBrowserBookmark(bookmarkId, bookmark, opts = {}) {
+  return requestNode(`/api/browser/bookmarks/${encodeURIComponent(bookmarkId)}`, {
+    method: 'PUT',
+    json: { bookmark },
+    timeoutMs: 10000,
+    ...opts,
+  });
+}
+
+export function deleteSanctuaryBrowserBookmark(bookmarkId, opts = {}) {
+  return requestNode(`/api/browser/bookmarks/${encodeURIComponent(bookmarkId)}`, {
+    method: 'DELETE',
+    timeoutMs: 10000,
+    ...opts,
+  });
+}
+
+export function fetchSanctuaryBrowserReader(url, { mode = 'reader', ...opts } = {}) {
+  return requestNode('/api/browser/reader', {
+    method: 'POST',
+    json: { url, mode },
+    timeoutMs: 15000,
+    ...opts,
+  });
+}
+
+export async function fetchSanctuaryBrowserSuggest(query, engine = 'ecosia', opts = {}) {
+  const clean = String(query || '').trim();
+  if (!clean || connectionStore.get().mode !== 'online') return [];
+  try {
+    const qs = new URLSearchParams({ q: clean, engine: String(engine || 'ecosia') }).toString();
+    const res = await requestNode(`/api/browser/suggest?${qs}`, {
+      background: true,
+      timeoutMs: 2500,
+      ...opts,
+    });
+    return Array.isArray(res?.suggestions) ? res.suggestions : [];
+  } catch {
+    return [];
+  }
+}
+
+export function submitBrowserCommandResult(cmdId, result, opts = {}) {
+  return requestNode('/api/browser/command_result', {
+    method: 'POST',
+    json: { cmd_id: cmdId, result },
+    timeoutMs: 10000,
+    ...opts,
+  });
 }

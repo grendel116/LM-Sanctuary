@@ -71,6 +71,9 @@ REQUIRED_IMPORT_SPECS = (
     "piexif",
     "dill",
     "matplotlib",
+    "openhands.sdk",
+    "openhands.tools",
+    "openhands.agent_server",
 )
 
 

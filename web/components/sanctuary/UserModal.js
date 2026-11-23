@@ -694,6 +694,10 @@ export function openUserModal({
             header: profile?.banner || '',
             url: `https://bsky.app/profile/${session.handle}`,
             noteText: profile?.description || '',
+            publicVisible: !(
+              Array.isArray(profile?.labels)
+              && profile.labels.some((l) => String(l?.val ?? l ?? '').trim().toLowerCase() === '!no-unauthenticated')
+            ),
             followersCount: Number(profile?.followersCount ?? 0),
             followingCount: Number(profile?.followsCount ?? 0),
             statusesCount: Number(profile?.postsCount ?? 0),

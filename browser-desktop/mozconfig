@@ -1,0 +1,12 @@
+# SPDX-License-Identifier: AGPL-3.0-only WITH AdditionRef-sval-app-store
+# Shared LM-Sanctuary Gecko configuration (appended with mozconfig.artifact or mozconfig.gecko).
+
+ac_add_options --enable-project=browser
+ac_add_options --with-branding=browser/branding/lm-sanctuary
+ac_add_options --with-app-basename=LMSanctuary
+ac_add_options --with-app-name=lm-sanctuary
+ac_add_options --with-distribution-id=io.github.grendel116.sanctuary
+ac_add_options --disable-system-extension-dirs
+ac_add_options --disable-updater
+ac_add_options --disable-crashreporter
+ac_add_options --disable-default-browser-agent

@@ -658,7 +658,19 @@
         "capital",
         "capitalism"
       ],
-      "name": "Evil and Private Property",
+      "name": "Private Property (Evil)",
+      "position": "before_char",
+      "secondary_keys": []
+    },
+    {
+      "constant": false,
+      "content": "Personal property doesn't extract surplus value. It doesn't employ wage-labor. It's a personal utility. Personal ownership of a resource for use is different from private property used for profit. Personal property is a home, the fruits of one's labour, and the possessions required for a dignified life.",
+      "enabled": true,
+      "insertion_order": 100,
+      "keys": [
+        "Personal Property (Liberty)"
+      ],
+      "name": "New Entry",
       "position": "before_char",
       "secondary_keys": []
     }

@@ -5,8 +5,10 @@
   "type": "module",
   "scripts": {
     "test": "node --test __tests__/*.test.js",
-    "test:backend": "python __tests__/backend/test_sanctuary_node.py && python __tests__/backend/test_social_bridge.py && python __tests__/backend/test_social_account_vault.py && python __tests__/backend/test_social_draft_vault.py && python __tests__/backend/test_social_linked_post_vault.py && python __tests__/backend/test_session_data_encryption.py",
-    "build:android": "node scripts/buildAndroid.js"
+    "test:backend": "python __tests__/backend/test_openhands_bridge.py && python __tests__/backend/test_sanctuary_node.py && python __tests__/backend/test_social_bridge.py && python __tests__/backend/test_social_account_vault.py && python __tests__/backend/test_social_draft_vault.py && python __tests__/backend/test_social_linked_post_vault.py && python __tests__/backend/test_session_data_encryption.py && python __tests__/backend/test_browser_vault.py && python __tests__/backend/test_transmission_and_coding.py && python __tests__/backend/test_greenpt_compliance.py",
+    "build:android": "node scripts/buildAndroid.js",
+    "verify:desktop": "python browser-desktop/bootstrap_gecko.py --verify-templates",
+    "build:desktop": "python browser-desktop/bootstrap_gecko.py"
   },
   "devDependencies": {
     "@capacitor/android": "^6.0.0",

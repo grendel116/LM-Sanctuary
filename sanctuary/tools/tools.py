@@ -17,12 +17,15 @@ _search_executor = concurrent.futures.ThreadPoolExecutor(max_workers=10)
 active_running_tools = {}
 _active_tools_lock = threading.Lock()
 
-MAX_IMAGES_PER_ROW = 3
+MAX_IMAGES_PER_ROW = 2
 
 current_session_id = contextvars.ContextVar('current_session_id', default='default')
 current_speaker_id = contextvars.ContextVar('current_speaker_id', default=None)
 current_portrait_slot_callback = contextvars.ContextVar('current_portrait_slot_callback', default=None)
 current_turn_image_budget = contextvars.ContextVar('current_turn_image_budget', default=None)
+current_plan_mode = contextvars.ContextVar('current_plan_mode', default=False)
+current_write_disengaged = contextvars.ContextVar('current_write_disengaged', default=False)
+current_approved_plan = contextvars.ContextVar('current_approved_plan', default='')
 session_tool_calls = {}
 session_tool_calls_lock = threading.Lock()
 
@@ -102,17 +105,17 @@ def get_project_folders() -> list:
         settings = {}
 
     default_folder = os.path.normpath(os.path.join(os.getcwd(), 'core', 'programs', active_prog))
+    programs_root = os.path.normcase(os.path.normpath(os.path.join(os.getcwd(), 'core', 'programs')))
     folders = [default_folder]
     try:
         loaded_folders = settings.get("folders", [])
         if loaded_folders:
-            # Update first folder dynamically if it's the old workspace root or a program folder
-            first_folder = os.path.normpath(loaded_folders[0])
-            cwd = os.path.normpath(os.getcwd())
-            is_old_program_dir = ("core" in first_folder and "programs" in first_folder) or first_folder == cwd
-            if is_old_program_dir and first_folder != default_folder:
-                loaded_folders[0] = default_folder
-            folders = loaded_folders
+            cleaned = [os.path.normpath(f) for f in loaded_folders if f]
+            if cleaned:
+                norm_first = os.path.normcase(cleaned[0])
+                if (norm_first == programs_root or norm_first.startswith(programs_root + os.sep)) and cleaned[0] != default_folder:
+                    cleaned[0] = default_folder
+                folders = cleaned
     except Exception:
         pass
     return folders
@@ -184,12 +187,87 @@ def resolve_workspace_cwd(cwd: str = "") -> str:
         return os.path.normpath(repo_parent)
     return root_dir
 
+
+def _find_git_root(start_dir: str) -> str:
+    """Walk upward from `start_dir` looking for `.git`, returning the repo root or ''."""
+    cur = os.path.abspath(start_dir)
+    while True:
+        if os.path.exists(os.path.join(cur, ".git")):
+            return os.path.normpath(cur)
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            return ""
+        cur = parent
+
+
+def _is_managed_program_subdir(path: str) -> bool:
+    programs_dir = os.path.normcase(os.path.normpath(os.path.join(root_dir, "core", "programs")))
+    cand = os.path.normcase(os.path.normpath(path))
+    return cand == programs_dir or cand.startswith(programs_dir + os.sep)
+
+
+def resolve_coding_workspace(raw_path: str = "") -> tuple[str, str, str]:
+    """Pin coding workspace to the git root, validate `raw_path`, and warn on missing paths.
+
+    Returns `(repo_root, focus_relpath, missing_hint_warning)`.
+    """
+    folders = [f for f in get_project_folders() if isinstance(f, str) and os.path.isdir(f)]
+    non_persona = [os.path.normpath(f) for f in folders if not _is_managed_program_subdir(f)]
+    if non_persona:
+        default_base = non_persona[0]
+    else:
+        repo_parent = os.path.normpath(os.path.dirname(root_dir))
+        default_base = repo_parent if os.path.isdir(repo_parent) else root_dir
+
+    default_root = _find_git_root(default_base) or default_base
+    clean_raw = (raw_path or "").strip()
+    if not clean_raw:
+        return default_root, "", ""
+
+    candidates: list[str] = []
+    norm_raw = os.path.normpath(clean_raw)
+    if os.path.isabs(norm_raw):
+        candidates.append(norm_raw)
+    else:
+        candidates.append(os.path.normpath(os.path.join(default_root, norm_raw)))
+        candidates.append(resolve_workspace_path(clean_raw))
+
+    existing_target = next((c for c in candidates if os.path.exists(c)), "")
+    if existing_target:
+        target_dir = existing_target if os.path.isdir(existing_target) else os.path.dirname(existing_target)
+        pinned_root = _find_git_root(target_dir) or target_dir
+        try:
+            rel = os.path.relpath(existing_target, pinned_root).replace("\\", "/")
+        except ValueError:
+            rel = ""
+        focus_rel = "" if rel in ("", ".") else rel
+        return pinned_root, focus_rel, ""
+
+    skip_dirs = {"__pycache__", "node_modules", ".git", ".venv", ".ruff_cache", ".pytest_cache"}
+    try:
+        top_dirs = sorted(
+            d for d in os.listdir(default_root)
+            if os.path.isdir(os.path.join(default_root, d))
+            and not d.startswith(".")
+            and d not in skip_dirs
+        )[:20]
+    except OSError:
+        top_dirs = []
+    dirs_hint = ", ".join(top_dirs) if top_dirs else "(none)"
+    warning = (
+        f"Note: Requested path '{clean_raw}' does not exist in {default_root}. "
+        f"Actual top-level directories: {dirs_hint}."
+    )
+    return default_root, "", warning
+
 # Global memory dict to hold tool confirmation states for mobile/web human-in-the-loop approvals
 pending_tool_calls = {}
+pending_browser_commands = {}
+pending_browser_commands_lock = threading.Lock()
 
 
 def cancel_pending_tool_confirmations(session_id: str | None = None) -> int:
-    """Deny and wake any pending HITL tool approvals matching the session (or all when None)."""
+    """Deny and wake any pending HITL tool approvals and browser commands matching the session."""
     woken = 0
     for _call_id, info in list(pending_tool_calls.items()):
         if not isinstance(info, dict) or info.get('status') != 'pending':
@@ -201,6 +279,17 @@ def cancel_pending_tool_confirmations(session_id: str | None = None) -> int:
             if event:
                 event.set()
             woken += 1
+    with pending_browser_commands_lock:
+        for _cmd_id, cmd_info in list(pending_browser_commands.items()):
+            if not isinstance(cmd_info, dict) or cmd_info.get('status') != 'pending':
+                continue
+            cmd_sid = cmd_info.get('session_id')
+            if session_id is None or cmd_sid is None or cmd_sid == session_id:
+                cmd_info['status'] = 'cancelled'
+                cmd_ev = cmd_info.get('event')
+                if cmd_ev:
+                    cmd_ev.set()
+                woken += 1
     return woken
 
 
@@ -250,6 +339,46 @@ def confirm_tool_execution(tool_name: str, details: str) -> bool:
         del pending_tool_calls[call_id]
     return False
 
+
+def request_user_choice(
+    question: str,
+    options: list[str] | None = None,
+    tool_name: str = "openhands:ask_user",
+    timeout: float = 120.0,
+) -> dict:
+    """Surface an interactive multiple-choice question card in the active Sanctuary chat session."""
+    sess_id = current_session_id.get()
+    try:
+        from runners.runner import cancelled_sessions
+        if sess_id and sess_id in cancelled_sessions:
+            return {"status": "cancelled", "option_index": None, "answer_text": ""}
+    except Exception:
+        pass
+
+    clean_options = [str(o).strip() for o in (options or []) if str(o).strip()][:6]
+    call_id = str(uuid.uuid4())
+    event = threading.Event()
+    pending_tool_calls[call_id] = {
+        "kind": "choice",
+        "tool_name": tool_name,
+        "details": str(question or "").strip(),
+        "options": clean_options,
+        "status": "pending",
+        "option_index": None,
+        "answer_text": "",
+        "event": event,
+        "session_id": sess_id,
+    }
+
+    event.wait(timeout)
+    info = pending_tool_calls.pop(call_id, None) or {}
+    return {
+        "status": info.get("status", "timeout"),
+        "option_index": info.get("option_index"),
+        "answer_text": str(info.get("answer_text") or "").strip(),
+    }
+
+
 # ==============================================================================
 # WEB BROWSING & RESEARCH TOOLS
 # ==============================================================================
@@ -257,13 +386,8 @@ def confirm_tool_execution(tool_name: str, details: str) -> bool:
 @track_tool_activity
 def read_webpage(url: str) -> str:
     """Fetches and extracts the readable text content of a specific webpage URL as structured Markdown.
-    Use this when the user shares a URL/link in the chat and asks you to read, review, or analyze it.
-
-    Args:
-        url: The web address (HTTP/HTTPS URL) to fetch and read.
-
-    Returns:
-        The extracted clean Markdown content of the webpage, or an error message.
+    Tries zero-cost static extraction locally first and escalates to Cloud `/v1/tools/crawl/scrape`
+    when pages are JS-rendered, sparse, or blocked.
     """
     import re
     from bs4 import BeautifulSoup
@@ -271,159 +395,314 @@ def read_webpage(url: str) -> str:
     import urllib3
     urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-    if not url.startswith(("http://", "https://")):
+    if not str(url or "").startswith(("http://", "https://")):
         return "Error: Invalid URL. The URL must start with http:// or https://"
+
+    from utils.url_privacy import strip_tracking_params
+    clean_url = strip_tracking_params(url)
+
+    markdown_text = ""
+    local_err_msg = ""
 
     try:
         import primp
-        client = primp.Client(timeout=15, verify=False, follow_redirects=True)
-        response = client.get(url)
-        if response.status_code != 200:
-            return f"Error: Failed to fetch webpage. HTTP status code: {response.status_code}"
-        html_content = response.text
+        client = primp.Client(timeout=12, verify=False, follow_redirects=True)
+        response = client.get(clean_url)
+        if response.status_code == 200 and response.text:
+            soup = BeautifulSoup(response.text, "html.parser")
+            for element in soup(["script", "style", "nav", "header", "footer", "meta", "noscript", "svg", "iframe", "form", "aside", "img", "figure"]):
+                element.decompose()
+            content_area = soup.find("main") or soup.find("article") or soup.find("body") or soup
+            from urllib.parse import urljoin
+            for anchor in content_area.find_all("a", href=True):
+                href = str(anchor.get("href") or "").strip()
+                if href and not href.startswith(("#", "mailto:", "javascript:", "tel:")):
+                    anchor["href"] = urljoin(clean_url, href)
+            markdown_text = md(str(content_area), heading_style="ATX", bullets="-")
+            markdown_text = re.sub(r"!\[.*?\]\(.*?\)", "", markdown_text)
+            markdown_text = re.sub(r"\n{3,}", "\n\n", markdown_text).strip()
+        else:
+            local_err_msg = f"HTTP status code: {response.status_code}"
     except Exception as e:
-        return f"Error loading webpage: {e}"
+        local_err_msg = str(e)
 
-    try:
-        soup = BeautifulSoup(html_content, 'html.parser')
+    # Escalate to Cloud crawl/scrape when static fetch failed or returned a JS shell (< 240 chars)
+    if len(markdown_text) < 240:
+        try:
+            from core import greenpt_client
+            scraped_md = greenpt_client.scrape_markdown(clean_url)
+            if scraped_md and len(scraped_md) > len(markdown_text):
+                markdown_text = scraped_md
+        except Exception:
+            pass
 
-        for element in soup(["script", "style", "nav", "header", "footer", "meta", "noscript", "svg", "iframe", "form", "aside", "img", "figure"]):
-            element.decompose()
+    limit = 6000
+    if len(markdown_text) > limit:
+        return markdown_text[:limit] + f"\n\n... [Content truncated, total length: {len(markdown_text)} characters] ..."
 
-        content_area = soup.find("main") or soup.find("article") or soup.find("body") or soup
+    if not markdown_text.strip():
+        if local_err_msg:
+            return f"Error: Failed to fetch webpage ({local_err_msg})."
+        return "Error: Webpage loaded, but no readable content could be extracted."
 
-        markdown_text = md(
-            str(content_area),
-            heading_style="ATX",
-            bullets="-"
+    return markdown_text
+
+
+@track_tool_activity
+def open_in_browser(url: str, split: bool = False) -> str:
+    """Open an HTTP/HTTPS URL directly inside the user's Sanctuary Browser tab (or side-by-side split view).
+
+    Args:
+        url: The HTTP/HTTPS web address to open for the user.
+        split: When True, opens the link beside the active tab in 2-pane Browser Split View.
+
+    Returns:
+        Confirmation message describing the opened Browser tab.
+    """
+    raw_url = str(url or "").strip()
+    if not raw_url.startswith(("http://", "https://")):
+        return "Error: Invalid URL. The URL must start with http:// or https://"
+
+    from utils.url_privacy import strip_tracking_params
+
+    clean_url = strip_tracking_params(raw_url)
+    sess_id = current_session_id.get()
+    with session_tool_calls_lock:
+        for entry in reversed(session_tool_calls.get(sess_id, [])):
+            if entry.get("name") == "open_in_browser" and "client_action" not in entry:
+                entry["client_action"] = {
+                    "type": "open_browser_tab",
+                    "url": clean_url,
+                    "split": bool(split),
+                }
+                break
+
+    return f"Opened {clean_url} in Sanctuary Browser{' split view' if split else ''}."
+
+
+@track_tool_activity
+def browser_action(
+    action: str = "snapshot",
+    url: str = "",
+    ref: str = "",
+    text: str = "",
+    tab_id: str = "",
+    direction: str = "down",
+    key: str = "",
+    clear: bool = True,
+    split: bool = False,
+    new_tab: bool = False,
+    timeout: float = 22.0,
+    **kwargs,
+) -> str:
+    """Interact directly with the user's live Sanctuary Browser workspace.
+
+    Supported `action` values:
+    - `list_tabs`: List open Browser tabs, URLs, titles, and active tab ID.
+    - `snapshot`: Read Sanctuary Browser's live DOM outline with interactive `[e1]`, `[e2]` element refs (passwords masked).
+    - `read`: Read clean rendered text from the active (or `tab_id`) Browser tab.
+    - `open` / `navigate`: Open a URL or search query (`url="https://..."` or `url="@eco query"`) in the Browser.
+    - `back` / `forward` / `close_tab`: Step Browser history or close a tab.
+    - `click`: Click element `ref="e12"` from the latest `snapshot` (gated by write confirmation).
+    - `type`: Type `text="..."` into input `ref="e5"` (`clear=True` by default).
+    - `select`: Choose option `text="..."` on `<select>` `ref="e8"`.
+    - `press`: Press keyboard key `key="Enter"` / `"Escape"` / `"PageDown"`.
+    - `scroll`: Scroll `direction="down"|"up"` (or scroll `ref` into view).
+    - `wait_text`: Wait until `text="..."` renders in the tab.
+    """
+    import json
+
+    clean_action = str(action or "snapshot").strip().lower()
+    alias_map = {
+        "get_snapshot": "snapshot",
+        "inspect": "snapshot",
+        "get_page_text": "read",
+        "read_text": "read",
+        "open_tab": "open",
+        "navigate_tab": "navigate",
+        "search": "open",
+        "click_element": "click",
+        "type_text": "type",
+        "select_option": "select",
+        "press_keys": "press",
+        "scroll_page": "scroll",
+        "wait_for_text": "wait_text",
+    }
+    clean_action = alias_map.get(clean_action, clean_action)
+
+    valid_actions = {
+        "list_tabs",
+        "snapshot",
+        "read",
+        "open",
+        "navigate",
+        "back",
+        "forward",
+        "close_tab",
+        "click",
+        "type",
+        "select",
+        "press",
+        "scroll",
+        "wait_text",
+    }
+    if clean_action not in valid_actions:
+        return f"Error: Unsupported browser_action '{clean_action}'. Valid actions: {', '.join(sorted(valid_actions))}."
+
+    clean_ref = str(ref or kwargs.get("element") or "").strip().strip("[]")
+    clean_url = str(url or kwargs.get("query") or "").strip()
+    clean_text = str(text if text != "" else (kwargs.get("value") or "")).strip()
+    clean_key = str(key or (clean_text if clean_action == "press" else "Enter")).strip()
+
+    if clean_action in ("click", "type", "select") and not clean_ref:
+        return f"Error: `ref` (e.g. 'e4' from `browser_action(action=\"snapshot\")`) is required for `{clean_action}`."
+
+    # Sval §0073 Write Gate: confirm with user before acting on page controls when security_preset == ask_always
+    if clean_action in ("click", "type", "select", "press"):
+        gate_details = {"action": clean_action}
+        if clean_ref:
+            gate_details["ref"] = clean_ref
+        if clean_action == "type":
+            gate_details["text"] = clean_text[:200]
+        elif clean_action == "select":
+            gate_details["option"] = clean_text[:120]
+        elif clean_action == "press":
+            gate_details["key"] = clean_key
+        if tab_id:
+            gate_details["tab_id"] = tab_id
+        if not confirm_tool_execution(f"browser:{clean_action}", json.dumps(gate_details, indent=2, ensure_ascii=False)):
+            return f"Browser `{clean_action}` action was declined by the user."
+
+    sess_id = current_session_id.get()
+    cmd_id = f"bcmd_{uuid.uuid4().hex[:10]}"
+    ev = threading.Event()
+    cmd_payload = {
+        "cmd_id": cmd_id,
+        "session_id": sess_id,
+        "action": clean_action,
+        "args": {
+            "url": clean_url,
+            "ref": clean_ref,
+            "text": clean_text,
+            "tab_id": str(tab_id or "").strip(),
+            "direction": str(direction or "down").strip().lower(),
+            "key": clean_key,
+            "clear": bool(clear),
+            "split": bool(split),
+            "new_tab": bool(new_tab),
+        },
+        "status": "pending",
+        "event": ev,
+        "result": None,
+    }
+
+    with pending_browser_commands_lock:
+        pending_browser_commands[cmd_id] = cmd_payload
+
+    ev.wait(max(2.0, float(timeout)))
+    with pending_browser_commands_lock:
+        finished = pending_browser_commands.pop(cmd_id, None) or {}
+
+    if finished.get("status") == "cancelled":
+        return "Browser action cancelled."
+    res = finished.get("result")
+    if not isinstance(res, dict):
+        return (
+            "No active Sanctuary Browser UI responded to this command (ensure LM-Sanctuary is open in the desktop/web window). "
+            "You can still use `web_search` and `read_webpage` for background research."
         )
 
-        markdown_text = re.sub(r'!\[.*?\]\(.*?\)', '', markdown_text)
-        markdown_text = re.sub(r'\n{3,}', '\n\n', markdown_text).strip()
+    if not res.get("ok"):
+        return f"Browser Error ({res.get('error') or 'failed'}): {res.get('message') or 'Could not complete browser action.'}"
 
-        limit = 4000
-        if len(markdown_text) > limit:
-            return markdown_text[:limit] + f"\n\n... [Content truncated, total length: {len(markdown_text)} characters] ..."
+    header = f"[Sanctuary Browser · {clean_action}]"
+    if res.get("title") or res.get("url"):
+        header += f"\nPage: {res.get('title') or '(untitled)'} — {res.get('url') or ''}"
 
-        if not markdown_text.strip():
-            return "Error: Webpage loaded, but no readable content could be extracted."
+    if clean_action == "list_tabs":
+        tabs = res.get("tabs") or []
+        if not tabs:
+            return f"{header}\n(No open tabs)"
+        t_lines = [
+            f"- {'*' if t.get('active') else ' '} [{t.get('id')}] {t.get('title') or 'Tab'} — {t.get('url') or ''}"
+            for t in tabs
+        ]
+        return f"{header}\n" + "\n".join(t_lines)
 
-        return markdown_text
-    except Exception as e:
-        return f"Error parsing webpage content: {e}"
+    if clean_action == "snapshot":
+        snap = str(res.get("snapshot") or "").strip()
+        if len(snap) > 8000:
+            snap = snap[:8000] + "\n... [Snapshot truncated; pass ref='eN' to inspect a specific subtree]"
+        return f"{header}\n{snap or '(Empty page snapshot)'}"
+
+    if clean_action == "read":
+        body = str(res.get("text") or "").strip()
+        if len(body) > 7000:
+            body = body[:7000] + "\n... [Page text truncated]"
+        return f"{header}\n{body or '(No visible text on page)'}"
+
+    if clean_action == "type":
+        return f"{header}\nTyped into [{clean_ref}] -> field value: {res.get('value', '')}"
+    if clean_action == "wait_text":
+        return f"{header}\nText {'found' if res.get('found') else 'not found before timeout'}: {clean_text}"
+
+    return f"{header}\nCompleted `{clean_action}`."
 
 
-def query_searxng(query: str, base_url: str = None, engines: str = "baidu,yandex,bing") -> list:
-    public_instances = [
-        "https://searx.be",
-        "https://searxng.site",
-        "https://priv.au",
-        "https://search.ononoki.org",
-        "https://search.demolite.org",
-        "https://searx.work"
-    ]
-    urls = [base_url] if base_url else public_instances
+def query_searxng(query: str, base_url: str = None, engines: str = "") -> list:
+    """Query a user-configured self-hosted SearXNG instance (returns [] if no `base_url` is set)."""
+    clean_base = (base_url or "").strip().rstrip("/")
+    if not clean_base:
+        return []
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
-    
-    tried_count = 0
-    for url in urls:
-        if not url:
-            continue
-        if tried_count >= 3:
-            break
-        url = url.rstrip('/')
-        tried_count += 1
-        try:
-            params = {
-                "q": query,
-                "format": "json",
-                "engines": engines
-            }
-            response = requests.get(f"{url}/search", params=params, headers=headers, timeout=2.5)
-            if response.status_code == 200:
-                data = response.json()
-                results = data.get("results", [])
-                if results:
-                    parsed_results = []
-                    for r in results[:6]:
-                        title = r.get("title", "Web Result")
-                        link = r.get("url", "")
-                        content = r.get("content", "")
-                        if link:
-                            parsed_results.append({
-                                "title": title,
-                                "url": link,
-                                "content": content
-                            })
-                    if parsed_results:
-                        return parsed_results
-        except Exception as e:
-            print(f"[SearXNG] Failed to query instance {url}: {e}")
-            continue
-            
+    try:
+        params = {"q": query, "format": "json"}
+        if engines:
+            params["engines"] = engines
+        response = requests.get(f"{clean_base}/search", params=params, headers=headers, timeout=4.0)
+        if response.status_code == 200:
+            results = response.json().get("results", [])
+            return [
+                {
+                    "title": r.get("title", "Web Result"),
+                    "url": r["url"],
+                    "content": r.get("content", ""),
+                    "source": "SearXNG",
+                }
+                for r in results[:6]
+                if r.get("url")
+            ]
+    except Exception as e:
+        print(f"[SearXNG] Failed to query instance {clean_base}: {e}")
     return []
 
 
 @track_tool_activity
 def web_search(query: str) -> str:
-    """Searches the web and returns raw hits containing titles, links, and snippets.
-    Supports routing via prefix queries (e.g. 'github: query', 'arxiv: query', 'hn: query', 'wikipedia: query')
-    or concurrent web blending for standard queries.
-
-    Args:
-        query: The search query.
-
-    Returns:
-        A formatted string of matching pages with titles, URLs, and snippets.
+    """Searches the web via GreenPT `/v1/tools/websearch` (with custom SearXNG / DuckDuckGo fallback)
+    and specialized domain APIs (`github:`, `arxiv:`, `hn:`, `wikipedia:`, `music:`).
     """
-    import os
     import concurrent.futures
     import time
 
-    # Read project settings
     search_engine = "web_crawling"
     searxng_url = ""
+    browser_search_engine = ""
     try:
         from runners.program import _load_settings
         settings = _load_settings()
         search_engine = settings.get("search_engine", "web_crawling")
-        searxng_url = settings.get("searxng_url", "")
+        searxng_url = str(settings.get("searxng_url") or "").strip()
+        browser_search_engine = str(settings.get("browser_search_engine") or "").strip().lower()
+        if browser_search_engine == "ddg":
+            browser_search_engine = "duckduckgo"
     except Exception as e:
         print(f"Error loading search settings: {e}")
 
-    # Map invalid or older values to web_crawling
     if search_engine not in ("web_crawling", "wikipedia"):
         search_engine = "web_crawling"
-
-    def run_searxng(q):
-        try:
-            hits = query_searxng(q, base_url=searxng_url, engines="baidu,yandex,bing")
-            if not hits:
-                hits = query_searxng(q, base_url=searxng_url)
-            return [{
-                "title": h["title"],
-                "url": h["url"],
-                "content": h["content"],
-                "source": "SearXNG"
-            } for h in hits]
-        except Exception as e:
-            print(f"[SearXNG] Error: {e}")
-            return []
-
-    def run_baidu(q):
-        try:
-            hits = query_searxng(q, base_url=searxng_url, engines="baidu")
-            return [{
-                "title": h["title"],
-                "url": h["url"],
-                "content": h["content"],
-                "source": "Baidu"
-            } for h in hits]
-        except Exception as e:
-            print(f"[Baidu SearXNG] Error: {e}")
-            return []
 
     def run_duckduckgo(q):
         try:
@@ -431,93 +710,19 @@ def web_search(query: str) -> str:
                 from ddgs import DDGS
             except ImportError:
                 from duckduckgo_search import DDGS
-            ddgs = DDGS()
-            hits = ddgs.text(q, max_results=6)
-            results = []
-            for h in (hits or []):
-                title = h.get("title", "")
-                url = h.get("href", "")
-                snippet = h.get("body", "")
-                if url:
-                    results.append({
-                        "title": title,
-                        "url": url,
-                        "content": snippet,
-                        "source": "DuckDuckGo"
-                    })
-            return results
+            hits = DDGS().text(q, max_results=6)
+            return [
+                {
+                    "title": h.get("title", ""),
+                    "url": h.get("href", ""),
+                    "content": h.get("body", ""),
+                    "source": "DuckDuckGo",
+                }
+                for h in (hits or [])
+                if h.get("href")
+            ]
         except Exception as e:
             print(f"[DuckDuckGo] Error: {e}")
-            return []
-
-    def run_brave(q):
-        api_key = os.getenv("BRAVE_SEARCH_API_KEY", "").strip()
-        if not api_key:
-            return []
-        try:
-            url = "https://api.search.brave.com/res/v1/web/search"
-            headers = {
-                "Accept": "application/json",
-                "Accept-Encoding": "gzip",
-                "X-Subscription-Token": api_key
-            }
-            params = {"q": q, "count": 8, "search_lang": "en"}
-            res = requests.get(url, headers=headers, params=params, timeout=6)
-            if res.status_code == 200:
-                web_results = res.json().get("web", {}).get("results", [])
-                results = []
-                for r in web_results:
-                    title = r.get("title", "")
-                    link = r.get("url", "")
-                    snippet = r.get("description", "")
-                    if link:
-                        results.append({
-                            "title": title,
-                            "url": link,
-                            "content": snippet,
-                            "source": "Brave"
-                        })
-                return results
-            else:
-                print(f"[Brave Search] HTTP {res.status_code}")
-                return []
-        except Exception as e:
-            print(f"[Brave Search] Error: {e}")
-            return []
-
-    def run_tavily(q):
-        api_key = os.getenv("TAVILY_API_KEY", "").strip()
-        if not api_key:
-            return []
-        try:
-            url = "https://api.tavily.com/search"
-            payload = {
-                "api_key": api_key,
-                "query": q,
-                "max_results": 8,
-                "include_answer": False
-            }
-            res = requests.post(url, json=payload, timeout=8)
-            if res.status_code == 200:
-                hits = res.json().get("results", [])
-                results = []
-                for r in hits:
-                    title = r.get("title", "")
-                    link = r.get("url", "")
-                    content = r.get("content", "")
-                    if link:
-                        results.append({
-                            "title": title,
-                            "url": link,
-                            "content": content,
-                            "source": "Tavily"
-                        })
-                return results
-            else:
-                print(f"[Tavily] HTTP {res.status_code}")
-                return []
-        except Exception as e:
-            print(f"[Tavily] Error: {e}")
             return []
 
     def run_wikipedia(q):
@@ -757,64 +962,52 @@ def web_search(query: str) -> str:
             print(f"[MusicBrainz] Error: {e}")
             results_pool = []
     else:
-        # Standard concurrent search blending
-        if search_engine == "web_crawling":
-            futures = {
-                _search_executor.submit(run_searxng, query): "SearXNG",
-                _search_executor.submit(run_baidu, query): "Baidu",
-                _search_executor.submit(run_duckduckgo, query): "DuckDuckGo",
-                _search_executor.submit(run_brave, query): "Brave",
-                _search_executor.submit(run_tavily, query): "Tavily",
-            }
+        if search_engine == "wikipedia" or browser_search_engine == "wikipedia":
+            results_pool = run_wikipedia(query)
+        elif search_engine == "web_crawling":
+            from core import greenpt_client
 
-            done, not_done = concurrent.futures.wait(futures.keys(), timeout=15.0)
+            collected_hits = []
+            used_greenpt = False
 
-            for future in done:
-                source_name = futures[future]
-                try:
-                    data_hits = future.result()
-                    if data_hits:
-                        results_pool.extend(data_hits)
-                except Exception as e:
-                    print(f"[{source_name}] Thread error: {e}")
+            if searxng_url:
+                collected_hits.extend(query_searxng(query, base_url=searxng_url))
 
-            for future in not_done:
-                source_name = futures[future]
-                print(f"[{source_name}] Thread timed out (exceeded 15.0s timeout limit).")
+            try:
+                greenpt_hits = greenpt_client.websearch(query, count=6, full_page_content="auto")
+                if greenpt_hits:
+                    collected_hits.extend(greenpt_hits)
+                    used_greenpt = True
+            except Exception as e:
+                print(f"[Cloud WebSearch] Fallback to local search ({e})")
 
-            # Deduplicate by URL, collapsing mobile/desktop variations
+            if not collected_hits:
+                collected_hits.extend(run_duckduckgo(query))
+
             seen_urls = set()
             unique_results = []
-            for r in results_pool:
-                url_clean = r["url"].lower().strip().rstrip('/')
+            for r in collected_hits:
+                url_clean = r["url"].lower().strip().rstrip("/")
                 compare_url = url_clean.replace("https://m.", "https://www.").replace("http://m.", "http://www.")
                 if compare_url not in seen_urls:
                     seen_urls.add(compare_url)
                     unique_results.append(r)
 
-            # Query Wikipedia if other sources returned empty
             if not unique_results:
-                print("[Web Crawling] Primary sources empty. Querying Wikipedia.")
-                wiki_results = run_wikipedia(query)
-                for r in wiki_results:
-                    url_clean = r["url"].lower().strip().rstrip('/')
+                for r in run_wikipedia(query):
+                    url_clean = r["url"].lower().strip().rstrip("/")
                     compare_url = url_clean.replace("https://m.", "https://www.").replace("http://m.", "http://www.")
                     if compare_url not in seen_urls:
                         seen_urls.add(compare_url)
                         unique_results.append(r)
 
             results_pool = unique_results
-
-            # Enrich results that came back with thin snippets
-            enrich_thin_results(results_pool)
-
-        elif search_engine == "wikipedia":
-            results_pool = run_wikipedia(query)
+            if not used_greenpt:
+                enrich_thin_results(results_pool)
 
     if not results_pool:
         return "No search results found."
 
-    # Directly format search results for local LLM consumption
     lines = []
     for r in results_pool[:10]:
         lines.append(f"Title: {r['title']}\nURL: {r['url']}\nSource: {r['source']}\nSnippet: {r['content']}")
@@ -825,6 +1018,69 @@ def web_search(query: str) -> str:
 def google_search(query: str) -> str:
     """Wrapper that delegates search queries to web_search."""
     return web_search(query)
+
+
+@track_tool_activity
+def list_tools(topic: str = "") -> str:
+    """Load exact `[tool_name(...)]` tags and usage rules for a capability topic on demand."""
+    from core.skill_retriever import _get_skill_registry, format_skill_records, retrieve_matched_skill_records
+
+    clean_topic = str(topic or "").strip()
+    if clean_topic:
+        matched = retrieve_matched_skill_records(query=clean_topic, story_active=False, threshold=0.25, top_k=3)
+        if matched:
+            return format_skill_records(matched)
+
+    lines = ["# AVAILABLE SANCTUARY TOOLS"]
+    for rec in _get_skill_registry():
+        summary = rec.get("summary", "").strip()
+        if summary:
+            lines.append(f"- {rec['name']}: {summary}")
+    return "\n".join(lines)
+
+
+@track_tool_activity
+def consult_cloud(prompt: str, tier: str = "fast", context: str = "") -> str:
+    """Pass deep synthesis, architectural reasoning, or long-context analysis to the configured Cloud /v1 model (Gear 2)
+    without opening a workspace shell/coding session.
+
+    Args:
+        prompt: Exact analytical question or synthesis task for the cloud model.
+        tier: 'fast' (`glm-5.3-flash`, default) or 'deep' (`glm-5.3` / configured default).
+        context: Optional supporting facts, excerpts, or constraints.
+    """
+    from core import greenpt_client
+
+    clean_prompt = str(prompt or "").strip()
+    if not clean_prompt:
+        return "Error: `prompt` must not be empty when calling consult_cloud."
+
+    if not greenpt_client.is_cloud_enabled(require_native_greenpt=False):
+        return (
+            "Cloud baton unavailable (routing policy is 'local_only', API key is unset, or credits are exhausted). "
+            "Continue directly with local reasoning."
+        )
+
+    user_content = f"{clean_prompt}\n\nContext:\n{context.strip()}" if str(context or "").strip() else clean_prompt
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "Provide a rigorous, high-precision, evidence-grounded synthesis so the local Sanctuary Program "
+                "can present an accurate answer in its own voice. Explicitly flag concrete specifics, correct any "
+                "misconceptions or prior errors, and state clearly if a detail cannot be verified. Do not add filler."
+            ),
+        },
+        {"role": "user", "content": user_content},
+    ]
+    try:
+        answer = greenpt_client.chat_completion(messages, tier=tier, temperature=0.3, max_tokens=4096)
+        chosen = greenpt_client.resolve_cloud_tier_model(tier=tier)
+        return f"[CLOUD SYNTHESIS ({chosen})]\n{answer}" if answer else "Error: Empty cloud synthesis response."
+    except greenpt_client.GreenPTQuotaError as exc:
+        return f"Cloud credits exhausted ({exc}). Continue directly with local reasoning."
+    except Exception as exc:
+        return f"Cloud synthesis unavailable ({exc}). Continue directly with local reasoning."
 
 # ==============================================================================
 # COMFYUI TOOLS
@@ -935,12 +1191,12 @@ def apply_comfy_workflow(workflow_path: str, parameters: dict, save_path: str, s
 @register_image_operation
 @serialized_gpu_operation
 @activate_image_operation
-def generate_local_image(prompt: str, count: int = 3, program_id: str = None) -> str:
+def generate_local_image(prompt: str, count: int = MAX_IMAGES_PER_ROW, program_id: str = None) -> str:
     """Generates local portrait image(s) using ComfyUI with program-specific workflow configurations.
     
     Args:
         prompt: A prompt describing what you are doing or the scene/expression.
-        count: Number of images to generate, from 1 to 3 (defaults to 3 for initial portrait generation, 1 for single slot reroll).
+        count: Number of images to generate, from 1 to 2 (defaults to 2 for initial portrait generation, 1 for single slot reroll).
         program_id: Optional program ID whose positive/negative image details and portraits folder should be used.
         
     Returns:
@@ -1377,15 +1633,25 @@ def generate_video_from_image(image_path: str, prompt: str) -> str:
             print(f"[COMFY VIDEO] Warning: Failed to delete temp input image {comfy_input_path}: {e}")
 
 @track_tool_activity
-def add_quest(title: str, notes: str, due: str = None, location: str = "", reminder_minutes: int = 15) -> str:
-    """Creates a new quest and adds it to the user's quest log.
-    
+def add_quest(
+    title: str,
+    notes: str,
+    due: str = None,
+    location: str = "",
+    reminder_minutes: int = 15,
+    recurrence: str = "",
+    auto_prompt: str = "",
+) -> str:
+    """Creates a new quest (or recurring scheduled automation) and adds it to the user's quest log.
+
     Args:
         title: Title/name of the quest.
         notes: Objectives of the quest, separated by newlines or commas.
         due: Target local date/time as ISO 8601 (e.g. "2026-10-29T09:00"). Defaults to now.
         location: Optional location coordinates or address.
         reminder_minutes: Optional alert/alarm trigger in minutes before due.
+        recurrence: Optional schedule ('hourly', 'daily', 'weekly', or 5-field cron like '0 9 * * *').
+        auto_prompt: Optional prompt for the Program to execute automatically whenever `due` arrives.
     """
     from datetime import datetime
     from core import quest_manager
@@ -1404,16 +1670,36 @@ def add_quest(title: str, notes: str, due: str = None, location: str = "", remin
     objectives = [line.strip() for line in raw_notes.split('\n') if line.strip()] or [notes.strip()]
 
     try:
-        quest = quest_manager.add_quest(title.strip(), objectives, due_dt, location.strip(), reminder_min_val)
+        quest = quest_manager.add_quest(
+            title.strip(),
+            objectives,
+            due_dt,
+            location.strip(),
+            reminder_min_val,
+            recurrence=str(recurrence or "").strip(),
+            auto_prompt=str(auto_prompt or "").strip(),
+        )
     except Exception as e:
         return f"Error adding quest: {e}"
     if quest is None:
         return f"Quest '{title.strip()}' is already in the log."
-    return f"Successfully added quest: '{quest['title']}' due {due_dt.strftime('%A, %B %d at %I:%M %p')} with {len(objectives)} objectives."
+    rec_suffix = f" (recurring: {quest['recurrence']})" if quest.get("recurrence") else ""
+    return (
+        f"Successfully added quest: '{quest['title']}' due "
+        f"{due_dt.strftime('%A, %B %d at %I:%M %p')}{rec_suffix} with {len(objectives)} objectives."
+    )
 
-from tools import antigravity_job as _antigravity_job
+from tools import coding_tools as _coding_tools
+from tools import openhands_job as _openhands_job
 
-delegate_coding = track_tool_activity(_antigravity_job.delegate_coding)
+list_dir = track_tool_activity(_coding_tools.list_dir)
+read_file = track_tool_activity(_coding_tools.read_file)
+grep_search = track_tool_activity(_coding_tools.grep_search)
+edit_file = track_tool_activity(_coding_tools.edit_file)
+write_file = track_tool_activity(_coding_tools.write_file)
+run_command = track_tool_activity(_coding_tools.run_command)
+
+delegate_coding = track_tool_activity(_openhands_job.delegate_coding)
 
 @track_tool_activity
 def add_journal_entry(keyphrases: str, content: str) -> str:
@@ -1583,22 +1869,6 @@ def search_music(query: str, mode: str = "deep_cuts") -> str:
 @track_tool_activity
 def tune_feed_algorithm(
     action: str = "update",
-    preset: str = "",
-    recency_half_life_hours: int | float | str | None = None,
-    small_web: int | float | str | None = None,
-    author_diversity: int | float | str | None = None,
-    reposts: int | float | str | None = None,
-    longform: int | float | str | None = None,
-    media: int | float | str | None = None,
-    reciprocity: int | float | str | None = None,
-    commercial: int | float | str | None = None,
-    bourgeois_politics: int | float | str | None = None,
-    mature_content: int | float | str | None = None,
-    boost_concepts: list[str] | str | None = None,
-    dampen_concepts: list[str] | str | None = None,
-    add_boost_concepts: list[str] | str | None = None,
-    add_dampen_concepts: list[str] | str | None = None,
-    remove_concepts: list[str] | str | None = None,
     discovery_channels: list[str] | str | None = None,
     discovery_instances: list[str] | str | None = None,
     add_discovery_channels: list[str] | str | None = None,
@@ -1607,7 +1877,7 @@ def tune_feed_algorithm(
     **kwargs,
 ) -> str:
     """
-    Tune the user's declarative local social feed re-ranker profile without approval prompts.
+    Manage the user's declarative local social feed channels and trusted servers without approval prompts.
     Does not touch social credentials or read timelines.
     """
     from core.feed_tuning import (
@@ -1622,32 +1892,10 @@ def tune_feed_algorithm(
     if act in ("get", "show", "status", "inspect"):
         return "[Feed Profile]\n" + format_feed_profile_summary(load_feed_profile())
 
-    slider_patch: dict[str, object] = {
-        "recencyHalfLifeHours": recency_half_life_hours,
-        "smallWeb": small_web,
-        "authorDiversity": author_diversity,
-        "reposts": reposts,
-        "longform": longform,
-        "media": media,
-        "reciprocity": reciprocity,
-        "commercial": commercial,
-        "bourgeoisPolitics": bourgeois_politics,
-        "matureContent": mature_content,
-    }
-    for k, v in kwargs.items():
-        if v is not None:
-            slider_patch[k] = v
-
-    active_preset = "reset" if act == "reset" and not preset else preset
     try:
         updated = apply_feed_tuning_patch(
-            preset=active_preset,
-            sliders=slider_patch,
-            boost_concepts=boost_concepts,
-            dampen_concepts=dampen_concepts,
-            add_boost_concepts=add_boost_concepts,
-            add_dampen_concepts=add_dampen_concepts,
-            remove_concepts=remove_concepts,
+            action=act,
+            reset=(act == "reset"),
             discovery_channels=discovery_channels,
             discovery_instances=discovery_instances,
             add_discovery_channels=add_discovery_channels,
@@ -1664,3 +1912,53 @@ def tune_feed_algorithm(
         pass
 
     return "[Feed Profile Updated]\n" + format_feed_profile_summary(updated)
+
+
+@track_tool_activity
+def set_working_folder(path: str = "", folder: str = "", **kwargs) -> str:
+    """Set the default workspace folder (folders[0]) in project_settings.json."""
+    import json
+    from runners import program as rp
+
+    raw_target = str(path or folder or kwargs.get("directory") or "").strip()
+    if not raw_target:
+        return "Error: A directory path is required."
+    target = os.path.abspath(os.path.expanduser(raw_target))
+    if not os.path.isdir(target):
+        return f"Error: Directory does not exist: {target}"
+
+    if not confirm_tool_execution("set_working_folder", f"Set default workspace folder to: {target}"):
+        return "Action cancelled by user."
+
+    settings_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "variables", "project_settings.json")
+    settings: dict = {}
+    if os.path.isfile(settings_path):
+        try:
+            with open(settings_path, "r", encoding="utf-8") as f:
+                loaded = json.load(f)
+            if isinstance(loaded, dict):
+                settings = loaded
+        except Exception:
+            settings = {}
+
+    prev_folders = settings.get("folders") if isinstance(settings.get("folders"), list) else []
+    target_key = os.path.normcase(target)
+    rest = []
+    for existing in prev_folders:
+        if not existing:
+            continue
+        norm = os.path.normpath(str(existing))
+        if os.path.normcase(norm) != target_key:
+            rest.append(norm)
+    settings["folders"] = [target] + rest
+
+    os.makedirs(os.path.dirname(settings_path), exist_ok=True)
+    with open(settings_path, "w", encoding="utf-8") as f:
+        json.dump(settings, f, indent=2)
+
+    rp._settings_cache = None
+    rp._settings_mtime = 0.0
+    return f"Default working folder set to {target}."
+
+
+

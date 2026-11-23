@@ -301,6 +301,7 @@ export async function upsertSocialAccount(meta, secrets = null, options = {}) {
     bot: Boolean(meta.bot),
     discoverable: meta.discoverable !== false,
     indexable: meta.indexable !== false,
+    publicVisible: meta.publicVisible !== false,
     hideCollections: Boolean(meta.hideCollections ?? meta.hide_collections),
     defaultVisibility: meta.defaultVisibility || meta.default_visibility || 'public',
     defaultSensitive: Boolean(meta.defaultSensitive ?? meta.default_sensitive),

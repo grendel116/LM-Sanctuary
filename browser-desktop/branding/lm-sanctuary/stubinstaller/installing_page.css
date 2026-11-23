@@ -1,0 +1,21 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+
+body {
+  color: #f3effa;
+  background-color: #121214;
+}
+
+#label,
+#progress_background,
+#blurb {
+  text-align: center;
+  margin: 20px 30px;
+}
+
+#label {
+  font-size: 40px;
+  margin-top: 100px;
+  margin-bottom: 20px;
+}

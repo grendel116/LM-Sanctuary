@@ -53,7 +53,15 @@ def load_quests(program: str | None = None) -> list[dict]:
         return _read(_quest_log_path(program))
 
 
-def add_quest(title: str, objectives: list[str], due: datetime, location: str, reminder_minutes: int) -> dict | None:
+def add_quest(
+    title: str,
+    objectives: list[str],
+    due: datetime,
+    location: str,
+    reminder_minutes: int,
+    recurrence: str = "",
+    auto_prompt: str = "",
+) -> dict | None:
     """Appends a quest. Returns the new quest, or None when an open quest already has this title."""
     path = _quest_log_path()
     with _lock:
@@ -70,9 +78,33 @@ def add_quest(title: str, objectives: list[str], due: datetime, location: str, r
             "reminder_minutes": reminder_minutes,
             "created_at": now.isoformat(timespec="seconds"),
         }
+        if recurrence:
+            quest["recurrence"] = recurrence
+        if auto_prompt:
+            quest["auto_prompt"] = auto_prompt
         quests.append(quest)
         _write(path, quests)
         return quest
+
+
+def advance_quest_schedule(quest_id: str, next_due: datetime | None, last_run: datetime, program: str | None = None) -> dict | None:
+    """Mark an automated quest run complete and advance `due` (or clear `auto_prompt` if one-shot)."""
+    path = _quest_log_path(program)
+    with _lock:
+        quests = _read(path)
+        updated = None
+        for q in quests:
+            if q.get("id") == quest_id:
+                q["last_run_at"] = last_run.isoformat(timespec="seconds")
+                if next_due is not None:
+                    q["due"] = next_due.isoformat(timespec="minutes")
+                else:
+                    q["auto_completed"] = True
+                updated = dict(q)
+                break
+        if updated is not None:
+            _write(path, quests)
+        return updated
 
 
 def remove_quest(quest_id: str) -> dict | None:

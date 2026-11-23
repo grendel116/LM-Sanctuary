@@ -1,0 +1,13 @@
+# SPDX-License-Identifier: AGPL-3.0-only WITH AdditionRef-sval-app-store
+# Full C++ / Rust Gecko release build fragment (with custom vendor, profile dir, and adblock engine).
+
+ac_add_options --with-user-appdir=.lm-sanctuary
+ac_add_options --enable-bootstrap
+ac_add_options --enable-debug-symbols=-gline-tables-only
+ac_add_options RUSTFLAGS=-Cdebuginfo=line-tables-only
+ac_add_options --enable-lto=thin
+if test "$(uname -s)" != "Linux"; then
+  ac_add_options --with-redist
+fi
+mk_add_options MOZ_OBJDIR=@TOPSRCDIR@/objdir-sanctuary-gecko
+mk_add_options AUTOCLOBBER=1

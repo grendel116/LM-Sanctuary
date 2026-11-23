@@ -78,20 +78,32 @@ export function createModalShell({
     });
   }
 
+  function dispatchOverlayChange() {
+    try {
+      doc?.dispatchEvent?.(new Event('sanctuary:overlay-change'));
+    } catch {
+      // Ignore environments without Event constructor
+    }
+  }
+
   dialog.addEventListener('close', () => {
     dialog.returnValue = '';
     onClose?.();
+    dispatchOverlayChange();
+    if (typeof queueMicrotask === 'function') queueMicrotask(dispatchOverlayChange);
   });
 
   function open() {
     if (!dialog.open) {
       dialog.showModal();
     }
+    dispatchOverlayChange();
   }
 
   function close() {
     if (dialog.open) {
       dialog.close();
+      dispatchOverlayChange();
     }
   }
 

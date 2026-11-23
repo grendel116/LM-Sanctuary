@@ -19,6 +19,10 @@ if SANCTUARY_DIR not in sys.path:
     sys.path.insert(0, SANCTUARY_DIR)
 
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "8")
+os.environ.setdefault("OMP_NUM_THREADS", "4")
+os.environ.setdefault("MKL_NUM_THREADS", "4")
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
 from dotenv import load_dotenv
 from flask import Response, jsonify, make_response, request
@@ -192,12 +196,40 @@ def prewarm_caches():
         except Exception as e:
             print(f"Error auto-starting local LLM server: {e}")
 
+    # Pre-warm shared CPU embedding model & skill vectors before ctranslate2/Whisper
+    try:
+        from utils.semantic_scorer import get_shared_embedding_model
+        from core import skill_retriever
+
+        get_shared_embedding_model(local_files_only=True)
+        skill_retriever._get_skill_registry()
+    except Exception as e:
+        print(f"Error prewarming embedding model: {e}")
+
     # Pre-warm local STT whisper model
     try:
         from core import stt
         stt.get_whisper_model()
     except Exception as e:
         print(f"Error prewarming STT model: {e}")
+
+    # Auto-start OpenHands Agent Server if enabled in settings/env
+    try:
+        from tools import openhands_job
+
+        oh_cfg = openhands_job.resolve_greenpt_config()
+        if oh_cfg.get("auto_start_server"):
+            from runners import openhands_server
+
+            print(">>> Auto-starting OpenHands Agent Server...")
+            threading.Thread(
+                target=openhands_server.start_openhands_server,
+                kwargs={"port": oh_cfg["server_port"], "sync_profiles": True},
+                name="openhands-server-autostart",
+                daemon=True,
+            ).start()
+    except Exception as e:
+        print(f"Error auto-starting OpenHands Agent Server: {e}")
 
     print(">>> Backend caches pre-warmed successfully!")
 
@@ -462,14 +494,14 @@ def authenticate():
 
 
 def cancel_session_work(session_id):
-    from tools import antigravity_job, tools as tools_mod
+    from tools import openhands_job, tools as tools_mod
     from utils import image_cancellation
 
     cancelled_sessions.add(session_id)
     tools_mod.cancel_pending_tool_confirmations(session_id)
-    ag_cancelled = antigravity_job.cancel_antigravity_jobs(session_id)
+    oh_cancelled = openhands_job.cancel_openhands_jobs(session_id)
     img_cancelled = image_cancellation.cancel(session_ids={session_id})
-    return bool(ag_cancelled or img_cancelled)
+    return bool(oh_cancelled or img_cancelled)
 
 
 def cancel_session_image_work(session_id):
@@ -511,7 +543,7 @@ def _get_current_status():
         for folder in sorted(os.listdir(vs.PROGRAMS_DIR)):
             folder_path = os.path.join(vs.PROGRAMS_DIR, folder)
             if os.path.isdir(folder_path):
-                if folder == "sebile" or os.path.isfile(os.path.join(folder_path, f"{folder}.json")) or any(f.lower().endswith(".md") for f in os.listdir(folder_path)):
+                if os.path.isfile(os.path.join(folder_path, f"{folder}.json")) or any(f.lower().endswith(".md") for f in os.listdir(folder_path)):
                     valid_programs.append(folder)
         
     return {
@@ -582,11 +614,13 @@ def start_background_services():
 
     init_runner()
 
+    from core import scheduler
     from runners import local_server
     from utils import media_events
     local_server._on_status_change = broadcast_status
     media_events.set_listener(broadcast_media_change)
 
+    scheduler.start_scheduler()
     threading.Thread(target=_status_monitor, daemon=True).start()
     if os.getenv("SANCTUARY_SKIP_PREWARM", "false").lower() not in ("true", "1", "yes"):
         threading.Thread(target=prewarm_caches, daemon=True).start()

@@ -31,9 +31,30 @@ TOOL_ALIASES = {
     "dalle.text2im": "generate_local_image",
     "dalle:text2im": "generate_local_image",
     "text2im": "generate_local_image",
+    "openhands_code": "delegate_coding",
+    "code_with_openhands": "delegate_coding",
+    "delegate_subagent": "delegate_coding",
     "antigravity_code": "delegate_coding",
     "code_with_antigravity": "delegate_coding",
     "run_coding_task": "delegate_coding",
+    "ask_cloud": "consult_cloud",
+    "cloud_consult": "consult_cloud",
+    "greenpt_consult": "consult_cloud",
+    "sanctuary_browser": "browser_action",
+    "inspect_browser": "browser_action",
+    "control_browser": "browser_action",
+    "set_default_folder": "set_working_folder",
+    "change_working_folder": "set_working_folder",
+    "search_tools": "list_tools",
+    "discover_tools": "list_tools",
+    "view_file": "read_file",
+    "replace_in_file": "edit_file",
+    "replace_file_content": "edit_file",
+    "write_to_file": "write_file",
+    "search_codebase": "grep_search",
+    "find_files": "list_dir",
+    "run_shell_command": "run_command",
+    "terminal": "run_command",
 }
 
 _MAIN_DIRECTIVE_PROMPT = (
@@ -130,6 +151,10 @@ def _extract_tool_calls(text: str) -> list[_ToolTagMatch]:
                     if j < n and text[j] == "]":
                         found_end = j + 1
                     break
+            elif ch == "]" and paren_depth == 1:
+                args_end = i
+                found_end = i + 1
+                break
             i += 1
 
         if found_end != -1:
@@ -362,6 +387,44 @@ def _parse_emulated_tool_call(tool_name: str, args_str: str) -> dict:
         for alias in ("prompt", "request", "goal", "instruction", "query"):
             if alias in kwargs and "task" not in kwargs:
                 kwargs["task"] = kwargs.pop(alias)
+        if "phase" in kwargs and "workflow" not in kwargs:
+            kwargs["workflow"] = kwargs.pop("phase")
+    elif tool_name == "consult_cloud":
+        for alias in ("query", "question", "task", "request"):
+            if alias in kwargs and "prompt" not in kwargs:
+                kwargs["prompt"] = kwargs.pop(alias)
+    elif tool_name == "list_tools":
+        for alias in ("query", "need", "category"):
+            if alias in kwargs and "topic" not in kwargs:
+                kwargs["topic"] = kwargs.pop(alias)
+    elif tool_name in ("read_file", "list_dir", "edit_file", "write_file"):
+        for alias in ("file_path", "filepath", "TargetFile", "AbsolutePath", "DirectoryPath"):
+            if alias in kwargs and "path" not in kwargs:
+                kwargs["path"] = kwargs.pop(alias)
+        if tool_name == "read_file":
+            for src_k, dst_k in (("StartLine", "start_line"), ("EndLine", "end_line")):
+                if src_k in kwargs and dst_k not in kwargs:
+                    kwargs[dst_k] = kwargs.pop(src_k)
+        elif tool_name == "edit_file":
+            for alias in ("old_str", "TargetContent"):
+                if alias in kwargs and "target" not in kwargs:
+                    kwargs["target"] = kwargs.pop(alias)
+            for alias in ("new_str", "ReplacementContent"):
+                if alias in kwargs and "replacement" not in kwargs:
+                    kwargs["replacement"] = kwargs.pop(alias)
+        elif tool_name == "write_file":
+            if "CodeContent" in kwargs and "content" not in kwargs:
+                kwargs["content"] = kwargs.pop("CodeContent")
+            if "Overwrite" in kwargs and "overwrite" not in kwargs:
+                kwargs["overwrite"] = kwargs.pop("Overwrite")
+    elif tool_name == "run_command":
+        for alias in ("CommandLine", "cmd"):
+            if alias in kwargs and "command" not in kwargs:
+                kwargs["command"] = kwargs.pop(alias)
+    elif tool_name == "grep_search":
+        for alias in ("pattern", "text", "Query"):
+            if alias in kwargs and "query" not in kwargs:
+                kwargs["query"] = kwargs.pop(alias)
 
     return {"args": args, "kwargs": kwargs}
 
@@ -597,12 +660,33 @@ def extract_uploaded_file_content(file_path: str | Path, max_chars: int = 8000) 
                 if total_chars >= max_chars:
                     break
             content = "\n\n".join(extracted_pages)[:max_chars]
+            if len(content.strip()) < 80:
+                try:
+                    from core import greenpt_client
+                    ocr_md = greenpt_client.convert_document(str(p), filename)
+                    if ocr_md:
+                        content = ocr_md[:max_chars]
+                except Exception:
+                    pass
             return (
                 f"[Attached Document: {filename} (PDF, {num_pages} pages, {file_size_kb} KB)]\n"
                 f"--- DOCUMENT CONTENT START ---\n{content}\n--- DOCUMENT CONTENT END ---"
             )
         except Exception as e:
             return f"[Attached Document: {filename} (PDF, {file_size_kb} KB - PDF extraction note: {e})]"
+
+    if ext in {".docx", ".pptx", ".xlsx"}:
+        try:
+            from core import greenpt_client
+            converted = greenpt_client.convert_document(str(p), filename)
+            if converted:
+                snippet = converted[:max_chars]
+                return (
+                    f"[Attached Document: {filename} ({ext.upper().lstrip('.')}, {file_size_kb} KB)]\n"
+                    f"--- DOCUMENT CONTENT START ---\n{snippet}\n--- DOCUMENT CONTENT END ---"
+                )
+        except Exception:
+            pass
 
     # Text / Code / CSV / JSON / Markdown
     text_extensions = {".txt", ".md", ".py", ".json", ".csv", ".log", ".html", ".css", ".js", ".ts", ".xml", ".yaml", ".yml", ".c", ".cpp", ".h", ".sh", ".bat", ".ini", ".cfg"}

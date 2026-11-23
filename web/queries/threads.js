@@ -7,9 +7,10 @@ import {
   isTailscaleFunnelUrl,
 } from '../constants/endpoints.js';
 import { plainTextToHtml } from '../core/schema/unifiedItem.js';
+import { connectionStore } from '../state/sanctuary/connection.js';
 import { FetchError } from './fetch/FetchError.js';
 import { fetchWrapper } from './fetch/fetchWrapper.js';
-import { requestThreadsProxy } from './sanctuary.js';
+import { requestThreadsInsightsBatch, requestThreadsProxy } from './sanctuary.js';
 
 function extractThreadsProxyError(body, status) {
   if (body && typeof body === 'object') {
@@ -546,8 +547,11 @@ export function normalizeThreadsPostRecord(raw = {}, authorProfile = {}) {
     ? childRows.map((child) => mapThreadsAttachment(child, raw?.alt_text)).filter(Boolean)
     : [mapThreadsAttachment(raw)].filter(Boolean);
 
+  const mediaType = String(raw?.media_type || '').trim();
   const threadsMeta = {
     postId,
+    ...(mediaType ? { mediaType } : {}),
+    ...(mediaType === 'REPOST_FACADE' ? { isRepost: true } : {}),
     ...(raw?.shortcode ? { shortcode: String(raw.shortcode) } : {}),
     ...(raw?.topic_tag ? { topicTag: String(raw.topic_tag) } : {}),
     ...(raw?.is_quote_post ? { isQuotePost: true } : {}),
@@ -625,11 +629,15 @@ export async function getThreadsPostReplies({ postId, accessToken, fetchImpl }) 
 }
 
 const threadsInsightsCache = new Map();
+const threadsInsightsInFlight = new Map();
+const threadsInsightsLastGood = new Map();
 const THREADS_INSIGHTS_TTL_MS = 60_000;
-const THREADS_INSIGHTS_ERR_TTL_MS = 300_000;
+const THREADS_INSIGHTS_ERR_TTL_MS = 8_000;
 
 export function clearThreadsInsightsCacheForTests() {
   threadsInsightsCache.clear();
+  threadsInsightsInFlight.clear();
+  threadsInsightsLastGood.clear();
 }
 
 /**
@@ -647,35 +655,129 @@ export async function getThreadsPostInsights({ postId, accessToken, fetchImpl } 
     if (cached && cached.expiresAt > now) {
       return cached.value ? { ...cached.value } : null;
     }
+    const pending = threadsInsightsInFlight.get(cleanId);
+    if (pending) {
+      const res = await pending;
+      return res ? { ...res } : null;
+    }
   }
 
-  const url = `${THREADS_GRAPH_BASE}/${encodeURIComponent(cleanId)}/insights?metric=likes,replies,reposts,quotes&access_token=${encodeURIComponent(accessToken)}`;
-  try {
-    const body = await threadsFetch(url, { fetchImpl, background: true, timeoutMs: 5000 });
-    const rows = Array.isArray(body?.data) ? body.data : [];
-    let likes = 0;
-    let replies = 0;
-    let reposts = 0;
-    let quotes = 0;
-    for (const row of rows) {
-      const name = String(row?.name || '').toLowerCase();
-      const val = Number(row?.total_value?.value ?? row?.values?.[0]?.value ?? 0) || 0;
-      if (name === 'likes') likes = val;
-      else if (name === 'replies') replies = val;
-      else if (name === 'reposts') reposts = val;
-      else if (name === 'quotes') quotes = val;
+  const run = async () => {
+    const url = `${THREADS_GRAPH_BASE}/${encodeURIComponent(cleanId)}/insights?metric=likes,replies,reposts,quotes&access_token=${encodeURIComponent(accessToken)}`;
+    try {
+      const body = await threadsFetch(url, { fetchImpl, background: true, timeoutMs: 12000 });
+      const rows = Array.isArray(body?.data) ? body.data : [];
+      let likes = 0;
+      let replies = 0;
+      let reposts = 0;
+      let quotes = 0;
+      for (const row of rows) {
+        const name = String(row?.name || '').toLowerCase();
+        const val = Number(row?.total_value?.value ?? row?.values?.[0]?.value ?? 0) || 0;
+        if (name === 'likes') likes = val;
+        else if (name === 'replies') replies = val;
+        else if (name === 'reposts') reposts = val;
+        else if (name === 'quotes') quotes = val;
+      }
+      const metrics = { likes, replies, reposts: reposts + quotes };
+      if (useCache) {
+        const doneNow = Date.now();
+        threadsInsightsCache.set(cleanId, { value: metrics, expiresAt: doneNow + THREADS_INSIGHTS_TTL_MS });
+        threadsInsightsLastGood.set(cleanId, metrics);
+      }
+      return metrics;
+    } catch {
+      const lastGood = useCache ? threadsInsightsLastGood.get(cleanId) : null;
+      if (lastGood) {
+        return { ...lastGood };
+      }
+      const isNative = Boolean(globalThis.Capacitor?.isNativePlatform?.());
+      if (useCache && (connectionStore.get().mode === 'online' || isNative)) {
+        threadsInsightsCache.set(cleanId, { value: null, expiresAt: Date.now() + THREADS_INSIGHTS_ERR_TTL_MS });
+      }
+      return null;
+    } finally {
+      if (useCache) threadsInsightsInFlight.delete(cleanId);
     }
-    const metrics = { likes, replies, reposts: reposts + quotes };
-    if (useCache) {
-      threadsInsightsCache.set(cleanId, { value: metrics, expiresAt: now + THREADS_INSIGHTS_TTL_MS });
-    }
-    return metrics;
-  } catch {
-    if (useCache) {
-      threadsInsightsCache.set(cleanId, { value: null, expiresAt: now + THREADS_INSIGHTS_ERR_TTL_MS });
-    }
-    return null;
+  };
+
+  if (useCache) {
+    const p = run();
+    threadsInsightsInFlight.set(cleanId, p);
+    const res = await p;
+    return res ? { ...res } : null;
   }
+  return run();
+}
+
+export async function getThreadsPostsInsightsBatch({ postIds = [], accessToken = '', fetchImpl } = {}) {
+  if (!accessToken) return {};
+  const cleanIds = [];
+  const seen = new Set();
+  for (const raw of Array.isArray(postIds) ? postIds : []) {
+    const cid = String(raw || '').replace(/^threads:(?:notif:)?/, '').trim();
+    if (!cid || seen.has(cid)) continue;
+    seen.add(cid);
+    cleanIds.push(cid);
+    if (cleanIds.length >= 30) break;
+  }
+  if (cleanIds.length === 0) return {};
+
+  const useCache = typeof fetchImpl !== 'function';
+  const now = Date.now();
+  const out = {};
+  const missingIds = [];
+  for (const cid of cleanIds) {
+    if (useCache) {
+      const cached = threadsInsightsCache.get(cid);
+      if (cached && cached.expiresAt > now) {
+        if (cached.value) out[cid] = { ...cached.value };
+        continue;
+      }
+    }
+    missingIds.push(cid);
+  }
+
+  if (missingIds.length === 0) return out;
+
+  const isNative = Boolean(globalThis.Capacitor?.isNativePlatform?.());
+  if (useCache && !isNative) {
+    const batchResults = await requestThreadsInsightsBatch({ postIds: missingIds, accessToken });
+    if (batchResults && typeof batchResults === 'object') {
+      const doneNow = Date.now();
+      for (const cid of missingIds) {
+        const entry = batchResults[cid];
+        if (entry && typeof entry === 'object') {
+          const metrics = {
+            likes: Number(entry.likes || 0),
+            replies: Number(entry.replies || 0),
+            reposts: Number(entry.reposts || 0),
+          };
+          out[cid] = metrics;
+          threadsInsightsCache.set(cid, { value: metrics, expiresAt: doneNow + THREADS_INSIGHTS_TTL_MS });
+          threadsInsightsLastGood.set(cid, metrics);
+        } else if (threadsInsightsLastGood.has(cid)) {
+          out[cid] = { ...threadsInsightsLastGood.get(cid) };
+        }
+      }
+      return out;
+    }
+  }
+
+  let cursor = 0;
+  const workerCount = Math.min(4, missingIds.length);
+  await Promise.all(
+    Array.from({ length: workerCount }, async () => {
+      while (cursor < missingIds.length) {
+        const cid = missingIds[cursor++];
+        const res = await getThreadsPostInsights({ postId: cid, accessToken, fetchImpl }).catch(() => null);
+        if (res && typeof res === 'object') {
+          out[cid] = res;
+        }
+      }
+    })
+  );
+  return out;
 }
 
 /**

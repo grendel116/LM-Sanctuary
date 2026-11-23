@@ -10,6 +10,13 @@ import { extractFieldLinkUrl, formatTruncatedUrlInnerHtml } from './fediverse.js
 
 const utf8Encoder = new TextEncoder();
 const utf8Decoder = new TextDecoder('utf-8', { fatal: false });
+const NATIVE_NODE_WEBSOCKET = typeof globalThis.process?.versions?.node === 'string' && typeof globalThis.WebSocket === 'function'
+  ? globalThis.WebSocket
+  : null;
+const JETSTREAM_ENDPOINTS = Object.freeze([
+  'wss://jetstream2.us-east.bsky.network/subscribe',
+  'wss://jetstream1.us-east.bsky.network/subscribe',
+]);
 
 function cleanServiceOrigin(serviceUrl = DEFAULT_BSKY_SERVICE) {
   return normalizeInstanceUrl(serviceUrl || DEFAULT_BSKY_SERVICE);
@@ -160,6 +167,7 @@ export async function bskyRequest({
   accessJwt = '',
   refreshJwt = '',
   onSessionRefreshed,
+  cache,
   timeoutMs,
   fetchImpl,
 }) {
@@ -187,6 +195,7 @@ export async function bskyRequest({
       headers: reqHeaders,
       json,
       body,
+      ...(cache !== undefined ? { cache } : {}),
       ...(timeoutMs ? { timeoutMs } : {}),
       fetchImpl,
     });
@@ -362,13 +371,16 @@ function isDirectAnimatedGifUrl(rawUrl) {
   try {
     const parsed = new URL(String(rawUrl || '').trim());
     if (parsed.protocol !== 'https:') return false;
+    if (/\.gif$/i.test(parsed.pathname)) return true;
     const host = parsed.hostname.toLowerCase();
-    const isGifHost =
+    const isKnownGifCdn =
       host === 'tenor.com' ||
       host.endsWith('.tenor.com') ||
       host === 'giphy.com' ||
-      host.endsWith('.giphy.com');
-    return isGifHost && /\.gif$/i.test(parsed.pathname);
+      host.endsWith('.giphy.com') ||
+      host === 'klipy.com' ||
+      host.endsWith('.klipy.com');
+    return isKnownGifCdn && /\.webp$/i.test(parsed.pathname);
   } catch {
     return false;
   }
@@ -404,6 +416,43 @@ function extractBskyVideoMedia(embedMedia, recordMedia, post, author) {
     did,
     cid,
   };
+}
+
+const BSKY_SENSITIVE_LABELS = new Set([
+  'porn',
+  'sexual',
+  'nudity',
+  'graphic-media',
+  'gore',
+  'corpse',
+  'self-harm',
+  'torture',
+  'nsfw',
+  'adult',
+  'suggestive',
+  '!warn',
+]);
+
+function collectBskyModerationLabels(post, record = null, author = null) {
+  const out = new Set();
+  const pushAll = (arr) => {
+    for (const l of Array.isArray(arr) ? arr : []) {
+      const val = String(l?.val ?? l ?? '').trim().toLowerCase();
+      if (val) out.add(val);
+    }
+  };
+  pushAll(post?.labels);
+  pushAll(record?.labels?.values);
+  pushAll(author?.labels || post?.author?.labels);
+  pushAll(post?.embed?.labels);
+  pushAll(post?.embed?.media?.labels);
+  pushAll(record?.embed?.labels);
+  pushAll(record?.embed?.media?.labels);
+  return [...out];
+}
+
+function hasSensitiveBskyLabels(labels) {
+  return Array.isArray(labels) && labels.some((l) => BSKY_SENSITIVE_LABELS.has(String(l || '').toLowerCase()));
 }
 
 function extractBskyQuotePost(rawEmbed) {
@@ -446,6 +495,11 @@ function extractBskyQuotePost(rawEmbed) {
     firstEmbed?.media?.thumbnail ||
     firstEmbed?.external?.thumb ||
     '';
+  const qLabels = collectBskyModerationLabels(
+    { labels: rawRec.labels, embed: firstEmbed, author: qAuthor },
+    qVal,
+    qAuthor
+  );
 
   return {
     id: `bluesky:${qUri || qCid}`,
@@ -460,6 +514,7 @@ function extractBskyQuotePost(rawEmbed) {
     createdAt: String(qVal.createdAt || rawRec.indexedAt || ''),
     url: qHandle && qRkey ? `https://bsky.app/profile/${qHandle}/post/${qRkey}` : '',
     ...(thumbUrl ? { thumbUrl: String(thumbUrl) } : {}),
+    ...(hasSensitiveBskyLabels(qLabels) ? { sensitive: true } : {}),
   };
 }
 
@@ -481,6 +536,65 @@ function extractBskyLinkCard(embedMedia) {
   }
 }
 
+function extractBskyReplyContext(rawReply) {
+  if (!rawReply || typeof rawReply !== 'object') return null;
+  const rawParent = rawReply.parent;
+  const rawRoot = rawReply.root;
+  const isRenderable = (node) => {
+    if (!node || typeof node !== 'object') return false;
+    const t = String(node.$type || '');
+    if (
+      t.includes('notFoundPost')
+      || t.includes('blockedPost')
+      || node.notFound
+      || node.blocked
+      || node.detached
+    ) {
+      return false;
+    }
+    return Boolean(node.uri && node.author && node.record);
+  };
+  const parent = isRenderable(rawParent) ? rawParent : (isRenderable(rawRoot) ? rawRoot : null);
+  if (!parent) return null;
+
+  const pUri = String(parent.uri || '');
+  const pAuthor = parent.author || {};
+  const pViewer = pAuthor.viewer || {};
+  if (pViewer.muted || pViewer.mutedByList || pViewer.blocking || pViewer.blockedBy || pViewer.blockingByList) {
+    return null;
+  }
+
+  const pHandle = String(pAuthor.handle || pAuthor.did || '');
+  const pRkey = rkeyFromAtUri(pUri);
+  const pRecord = parent.record || {};
+  const firstEmbed = parent.embed || null;
+  const thumbUrl =
+    firstEmbed?.images?.[0]?.thumb ||
+    firstEmbed?.images?.[0]?.fullsize ||
+    firstEmbed?.thumbnail ||
+    firstEmbed?.media?.images?.[0]?.thumb ||
+    firstEmbed?.media?.thumbnail ||
+    firstEmbed?.external?.thumb ||
+    '';
+  const pLabels = collectBskyModerationLabels(parent, pRecord, pAuthor);
+
+  return {
+    id: `bluesky:${pUri}`,
+    protocol: 'bluesky',
+    uri: pUri,
+    cid: String(parent.cid || ''),
+    url: pHandle && pRkey ? `https://bsky.app/profile/${pHandle}/post/${pRkey}` : '',
+    authorId: String(pAuthor.did || ''),
+    authorName: String(pAuthor.displayName || pHandle),
+    authorHandle: pHandle,
+    authorAvatar: String(pAuthor.avatar || ''),
+    text: String(pRecord.text || ''),
+    createdAt: String(pRecord.createdAt || parent.indexedAt || ''),
+    ...(thumbUrl ? { thumbUrl: String(thumbUrl) } : {}),
+    ...(hasSensitiveBskyLabels(pLabels) ? { sensitive: true } : {}),
+  };
+}
+
 /**
  * Normalize an AT Protocol feedViewPost or postView into the shared PostItem shape.
  */
@@ -500,31 +614,45 @@ export function normalizeBskyPost(feedItem) {
     ? (recordEmbed.media || {})
     : recordEmbed;
   const embedImages = Array.isArray(embedMedia?.images) ? embedMedia.images : [];
+  const rawBlobImages = embedImages.length === 0 && author?.did && Array.isArray(recordMedia?.images)
+    ? recordMedia.images
+    : [];
   const videoMedia = extractBskyVideoMedia(embedMedia, recordMedia, post, author);
   const gifExternal = embedMedia?.external && isDirectAnimatedGifUrl(embedMedia.external.uri) ? embedMedia.external : null;
   const linkCard = gifExternal ? null : extractBskyLinkCard(embedMedia);
   const quotePost = extractBskyQuotePost(rawEmbed);
+  const replyContext = extractBskyReplyContext(feedItem?.reply);
   const createdAt = record.createdAt || post?.indexedAt || '';
   const facets = Array.isArray(record.facets) ? record.facets : [];
-  const labelSet = new Set();
-  for (const l of (Array.isArray(post?.labels) ? post.labels : [])) {
-    if (l?.val) labelSet.add(String(l.val).trim().toLowerCase());
-  }
-  const recLabelVals = Array.isArray(record?.labels?.values) ? record.labels.values : [];
-  for (const l of recLabelVals) {
-    if (l?.val) labelSet.add(String(l.val).trim().toLowerCase());
-  }
-  const labels = [...labelSet];
+  const labels = collectBskyModerationLabels(post, record, author);
 
-  const media = embedImages.map((img, idx) => ({
-    id: `${post?.cid || 'img'}_${idx}`,
-    type: 'image',
-    url: img.fullsize || img.thumb || '',
-    previewUrl: img.thumb || img.fullsize || '',
-    description: img.alt || '',
-    width: Number.parseInt(img.aspectRatio?.width, 10) || 0,
-    height: Number.parseInt(img.aspectRatio?.height, 10) || 0,
-  }));
+  const media = embedImages.length > 0
+    ? embedImages.map((img, idx) => ({
+        id: `${post?.cid || 'img'}_${idx}`,
+        type: 'image',
+        url: img.fullsize || img.thumb || '',
+        previewUrl: img.thumb || img.fullsize || '',
+        description: img.alt || '',
+        width: Number.parseInt(img.aspectRatio?.width, 10) || 0,
+        height: Number.parseInt(img.aspectRatio?.height, 10) || 0,
+      }))
+    : rawBlobImages
+        .map((ri, idx) => {
+          const blobCid = String(ri?.image?.ref?.$link || ri?.image?.cid || '').trim();
+          if (!blobCid || !author?.did) return null;
+          const didEnc = encodeURIComponent(String(author.did));
+          const cidEnc = encodeURIComponent(blobCid);
+          return {
+            id: `${post?.cid || 'img'}_${idx}`,
+            type: 'image',
+            url: `https://cdn.bsky.app/img/feed_fullsize/plain/${didEnc}/${cidEnc}@jpeg`,
+            previewUrl: `https://cdn.bsky.app/img/feed_thumbnail/plain/${didEnc}/${cidEnc}@jpeg`,
+            description: String(ri?.alt || ''),
+            width: Number.parseInt(ri?.aspectRatio?.width, 10) || 0,
+            height: Number.parseInt(ri?.aspectRatio?.height, 10) || 0,
+          };
+        })
+        .filter(Boolean);
   if (videoMedia) {
     media.push(videoMedia);
   }
@@ -544,7 +672,7 @@ export function normalizeBskyPost(feedItem) {
       mimeType: 'image/gif',
       url: String(gifExternal.uri),
       previewUrl: String(gifExternal.thumb || gifExternal.uri),
-      description: String(gifExternal.description || gifExternal.title || ''),
+      description: String(gifExternal.description || gifExternal.title || '').replace(/^ALT:\s*/i, ''),
       width: gifWidth,
       height: gifHeight,
     });
@@ -593,6 +721,7 @@ export function normalizeBskyPost(feedItem) {
     media,
     linkCard,
     ...(quotePost ? { quotePost } : {}),
+    ...(replyContext ? { replyContext } : {}),
     counts: {
       replies: post?.replyCount ?? 0,
       reposts: post?.repostCount ?? 0,
@@ -737,6 +866,10 @@ export function normalizeBskyActorProfile(raw) {
   if (typeof raw?.pronouns === 'string' && raw.pronouns.trim()) {
     fields.push({ name: 'Pronouns', value: raw.pronouns.trim() });
   }
+  const rawLabels = Array.isArray(raw?.labels) ? raw.labels : [];
+  const loggedOutHidden = rawLabels.some(
+    (l) => String(l?.val ?? l ?? '').trim().toLowerCase() === '!no-unauthenticated'
+  );
   return {
     profile: {
       id: did,
@@ -751,6 +884,7 @@ export function normalizeBskyActorProfile(raw) {
       note: description ? renderBskyRichTextToHtml(description, raw?.descriptionFacets) : '',
       noteText: description,
       fields: fields.slice(0, 4),
+      publicVisible: !loggedOutHidden,
       followersCount: raw?.followersCount ?? 0,
       followingCount: raw?.followsCount ?? 0,
       statusesCount: raw?.postsCount ?? 0,
@@ -811,6 +945,90 @@ export async function getBskyBlocks(opts = {}) {
   };
 }
 
+function isActiveMutedWordItem(item, nowMs = Date.now()) {
+  if (!item || typeof item !== 'object') return false;
+  const val = String(item.value || '').trim();
+  if (!val) return false;
+  if (item.expiresAt) {
+    const expMs = Date.parse(item.expiresAt);
+    if (Number.isFinite(expMs) && expMs <= nowMs) return false;
+  }
+  return true;
+}
+
+/**
+ * Fetch active Bluesky muted words & tags from app.bsky.actor.getPreferences (mutedWordsPref).
+ */
+export async function getBskyMutedWords(opts = {}) {
+  const data = await bskyRequest({
+    ...opts,
+    endpoint: 'app.bsky.actor.getPreferences',
+  });
+  const prefs = Array.isArray(data?.preferences) ? data.preferences : [];
+  const mutedPref = prefs.find((p) => p?.$type === 'app.bsky.actor.defs#mutedWordsPref');
+  const items = Array.isArray(mutedPref?.items) ? mutedPref.items : [];
+  const nowMs = Date.now();
+  const out = [];
+  const seen = new Set();
+  for (const item of items) {
+    if (!isActiveMutedWordItem(item, nowMs)) continue;
+    const phrase = String(item.value || '').trim();
+    const low = phrase.toLowerCase();
+    if (seen.has(low)) continue;
+    seen.add(low);
+    out.push({
+      id: `bsky_mw_${item.id || low}`,
+      title: phrase,
+      phrase,
+      keywords: [phrase],
+      filter_action: 'hide',
+      source: 'bluesky',
+    });
+  }
+  return out;
+}
+
+/**
+ * Add or remove a muted word/tag in Bluesky app.bsky.actor.defs#mutedWordsPref via putPreferences.
+ */
+export async function syncBskyMutedWord({ phrase, remove = false, ...auth } = {}) {
+  const cleanPhrase = String(phrase || '').trim();
+  if (!cleanPhrase) return false;
+  const data = await bskyRequest({
+    ...auth,
+    endpoint: 'app.bsky.actor.getPreferences',
+  });
+  const prefs = Array.isArray(data?.preferences) ? [...data.preferences] : [];
+  const idx = prefs.findIndex((p) => p?.$type === 'app.bsky.actor.defs#mutedWordsPref');
+  const curPref = idx >= 0
+    ? { ...prefs[idx], items: Array.isArray(prefs[idx].items) ? [...prefs[idx].items] : [] }
+    : { $type: 'app.bsky.actor.defs#mutedWordsPref', items: [] };
+
+  const low = cleanPhrase.toLowerCase();
+  const filteredItems = curPref.items.filter(
+    (item) => String(item?.value || '').trim().toLowerCase() !== low
+  );
+  if (remove) {
+    curPref.items = filteredItems;
+  } else {
+    curPref.items = [
+      ...filteredItems,
+      { value: cleanPhrase, targets: ['content', 'tag'] },
+    ];
+  }
+
+  if (idx >= 0) prefs[idx] = curPref;
+  else prefs.push(curPref);
+
+  await bskyRequest({
+    ...auth,
+    endpoint: 'app.bsky.actor.putPreferences',
+    method: 'POST',
+    json: { preferences: prefs },
+  });
+  return true;
+}
+
 /**
  * Sync displayName, description, avatar/banner blobs, pronouns, and app.bsky.actor.link records
  * onto the connected Bluesky PDS repository (`app.bsky.actor.profile` rkey `self`).
@@ -824,6 +1042,7 @@ export async function updateBskyProfile({
   displayName,
   description,
   fields,
+  publicVisible,
   avatarBlob = null,
   bannerBlob = null,
   removeAvatar = false,
@@ -968,6 +1187,27 @@ export async function updateBskyProfile({
     record.banner = await resolveMediaBlob(bannerBlob);
   } else if (removeHeader) {
     delete record.banner;
+  }
+
+  if (typeof publicVisible === 'boolean') {
+    const existingLabelVals = Array.isArray(existingValue.labels?.values)
+      ? existingValue.labels.values.filter(
+          (v) => v && typeof v.val === 'string' && v.val.trim().toLowerCase() !== '!no-unauthenticated'
+        )
+      : [];
+    if (!publicVisible) {
+      record.labels = {
+        $type: 'com.atproto.label.defs#selfLabels',
+        values: [...existingLabelVals, { val: '!no-unauthenticated' }],
+      };
+    } else if (existingLabelVals.length > 0) {
+      record.labels = {
+        $type: 'com.atproto.label.defs#selfLabels',
+        values: existingLabelVals,
+      };
+    } else {
+      delete record.labels;
+    }
   }
 
   await xrpc({
@@ -1115,6 +1355,56 @@ export async function getBskyActorLikes(opts = {}) {
     items: Array.isArray(data?.feed) ? data.feed.map(normalizeBskyPost) : [],
     nextCursor: data?.cursor || null,
   };
+}
+
+export async function getBskyPostLikes(opts = {}) {
+  const { uri, limit = 25, cursor = '', ...auth } = opts;
+  if (!uri) return { likes: [], nextCursor: null };
+  const data = await bskyPublicReadRequest({
+    ...auth,
+    endpoint: 'app.bsky.feed.getLikes',
+    params: { uri, limit, ...(cursor ? { cursor } : {}) },
+  });
+  const likes = (Array.isArray(data?.likes) ? data.likes : [])
+    .map((row) => row?.actor)
+    .filter((a) => a && (a.did || a.handle));
+  return {
+    likes,
+    nextCursor: data?.cursor || null,
+  };
+}
+
+export async function getBskySavedFeedUris(opts = {}) {
+  if (!opts?.accessJwt) return [];
+  const data = await bskyRequest({
+    ...opts,
+    endpoint: 'app.bsky.actor.getPreferences',
+  });
+  const prefs = Array.isArray(data?.preferences) ? data.preferences : [];
+  const uris = [];
+  const seen = new Set();
+  const addUri = (raw) => {
+    const val = String(raw || '').trim();
+    if (!val.startsWith('at://') || !val.includes('/app.bsky.feed.generator/')) return;
+    if (seen.has(val)) return;
+    seen.add(val);
+    uris.push(val);
+  };
+  for (const pref of prefs) {
+    if (!pref || typeof pref !== 'object') continue;
+    if (pref.$type === 'app.bsky.actor.defs#savedFeedsPrefV2' && Array.isArray(pref.items)) {
+      for (const item of pref.items) {
+        if (item?.type === 'feed' || String(item?.value || '').includes('/app.bsky.feed.generator/')) {
+          addUri(item.value);
+        }
+      }
+    } else if (pref.$type === 'app.bsky.actor.defs#savedFeedsPref') {
+      for (const raw of [...(Array.isArray(pref.pinned) ? pref.pinned : []), ...(Array.isArray(pref.saved) ? pref.saved : [])]) {
+        addUri(raw);
+      }
+    }
+  }
+  return uris;
 }
 
 export async function getBskyPostThread(opts) {
@@ -1397,10 +1687,11 @@ export async function searchBskyPosts(opts) {
 
 export async function searchBskyFeedGenerators(opts = {}) {
   const { query = '', limit = 6, ...auth } = opts;
+  const cleanQuery = String(query || '').trim();
   const data = await bskyPublicReadRequest({
     ...auth,
     endpoint: 'app.bsky.unspecced.getPopularFeedGenerators',
-    params: { query: String(query || '').trim(), limit },
+    params: { ...(cleanQuery ? { query: cleanQuery } : {}), limit },
   });
   return (Array.isArray(data?.feeds) ? data.feeds : [])
     .map((f) => ({
@@ -1410,6 +1701,7 @@ export async function searchBskyFeedGenerators(opts = {}) {
       description: String(f?.description || ''),
       likeCount: Number(f?.likeCount || 0),
       creatorHandle: String(f?.creator?.handle || ''),
+      avatar: String(f?.avatar || ''),
     }))
     .filter((f) => f.uri.startsWith('at://'));
 }
@@ -1669,4 +1961,248 @@ export async function updateBskyNotificationsSeen({
     onSessionRefreshed,
     fetchImpl,
   });
+}
+
+/**
+ * Batch-hydrate AT URIs in chunks of 25 via authenticated PDS or public AppView getPosts.
+ * @param {{ uris?: Array<string>, timeoutMs?: number, fetchImpl?: Function, serviceUrl?: string, accessJwt?: string, refreshJwt?: string, onSessionRefreshed?: Function }} [options]
+ * @returns {Promise<Array<object>>}
+ */
+export async function getBskyPosts({ uris = [], timeoutMs = 4500, fetchImpl, ...auth } = {}) {
+  const cleanUris = [
+    ...new Set(
+      (Array.isArray(uris) ? uris : [])
+        .map((u) => String(u || '').trim())
+        .filter((u) => u.startsWith('at://'))
+    ),
+  ];
+  if (cleanUris.length === 0) return [];
+
+  const chunks = [];
+  for (let i = 0; i < cleanUris.length; i += 25) {
+    chunks.push(cleanUris.slice(i, i + 25));
+  }
+
+  const results = await Promise.allSettled(
+    chunks.map((chunk) =>
+      bskyPublicReadRequest({
+        ...auth,
+        endpoint: 'app.bsky.feed.getPosts',
+        params: { uris: chunk },
+        ...(timeoutMs ? { timeoutMs } : {}),
+        fetchImpl,
+      })
+    )
+  );
+
+  const hydrated = [];
+  for (const res of results) {
+    if (res.status !== 'fulfilled') continue;
+    for (const postView of Array.isArray(res.value?.posts) ? res.value.posts : []) {
+      hydrated.push(normalizeBskyPost({ post: postView }));
+    }
+  }
+  return hydrated;
+}
+
+const DEFAULT_JETSTREAM_BLOCKED_LABELS = ['!hide', '!takedown', 'spam'];
+
+function matchesJetstreamMediaFilter(record, mediaFilter) {
+  if (!mediaFilter || mediaFilter === 'any') return true;
+  const emb = record?.embed;
+  const topType = emb && typeof emb === 'object' ? String(emb.$type || '') : '';
+  const nestedType = emb && typeof emb === 'object' ? String(emb.media?.$type || '') : '';
+  const hasImages = topType === 'app.bsky.embed.images' || nestedType === 'app.bsky.embed.images';
+  const hasVideo = topType === 'app.bsky.embed.video' || nestedType === 'app.bsky.embed.video';
+  if (mediaFilter === 'text') return !hasImages && !hasVideo;
+  if (!emb || typeof emb !== 'object') return false;
+  if (mediaFilter === 'images') return hasImages;
+  if (mediaFilter === 'video') return hasVideo;
+  return hasImages || hasVideo;
+}
+
+function collectJetstreamSocketUris(endpoint, {
+  targetCount,
+  deadlineMs,
+  cursorUs,
+  mediaFilter,
+  preferredLanguage,
+  blockedLabelSet,
+  recordMatcher = null,
+  signal,
+  WebSocketImpl,
+}) {
+  return new Promise((resolve) => {
+    const remainingMs = Math.max(0, deadlineMs - Date.now());
+    if (remainingMs < 50 || signal?.aborted) {
+      resolve({ uris: [], errored: false });
+      return;
+    }
+
+    const url = `${endpoint}?wantedCollections=app.bsky.feed.post&cursor=${Math.max(0, Math.floor(cursorUs))}`;
+    let ws;
+    try {
+      ws = new WebSocketImpl(url);
+    } catch {
+      resolve({ uris: [], errored: true });
+      return;
+    }
+
+    const seen = new Set();
+    const preferredUris = [];
+    const fallbackUris = [];
+    let settled = false;
+    let errored = false;
+
+    const cleanup = () => {
+      clearTimeout(timer);
+      if (signal && typeof signal.removeEventListener === 'function') {
+        signal.removeEventListener('abort', onAbort);
+      }
+      if (ws) {
+        ws.onmessage = null;
+        ws.onerror = null;
+        ws.onclose = null;
+      }
+    };
+
+    const finish = (didError = false) => {
+      if (settled) return;
+      settled = true;
+      errored = didError;
+      cleanup();
+      try {
+        ws?.close?.();
+      } catch {
+        // Ignore already-closed WebSocket
+      }
+      const uris = [...preferredUris, ...fallbackUris].slice(0, targetCount);
+      resolve({ uris, errored });
+    };
+
+    const onAbort = () => finish(false);
+    if (signal && typeof signal.addEventListener === 'function') {
+      signal.addEventListener('abort', onAbort, { once: true });
+    }
+    const timer = setTimeout(() => finish(false), remainingMs);
+
+    ws.onmessage = (ev) => {
+      if (settled || typeof ev?.data !== 'string') return;
+      let msg;
+      try {
+        msg = JSON.parse(ev.data);
+      } catch {
+        return;
+      }
+      if (msg?.kind !== 'commit') return;
+      const commit = msg.commit;
+      if (
+        !commit
+        || commit.operation !== 'create'
+        || commit.collection !== 'app.bsky.feed.post'
+        || !msg.did
+        || !commit.rkey
+      ) {
+        return;
+      }
+      const record = commit.record;
+      if (!record || typeof record !== 'object' || record.reply) return;
+
+      const selfLabels = Array.isArray(record.labels?.values) ? record.labels.values : [];
+      if (blockedLabelSet.size > 0 && selfLabels.some((l) => blockedLabelSet.has(String(l?.val ?? l ?? '').trim().toLowerCase()))) {
+        return;
+      }
+
+      if (preferredLanguage && Array.isArray(record.langs) && record.langs.length > 0) {
+        const pref = String(preferredLanguage).trim().toLowerCase().split('-')[0];
+        if (pref && !record.langs.some((lang) => String(lang || '').toLowerCase().startsWith(pref))) {
+          return;
+        }
+      }
+
+      if (!matchesJetstreamMediaFilter(record, mediaFilter)) return;
+
+      const verdict = typeof recordMatcher === 'function' ? recordMatcher(record) : 'prefer';
+      if (verdict === 'skip') return;
+
+      const atUri = `at://${msg.did}/app.bsky.feed.post/${commit.rkey}`;
+      if (seen.has(atUri)) return;
+      seen.add(atUri);
+      if (verdict === 'prefer') {
+        preferredUris.push(atUri);
+        if (preferredUris.length >= targetCount) {
+          finish(false);
+        }
+      } else if (fallbackUris.length < targetCount) {
+        fallbackUris.push(atUri);
+      }
+    };
+
+    ws.onerror = () => {
+      if (preferredUris.length === 0 && fallbackUris.length === 0) {
+        finish(true);
+      }
+    };
+
+    ws.onclose = () => {
+      finish(false);
+    };
+  });
+}
+
+/**
+ * Zero-auth client-side Bluesky Jetstream WebSocket burst sampler with 45s ring-buffer
+ * rewind (for Ozone labeler propagation) and 25-URI AppView batch hydration.
+ */
+export async function harvestBlueskyJetstreamBurst({
+  targetCount = 60,
+  maxDurationMs = 2500,
+  cursorRewindMs = 45_000,
+  mediaOnly = false,
+  mediaFilter = 'any',
+  preferredLanguage = '',
+  blockedSelfLabels = DEFAULT_JETSTREAM_BLOCKED_LABELS,
+  recordMatcher = null,
+  signal = null,
+  WebSocketImpl = globalThis.WebSocket,
+  timeoutMs = 4500,
+  fetchImpl,
+  ...auth
+} = {}) {
+  if (typeof WebSocketImpl !== 'function') return [];
+  if (NATIVE_NODE_WEBSOCKET && WebSocketImpl === NATIVE_NODE_WEBSOCKET) return [];
+  if (signal?.aborted) return [];
+
+  const effMedia = mediaOnly && (!mediaFilter || mediaFilter === 'any') ? 'media' : (mediaFilter || 'any');
+  const blockedLabelSet = new Set(
+    (Array.isArray(blockedSelfLabels) ? blockedSelfLabels : [])
+      .map((l) => String(l || '').trim().toLowerCase())
+      .filter(Boolean)
+  );
+  const deadlineMs = Date.now() + Math.max(100, Number(maxDurationMs) || 2500);
+  const cursorUs = (Date.now() - Math.max(0, Number(cursorRewindMs) || 0)) * 1000;
+
+  let uris = [];
+  for (let i = 0; i < JETSTREAM_ENDPOINTS.length; i += 1) {
+    if (signal?.aborted || Date.now() >= deadlineMs) break;
+    const res = await collectJetstreamSocketUris(JETSTREAM_ENDPOINTS[i], {
+      targetCount: Math.max(1, Number(targetCount) || 60),
+      deadlineMs,
+      cursorUs,
+      mediaFilter: effMedia,
+      preferredLanguage,
+      blockedLabelSet,
+      recordMatcher,
+      signal,
+      WebSocketImpl,
+    });
+    if (res.uris.length > 0) {
+      uris = res.uris;
+      break;
+    }
+    if (!res.errored && Date.now() >= deadlineMs) break;
+  }
+
+  if (uris.length === 0 || signal?.aborted) return [];
+  return getBskyPosts({ uris, timeoutMs, fetchImpl, ...auth });
 }

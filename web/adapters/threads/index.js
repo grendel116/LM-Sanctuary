@@ -114,7 +114,7 @@ export class ThreadsAdapter extends SocialAdapter {
     });
   }
 
-  async fetchOwnPosts(limit = 20) {
+  async fetchOwnPosts(limit = 20, { includeInsights = true } = {}) {
     const res = await getOwnThreadsPosts({
       userId: this.userId,
       accessToken: this.accessToken,
@@ -128,6 +128,9 @@ export class ThreadsAdapter extends SocialAdapter {
       avatar: this.avatarUrl,
     };
     const items = (Array.isArray(res?.data) ? res.data : []).map((raw) => normalizeThreadsPostRecord(raw, prof));
+    if (!includeInsights) {
+      return items;
+    }
     await Promise.all(
       items.slice(0, 10).map(async (item) => {
         const pid = item._meta?.threads?.postId;
@@ -284,7 +287,7 @@ export class ThreadsAdapter extends SocialAdapter {
     return mapped;
   }
 
-  async fetchNotifications(_cursor = '', limit = 10, { trackedPostIds = [] } = {}) {
+  async fetchNotifications(_cursor = '', limit = 20, { trackedPostIds = [] } = {}) {
     const cleanTrackedIds = [
       ...new Set(
         (Array.isArray(trackedPostIds) ? trackedPostIds : [])
@@ -292,12 +295,11 @@ export class ThreadsAdapter extends SocialAdapter {
           .filter(Boolean)
       ),
     ];
-    const trackedSet = new Set(cleanTrackedIds);
     const ownHandle = String(this.username || '').trim().replace(/^@/, '').toLowerCase();
 
     const mentionsRes = await getThreadsMentions({
       accessToken: this.accessToken,
-      limit: Math.min(limit, 15),
+      limit: Math.min(limit, 30),
       fetchImpl: this.fetchImpl,
     }).catch(() => ({ data: [] }));
 
@@ -325,23 +327,26 @@ export class ThreadsAdapter extends SocialAdapter {
     };
 
     for (const m of mentionsRes?.data || []) {
-      const parentId = String(m?.replied_to?.id || '').trim();
-      const rootId = String(m?.root_post?.id || '').trim();
-      if ((parentId || rootId) && !trackedSet.has(parentId) && !trackedSet.has(rootId)) {
-        continue;
-      }
+      const parentId = String(m?.replied_to?.id || m?.root_post?.id || '').trim();
       const item = toNotifItem(m, 'mention', parentId);
       if (item) results.push(item);
     }
 
-    const replyBatches = await Promise.all(
-      cleanTrackedIds.slice(0, 15).map(async (pid) => {
-        const repData = await getThreadsPostReplies({
-          postId: pid,
-          accessToken: this.accessToken,
-          fetchImpl: this.fetchImpl,
-        }).catch(() => ({ data: [] }));
-        return { pid, rows: Array.isArray(repData?.data) ? repData.data : [] };
+    const replyTargets = cleanTrackedIds.slice(0, 20);
+    const replyBatches = [];
+    let replyCursor = 0;
+    const replyWorkers = Math.min(4, replyTargets.length);
+    await Promise.all(
+      Array.from({ length: replyWorkers }, async () => {
+        while (replyCursor < replyTargets.length) {
+          const pid = replyTargets[replyCursor++];
+          const repData = await getThreadsPostReplies({
+            postId: pid,
+            accessToken: this.accessToken,
+            fetchImpl: this.fetchImpl,
+          }).catch(() => ({ data: [] }));
+          replyBatches.push({ pid, rows: Array.isArray(repData?.data) ? repData.data : [] });
+        }
       })
     );
 

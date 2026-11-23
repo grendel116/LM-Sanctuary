@@ -2,6 +2,7 @@ import {
   isAllowedSocialUrl,
   normalizeInstanceUrl,
 } from '../constants/endpoints.js';
+import { kvGet, kvSet } from '../storage/nativeStore.js';
 import { fetchWrapper } from './fetch/fetchWrapper.js';
 
 const DROP_CONTENT_TAGS = new Set([
@@ -781,6 +782,15 @@ export function cleanMastodonMediaUrl(url) {
   return clean;
 }
 
+function resolveMastodonAttachmentUrl(rawUrl, origin) {
+  const clean = cleanMastodonMediaUrl(rawUrl);
+  if (!clean) return '';
+  if (/^https?:\/\//i.test(clean)) return clean;
+  if (clean.startsWith('//')) return `https:${clean}`;
+  if (clean.startsWith('/') && origin) return `${origin}${clean}`;
+  return clean;
+}
+
 export function parseMastodonNextMaxId(linkHeader) {
   const header = String(linkHeader || '');
   if (!header) return null;
@@ -903,7 +913,21 @@ export function normalizeMastodonStatus(raw, instanceUrl) {
       text: qText,
       createdAt: rawQuote.created_at || '',
       ...(qThumb ? { thumbUrl: qThumb } : {}),
+      ...(rawQuote.sensitive || rawQuote.spoiler_text ? { sensitive: true } : {}),
     };
+  }
+
+  const rawFiltered = Array.isArray(post?.filtered)
+    ? post.filtered
+    : (Array.isArray(raw?.filtered) ? raw.filtered : []);
+  let filteredAction = '';
+  let filteredTitle = '';
+  if (rawFiltered.length > 0) {
+    const hasHide = rawFiltered.some(
+      (f) => String(f?.filter?.filter_action || f?.filter_action || 'hide').toLowerCase() === 'hide'
+    );
+    filteredAction = hasHide ? 'hide' : 'warn';
+    filteredTitle = String(rawFiltered[0]?.filter?.title || rawFiltered[0]?.title || '').trim();
   }
 
   return {
@@ -929,20 +953,36 @@ export function normalizeMastodonStatus(raw, instanceUrl) {
     inReplyToId: post.in_reply_to_id ? String(post.in_reply_to_id) : null,
     inReplyToAccountId: post.in_reply_to_account_id ? String(post.in_reply_to_account_id) : null,
     media: Array.isArray(post.media_attachments)
-      ? post.media_attachments.map((att) => ({
-          id: String(att.id || ''),
-          type: att.type || 'image',
-          url: att.url || att.remote_url || '',
-          previewUrl: att.preview_url || att.url || '',
-          description: att.description || '',
-          width: Number.parseInt(att.meta?.original?.width || att.meta?.small?.width || 0, 10) || 0,
-          height: Number.parseInt(att.meta?.original?.height || att.meta?.small?.height || 0, 10) || 0,
-          meta: att.meta || null,
-        }))
+      ? post.media_attachments.map((att) => {
+          const url = resolveMastodonAttachmentUrl(att.url || att.remote_url, origin);
+          const previewUrl = resolveMastodonAttachmentUrl(att.preview_url || att.url || att.remote_url, origin);
+          const rawType = String(att.type || '').toLowerCase();
+          let resolvedType = rawType;
+          if (!resolvedType || resolvedType === 'unknown') {
+            if (/\.(?:mp4|webm|mov|m4v)(?:[?#]|$)/i.test(url)) {
+              resolvedType = 'video';
+            } else if (/\.(?:jpe?g|png|webp|avif|gif)(?:[?#]|$)/i.test(url) || Boolean(previewUrl || url)) {
+              resolvedType = 'image';
+            } else {
+              resolvedType = 'image';
+            }
+          }
+          return {
+            id: String(att.id || ''),
+            type: resolvedType,
+            url,
+            previewUrl,
+            description: att.description || '',
+            width: Number.parseInt(att.meta?.original?.width || att.meta?.small?.width || 0, 10) || 0,
+            height: Number.parseInt(att.meta?.original?.height || att.meta?.small?.height || 0, 10) || 0,
+            meta: att.meta || null,
+          };
+        })
       : [],
     emojis,
     linkCard,
     ...(quotePost ? { quotePost } : {}),
+    ...(filteredAction ? { filteredAction, ...(filteredTitle ? { filteredTitle } : {}) } : {}),
     counts: {
       replies: post.replies_count ?? 0,
       reposts: post.reblogs_count ?? 0,
@@ -1039,9 +1079,12 @@ export async function getTimeline({
   accessToken = '',
   stream = 'home',
   listId = '',
+  hashtag = '',
   maxId = '',
   sinceId = '',
   limit = 20,
+  onlyMedia = false,
+  cache,
   timeoutMs,
   fetchImpl,
 }) {
@@ -1057,16 +1100,22 @@ export async function getTimeline({
   } else if (stream === 'list') {
     if (!listId) throw new Error('listId is required for list timeline');
     path = `/api/v1/timelines/list/${encodeURIComponent(listId)}`;
+  } else if (stream === 'hashtag') {
+    const cleanTag = String(hashtag || '').replace(/^#/, '').trim();
+    if (!cleanTag) throw new Error('hashtag is required for hashtag timeline');
+    path = `/api/v1/timelines/tag/${encodeURIComponent(cleanTag)}`;
   } else if (stream === 'bookmarks') {
     path = '/api/v1/bookmarks';
   }
 
+  if (onlyMedia) params.set('only_media', 'true');
   if (maxId) params.set('max_id', maxId);
   if (sinceId) params.set('since_id', sinceId);
 
   const res = await fetchWrapper(`${origin}${path}?${params.toString()}`, {
     headers: authHeaders(accessToken),
     responseType: 'raw',
+    ...(cache !== undefined ? { cache } : {}),
     ...(timeoutMs ? { timeoutMs } : {}),
     fetchImpl,
   });
@@ -1082,6 +1131,8 @@ export async function getTagTimeline({
   tag = '',
   maxId = '',
   limit = 15,
+  onlyMedia = false,
+  cache,
   timeoutMs,
   fetchImpl,
 } = {}) {
@@ -1089,10 +1140,12 @@ export async function getTagTimeline({
   if (!cleanTag) return { items: [], nextCursor: null };
   const origin = normalizeInstanceUrl(instanceUrl);
   const params = new URLSearchParams({ limit: String(limit) });
+  if (onlyMedia) params.set('only_media', 'true');
   if (maxId) params.set('max_id', maxId);
   const res = await fetchWrapper(`${origin}/api/v1/timelines/tag/${encodeURIComponent(cleanTag)}?${params.toString()}`, {
     headers: authHeaders(accessToken),
     responseType: 'raw',
+    ...(cache !== undefined ? { cache } : {}),
     ...(timeoutMs ? { timeoutMs } : {}),
     fetchImpl,
   });
@@ -1104,8 +1157,10 @@ export async function getTagTimeline({
 
 export async function getTrendingStatuses({
   instanceUrl = 'https://mastodon.social',
+  accessToken = '',
   limit = 20,
   offset = 0,
+  cache,
   timeoutMs,
   fetchImpl,
 } = {}) {
@@ -1115,6 +1170,8 @@ export async function getTrendingStatuses({
     offset: String(Math.max(0, Number(offset) || 0)),
   });
   const list = await fetchWrapper(`${origin}/api/v1/trends/statuses?${params.toString()}`, {
+    headers: authHeaders(accessToken),
+    ...(cache !== undefined ? { cache } : {}),
     ...(timeoutMs ? { timeoutMs } : {}),
     fetchImpl,
   });
@@ -1292,6 +1349,7 @@ export async function getLemmyLocalPosts({
   instanceUrl,
   pageCursor = '',
   limit = 12,
+  cache,
   timeoutMs,
   fetchImpl,
 } = {}) {
@@ -1310,6 +1368,7 @@ export async function getLemmyLocalPosts({
     }
   }
   const data = await fetchWrapper(`${origin}/api/v3/post/list?${params.toString()}`, {
+    ...(cache !== undefined ? { cache } : {}),
     ...(timeoutMs ? { timeoutMs } : {}),
     fetchImpl,
   });
@@ -1325,6 +1384,71 @@ export async function getUserLists({ instanceUrl, accessToken, fetchImpl }) {
     headers: authHeaders(accessToken),
     fetchImpl,
   });
+}
+
+export async function getFollowedTags({ instanceUrl, accessToken, limit = 50, cache, timeoutMs, fetchImpl } = {}) {
+  const origin = normalizeInstanceUrl(instanceUrl);
+  const params = new URLSearchParams({ limit: String(limit) });
+  const list = await fetchWrapper(`${origin}/api/v1/followed_tags?${params.toString()}`, {
+    headers: authHeaders(accessToken),
+    ...(cache !== undefined ? { cache } : {}),
+    ...(timeoutMs ? { timeoutMs } : {}),
+    fetchImpl,
+  });
+  const tags = [];
+  const seen = new Set();
+  for (const row of Array.isArray(list) ? list : []) {
+    const clean = String(row?.name || '').trim().replace(/^#+/, '').toLowerCase();
+    if (!clean || seen.has(clean)) continue;
+    seen.add(clean);
+    tags.push(clean);
+  }
+  return tags;
+}
+
+export async function getFavouritedStatuses({ instanceUrl, accessToken, limit = 15, cache, timeoutMs, fetchImpl } = {}) {
+  const origin = normalizeInstanceUrl(instanceUrl);
+  const params = new URLSearchParams({ limit: String(limit) });
+  const list = await fetchWrapper(`${origin}/api/v1/favourites?${params.toString()}`, {
+    headers: authHeaders(accessToken),
+    ...(cache !== undefined ? { cache } : {}),
+    ...(timeoutMs ? { timeoutMs } : {}),
+    fetchImpl,
+  });
+  return Array.isArray(list) ? list.map((s) => normalizeMastodonStatus(s, origin)) : [];
+}
+
+export async function getStatusBoostersAndLikers({ instanceUrl, accessToken, statusId, limit = 20, timeoutMs, fetchImpl } = {}) {
+  if (!statusId) return [];
+  const origin = normalizeInstanceUrl(instanceUrl);
+  const sid = encodeURIComponent(String(statusId));
+  const params = new URLSearchParams({ limit: String(limit) });
+  const opts = {
+    headers: authHeaders(accessToken),
+    ...(timeoutMs ? { timeoutMs } : {}),
+    fetchImpl,
+  };
+  const [reblogsRes, favsRes] = await Promise.allSettled([
+    fetchWrapper(`${origin}/api/v1/statuses/${sid}/reblogged_by?${params.toString()}`, opts),
+    fetchWrapper(`${origin}/api/v1/statuses/${sid}/favourited_by?${params.toString()}`, opts),
+  ]);
+  const byKey = new Map();
+  for (const res of [reblogsRes, favsRes]) {
+    if (res.status !== 'fulfilled' || !Array.isArray(res.value)) continue;
+    for (const acc of res.value) {
+      const id = String(acc?.id || '');
+      const acct = String(acc?.acct || acc?.username || '').trim();
+      const key = acct.toLowerCase() || id;
+      if (!key || byKey.has(key)) continue;
+      byKey.set(key, {
+        id,
+        acct,
+        username: String(acc?.username || ''),
+        displayName: String(acc?.display_name || acc?.displayName || acct),
+      });
+    }
+  }
+  return [...byKey.values()];
 }
 
 export async function getNotifications({
@@ -1421,6 +1545,7 @@ export async function searchFediverse({
   resolve = true,
   limit = 20,
   offset = 0,
+  timeoutMs,
   fetchImpl,
 }) {
   const origin = normalizeInstanceUrl(instanceUrl);
@@ -1433,6 +1558,7 @@ export async function searchFediverse({
   if (type) params.set('type', type);
   const res = await fetchWrapper(`${origin}/api/v2/search?${params.toString()}`, {
     headers: authHeaders(accessToken),
+    ...(timeoutMs ? { timeoutMs } : {}),
     fetchImpl,
   });
   return {
@@ -1867,38 +1993,51 @@ export async function removeAccountsFromList({ instanceUrl, accessToken, listId,
 
 export async function getFilters({ instanceUrl, accessToken, fetchImpl }) {
   const origin = normalizeInstanceUrl(instanceUrl);
+  const nowMs = Date.now();
   try {
     const rows = await fetchWrapper(`${origin}/api/v2/filters`, {
       headers: authHeaders(accessToken),
       fetchImpl,
     });
-    return (Array.isArray(rows) ? rows : []).map((f) => {
-      const kws = Array.isArray(f.keywords)
-        ? f.keywords.map((k) => String(k?.keyword || '').trim()).filter(Boolean)
-        : [];
-      return {
-        id: String(f.id),
-        title: f.title || kws[0] || '',
-        phrase: kws[0] || f.title || '',
-        ...(kws.length > 0 ? { keywords: kws } : {}),
-        context: f.context || ['home', 'public', 'notifications', 'thread'],
-        filter_action: f.filter_action || 'hide',
-        mastodon_filter_id: String(f.id),
-      };
-    });
+    return (Array.isArray(rows) ? rows : [])
+      .filter((f) => {
+        if (!f?.expires_at) return true;
+        const exp = Date.parse(f.expires_at);
+        return !Number.isFinite(exp) || exp > nowMs;
+      })
+      .map((f) => {
+        const kws = Array.isArray(f.keywords)
+          ? f.keywords.map((k) => String(k?.keyword || '').trim()).filter(Boolean)
+          : [];
+        return {
+          id: String(f.id),
+          title: f.title || kws[0] || '',
+          phrase: kws[0] || f.title || '',
+          ...(kws.length > 0 ? { keywords: kws } : {}),
+          context: f.context || ['home', 'public', 'notifications', 'thread'],
+          filter_action: f.filter_action || 'hide',
+          mastodon_filter_id: String(f.id),
+        };
+      });
   } catch {
     const rows = await fetchWrapper(`${origin}/api/v1/filters`, {
       headers: authHeaders(accessToken),
       fetchImpl,
     });
-    return (Array.isArray(rows) ? rows : []).map((f) => ({
-      id: String(f.id),
-      title: f.phrase || '',
-      phrase: f.phrase || '',
-      context: f.context || ['home', 'public'],
-      filter_action: 'hide',
-      mastodon_filter_id: String(f.id),
-    }));
+    return (Array.isArray(rows) ? rows : [])
+      .filter((f) => {
+        if (!f?.expires_at) return true;
+        const exp = Date.parse(f.expires_at);
+        return !Number.isFinite(exp) || exp > nowMs;
+      })
+      .map((f) => ({
+        id: String(f.id),
+        title: f.phrase || '',
+        phrase: f.phrase || '',
+        context: f.context || ['home', 'public'],
+        filter_action: 'hide',
+        mastodon_filter_id: String(f.id),
+      }));
   }
 }
 
@@ -2089,4 +2228,457 @@ export async function respondFollowRequest({ instanceUrl, accessToken, accountId
     headers: authHeaders(accessToken),
     fetchImpl,
   });
+}
+
+const FEDIDB_SERVERS_URL = 'https://api.fedidb.org/v1/servers?limit=40';
+const FEDIDB_CACHE_KV_KEY = 'sanctuary_fedidb_pool_v1';
+const FEDIDB_QUARANTINE_KV_KEY = 'sanctuary_fedidb_quarantine_v1';
+const FEDIDB_TTL_MS = 24 * 3600_000;
+const PUBLIC_OPT_OUT_RE = /#(?:noindex|nobot|nodiscover)\b/i;
+
+const SUPPORTED_FEDIDB_SLUGS = new Set([
+  'mastodon',
+  'pixelfed',
+  'pleroma',
+  'akkoma',
+  'gotosocial',
+  'hometown',
+  'misskey',
+  'sharkey',
+  'firefish',
+  'iceshrimp',
+]);
+const MISSKEY_FAMILY_SLUGS = new Set(['misskey', 'sharkey', 'firefish', 'iceshrimp']);
+const AUTH_WALLED_PUBLIC_HOSTS = new Set([
+  'mastodon.social',
+  'mstdn.social',
+  'mastodon.online',
+  'pixelfed.social',
+  'pixelfed.de',
+  'pixelfed.uno',
+  'gram.social',
+  'metapixl.com',
+  'fed.brid.gy',
+]);
+
+export const FALLBACK_FEDIVERSE_POOL = Object.freeze([
+  Object.freeze({ domain: 'mastodon.world', software: 'mastodon', weight: 1.0 }),
+  Object.freeze({ domain: 'mas.to', software: 'mastodon', weight: 1.0 }),
+  Object.freeze({ domain: 'universeodon.com', software: 'mastodon', weight: 1.0 }),
+  Object.freeze({ domain: 'hachyderm.io', software: 'mastodon', weight: 1.0 }),
+  Object.freeze({ domain: 'fosstodon.org', software: 'mastodon', weight: 1.0 }),
+  Object.freeze({ domain: 'sfba.social', software: 'mastodon', weight: 1.0 }),
+  Object.freeze({ domain: 'mastodon.cloud', software: 'mastodon', weight: 1.0 }),
+  Object.freeze({ domain: 'mstdn.jp', software: 'mastodon', weight: 1.0 }),
+  Object.freeze({ domain: 'social.vivaldi.net', software: 'mastodon', weight: 1.0 }),
+  Object.freeze({ domain: 'techhub.social', software: 'mastodon', weight: 1.0 }),
+  Object.freeze({ domain: 'infosec.exchange', software: 'mastodon', weight: 1.0 }),
+  Object.freeze({ domain: 'kolektiva.social', software: 'mastodon', weight: 1.0 }),
+  Object.freeze({ domain: 'misskey.io', software: 'misskey', weight: 1.0 }),
+  Object.freeze({ domain: 'misskey.design', software: 'misskey', weight: 1.0 }),
+]);
+
+let cachedFediPoolEntry = null;
+const quarantinedPublicHosts = new Map();
+let quarantineHydrated = false;
+let lastSampledPoolDomains = new Set();
+
+export function clearFediverseDiscoveryCacheForTests() {
+  cachedFediPoolEntry = null;
+  quarantinedPublicHosts.clear();
+  quarantineHydrated = false;
+  lastSampledPoolDomains.clear();
+}
+
+/**
+ * Respect Fediverse privacy signals (#noindex, #nobot, discoverable: false, indexable: false)
+ * on public discovery streams.
+ * @param {object} item
+ * @returns {boolean}
+ */
+export function isPublicDiscoveryOptOut(item) {
+  if (!item || typeof item !== 'object') return false;
+  const author = item.author || {};
+  if (author.discoverable === false || author.indexable === false) return true;
+  const bio = `${author.noteText || ''} ${author.note || ''}`;
+  if (bio && PUBLIC_OPT_OUT_RE.test(bio)) return true;
+  const body = `${item.content_text || item.text || ''} ${item.contentHtml || ''}`;
+  return Boolean(body && PUBLIC_OPT_OUT_RE.test(body));
+}
+
+function escapeHtmlPlain(raw) {
+  return String(raw || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+function normalizeMisskeyNote(note, origin) {
+  const host = new URL(origin).hostname;
+  const user = note?.user || {};
+  const uHost = String(user.host || host).toLowerCase();
+  const uname = String(user.username || user.id || 'user');
+  const acct = `${uname}@${uHost}`;
+  const rawText = String(note?.text || '').trim();
+  const cw = String(note?.cw || '').trim();
+  const contentHtml = rawText ? `<p>${escapeHtmlPlain(rawText).replace(/\n+/g, '<br>')}</p>` : '';
+  const files = Array.isArray(note?.files) ? note.files : [];
+  const media = files
+    .filter((f) => f && f.url)
+    .map((f) => {
+      const mime = String(f.type || '').toLowerCase();
+      const type = mime.startsWith('video/') ? 'video' : (mime.startsWith('audio/') ? 'audio' : 'image');
+      return {
+        id: String(f.id || ''),
+        type,
+        mimeType: mime,
+        url: cleanMastodonMediaUrl(f.url),
+        previewUrl: cleanMastodonMediaUrl(f.thumbnailUrl || f.url),
+        description: String(f.comment || ''),
+        width: Number.parseInt(f.properties?.width || 0, 10) || 0,
+        height: Number.parseInt(f.properties?.height || 0, 10) || 0,
+      };
+    });
+  const publishedAt = String(note?.createdAt || '');
+  const reactionTotal = Object.values(note?.reactions || {}).reduce((sum, n) => sum + Number(n || 0), 0);
+  const permalink = sanitizeHref(note?.uri || note?.url || `${origin}/notes/${encodeURIComponent(String(note?.id || ''))}`)
+    || `${origin}/notes/${encodeURIComponent(String(note?.id || ''))}`;
+
+  return {
+    key: `fediverse:${origin}:misskey:${note.id}`,
+    network: 'fediverse',
+    instanceUrl: origin,
+    id: `misskey:${host}:${note.id}`,
+    wrapperId: `misskey:${host}:${note.id}`,
+    uri: note.uri || permalink,
+    url: permalink,
+    createdAt: publishedAt,
+    createdAtMs: Date.parse(publishedAt) || 0,
+    author: {
+      id: String(user.id || uname),
+      username: uname,
+      acct,
+      displayName: String(user.name || uname),
+      avatar: cleanMastodonMediaUrl(user.avatarUrl || ''),
+      header: '',
+      url: sanitizeHref(`${origin}/@${uname}`) || '',
+      note: '',
+      noteText: String(user.description || ''),
+      fields: [],
+      locked: Boolean(user.isLocked),
+      bot: Boolean(user.isBot),
+      discoverable: user.discoverable !== false,
+      indexable: user.indexable !== false,
+      hideCollections: false,
+      defaultVisibility: 'public',
+      defaultSensitive: false,
+      defaultLanguage: 'en',
+      attributionDomains: [],
+      followersCount: 0,
+      followingCount: 0,
+      statusesCount: 0,
+      emojis: [],
+    },
+    rebloggedBy: null,
+    rebloggedAt: '',
+    pinned: false,
+    contentHtml,
+    sanitizedHtml: sanitizeFediverseHtmlToString(contentHtml, []),
+    spoilerText: cw,
+    sensitive: Boolean(cw || files.some((f) => Boolean(f?.isSensitive))),
+    visibility: 'public',
+    language: '',
+    inReplyToId: null,
+    inReplyToAccountId: null,
+    media,
+    emojis: [],
+    linkCard: null,
+    counts: {
+      replies: Number(note?.repliesCount || 0),
+      reposts: Number(note?.renoteCount || 0),
+      likes: reactionTotal,
+    },
+    viewerState: { favourited: false, reblogged: false, bookmarked: false },
+    raw: note,
+  };
+}
+
+/**
+ * Fetch local public notes from a Misskey / Sharkey / Firefish / Iceshrimp instance.
+ */
+export async function getMisskeyLocalNotes({
+  instanceUrl,
+  limit = 20,
+  onlyMedia = false,
+  untilId = '',
+  cache,
+  timeoutMs = 3500,
+  fetchImpl,
+} = {}) {
+  const origin = normalizeInstanceUrl(instanceUrl);
+  const body = { limit: Math.min(40, Math.max(1, Number(limit) || 20)) };
+  if (onlyMedia) body.withFiles = true;
+  if (untilId) body.untilId = untilId;
+  const rows = await fetchWrapper(`${origin}/api/notes/local-timeline`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    json: body,
+    ...(cache !== undefined ? { cache } : {}),
+    ...(timeoutMs ? { timeoutMs } : {}),
+    fetchImpl,
+  });
+  const list = Array.isArray(rows) ? rows : [];
+  const items = [];
+  for (const note of list) {
+    if (!note || typeof note !== 'object' || note.replyId) continue;
+    const vis = String(note.visibility || 'public').toLowerCase();
+    if (vis !== 'public' && vis !== 'home') continue;
+    if (!note.text && (!Array.isArray(note.files) || note.files.length === 0)) continue;
+    items.push(normalizeMisskeyNote(note, origin));
+  }
+  const lastId = list.length >= body.limit && list[list.length - 1]?.id ? String(list[list.length - 1].id) : null;
+  return { items, nextCursor: lastId };
+}
+
+async function ensureQuarantineHydrated() {
+  if (quarantineHydrated) return;
+  quarantineHydrated = true;
+  const saved = await kvGet(FEDIDB_QUARANTINE_KV_KEY, null).catch(() => null);
+  if (!saved || typeof saved !== 'object') return;
+  const now = Date.now();
+  for (const [host, expiresAt] of Object.entries(saved)) {
+    if (Number(expiresAt) > now) quarantinedPublicHosts.set(host, Number(expiresAt));
+  }
+}
+
+function recordQuarantinedHost(domain) {
+  const clean = String(domain || '').trim().toLowerCase();
+  if (!clean) return;
+  const now = Date.now();
+  quarantinedPublicHosts.set(clean, now + FEDIDB_TTL_MS);
+  const snapshot = {};
+  for (const [h, exp] of quarantinedPublicHosts.entries()) {
+    if (exp > now) snapshot[h] = exp;
+  }
+  void kvSet(FEDIDB_QUARANTINE_KV_KEY, snapshot).catch(() => {});
+}
+
+function normalizeFediPoolEntry(domainRaw, softwareRaw = 'mastodon', weightRaw = 1) {
+  const domain = String(domainRaw || '').trim().toLowerCase().replace(/^https?:\/\//, '').split(/[/?#]/)[0];
+  if (!domain || !isAllowedSocialUrl(`https://${domain}`) || AUTH_WALLED_PUBLIC_HOSTS.has(domain)) {
+    return null;
+  }
+  const software = String(softwareRaw || 'mastodon').trim().toLowerCase();
+  if (!SUPPORTED_FEDIDB_SLUGS.has(software)) return null;
+  return {
+    domain,
+    software,
+    weight: Number.isFinite(Number(weightRaw)) && Number(weightRaw) > 0 ? Number(weightRaw) : 1,
+  };
+}
+
+/**
+ * Fetch and cache active Mastodon, Pixelfed, Pleroma, and Misskey instances from FediDB for 24 hours,
+ * falling back cleanly to a curated open seed pool if offline or rate-limited.
+ */
+export async function fetchDynamicFediverseInstances({
+  forceRefresh = false,
+  timeoutMs = 4000,
+  fetchImpl,
+} = {}) {
+  await ensureQuarantineHydrated();
+  const now = Date.now();
+
+  if (!forceRefresh) {
+    if (cachedFediPoolEntry && cachedFediPoolEntry.expiresAt > now && Array.isArray(cachedFediPoolEntry.instances)) {
+      return cachedFediPoolEntry.instances.filter((e) => (quarantinedPublicHosts.get(e.domain) || 0) <= now);
+    }
+    const stored = await kvGet(FEDIDB_CACHE_KV_KEY, null).catch(() => null);
+    if (stored && Number(stored.expiresAt || 0) > now && Array.isArray(stored.instances) && stored.instances.length > 0) {
+      cachedFediPoolEntry = { instances: stored.instances, expiresAt: Number(stored.expiresAt) };
+      return stored.instances.filter((e) => (quarantinedPublicHosts.get(e.domain) || 0) <= now);
+    }
+  }
+
+  const byDomain = new Map();
+  const addEntry = (entry) => {
+    if (!entry) return;
+    if (!byDomain.has(entry.domain)) byDomain.set(entry.domain, entry);
+  };
+
+  try {
+    const payload = await fetchWrapper(FEDIDB_SERVERS_URL, {
+      ...(timeoutMs ? { timeoutMs } : {}),
+      fetchImpl,
+    });
+    const rows = Array.isArray(payload?.data) ? payload.data : (Array.isArray(payload) ? payload : []);
+    for (const row of rows) {
+      if (!row || row.stats_held || row.open_registration === false) continue;
+      const slug = String(row.software?.slug || row.software?.name || '').toLowerCase();
+      addEntry(normalizeFediPoolEntry(row.domain, slug, 1.0));
+    }
+  } catch {
+    // Fall back gracefully to seed list when offline or rate-limited
+  }
+
+  for (const seed of FALLBACK_FEDIVERSE_POOL) {
+    addEntry(normalizeFediPoolEntry(seed.domain, seed.software, seed.weight));
+  }
+
+  const instances = [...byDomain.values()];
+  cachedFediPoolEntry = { instances, expiresAt: now + FEDIDB_TTL_MS };
+  void kvSet(FEDIDB_CACHE_KV_KEY, cachedFediPoolEntry).catch(() => {});
+  return instances.filter((e) => (quarantinedPublicHosts.get(e.domain) || 0) <= now);
+}
+
+function weightedSampleInstances(pool, count, { onlyMedia = false, mediaType = 'any', avoidDomains = null, rng = Math.random } = {}) {
+  const candidates = [...pool];
+  if (candidates.length === 0 || count <= 0) return [];
+  const shouldAvoid = avoidDomains instanceof Set && avoidDomains.size > 0 && candidates.length > count;
+  const picked = [];
+  while (picked.length < count && candidates.length > 0) {
+    const weights = candidates.map((c) => {
+      let w = c.weight || 1;
+      if (mediaType === 'image' && c.software === 'pixelfed') {
+        w *= 6.0;
+      } else if (onlyMedia && (c.software === 'pixelfed' || MISSKEY_FAMILY_SLUGS.has(c.software))) {
+        w *= 2.5;
+      }
+      if (shouldAvoid && avoidDomains.has(c.domain)) {
+        w *= 0.12;
+      }
+      return w;
+    });
+    const totalW = weights.reduce((a, b) => a + b, 0);
+    let target = (typeof rng === 'function' ? rng() : Math.random()) * totalW;
+    let chosenIdx = candidates.length - 1;
+    for (let i = 0; i < weights.length; i += 1) {
+      target -= weights[i];
+      if (target <= 0) {
+        chosenIdx = i;
+        break;
+      }
+    }
+    picked.push(candidates.splice(chosenIdx, 1)[0]);
+  }
+  return picked;
+}
+
+function matchesFediverseMediaType(item, mediaType = 'any') {
+  if (!mediaType || mediaType === 'any') return true;
+  const media = Array.isArray(item?.media) ? item.media : [];
+  if (media.length === 0) return false;
+  if (mediaType === 'image') {
+    return media.some((m) => String(m?.type || 'image').toLowerCase() === 'image');
+  }
+  if (mediaType === 'video') {
+    return media.some((m) => {
+      const t = String(m?.type || '').toLowerCase();
+      return t === 'video' || t === 'gifv' || Boolean(m?.hlsUrl);
+    });
+  }
+  return true;
+}
+
+/**
+ * Sample open Fediverse instances uniformly at random from the 24h FediDB cache in parallel (3500ms timeout),
+ * drop opt-out accounts (#noindex, #nobot, discoverable: false, indexable: false), and ingest Misskey & #loops video streams.
+ */
+export async function harvestDynamicFediversePool({
+  sampleSize = 10,
+  perInstanceLimit = 20,
+  timeoutMs = 3500,
+  onlyMedia = false,
+  mediaType = 'any',
+  includePhotoTags = false,
+  includeLoopsTags = false,
+  connectedHost = '',
+  connectedAccessToken = '',
+  forceRefresh = false,
+  rng = Math.random,
+  fetchImpl,
+} = {}) {
+  const pool = await fetchDynamicFediverseInstances({ timeoutMs: Math.max(timeoutMs, 4000), fetchImpl });
+  const reqCache = forceRefresh ? 'no-store' : undefined;
+  const sampled = weightedSampleInstances(pool, Math.min(12, Math.max(1, Number(sampleSize) || 10)), {
+    onlyMedia: Boolean(onlyMedia || mediaType !== 'any'),
+    mediaType,
+    avoidDomains: forceRefresh ? lastSampledPoolDomains : null,
+    rng,
+  });
+  lastSampledPoolDomains = new Set(sampled.map((s) => s.domain));
+
+  const cleanConnHost = String(connectedHost || '').trim().toLowerCase();
+  const tasks = sampled.map(async (entry) => {
+    const origin = `https://${entry.domain}`;
+    try {
+      const res = MISSKEY_FAMILY_SLUGS.has(entry.software)
+        ? await getMisskeyLocalNotes({
+            instanceUrl: origin,
+            limit: perInstanceLimit,
+            onlyMedia: Boolean(onlyMedia || mediaType !== 'any'),
+            ...(reqCache ? { cache: reqCache } : {}),
+            timeoutMs,
+            fetchImpl,
+          })
+        : await getTimeline({
+            instanceUrl: origin,
+            accessToken: entry.domain === cleanConnHost ? connectedAccessToken : '',
+            stream: 'local',
+            onlyMedia: Boolean(onlyMedia || mediaType !== 'any'),
+            limit: perInstanceLimit,
+            ...(reqCache ? { cache: reqCache } : {}),
+            timeoutMs,
+            fetchImpl,
+          });
+      return res.items || [];
+    } catch (err) {
+      const status = Number(err?.status || 0);
+      if (status === 401 || status === 403 || status === 404 || status === 422) {
+        recordQuarantinedHost(entry.domain);
+      }
+      return [];
+    }
+  });
+
+  const extraTags = [];
+  if (includePhotoTags) extraTags.push('pixelfed', 'fediphoto', 'photography', 'photooftheday');
+  if (includeLoopsTags) extraTags.push('loops', 'loopsvideo', 'shortform', 'video');
+
+  if (extraTags.length > 0) {
+    const tagHosts = [cleanConnHost || 'mastodon.world', 'mas.to'];
+    const seenTagHost = new Set();
+    for (const host of tagHosts) {
+      if (!host || seenTagHost.has(host)) continue;
+      seenTagHost.add(host);
+      for (const tag of extraTags) {
+        tasks.push(
+          getTagTimeline({
+            instanceUrl: `https://${host}`,
+            accessToken: host === cleanConnHost ? connectedAccessToken : '',
+            tag,
+            onlyMedia: true,
+            limit: 25,
+            ...(reqCache ? { cache: reqCache } : {}),
+            timeoutMs,
+            fetchImpl,
+          })
+            .then((r) => r.items || [])
+            .catch(() => [])
+        );
+      }
+    }
+  }
+
+  const settled = await Promise.allSettled(tasks);
+  const out = [];
+  for (const res of settled) {
+    if (res.status !== 'fulfilled' || !Array.isArray(res.value)) continue;
+    for (const item of res.value) {
+      if (!item || isPublicDiscoveryOptOut(item)) continue;
+      if (!matchesFediverseMediaType(item, mediaType)) continue;
+      out.push(item);
+    }
+  }
+  return out;
 }

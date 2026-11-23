@@ -17,6 +17,7 @@ import {
   publishThreadsPost,
   resolveThreadsMediaUrl,
 } from '../web/queries/threads.js';
+import { browserStore, resetBrowserStoreForTests } from '../web/state/browserStore.js';
 import { resetCompose } from '../web/state/composeStore.js';
 import { feedStore, resetFeedStoreForTests, setStreamItems } from '../web/state/feedStore.js';
 import { resetConnectionStoreForTests } from '../web/state/sanctuary/connection.js';
@@ -237,7 +238,7 @@ test('normalizeBskyPost and PostCard convert UTF-8 record.facets and external li
   }
 });
 
-test('createAppShell capture external link handler uses pywebview.api.open_external and falls back to window.open when it returns false', async () => {
+test('createAppShell opens external post links straight into a new Browser tab (no Quick Peek and no OS browser fallback)', async () => {
   const dom = installMockDom();
   const prevPywebview = globalThis.pywebview;
   const prevOpen = globalThis.open;
@@ -264,6 +265,7 @@ test('createAppShell capture external link handler uses pywebview.api.open_exter
     resetConnectionStoreForTests();
     resetFeedStoreForTests();
     resetCompose();
+    resetBrowserStoreForTests();
 
     const doc = dom.document;
     const host = doc.createElement('div');
@@ -277,7 +279,7 @@ test('createAppShell capture external link handler uses pywebview.api.open_exter
           cid: 'bafy_link1',
           author: { did: 'did:plc:abc', handle: 'alice.bsky.social', displayName: 'Alice' },
           record: {
-            text: 'Check https://example.org/watch',
+            text: 'Check https://example.org/watch?utm_source=bsky&v=1',
             createdAt: '2026-11-19T10:30:00Z',
           },
         },
@@ -287,22 +289,21 @@ test('createAppShell capture external link handler uses pywebview.api.open_exter
     app = createAppShell(host, { initialTab: 'home', skipBackgroundInit: true });
     const link = host.querySelector('.post-body-html a');
     assert.ok(link);
-    assert.equal(link.getAttribute('href'), 'https://example.org/watch');
+    assert.equal(link.getAttribute('href'), 'https://example.org/watch?utm_source=bsky&v=1');
 
+    // Regular external post link opens straight into a new Browser tab with tracking params stripped and no OS browser fallback
     link.click();
     await new Promise((r) => setTimeout(r, 20));
-    assert.deepEqual(pywebviewCalls, ['https://example.org/watch']);
+    assert.equal(doc.title, 'Browser');
+    assert.equal(host.querySelector('.quick-peek-overlay'), null);
+    assert.equal(host.querySelector('.browser-os-link-btn'), null);
+    const activeTab = browserStore.get().tabs.find((t) => t.id === browserStore.get().activeTabId);
+    assert.equal(activeTab?.url, 'https://example.org/watch?v=1');
+    assert.equal(pywebviewCalls.length, 0);
     assert.equal(openedFallback.length, 0);
-
-    pywebviewReturn = false;
-    link.click();
-    await new Promise((r) => setTimeout(r, 20));
-    assert.deepEqual(pywebviewCalls, ['https://example.org/watch', 'https://example.org/watch']);
-    assert.equal(openedFallback.length, 1);
-    assert.equal(openedFallback[0].url, 'https://example.org/watch');
-    assert.equal(openedFallback[0].target, '_blank');
   } finally {
     app?.destroy();
+    resetBrowserStoreForTests();
     globalThis.pywebview = prevPywebview;
     globalThis.open = prevOpen;
     dom.restore();

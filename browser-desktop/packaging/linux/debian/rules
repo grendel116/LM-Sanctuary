@@ -1,0 +1,19 @@
+#!/usr/bin/make -f
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at http://mozilla.org/MPL/2.0/.
+
+%:
+	dh $@
+
+override_dh_strip_nondeterminism:
+	:
+
+override_dh_dwz:
+	:
+
+override_dh_strip:
+	:
+
+override_dh_shlibdeps:
+	:

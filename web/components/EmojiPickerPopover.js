@@ -238,6 +238,7 @@ export function createEmojiPicker({
   searchIn.className = 'onboarding-input emoji-picker-search';
   searchIn.placeholder = 'Search emoji...';
   searchIn.setAttribute('aria-label', 'Search emoji');
+  searchIn.setAttribute('autocomplete', 'off');
   searchIn.setAttribute('autocorrect', 'off');
   searchIn.setAttribute('autocapitalize', 'none');
   searchIn.setAttribute('spellcheck', 'false');

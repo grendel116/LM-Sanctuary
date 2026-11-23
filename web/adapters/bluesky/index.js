@@ -194,12 +194,15 @@ export class BlueskyAdapter extends SocialAdapter {
       .filter((r) => allowReasons.has(r.reason))
       .map((r) => {
         const h = r.author?.handle || r.author?.did || '';
+        const followUri = String(r.author?.viewer?.following || '');
         const actor = {
           id: r.author?.did || '',
           name: r.author?.displayName || h,
           handle: h,
           avatar_url: r.author?.avatar || '',
           url: h ? `https://bsky.app/profile/${h}` : '',
+          following: Boolean(followUri),
+          ...(followUri ? { followUri } : {}),
         };
         const text = r.record?.text || '';
         const published = r.indexedAt || r.record?.createdAt || new Date().toISOString();
@@ -241,7 +244,7 @@ export class BlueskyAdapter extends SocialAdapter {
           .map((it) => it._meta?.bluesky?.subjectUri || '')
           .filter((u) => u.startsWith('at://'))
       ),
-    ].slice(0, 25);
+    ].slice(0, 50);
 
     if (subjectUris.length > 0) {
       const postsByUri = await getBskyPostsByUris({ uris: subjectUris, ...this._authArgs() }).catch(() => ({}));

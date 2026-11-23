@@ -1,0 +1,16 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at http://mozilla.org/MPL/2.0/.
+
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Sanctuary Browser
+GenericName=Web Browser & AI Sanctuary
+Comment=Privacy-first sovereign browser and local AI workspace
+Exec=lm-sanctuary %u
+Terminal=false
+Icon=lm-sanctuary
+StartupWMClass=lm-sanctuary
+Categories=GNOME;GTK;Network;WebBrowser;
+StartupNotify=true

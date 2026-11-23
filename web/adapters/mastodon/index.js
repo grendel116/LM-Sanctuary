@@ -7,6 +7,7 @@ import {
   dismissMastodonNotification,
   editStatus,
   getNotifications,
+  getRelationships,
   getTimeline,
   pinStatus,
   publishStatus,
@@ -207,6 +208,26 @@ export class MastodonAdapter extends SocialAdapter {
       limit,
       fetchImpl: this.fetchImpl,
     });
+    const followAccountIds = [
+      ...new Set(
+        rows
+          .filter((n) => (n.type === 'follow' || n.type === 'follow_request') && n.account?.id)
+          .map((n) => String(n.account.id))
+      ),
+    ];
+    const relById = new Map();
+    if (followAccountIds.length > 0 && this.accessToken) {
+      const rels = await getRelationships({
+        instanceUrl: this.instanceUrl,
+        accessToken: this.accessToken,
+        accountIds: followAccountIds,
+        fetchImpl: this.fetchImpl,
+      }).catch(() => []);
+      for (const rel of Array.isArray(rels) ? rels : []) {
+        if (rel?.id !== undefined) relById.set(String(rel.id), rel);
+      }
+    }
+
     const mapType = {
       mention: 'mention',
       reply: 'reply',
@@ -217,12 +238,14 @@ export class MastodonAdapter extends SocialAdapter {
       quote: 'quote',
     };
     return rows.map((n) => {
+      const rel = n.account?.id ? relById.get(String(n.account.id)) : null;
       const actor = {
         id: n.account?.id || '',
         name: n.account?.displayName || n.account?.acct || '',
         handle: n.account?.acct || '',
         avatar_url: n.account?.avatar || '',
         url: n.account?.url || '',
+        ...(rel ? { following: Boolean(rel.following), requested: Boolean(rel.requested) } : {}),
       };
       if (n.status) {
         const base = toUnifiedItem(n.status);

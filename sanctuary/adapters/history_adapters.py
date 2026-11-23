@@ -11,6 +11,23 @@ from utils.utils import (
 )
 
 
+_POST_INST_CACHE: dict[str, tuple[float, str]] = {}
+
+
+def _extract_retrieval_query(user_msg: dict | None, raw_text: str) -> str:
+    """Keep shared card header + user's own note so third-party post bodies don't pollute retrieval."""
+    clean = (raw_text or "").strip()
+    if not clean.startswith(("[Shared post by ", "[Shared webpage from ")):
+        return clean
+    header = clean.split("\n", 1)[0]
+    if isinstance(user_msg, dict) and user_msg.get("user_note") is not None:
+        note = str(user_msg.get("user_note") or "").strip()
+        return f"{header}\n{note}".strip()
+    if "\n\n" in clean:
+        return f"{header}\n{clean.split('\n\n')[-1].strip()}".strip()
+    return header
+
+
 class OsHistoryAdapter:
     def __init__(self, runner_obj, session_id: str, file_path_resolved, image_data, image_mime, query_vector=None):
         self.runner_obj = runner_obj
@@ -20,6 +37,27 @@ class OsHistoryAdapter:
         self.image_mime = image_mime
         self.query_vector = query_vector
         self._cached_post_injection = None
+        self.matched_skill_records = []
+        self.has_sensitive_context = False
+
+    def get_latest_image_data_url(self) -> str:
+        """Return a `data:image/...;base64,...` URL if the active turn attached an image."""
+        import base64
+        import mimetypes
+
+        if self.image_data and self.image_mime:
+            return f"data:{self.image_mime};base64,{self.image_data}"
+        if self.file_path_resolved and os.path.isfile(self.file_path_resolved):
+            ext = os.path.splitext(self.file_path_resolved)[1].lower()
+            if ext in (".png", ".jpg", ".jpeg", ".webp", ".gif"):
+                mime = mimetypes.guess_type(self.file_path_resolved)[0] or "image/png"
+                try:
+                    with open(self.file_path_resolved, "rb") as f:
+                        b64 = base64.b64encode(f.read()).decode("ascii")
+                    return f"data:{mime};base64,{b64}"
+                except OSError:
+                    return ""
+        return ""
 
     def _get_chat_budget(self) -> int:
         chat_budget = os.getenv("LOCAL_CHAT_BUDGET", "4096")
@@ -27,9 +65,11 @@ class OsHistoryAdapter:
             return max(2048, int(chat_budget))
         return 4096
 
-    def _get_max_input_tokens(self, in_tool_loop: bool = False) -> int:
+    def _get_max_input_tokens(self, in_tool_loop: bool = False, cloud_gear: bool = False) -> int:
         # Conversational turns stay within LOCAL_CHAT_BUDGET so memory + vectors replace long-context prefill.
-        # Active tool-loop iterations expand into the allocated KV context so file/web reads fit in full.
+        # Active tool-loop iterations expand into the allocated KV context; Cloud Gears unlock 32K.
+        if cloud_gear:
+            return 32768
         chat_budget = self._get_chat_budget()
         if not in_tool_loop:
             return chat_budget
@@ -52,6 +92,16 @@ class OsHistoryAdapter:
             return sum(len(item.get("text", "")) if isinstance(item, dict) else len(item) for item in content)
         return len(content or "")
 
+    def estimate_turn_tokens(self) -> int:
+        """Estimate active turn + recent dialogue tokens without triggering context-drop logs."""
+        history = self.runner_obj.sessions_history.get(self.session_id, [])
+        total_chars = 0
+        for msg in history[-24:]:
+            if msg.get("role") in ("voice-call", "system-memory") or msg.get("compacted"):
+                continue
+            total_chars += len(str(msg.get("text") or ""))
+        return int(total_chars / self.CHARS_PER_TOKEN)
+
     def _build_tiered_messages(
         self,
         system_content: str,
@@ -59,6 +109,7 @@ class OsHistoryAdapter:
         post_injection: str,
         max_input_tokens: int | None = None,
         in_tool_loop: bool = False,
+        cloud_gear: bool = False,
     ) -> list[dict]:
         """
         Assembles the OpenAI payload in prefix-cache order:
@@ -67,7 +118,7 @@ class OsHistoryAdapter:
           3. Latest user turn with the per-turn post-injection appended.
         """
         if max_input_tokens is None:
-            max_input_tokens = self._get_max_input_tokens(in_tool_loop=in_tool_loop)
+            max_input_tokens = self._get_max_input_tokens(in_tool_loop=in_tool_loop, cloud_gear=cloud_gear)
         char_budget = int(max_input_tokens * self.CHARS_PER_TOKEN)
 
         chat_turns = [m for m in raw_messages if m.get("role") != "system"]
@@ -133,7 +184,7 @@ class OsHistoryAdapter:
         return _merge_consecutive_messages(final_messages)
 
     def get_openai_messages(
-        self, sys_inst: str, rag_context: str, memory_context: str = "", turn_directive: str = ""
+        self, sys_inst: str, rag_context: str, memory_context: str = "", turn_directive: str = "", cloud_gear: bool = False
     ) -> list[dict]:
         from core.program_config import is_story_mode, replace_placeholders
         from runners.program import get_active_program
@@ -197,28 +248,48 @@ class OsHistoryAdapter:
         )
         in_tool_loop = latest_user_idx >= 0 and last_tool_idx > latest_user_idx
         prior_tool_cap = max(800, int(self._get_chat_budget() * 0.20))
-        loop_tool_cap = max(600, int(self._get_max_input_tokens(in_tool_loop=True) * 0.12))
+        loop_tool_cap = max(600, int(self._get_max_input_tokens(in_tool_loop=True, cloud_gear=cloud_gear) * (0.45 if cloud_gear else 0.12)))
+        has_read_webpage_in_loop = in_tool_loop and any(
+            (m.get("id", "").startswith("tool_") or str(m.get("text") or "").startswith("[Tool Response from read_webpage"))
+            and "read_webpage" in str(m.get("text") or "")
+            for m in filtered_history[latest_user_idx + 1:]
+        )
 
         for idx, msg in enumerate(filtered_history):
             role = "assistant" if msg["role"] == "program" else "user"
             msg_id = msg.get("id", "")
             content_text = replace_placeholders(msg.get("text") or "")
+            if (
+                has_read_webpage_in_loop
+                and role == "user"
+                and not msg_id.startswith("tool_")
+                and content_text.startswith("[Shared webpage from ")
+            ):
+                header = content_text.split("\n", 1)[0]
+                user_note = (msg.get("user_note") or "").strip()
+                content_text = f"{header}\n\n{user_note}" if user_note else header
 
             if is_group and role == "assistant" and msg.get("sender_name"):
                 s_name = msg["sender_name"]
                 if not content_text.startswith(f"[{s_name}]") and not content_text.startswith(f"{s_name}:"):
                     content_text = f"[{s_name}]: {content_text}"
 
-            # Only re-serialize tool call tags on intermediate (itm_) turns that directly preceded a tool response.
-            # Never append tool tags onto completed prgm_ turns, as that teaches models to emit tags after final replies.
+            # Only re-serialize tool call summaries on intermediate (itm_) turns that directly preceded a tool response.
+            # When cloud_gear=True, emit plain `Called ...` summaries so Cloud models keep using native JSON tool_calls.
             if msg.get("tool_calls") and msg_id.startswith("itm_"):
                 for tc in msg["tool_calls"]:
                     if tc.get("type") == "call":
-                        args_list = [
-                            f'{k}="{v.replace('"', '\\"')}"' if isinstance(v, str) else f"{k}={v}"
-                            for k, v in tc.get("args", {}).items()
-                        ]
-                        content_text += f"\n[{tc.get('name')}({', '.join(args_list)})]"
+                        args_list = []
+                        for k, v in tc.get("args", {}).items():
+                            if isinstance(v, str):
+                                preview = f"{v[:320]}..." if len(v) > 320 else v
+                                args_list.append(f"{k}={json.dumps(preview, ensure_ascii=False)}")
+                            else:
+                                args_list.append(f"{k}={v}")
+                        if cloud_gear:
+                            content_text += f"\nCalled {tc.get('name')}({', '.join(args_list)})"
+                        else:
+                            content_text += f"\n[{tc.get('name')}({', '.join(args_list)})]"
 
             # Compact large tool outputs from completed prior turns so they do not crowd out dialogue history
             if (
@@ -293,6 +364,7 @@ class OsHistoryAdapter:
             raw_messages=raw_messages,
             post_injection=self._cached_post_injection,
             in_tool_loop=in_tool_loop,
+            cloud_gear=cloud_gear,
         )
 
         return msgs
@@ -332,21 +404,24 @@ class OsHistoryAdapter:
                 clean_mem = msg["text"].replace("[System Memory of older conversation turns]:", "").strip()
                 post_blocks.append(f"<conversation_memory>\n{clean_mem}\n</conversation_memory>")
 
-        last_user_msg = next(
+        last_user_entry = next(
             (
-                m.get("text", "") for m in reversed(filtered_history)
+                m for m in reversed(filtered_history)
                 if m.get("role") == "user"
                 and not m.get("id", "").startswith("tool_")
                 and not m.get("text", "").startswith("[Tool Response from")
             ),
-            "",
+            None,
         )
+        last_user_msg = (last_user_entry or {}).get("text", "")
+        retrieval_query = _extract_retrieval_query(last_user_entry, last_user_msg)
 
-        if last_user_msg:
+        if retrieval_query:
             try:
                 from tools.journals import match_journals
-                matched = match_journals(last_user_msg, active_prog, query_vector=self.query_vector)
+                matched = match_journals(retrieval_query, active_prog, query_vector=self.query_vector)
                 if matched:
+                    self.has_sensitive_context = True
                     journals_text = "\n".join(f"- {replace_placeholders(e['content'])}" for e in matched)
                     post_blocks.append(f"<recalled_journals>\n{journals_text}\n</recalled_journals>")
             except Exception as je:
@@ -355,32 +430,60 @@ class OsHistoryAdapter:
         if rag_context:
             post_blocks.append(f"<knowledge_base>\n{rag_context}\n</knowledge_base>")
 
-        if last_user_msg:
+        if retrieval_query:
             try:
-                from core.skill_retriever import retrieve_skill_instructions
-                skills = retrieve_skill_instructions(
-                    query=last_user_msg,
+                from core.skill_retriever import (
+                    format_skill_records,
+                    retrieve_matched_skill_records,
+                )
+                self.matched_skill_records = retrieve_matched_skill_records(
+                    query=retrieval_query,
                     story_active=story_active,
                     threshold=0.38,
                     top_k=2,
+                    query_vector=self.query_vector,
                 )
+                skills = format_skill_records(self.matched_skill_records)
                 if skills:
                     post_blocks.append(skills)
             except Exception as se:
                 print(f"[skills] Retrieval error: {se}")
 
-        if last_user_msg and ("http://" in last_user_msg or "https://" in last_user_msg):
+        stripped_user = (last_user_msg or "").lstrip()
+        if stripped_user.lower().startswith("/plan"):
             post_blocks.append(
-                "# PASTED LINK DIRECTIVE\n"
-                "When a URL is present in the message, execute `[read_webpage(url=\"...\")]` to fetch the webpage. "
-                "After the webpage content is retrieved, analyze its core concepts and discuss the article's ideas directly in character."
+                "# IMPLEMENTATION PLAN MODE\n"
+                "The user invoked `/plan`. Do NOT mutate files or run destructive commands yet. "
+                "Inspect files read-only (`list_dir`, `grep_search`, `read_file`) or research (`web_search`, `read_webpage`), then present a concise, "
+                "concrete plan wrapped inside a fenced ```sanctuary-plan block with sections for Goal, "
+                "Planned Changes, and Verification so the user can review and click Proceed."
+            )
+
+        has_web_tool_in_loop = any(
+            (m.get("id", "").startswith("tool_") or "[Tool Response from " in str(m.get("text") or ""))
+            and any(t in str(m.get("text") or "") for t in ("read_webpage", "web_search", "browser_action"))
+            for m in filtered_history[latest_user_idx + 1:]
+        )
+        if (last_user_msg and ("http://" in last_user_msg or "https://" in last_user_msg)) or has_web_tool_in_loop:
+            post_blocks.append(
+                "# WEB & RESEARCH GROUNDING DIRECTIVE\n"
+                "Ground your answer in concrete facts, commands, structure, and technical specifics from the retrieved webpage(s) or search results. "
+                "Do not speculate before tools run or rely on vague card previews. "
+                "If an overview/index page lacks the requested detail and lists relevant subpage links, call `[read_webpage(url=\"...\")]` to read them before answering."
             )
 
         try:
             json_path = Path(PROGRAMS_DIR) / active_prog / f"{active_prog}.json"
             if json_path.is_file():
-                raw = json.loads(json_path.read_text(encoding="utf-8"))
-                post_inst = raw.get("data", raw).get("post_history_instructions", "").strip()
+                mtime = json_path.stat().st_mtime
+                cache_key = str(json_path)
+                cached = _POST_INST_CACHE.get(cache_key)
+                if cached and cached[0] == mtime:
+                    post_inst = cached[1]
+                else:
+                    raw = json.loads(json_path.read_text(encoding="utf-8"))
+                    post_inst = raw.get("data", raw).get("post_history_instructions", "").strip()
+                    _POST_INST_CACHE[cache_key] = (mtime, post_inst)
                 if post_inst:
                     post_blocks.append(replace_placeholders(post_inst))
         except Exception as e:

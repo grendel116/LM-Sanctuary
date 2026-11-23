@@ -43,4 +43,6 @@ opencv-python-headless
 piexif
 dill
 matplotlib
-google-antigravity
+openhands-sdk
+openhands-tools
+openhands-agent-server

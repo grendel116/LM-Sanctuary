@@ -167,12 +167,29 @@ test('UserModal and SettingsModal use classic native <dialog> without ARIA dialo
         { status: 200, headers: { 'content-type': 'application/json' } }
       );
     }
+    if (u.includes('/api/openhands/server')) {
+      return new Response(
+        JSON.stringify({
+          running: false,
+          port: 8091,
+          openai_base_url: 'http://127.0.0.1:8091/v1',
+          model_id: 'openhands_greenpt',
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } }
+      );
+    }
     if (u.includes('/api/project_settings')) {
       return new Response(
         JSON.stringify({
           folders: ['/tmp/ws'],
           security_preset: 'ask_always',
           artifact_review_policy: 'ask_always',
+          greenpt_api_key: '',
+          greenpt_base_url: 'https://api.greenpt.ai/v1',
+          openhands_model: 'glm-5.3',
+          openhands_mode: 'cli',
+          openhands_server_port: 8091,
+          openhands_auto_start_server: false,
           search_engine: 'web_crawling',
           tts_voice: 'af_heart',
         }),
@@ -258,29 +275,55 @@ test('UserModal and SettingsModal use classic native <dialog> without ARIA dialo
     assert.ok(settingsDialog.textContent.includes('Qwen 7B'));
 
     const modalTabLabels = Array.from(settingsDialog.querySelectorAll('.modal-tab-btn')).map((b) => b.textContent);
-    assert.deepEqual(modalTabLabels, ['Models', 'Project Settings', 'Moderation']);
+    assert.deepEqual(modalTabLabels, ['Models', 'Project', 'Moderation']);
 
     const projectTabBtn = Array.from(settingsDialog.querySelectorAll('.modal-tab-btn'))
-      .find((b) => b.textContent === 'Project Settings');
+      .find((b) => b.textContent === 'Project');
     assert.ok(projectTabBtn);
     projectTabBtn.click();
     await new Promise((r) => setTimeout(r, 20));
     assert.ok(settingsDialog.textContent.includes('/tmp/ws'));
     assert.ok(settingsDialog.querySelector('#node-url-input'));
-    const apiKeyInput = settingsDialog.querySelector('#project-gemini-api-key');
-    assert.ok(apiKeyInput);
+    assert.equal(settingsDialog.querySelector('#project-gemini-api-key'), null);
+    const apiKeyInput = settingsDialog.querySelector('#project-greenpt-api-key');
+    const baseUrlInput = settingsDialog.querySelector('#project-greenpt-base-url');
+    const modelInput = settingsDialog.querySelector('#project-openhands-model');
+    const modeSelect = settingsDialog.querySelector('#project-openhands-mode');
+    assert.ok(apiKeyInput && baseUrlInput && modelInput && modeSelect);
     assert.equal(apiKeyInput.type, 'password');
-    apiKeyInput.value = 'AIza_test_saved_key';
+
+    apiKeyInput.value = 'sk_greenpt_test_saved_key';
     apiKeyInput.dispatchEvent(new Event('change'));
-    await new Promise((r) => setTimeout(r, 20));
+    baseUrlInput.value = 'https://api.us.greenpt.ai/v1';
+    baseUrlInput.dispatchEvent(new Event('change'));
+    modelInput.value = 'glm-5.3-flash';
+    modelInput.dispatchEvent(new Event('change'));
+    modeSelect.value = 'server';
+    modeSelect.dispatchEvent(new Event('change'));
+    await new Promise((r) => setTimeout(r, 25));
+
+    const projectBodies = savedBodies
+      .filter((b) => b.url.includes('/api/project_settings'))
+      .map((b) => JSON.parse(b.body));
+    assert.ok(projectBodies.some((p) => p.greenpt_api_key === 'sk_greenpt_test_saved_key'));
+    assert.ok(projectBodies.some((p) => p.greenpt_base_url === 'https://api.us.greenpt.ai/v1'));
+    assert.ok(projectBodies.some((p) => p.openhands_model === 'glm-5.3-flash'));
     assert.ok(
-      savedBodies.some(
-        (b) => b.url.includes('/api/project_settings') && JSON.parse(b.body).gemini_api_key === 'AIza_test_saved_key'
+      projectBodies.some(
+        (p) => p.openhands_mode === 'server' && !Object.prototype.hasOwnProperty.call(p, 'greenpt_api_key')
       )
     );
+
+    // Typing a new key without firing 'change' flushes on modal close
+    apiKeyInput.value = 'sk_greenpt_flush_on_close';
+    apiKeyInput.dispatchEvent(new Event('input'));
     settingsDialog.close();
 
     await new Promise((r) => setTimeout(r, 15));
+    const flushedBodies = savedBodies
+      .filter((b) => b.url.includes('/api/project_settings'))
+      .map((b) => JSON.parse(b.body));
+    assert.ok(flushedBodies.some((p) => p.greenpt_api_key === 'sk_greenpt_flush_on_close'));
   } finally {
     globalThis.fetch = prevFetch;
     dom.restore();
@@ -474,7 +517,7 @@ test('Feed & Following render two clean tabs and avoid unauthenticated home time
   globalThis.fetch = async (url) => {
     const u = String(url);
     calledUrls.push(u);
-    if (u.includes('/api/v1/timelines/tag/news') || u.includes('/api/v1/timelines/tag/technology') || u.includes('/api/v1/timelines/tag/science')) {
+    if (u.includes('/api/v1/trends/statuses')) {
       return new Response(
         JSON.stringify([
           {
@@ -488,7 +531,7 @@ test('Feed & Following render two clean tabs and avoid unauthenticated home time
         { status: 200, headers: { 'content-type': 'application/json' } }
       );
     }
-    if (u.includes('/api/v1/timelines/tag/') || u.includes('/api/v1/timelines/public')) {
+    if (u.includes('/api/v1/timelines/tag/')) {
       return new Response('[]', { status: 200, headers: { 'content-type': 'application/json' } });
     }
     if (u.includes('app.bsky.feed.getFeed')) {
@@ -505,6 +548,15 @@ test('Feed & Following render two clean tabs and avoid unauthenticated home time
     resetAuthStoreForTests();
     resetConnectionStoreForTests();
     resetFeedStoreForTests();
+    feedStore.set({
+      tuning: {
+        version: 2,
+        updatedAt: 0,
+        updatedBy: 'default',
+        discoveryChannels: [],
+        discoveryInstances: ['mastodon.world'],
+      },
+    });
     setActiveStream('feed');
 
     const doc = dom.document;
@@ -518,9 +570,10 @@ test('Feed & Following render two clean tabs and avoid unauthenticated home time
 
     await new Promise((r) => setTimeout(r, 30));
     const tabBtns = host.querySelectorAll('.feed-stream-tabs .stage-tab-btn');
-    assert.equal(tabBtns.length, 2);
+    assert.equal(tabBtns.length, 4);
+    assert.deepEqual(Array.from(tabBtns).map((b) => b.textContent), ['Feed', 'Following', 'Photos', 'Video']);
     assert.ok(host.textContent.includes('Trending open post'));
-    assert.equal(calledUrls.some((u) => u.includes('whats-hot') || u.includes('/trends/statuses')), false);
+    assert.equal(calledUrls.some((u) => u.includes('/api/v1/timelines/tag/')), false);
 
     calledUrls.length = 0;
     tabBtns[1].click();
@@ -806,6 +859,23 @@ test('PostCard Share-to-Program uses distinct send symbol, stages a compact post
     assert.equal(row.querySelector('.message.user').dataset.rawText, 'Thoughts on this?');
     assert.ok(row.querySelector('.message-text').textContent.includes('Thoughts on this?'));
     assert.equal(row.querySelector('.message-text').textContent.includes('[Shared post by'), false);
+
+    // Legacy / rerolled message without shared_post dict recovers card + user note from formatted text
+    const recoveredRow = buildMessageRow({
+      id: 'usr_shared_legacy_1',
+      role: 'user',
+      text: '[Shared post by Rev Mike (@mike@social.thegreens.uk)]\nSelf-hosting my own corner of the Fediverse!\n\nThis was Mike\'s original message.\n\nSecond paragraph.',
+      timestamp: Date.now() / 1000,
+    });
+    assert.ok(recoveredRow.querySelector('.shared-post-card'));
+    assert.equal(recoveredRow.querySelector('.shared-post-author').textContent, 'Rev Mike');
+    assert.equal(recoveredRow.querySelector('.shared-post-handle').textContent, '@mike@social.thegreens.uk');
+    assert.equal(recoveredRow.querySelector('.shared-post-text').textContent, 'Self-hosting my own corner of the Fediverse!');
+    assert.equal(
+      recoveredRow.querySelector('.message.user').dataset.rawText,
+      "This was Mike's original message.\n\nSecond paragraph."
+    );
+    assert.equal(recoveredRow.querySelector('.message-text').textContent.includes('[Shared post by'), false);
 
     app.destroy();
     await new Promise((r) => setTimeout(r, 15));
@@ -1522,7 +1592,95 @@ test('Single, 2-up pair, and 3+ image PostCards preserve full aspect ratio heigh
     sharedViewer.querySelector('.next-btn').click();
     assert.equal(sharedViewer.querySelector('#modal-img').src, 'https://cdn.example/shared-2.jpg');
     sharedViewer.close();
+
+    // Terminal tool log summary skips leading `cd <workspace>;` boilerplate
+    const termRow = buildMessageRow({
+      id: 'prgm_term_cd_1',
+      role: 'program',
+      text: 'Checked feed.',
+      tool_calls: [
+        {
+          type: 'call',
+          id: 'tc_cd_1',
+          name: 'openhands:terminal',
+          args: { command: 'cd C:\\LLM\\LM-Sanctuary; git grep -n "feed"' },
+        },
+        {
+          type: 'response',
+          id: 'tc_cd_1',
+          name: 'openhands:terminal',
+          response: 'web/app/feed.js:1:...',
+        },
+      ],
+      timestamp: Date.now() / 1000,
+    });
+    const termTarget = termRow.querySelector('.ag-log-target')?.textContent || '';
+    assert.equal(termTarget.includes('git grep'), true, termTarget);
+    assert.equal(termTarget.includes('cd C:\\LLM\\LM-Sanctuary'), false, termTarget);
   } finally {
+    globalThis.fetch = prevFetch;
+    dom.restore();
+  }
+});
+
+test('ComposeModal renders original parent message when replying and clears stale reply state on close/new post', async () => {
+  const { closeCompose, openCompose } = await import('../web/state/composeStore.js');
+  const dom = installMockDom();
+  const prevFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response('[]', { status: 200, headers: { 'content-type': 'application/json' } });
+
+  try {
+    resetCompose();
+    const host = dom.document.createElement('div');
+    dom.document.body.appendChild(host);
+    const ctrl = mountComposeModal(host);
+
+    prefillReply({
+      id: 'mastodon:orig_42',
+      protocol: 'mastodon',
+      content_text: 'Original post asking for feedback on cooperative infrastructure.',
+      date_published: '2026-11-23T07:00:00.000Z',
+      author: {
+        id: 'u_mike',
+        name: 'Rev Mike',
+        handle: 'mike@social.thegreens.uk',
+        avatar_url: 'https://cdn.example/mike.png',
+      },
+      _meta: { mastodon: { statusId: 'orig_42', instanceUrl: 'https://mastodon.social' } },
+    });
+
+    const banner = host.querySelector('.compose-reply-banner');
+    assert.equal(banner.hidden, false);
+    assert.ok(banner.querySelector('.compose-reply-label')?.textContent.includes('Replying to @mike@social.thegreens.uk'));
+    assert.ok(banner.querySelector('.post-reply-context-text')?.textContent.includes('Original post asking for feedback'));
+    assert.equal(host.querySelector('.compose-publish-btn')?.textContent, 'Reply');
+
+    // Closing the modal clears replyTo and untouched mention prefix so next openCompose({}) is standalone
+    closeCompose();
+    assert.equal(composeStore.get().replyTo, null);
+    assert.equal(composeStore.get().text, '');
+
+    openCompose({});
+    assert.equal(host.querySelector('.compose-reply-banner').hidden, true);
+    assert.equal(host.querySelector('.compose-publish-btn')?.textContent, 'Post');
+
+    // Clicking the inline clear button detaches a reply back to standalone New post
+    prefillReply({
+      id: 'bluesky:at://did:plc:x/app.bsky.feed.post/1',
+      protocol: 'bluesky',
+      content_text: 'Original Bluesky message',
+      author: { id: 'did:plc:x', name: 'Alice', handle: 'alice.bsky.social' },
+      _meta: { bluesky: { uri: 'at://did:plc:x/app.bsky.feed.post/1', cid: 'cid1' } },
+    });
+    assert.equal(host.querySelector('.compose-reply-banner').hidden, false);
+    host.querySelector('.compose-reply-clear-btn').click();
+    assert.equal(composeStore.get().replyTo, null);
+    assert.equal(host.querySelector('.compose-reply-banner').hidden, true);
+    assert.equal(host.querySelector('.compose-publish-btn')?.textContent, 'Post');
+
+    ctrl.destroy();
+  } finally {
+    resetCompose();
     globalThis.fetch = prevFetch;
     dom.restore();
   }

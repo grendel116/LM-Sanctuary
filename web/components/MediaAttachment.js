@@ -5,6 +5,10 @@
 const REMOVE_SVG = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>`;
 const CAROUSEL_PREV_SVG = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="15 18 9 12 15 6"></polyline></svg>`;
 const CAROUSEL_NEXT_SVG = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6"></polyline></svg>`;
+const EYE_OPEN_SVG = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg>`;
+const EYE_OFF_SVG = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"></path><line x1="1" y1="1" x2="23" y2="23"></line></svg>`;
+
+let sensitiveGateSeq = 0;
 
 const MIN_MEDIA_RATIO = 0.35;
 const MAX_MEDIA_RATIO = 2.6;
@@ -22,7 +26,7 @@ function getItemAspectRatio(item) {
   return null;
 }
 
-function buildMediaElement(doc, item, idx, total, onExpand, allItems, { onRatioResolved } = {}) {
+function buildMediaElement(doc, item, idx, total, onExpand, allItems, { onRatioResolved, mediaPriority = 'lazy' } = {}) {
   const type = String(item.type || item.mimeType || item.mime_type || 'image').toLowerCase();
   const mime = String(item.mime_type || item.mimeType || '').toLowerCase();
   const url = item.url || item.previewUrl || item.hlsUrl || '';
@@ -42,18 +46,23 @@ function buildMediaElement(doc, item, idx, total, onExpand, allItems, { onRatioR
       video.setAttribute('width', String(w));
       video.setAttribute('height', String(h));
     }
+    video.disablePictureInPicture = true;
+    video.setAttribute('disablepictureinpicture', '');
     video.controls = true;
     video.setAttribute('controls', '');
     video.playsInline = true;
     video.setAttribute('playsinline', '');
     video.preload = 'metadata';
     video.setAttribute('preload', 'metadata');
-    video.setAttribute('loading', 'lazy');
+    if (mediaPriority === 'lazy' || idx > 0) {
+      video.setAttribute('loading', 'lazy');
+    }
     if (item.previewUrl && item.previewUrl !== url) {
       video.poster = item.previewUrl;
       video.setAttribute('poster', item.previewUrl);
     }
     if (isGifv) {
+      video.dataset.isGifv = 'true';
       video.muted = true;
       video.loop = true;
       const reducedMotion = Boolean(globalThis.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches);
@@ -147,8 +156,21 @@ function buildMediaElement(doc, item, idx, total, onExpand, allItems, { onRatioR
   const img = doc.createElement('img');
   img.className = 'post-media-item';
   img.alt = altDesc || 'Post attachment';
-  img.loading = 'lazy';
+  if (mediaPriority === 'high' && idx === 0) {
+    img.fetchPriority = 'high';
+    img.setAttribute('fetchpriority', 'high');
+  } else if (mediaPriority === 'eager' && (idx === 0 || total === 2)) {
+    // Eager above-the-fold fetch without overriding default fetchpriority.
+  } else if (mediaPriority !== 'lazy' && idx > 0) {
+    img.loading = 'lazy';
+    img.fetchPriority = 'low';
+    img.setAttribute('fetchpriority', 'low');
+  } else {
+    img.loading = 'lazy';
+  }
   img.decoding = 'async';
+  img.referrerPolicy = 'no-referrer';
+  img.setAttribute('referrerpolicy', 'no-referrer');
   const w = Number.parseInt(item.width, 10);
   const h = Number.parseInt(item.height, 10);
   if (Number.isFinite(w) && w > 0 && Number.isFinite(h) && h > 0) {
@@ -167,6 +189,14 @@ function buildMediaElement(doc, item, idx, total, onExpand, allItems, { onRatioR
     }
   };
   img.addEventListener('load', handleImgReady, { once: true });
+  const fallbackPreview = String(item.previewUrl || '').trim();
+  if (fallbackPreview && fallbackPreview !== (url || '')) {
+    img.addEventListener('error', () => {
+      if (img.src !== fallbackPreview) {
+        img.src = fallbackPreview;
+      }
+    }, { once: true });
+  }
   img.src = url || item.previewUrl || '';
   if (img.complete && img.naturalWidth > 0) {
     queueMicrotask(handleImgReady);
@@ -182,10 +212,84 @@ function buildMediaElement(doc, item, idx, total, onExpand, allItems, { onRatioR
   return btn;
 }
 
-export function createPostMediaGrid(media = [], { onExpand } = {}) {
-  const doc = globalThis.document;
-  const validItems = (Array.isArray(media) ? media : []).filter((item) => item && (item.url || item.previewUrl || item.hlsUrl));
+function setGridInertState(gridEl, isInert) {
+  gridEl.inert = Boolean(isInert);
+  if (isInert) {
+    gridEl.setAttribute?.('inert', '');
+  } else {
+    gridEl.removeAttribute?.('inert');
+  }
+}
 
+function wrapSensitiveMediaGrid(doc, gridEl, sensitiveWarning) {
+  sensitiveGateSeq += 1;
+  const gridId = `post-sensitive-media-${sensitiveGateSeq}`;
+  gridEl.id = gridId;
+
+  const wrap = doc.createElement('div');
+  wrap.className = 'post-media-sensitive-wrap is-blurred';
+
+  const stage = doc.createElement('div');
+  stage.className = 'post-media-sensitive-stage';
+
+  const toggleBtn = doc.createElement('button');
+  toggleBtn.type = 'button';
+  toggleBtn.className = 'post-media-sensitive-btn';
+  toggleBtn.setAttribute('aria-controls', gridId);
+
+  const iconEl = doc.createElement('span');
+  iconEl.className = 'post-media-sensitive-icon';
+  iconEl.setAttribute('aria-hidden', 'true');
+  iconEl.style.display = 'contents';
+
+  const labelEl = doc.createElement('span');
+  labelEl.className = 'post-media-sensitive-label';
+
+  toggleBtn.append(iconEl, labelEl);
+
+  const videos = [...gridEl.querySelectorAll('video')];
+  let revealed = false;
+
+  const syncGateState = () => {
+    wrap.classList.toggle('is-blurred', !revealed);
+    wrap.classList.toggle('is-revealed', revealed);
+    setGridInertState(gridEl, !revealed);
+    toggleBtn.setAttribute('aria-expanded', revealed ? 'true' : 'false');
+    iconEl.innerHTML = revealed ? EYE_OFF_SVG : EYE_OPEN_SVG;
+    labelEl.textContent = revealed ? 'Hide media' : `Show · ${sensitiveWarning}`;
+    const reducedMotion = Boolean(globalThis.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches);
+    for (const v of videos) {
+      if (!revealed) {
+        v.autoplay = false;
+        try {
+          v.pause?.();
+        } catch {
+          // Ignore pause errors in synthetic DOM
+        }
+      } else if (v.dataset?.isGifv === 'true' && !reducedMotion) {
+        v.autoplay = true;
+        try {
+          v.play?.()?.catch?.(() => {});
+        } catch {
+          // Ignore play errors in synthetic DOM
+        }
+      }
+    }
+  };
+
+  toggleBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    revealed = !revealed;
+    syncGateState();
+  });
+
+  syncGateState();
+  stage.append(gridEl, toggleBtn);
+  wrap.appendChild(stage);
+  return wrap;
+}
+
+function buildRawMediaGrid(doc, validItems, onExpand, { forceCarousel = false, mediaPriority = 'lazy' } = {}) {
   if (validItems.length <= 1) {
     const single = doc.createElement('div');
     let extraClass = '';
@@ -221,12 +325,12 @@ export function createPostMediaGrid(media = [], { onExpand } = {}) {
           applySingleRatio(initRatio, Number.parseInt(only.width, 10) || 0, Number.parseInt(only.height, 10) || 0);
         }
       }
-      single.appendChild(buildMediaElement(doc, only, 0, 1, onExpand, validItems, { onRatioResolved: applySingleRatio }));
+      single.appendChild(buildMediaElement(doc, only, 0, 1, onExpand, validItems, { onRatioResolved: applySingleRatio, mediaPriority }));
     }
     return single;
   }
 
-  if (validItems.length === 2) {
+  if (validItems.length === 2 && !forceCarousel) {
     const pair = doc.createElement('div');
     pair.className = 'post-media-grid post-media-pair post-media-count-2';
     const ratios = validItems.map((it) => getItemAspectRatio(it));
@@ -251,6 +355,7 @@ export function createPostMediaGrid(media = [], { onExpand } = {}) {
       const slot = doc.createElement('div');
       slot.className = 'post-media-pair-slot';
       const el = buildMediaElement(doc, item, idx, 2, onExpand, validItems, {
+        mediaPriority,
         onRatioResolved: (r, w, h) => {
           ratios[idx] = r;
           if (w > 0 && h > 0) dims[idx] = [w, h];
@@ -329,6 +434,7 @@ export function createPostMediaGrid(media = [], { onExpand } = {}) {
     slide.dataset.markerName = `Go to image ${idx + 1}`;
     slide.appendChild(
       buildMediaElement(doc, item, idx, total, onExpand, validItems, {
+        mediaPriority,
         onRatioResolved: (r, w, h) => {
           slideRatios[idx] = r;
           if (w > 0 && h > 0) slideDims[idx] = [w, h];
@@ -513,6 +619,17 @@ export function createPostMediaGrid(media = [], { onExpand } = {}) {
   );
 
   return carousel;
+}
+
+export function createPostMediaGrid(media = [], { onExpand, sensitiveWarning = '', forceCarousel = false, mediaPriority = 'lazy' } = {}) {
+  const doc = globalThis.document;
+  const validItems = (Array.isArray(media) ? media : []).filter((item) => item && (item.url || item.previewUrl || item.hlsUrl));
+  const gridEl = buildRawMediaGrid(doc, validItems, onExpand, { forceCarousel, mediaPriority });
+  const warningText = String(sensitiveWarning || '').trim();
+  if (!warningText || validItems.length === 0) {
+    return gridEl;
+  }
+  return wrapSensitiveMediaGrid(doc, gridEl, warningText);
 }
 
 export function createComposerMediaEditor(attachments = [], { onRemove } = {}) {

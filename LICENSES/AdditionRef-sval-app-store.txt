@@ -1,0 +1,61 @@
+Sval App Store Permission, version 1.0
+
+Additional permission under section 7 of the GNU Affero General Public
+License, version 3 (the "License").
+
+1. Definitions
+
+Terms defined in the License have the same meaning here.
+
+"App Store" means a service that distributes software to users subject to
+its operator's terms, such as the Apple App Store, the Mac App Store,
+Google Play and the Microsoft Store.
+
+"Store Terms" means the terms, usage rules and technical measures,
+including code signing, encryption and digital rights management, that an
+App Store's operator applies to software it distributes, and to that
+software's users, as a condition of distribution.
+
+2. Permission
+
+Each copyright holder who has released their work under this permission
+grants you, in addition to the License, permission to convey the Program,
+or a covered work based on it, in object code form through an App Store,
+even though the Store Terms:
+
+  a) impose on recipients restrictions that section 10 of the License
+     would otherwise forbid;
+  b) apply technical measures to the object code that section 3 of the
+     License would otherwise address; or
+  c) prevent recipients from installing modified versions on their
+     device, so that the Installation Information required by section 6
+     of the License cannot be provided for that copy.
+
+3. Conditions
+
+This permission applies only if:
+
+  a) you comply with the License in every other respect for each covered
+     work you convey this way, including offering its Corresponding Source
+     at no charge as section 6 requires, and to network users as
+     section 13 requires;
+  b) you add no restrictions beyond those the Store Terms impose; and
+  c) the copy, or its listing in the App Store, states where its
+     Corresponding Source can be obtained.
+
+4. Scope
+
+This permission covers only material whose copyright holders have released
+it under this permission. It does not change the terms of any other part of
+a covered work.
+
+5. No trademark rights
+
+This permission grants no right to use Sval's name, logos or other marks.
+TRADEMARKS.md governs those.
+
+6. Removal
+
+As section 7 of the License allows, you may remove this permission from
+your copies of the Program or of works based on it. Doing so does not
+affect anyone else's copies.

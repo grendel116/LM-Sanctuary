@@ -1,14 +1,30 @@
 import { createOfflineNotice } from '../components/OfflineNotice.js';
-import { createPostCard, getPostActionCapabilities, syncPostCardReactions } from '../components/PostCard.js';
+import {
+  createLoopsSlide,
+  createPostCard,
+  getPostActionCapabilities,
+  syncPostCardReactions,
+  VOLUME_MUTED_SVG,
+  VOLUME_ON_SVG,
+} from '../components/PostCard.js';
 import { attachPullToRefresh } from '../components/PullToRefresh.js';
+import { attachSearchSuggestions } from '../components/SearchSuggestions.js';
+import { openMediaLightbox } from '../components/sanctuary/PortraitGrid.js';
 import { createClassicModalDialog, showAlert, showConfirm } from '../components/sanctuary/SanctuaryDialog.js';
 import { createLoadingState } from '../components/ui/index.js';
 import { normalizeInstanceUrl } from '../constants/endpoints.js';
 import { DEFAULT_AVATAR_DATA_URI } from '../constants/avatars.js';
-import { rankFeedItems } from '../core/feedRanker.js';
-import { applyKeywordFilters, isUnifiedItemModerated } from '../core/schema/unifiedItem.js';
+import { hasVisualMediaAttachment, isAutomatedSyndicationOrBotItem, rankFeedItems } from '../core/feedRanker.js';
+import {
+  applyKeywordFilters,
+  buildOwnAccountKeySet,
+  getSensitiveMediaWarning,
+  isOwnOrSelfBoostedUnifiedItem,
+  isUnifiedItemModerated,
+  resolveContextualStreamItems,
+} from '../core/schema/unifiedItem.js';
 import { getBskyTimeline } from '../queries/bluesky.js';
-import { harvestSanctuaryFeed } from '../queries/feedHarvester.js';
+import { harvestSanctuaryFeed, syncOwnViewerActivity } from '../queries/feedHarvester.js';
 import { formatApiErrorMessage } from '../queries/fetch/fetchWrapper.js';
 import { getTimeline, searchFediverse, toggleBookmark } from '../queries/fediverse.js';
 import {
@@ -18,9 +34,11 @@ import {
   deleteUnified,
   dismissBridgeRetry,
   enrichUnifiedItemsMetrics,
+  fetchHashtagPosts,
   fetchKeywordFilters,
   fetchListAccounts,
   fetchLists,
+  fetchSemanticFeedScores,
   likeUnified,
   pinUnified,
   removeAccountFromMastodonList,
@@ -41,7 +59,11 @@ import {
   hydrateCachedModeration,
   hydrateCachedStream,
   hydrateFeedTuning,
+  hydrateRankingManifest,
   mergeChronologicalPosts,
+  mergeDiscoveredViewerInteractions,
+  mergeSemanticFeedScores,
+  mergeTasteMemoryWithFollowing,
   mutatePostAcrossStreams,
   persistStreamCache,
   reconcileEnrichedStreamItems,
@@ -63,7 +85,10 @@ const FEED_REFRESH_SVG = `<svg width="14" height="14" viewBox="0 0 24 24" fill="
 const STREAM_TABS = [
   ['feed', 'Feed'],
   ['following', 'Following'],
+  ['photos', 'Photos'],
+  ['video', 'Video'],
 ];
+const DISCOVERY_STREAMS = new Set(['feed', 'photos', 'video', 'visual']);
 const ALLOWED_STREAMS = new Set(STREAM_TABS.map(([id]) => id));
 
 function hasAnySocialAccount(authState) {
@@ -90,58 +115,71 @@ function getRetrySig(authState) {
     .join('|');
 }
 
-function computePostStructureSig(post, showSanctuary, hasMasto, hasBsky = false, hasThreads = false, retrySig = '') {
+function computePostStructureSig(post, showSanctuary, hasMasto, hasBsky = false, hasThreads = false, retrySig = '', manifestSig = '', streamVariant = 'default') {
   const key = String(post?.id || post?.key || '');
   const m = post?._meta?.mastodon || {};
   const b = post?._meta?.bluesky || {};
-  const linked = post?._meta?.linkedIds || {};
   const attUrls = Array.isArray(post?.attachments) ? post.attachments.map((a) => a?.url || '').join(',') : '';
   const quoteKey = post?._meta?.quotePost?.id || post?._meta?.quotePost?.url || (post?._meta?.quotePost?.unavailable ? 'unavail' : '');
+  const bskyLabels = Array.isArray(b.labels) ? b.labels.join(',') : '';
   return [
+    streamVariant,
     key,
     post?.content_html || post?.content_text || '',
     post?.language || '',
     m.spoilerText || post?.spoilerText || '',
+    Boolean(m.sensitive),
+    bskyLabels,
     post?._meta?.linkCard?.url || post?.linkCard?.url || '',
     attUrls,
     quoteKey,
+    post?._meta?.replyContext?.id || '',
     Boolean(m.pinned),
-    linked.mastodonStatusId || m.statusId || '',
-    linked.blueskyUri || b.uri || '',
-    linked.threadsPostId || post?._meta?.threads?.postId || '',
-    post?._meta?.feedFeedback || '',
     m.rebloggedBy?.handle || b.rebloggedBy?.handle || '',
+    Array.isArray(post?._meta?.boosters) ? post._meta.boosters.length : 0,
+    Number(post?._meta?.peerVouches || 0),
     Boolean(showSanctuary),
     Boolean(hasMasto),
     Boolean(hasBsky),
     Boolean(hasThreads),
     retrySig,
+    manifestSig,
   ].join('\u001f');
 }
 
 function computePostReactionSig(post) {
   const m = post?._meta?.mastodon || {};
   const b = post?._meta?.bluesky || {};
+  const linked = post?._meta?.linkedIds || {};
   const metrics = post?.metrics || {};
   return [
     metrics.likes ?? 0,
     metrics.replies ?? 0,
     metrics.reposts ?? 0,
     Boolean(m.favourited || b.likeUri || post?.viewerState?.favourited),
+    Boolean(post?._meta?.viewerReplied || m.replied || b.replied || post?.viewerState?.replied),
     Boolean(m.reblogged || b.repostUri || post?.viewerState?.reblogged),
     Boolean(m.bookmarked || post?.viewerState?.bookmarked),
     Boolean(b.replyDisabled),
     String(m.visibility || 'public'),
+    post?._meta?.feedFeedback || '',
+    linked.mastodonStatusId || m.statusId || '',
+    linked.blueskyUri || b.uri || '',
+    linked.threadsPostId || post?._meta?.threads?.postId || '',
     JSON.stringify(post?._meta?.metricsBreakdown || null),
   ].join('\u001f');
 }
 
-function computeTuningSig(tuning) {
+function computeTuningSig(tuning, manifest = null) {
   const t = tuning || {};
   return JSON.stringify([
-    t.sliders || {},
     t.discoveryChannels || [],
     t.discoveryInstances || [],
+    manifest?.version || 1,
+    manifest?.weights || null,
+    manifest?.caps || null,
+    manifest?.syndicationBotPatterns || null,
+    manifest?.sensitiveContentTriggers || null,
   ]);
 }
 
@@ -232,6 +270,7 @@ export function mountFeedScreen(containerEl, {
   onAskSanctuary,
   onOpenAccounts,
   onSelectAuthor,
+  startupReadyPromise = null,
 } = {}) {
   const doc = globalThis.document;
   containerEl.replaceChildren();
@@ -249,51 +288,73 @@ export function mountFeedScreen(containerEl, {
   let lastAutoCursorSig = '';
   let autoCheckTimer = null;
   let sourceRefreshTimer = null;
+  let tasteRescoreTimer = null;
+  let activeHashtag = '';
+  let hashtagItems = [];
+  let hashtagLoading = false;
+  let hashtagError = '';
+  let hashtagRequestEpoch = 0;
   let prefsHydrated = false;
+  let initialStartupSettled = !startupReadyPromise;
+  let lastUserTuningEpoch = Number(feedStore.get().userTuningEpoch || 0);
   let lastHarvestSourceSig = computeHarvestSourceSig(feedStore.get().tuning);
+  let syncedFilterAccountsSig = '';
+
+  async function scoreItemsWithNode(items, { replaceTaste = false } = {}) {
+    if (destroyed || !Array.isArray(items) || items.length === 0) return;
+    if (connectionStore.get().mode !== 'online') return;
+    const st = feedStore.get();
+    const effectiveTaste = mergeTasteMemoryWithFollowing(st.tasteMemory, st.streams?.following?.items);
+    try {
+      const res = await fetchSemanticFeedScores({
+        items,
+        boostConcepts: st.tuning?.discoveryChannels || [],
+        positiveExamples: effectiveTaste.positive,
+        negativeExamples: effectiveTaste.negative,
+        includeAxes: false,
+        timeoutMs: 2500,
+      });
+      if (destroyed) return;
+      const hasAxes = Object.keys(res?.axisScores || {}).length > 0;
+      const hasConcepts = Object.keys(res?.scores || {}).length > 0;
+      const hasTaste = Object.keys(res?.tasteScores || {}).length > 0;
+      if (hasAxes || hasConcepts || hasTaste) {
+        mergeSemanticFeedScores({
+          scores: res.scores,
+          axisScores: res.axisScores,
+          tasteScores: res.tasteScores,
+          replaceTaste,
+        });
+      }
+    } catch {
+      // Offline or node unavailable; rankFeedItems falls back to structural + lexical signals
+    }
+  }
 
   const cardCache = new Map();
   const streamOrders = new Map();
   const pendingReactions = new Set();
-  const cardObservation = new Map();
-  const dwelledIds = new Set();
-  const skippedIds = new Set();
-  let dwellObserver = null;
+  let loopsMuted = true;
+  let activeLoopsSlide = null;
+  let loopsSnapObserver = null;
+  let loopsPreloadObserver = null;
 
-  function stopCardDwellObservation(cardEl) {
+  function unobserveCardLoops(cardEl) {
     if (!cardEl) return;
-    const obs = cardObservation.get(cardEl);
-    if (obs) {
-      clearTimeout(obs.dwellTimer);
-      cardObservation.delete(cardEl);
-    }
-    dwellObserver?.unobserve?.(cardEl);
-  }
-
-  function startCardDwellObservation(cardEl, post, streamName) {
-    if (!cardEl || !dwellObserver) return;
-    const postKey = String(post?.id || post?.key || '').trim();
-    if (!postKey) return;
-    const prev = cardObservation.get(cardEl);
-    if (prev && prev.postKey === postKey && prev.streamName === streamName) return;
-    if (prev) clearTimeout(prev.dwellTimer);
-    cardObservation.set(cardEl, {
-      post,
-      postKey,
-      streamName,
-      enteredAt: 0,
-      dwellTimer: 0,
-    });
-    dwellObserver.observe(cardEl);
+    loopsSnapObserver?.unobserve?.(cardEl);
+    loopsPreloadObserver?.unobserve?.(cardEl);
   }
   const prefsHydrationPromise = Promise.allSettled([
     hydrateFeedTuning(),
+    hydrateRankingManifest(),
     hydrateCachedModeration(),
     hydrateCachedFilters(),
   ]).finally(() => {
     prefsHydrated = true;
     lastHarvestSourceSig = computeHarvestSourceSig(feedStore.get().tuning);
-    if (!destroyed) void fetchKeywordFilters().catch(() => {});
+    if (!destroyed && hasAnySocialAccount(authStore.get())) {
+      void fetchKeywordFilters().catch(() => {});
+    }
   });
 
   const root = doc.createElement('section');
@@ -317,6 +378,13 @@ export function mountFeedScreen(containerEl, {
     btn.appendChild(labelEl);
     btn.addEventListener('click', () => {
       const prevStream = ALLOWED_STREAMS.has(feedStore.get().activeStream) ? feedStore.get().activeStream : 'feed';
+      if (activeHashtag) {
+        activeHashtag = '';
+        hashtagItems = [];
+        hashtagError = '';
+        hashtagLoading = false;
+        if (key === prevStream) render();
+      }
       setActiveStream(key);
       if (key !== prevStream) {
         const bucket = feedStore.get().streams[key];
@@ -336,7 +404,7 @@ export function mountFeedScreen(containerEl, {
   feedRefreshBtn.title = 'Refresh feed';
   feedRefreshBtn.innerHTML = FEED_REFRESH_SVG;
   feedRefreshBtn.addEventListener('click', () => {
-    void loadStream(false, { showSpinner: true });
+    void loadStream(false, { showSpinner: true, forceRefresh: true });
   });
 
   tabsRow.append(feedRefreshBtn);
@@ -359,7 +427,58 @@ export function mountFeedScreen(containerEl, {
   manageListsBtn.textContent = 'Manage Lists';
   listFilterBar.append(listSelect, manageListsBtn);
 
-  stageHeader.append(tabsRow, listFilterBar);
+  let photosViewMode = 'stream';
+  const photosViewBar = doc.createElement('div');
+  photosViewBar.className = 'photos-view-bar';
+  photosViewBar.hidden = true;
+  const photosToggleGroup = doc.createElement('div');
+  photosToggleGroup.className = 'photos-view-toggle';
+  photosToggleGroup.setAttribute('role', 'group');
+  photosToggleGroup.setAttribute('aria-label', 'Photos layout');
+  const photosViewButtons = new Map();
+  for (const [modeId, modeLabel] of [['stream', 'Stream'], ['mosaic', 'Gallery']]) {
+    const vBtn = doc.createElement('button');
+    vBtn.type = 'button';
+    vBtn.className = `photos-view-btn${modeId === photosViewMode ? ' active' : ''}`;
+    vBtn.dataset.photosView = modeId;
+    vBtn.setAttribute('aria-pressed', modeId === photosViewMode ? 'true' : 'false');
+    vBtn.textContent = modeLabel;
+    vBtn.addEventListener('click', () => {
+      if (photosViewMode === modeId) return;
+      photosViewMode = modeId;
+      for (const [k, b] of photosViewButtons.entries()) {
+        const isSel = k === photosViewMode;
+        b.classList.toggle('active', isSel);
+        b.setAttribute('aria-pressed', isSel ? 'true' : 'false');
+      }
+      cardCache.clear();
+      render();
+    });
+    photosViewButtons.set(modeId, vBtn);
+    photosToggleGroup.appendChild(vBtn);
+  }
+  photosViewBar.append(photosToggleGroup);
+
+  const hashtagBar = doc.createElement('div');
+  hashtagBar.className = 'feed-hashtag-bar';
+  hashtagBar.hidden = true;
+  const hashtagLabel = doc.createElement('span');
+  hashtagLabel.className = 'feed-hashtag-label';
+  const hashtagClearBtn = doc.createElement('button');
+  hashtagClearBtn.type = 'button';
+  hashtagClearBtn.className = 'btn-sleek-pill feed-hashtag-clear-btn';
+  hashtagClearBtn.textContent = 'Clear';
+  hashtagClearBtn.addEventListener('click', () => {
+    activeHashtag = '';
+    hashtagItems = [];
+    hashtagError = '';
+    hashtagLoading = false;
+    hashtagRequestEpoch += 1;
+    render();
+  });
+  hashtagBar.append(hashtagLabel, hashtagClearBtn);
+
+  stageHeader.append(tabsRow, listFilterBar, photosViewBar, hashtagBar);
 
   // Inline quick-compose bar ("What's new?")
   const inlineComposeForm = doc.createElement('form');
@@ -409,7 +528,110 @@ export function mountFeedScreen(containerEl, {
 
   const scrollRoot = containerEl.closest?.('.center-column-wrap') || null;
   const scrollTarget = scrollRoot || containerEl;
-  const detachPull = attachPullToRefresh(scrollTarget, () => loadStream(false));
+  const detachPull = attachPullToRefresh(scrollTarget, () => loadStream(false, { forceRefresh: true }));
+
+  function hydrateLazyLoopsVideo(video) {
+    if (!video) return;
+    let changed = false;
+    if (video.dataset?.lazyPoster) {
+      video.poster = video.dataset.lazyPoster;
+      video.setAttribute('poster', video.dataset.lazyPoster);
+      delete video.dataset.lazyPoster;
+      changed = true;
+    }
+    const lazyHls = video.dataset?.lazyHls || '';
+    const lazySrc = video.dataset?.lazySrc || '';
+    const lazyMime = video.dataset?.lazyMime || '';
+    if (lazyHls && video.canPlayType?.('application/vnd.apple.mpegurl')) {
+      const hlsSource = doc.createElement('source');
+      hlsSource.setAttribute('src', lazyHls);
+      hlsSource.setAttribute('type', 'application/vnd.apple.mpegurl');
+      video.appendChild(hlsSource);
+      if (lazySrc && lazySrc !== lazyHls) {
+        const mp4Source = doc.createElement('source');
+        mp4Source.setAttribute('src', lazySrc);
+        mp4Source.setAttribute('type', lazyMime.startsWith('video/') ? lazyMime : 'video/mp4');
+        video.appendChild(mp4Source);
+      }
+      changed = true;
+    } else if (lazySrc) {
+      video.src = lazySrc;
+      video.setAttribute('src', lazySrc);
+      changed = true;
+    }
+    if (video.dataset) {
+      delete video.dataset.lazyHls;
+      delete video.dataset.lazySrc;
+      delete video.dataset.lazyMime;
+    }
+    if (changed) {
+      video.preload = 'metadata';
+      video.setAttribute('preload', 'metadata');
+      try {
+        video.load?.();
+      } catch {
+        // Ignore load errors in synthetic DOM
+      }
+    }
+  }
+
+  function pauseAllLoopsVideos() {
+    activeLoopsSlide = null;
+    for (const v of listEl.querySelectorAll('video.loops-video')) {
+      try {
+        v.pause?.();
+      } catch {
+        // Ignore pause errors in synthetic DOM
+      }
+    }
+  }
+
+  function syncLoopsSoundButtons() {
+    for (const v of listEl.querySelectorAll('video.loops-video')) {
+      v.muted = loopsMuted;
+      if (loopsMuted) v.setAttribute?.('muted', '');
+      else v.removeAttribute?.('muted');
+    }
+    for (const btn of listEl.querySelectorAll('.loops-sound-btn')) {
+      btn.setAttribute('aria-pressed', loopsMuted ? 'false' : 'true');
+      btn.setAttribute('aria-label', loopsMuted ? 'Unmute audio' : 'Mute audio');
+      btn.innerHTML = loopsMuted ? VOLUME_MUTED_SVG : VOLUME_ON_SVG;
+    }
+  }
+
+  function activateLoopsSlide(slideEl) {
+    if (destroyed || !slideEl) return;
+    if ((feedStore.get().activeStream || 'feed') !== 'video') return;
+    activeLoopsSlide = slideEl;
+    const targetVideo = slideEl.querySelector('video.loops-video');
+    for (const v of listEl.querySelectorAll('video.loops-video')) {
+      if (v !== targetVideo) {
+        try {
+          v.pause?.();
+        } catch {
+          // Ignore pause error
+        }
+      }
+    }
+    if (!targetVideo) return;
+    hydrateLazyLoopsVideo(targetVideo);
+    targetVideo.preload = 'auto';
+    targetVideo.setAttribute?.('preload', 'auto');
+    const nextVid = slideEl.nextElementSibling?.querySelector?.('video.loops-video');
+    if (nextVid) hydrateLazyLoopsVideo(nextVid);
+    targetVideo.muted = loopsMuted;
+    if (loopsMuted) targetVideo.setAttribute?.('muted', '');
+    else targetVideo.removeAttribute?.('muted');
+    const stage = slideEl.querySelector('.loops-stage');
+    const reducedMotion = Boolean(globalThis.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches);
+    if (!stage?.classList?.contains('is-blurred') && !stage?.classList?.contains('is-user-paused') && !reducedMotion) {
+      try {
+        targetVideo.play?.()?.catch?.(() => {});
+      } catch {
+        // Ignore autoplay rejection
+      }
+    }
+  }
 
   function syncInfiniteFooter() {
     if (destroyed) return;
@@ -464,6 +686,11 @@ export function mountFeedScreen(containerEl, {
     return items.find((it) => String(it?.id || it?.key || '') === postKey) || post;
   }
 
+  function persistActiveStreamIfNeeded() {
+    const activeName = ALLOWED_STREAMS.has(feedStore.get().activeStream) ? feedStore.get().activeStream : 'feed';
+    void persistStreamCache(activeName).catch(() => {});
+  }
+
   async function handleLike(post) {
     const cur = resolvePostInActiveBucket(post) || post;
     if (!getPostActionCapabilities(cur).like.enabled) return;
@@ -480,6 +707,7 @@ export function mountFeedScreen(containerEl, {
       if (updated) {
         mutatePostAcrossStreams(postKey, () => updated);
       }
+      persistActiveStreamIfNeeded();
       if (!wasLiked) {
         void recordAuthorInteraction(cur, cur?.protocol, 1);
         void recordBehavioralSignal(cur, 'like');
@@ -508,6 +736,7 @@ export function mountFeedScreen(containerEl, {
       if (!destroyed && updated) {
         mutatePostAcrossStreams(postKey, () => updated);
       }
+      if (!destroyed) persistActiveStreamIfNeeded();
       if (!wasReposted) {
         void recordAuthorInteraction(cur, cur?.protocol, 1.5);
         void recordBehavioralSignal(cur, 'repost');
@@ -566,7 +795,19 @@ export function mountFeedScreen(containerEl, {
         void recordAuthorInteraction(cur, 'mastodon', 1);
         void recordBehavioralSignal(cur, 'bookmark');
       }
-      mutatePostAcrossStreams(postKey, () => updated);
+      const curMasto = cur._meta?.mastodon || {};
+      const nextBookmarked = Boolean(updated?.viewerState?.bookmarked ?? updated?.bookmarked ?? !bookmarked);
+      mutatePostAcrossStreams(postKey, () => ({
+        ...cur,
+        _meta: {
+          ...(cur._meta || {}),
+          mastodon: {
+            ...curMasto,
+            bookmarked: nextBookmarked,
+          },
+        },
+      }));
+      persistActiveStreamIfNeeded();
     } catch {
       if (!destroyed) {
         mutatePostAcrossStreams(postKey, () => cur);
@@ -596,6 +837,7 @@ export function mountFeedScreen(containerEl, {
     titleIn.type = 'text';
     titleIn.className = 'onboarding-input';
     titleIn.placeholder = 'New list title...';
+    titleIn.setAttribute('autocomplete', 'off');
     const createBtn = doc.createElement('button');
     createBtn.type = 'submit';
     createBtn.className = 'btn-sleek-pill';
@@ -620,9 +862,10 @@ export function mountFeedScreen(containerEl, {
       const addForm = doc.createElement('form');
       addForm.className = 'list-create-row';
       const searchIn = doc.createElement('input');
-      searchIn.type = 'text';
+      searchIn.type = 'search';
       searchIn.className = 'onboarding-input';
       searchIn.placeholder = 'Add @user to list...';
+      searchIn.setAttribute('autocomplete', 'off');
       searchIn.setAttribute('autocorrect', 'off');
       searchIn.setAttribute('autocapitalize', 'none');
       searchIn.setAttribute('spellcheck', 'false');
@@ -631,6 +874,32 @@ export function mountFeedScreen(containerEl, {
       searchBtn.className = 'onboarding-btn';
       searchBtn.textContent = 'Find';
       addForm.append(searchIn, searchBtn);
+
+      attachSearchSuggestions(searchIn, {
+        anchorEl: addForm,
+        debounceMs: 220,
+        minChars: 2,
+        maxItems: 6,
+        fetchRemoteSuggestions: async (rawQ) => {
+          const found = await searchAccountsAndPosts(rawQ).catch(() => ({ accounts: [] }));
+          return (found.accounts || [])
+            .filter((acc) => acc?.id && acc?.acct)
+            .slice(0, 6)
+            .map((acc) => ({
+              kind: 'account',
+              icon: 'account',
+              label: acc.displayName || acc.username || acc.acct,
+              sublabel: `@${acc.acct}`,
+              value: acc.id,
+            }));
+        },
+        onSelect: async (item) => {
+          searchIn.value = '';
+          await addAccountToMastodonList(listObj.id, item.value);
+          searchResults.replaceChildren();
+          await renderMembers(listObj);
+        },
+      });
 
       const searchResults = doc.createElement('div');
       searchResults.className = 'classic-cards-stack';
@@ -747,11 +1016,14 @@ export function mountFeedScreen(containerEl, {
     void loadStream(false);
   });
 
-  async function loadStream(append = false, { showSpinner = false } = {}) {
+  async function loadStream(append = false, { showSpinner = false, forceRefresh = false } = {}) {
     if (destroyed) return;
     const state = feedStore.get();
     const streamName = ALLOWED_STREAMS.has(state.activeStream) ? state.activeStream : 'feed';
     const existingBucket = state.streams[streamName] || { items: [], nextCursor: null };
+    const priorSeenIds = !append && forceRefresh && DISCOVERY_STREAMS.has(streamName)
+      ? (existingBucket.items || []).map((it) => String(it?.id || it?.key || '')).filter(Boolean)
+      : [];
 
     if (append) {
       if (loadingOlder || inFlightRefresh || !existingBucket.nextCursor) return;
@@ -763,6 +1035,10 @@ export function mountFeedScreen(containerEl, {
       loadingOlder = false;
       appendError = '';
       lastAutoCursorSig = '';
+      if (forceRefresh) {
+        if (scrollTarget) scrollTarget.scrollTop = 0;
+        listEl.scrollTop = 0;
+      }
       syncRefreshButton();
       syncInfiniteFooter();
     }
@@ -771,13 +1047,16 @@ export function mountFeedScreen(containerEl, {
     const hadItems = existingBucket.items.length > 0;
 
     if (!append) {
-      await prefsHydrationPromise;
-      if (destroyed || epoch !== requestEpoch) return;
       if (!hadItems) {
         setStreamLoading(true, null);
-        await hydrateCachedStream(streamName);
-        if (destroyed || epoch !== requestEpoch) return;
       }
+      if (!initialStartupSettled && startupReadyPromise) {
+        await Promise.allSettled([prefsHydrationPromise, startupReadyPromise]);
+        initialStartupSettled = true;
+      } else {
+        await prefsHydrationPromise;
+      }
+      if (destroyed || epoch !== requestEpoch) return;
     }
 
     if (append) {
@@ -790,9 +1069,26 @@ export function mountFeedScreen(containerEl, {
       const [fediAuth, bskyAuth, threadsAuth] = await Promise.all([
         getAuthenticatedAccount('fediverse'),
         getAuthenticatedAccount('bluesky'),
-        streamName === 'feed' ? getAuthenticatedAccount('threads') : Promise.resolve(null),
+        DISCOVERY_STREAMS.has(streamName) ? getAuthenticatedAccount('threads') : Promise.resolve(null),
       ]);
       if (destroyed || epoch !== requestEpoch) return;
+
+      const curFilterAccSig = `${fediAuth?.meta?.id || ''}|${bskyAuth?.meta?.id || ''}`;
+      if (!append && curFilterAccSig !== syncedFilterAccountsSig) {
+        await fetchKeywordFilters().catch(() => {});
+        syncedFilterAccountsSig = curFilterAccSig;
+        if (destroyed || epoch !== requestEpoch) return;
+      }
+
+      if (!append && (fediAuth || bskyAuth)) {
+        void syncOwnViewerActivity({ fediAuth, bskyAuth })
+          .then((entries) => {
+            if (!destroyed && Array.isArray(entries) && entries.length > 0) {
+              mergeDiscoveredViewerInteractions(entries);
+            }
+          })
+          .catch(() => {});
+      }
 
       const curCursor = feedStore.get().streams[streamName]?.nextCursor || {};
 
@@ -818,6 +1114,8 @@ export function mountFeedScreen(containerEl, {
               stream: selectedListId ? 'list' : 'home',
               listId: selectedListId,
               maxId: append ? (curCursor.fedi || '') : '',
+              limit: 40,
+              ...(forceRefresh && !append ? { cache: 'no-store' } : {}),
             })
               .then((r) => ({ source: 'fedi', items: r.items, nextFedi: r.nextCursor }))
               .catch((err) => {
@@ -837,6 +1135,8 @@ export function mountFeedScreen(containerEl, {
               refreshJwt: bskyAuth.secrets.refreshJwt,
               onSessionRefreshed: (tok) => updateAccountTokens(bskyAuth.meta.id, tok),
               cursor: append ? (curCursor.bsky || '') : '',
+              limit: 50,
+              ...(forceRefresh && !append ? { cache: 'no-store' } : {}),
             })
               .then((r) => ({ source: 'bsky', items: r.items, nextBsky: r.nextCursor }))
               .catch((err) => {
@@ -874,6 +1174,10 @@ export function mountFeedScreen(containerEl, {
             return;
           }
           if ((feedStore.get().streams.following?.items?.length || 0) === 0) {
+            await hydrateCachedStream('following').catch(() => {});
+            if (destroyed || epoch !== requestEpoch) return;
+          }
+          if ((feedStore.get().streams.following?.items?.length || 0) === 0) {
             setStreamLoading(false, firstError || 'Unable to load Following stream.');
           } else {
             setStreamLoading(false, null);
@@ -892,20 +1196,26 @@ export function mountFeedScreen(containerEl, {
         return;
       }
 
-      // 'feed' stream: Blended Following + 2nd-degree graph + Sovereign discovery + pre-paint MiniLM taste
+      // Discovery streams ('feed', 'photos', 'video'): Unmediated Jetstream + FediDB + RankingManifest
       const latestState = feedStore.get();
       lastHarvestSourceSig = computeHarvestSourceSig(latestState.tuning);
+      const discoveryMode = streamName === 'photos' || streamName === 'video' || streamName === 'visual'
+        ? streamName
+        : 'default';
       const harvested = await harvestSanctuaryFeed({
         fediAuth,
         bskyAuth,
         threadsAuth,
         tuning: latestState.tuning,
+        manifest: latestState.rankingManifest,
+        discoveryMode,
         interactedAuthors: latestState.interactedAuthors,
-        implicitAuthors: latestState.implicitAuthors,
         tasteMemory: latestState.tasteMemory,
         moderatedActors: latestState.moderatedActors,
+        filterRules: latestState.filters,
         cursor: append ? curCursor : null,
         append,
+        forceRefresh: Boolean(forceRefresh && !append),
       });
       if (destroyed || epoch !== requestEpoch) return;
 
@@ -915,23 +1225,48 @@ export function mountFeedScreen(containerEl, {
         ? harvestedItems
         : mergeChronologicalPosts([], harvestedItems);
 
+      const latestSt = feedStore.get();
+      const hasTasteSeed =
+        (latestSt.tasteMemory?.positive?.length || 0) > 0
+        || (latestSt.tasteMemory?.negative?.length || 0) > 0
+        || (latestSt.streams?.following?.items?.length || 0) > 0
+        || (latestSt.tuning?.discoveryChannels?.length || 0) > 0;
+      const needPreScore =
+        connectionStore.get().mode === 'online'
+        && nextItems.length > 0
+        && hasTasteSeed;
+      if (needPreScore) {
+        await scoreItemsWithNode(nextItems);
+        if (destroyed || epoch !== requestEpoch) return;
+      }
+
       if (append) {
-        appendStreamItems('feed', nextItems, nextCursor);
+        appendStreamItems(streamName, nextItems, nextCursor);
       } else {
-        setStreamItems('feed', nextItems, nextCursor, {
+        setStreamItems(streamName, nextItems, nextCursor, {
           shuffleSeed: `${Date.now()}:${Math.random().toString(36).slice(2)}`,
+          deprioritizeIds: priorSeenIds,
         });
       }
-      await persistStreamCache('feed');
+      await persistStreamCache(streamName);
+      if (!needPreScore && nextItems.length > 0) {
+        void scoreItemsWithNode(nextItems);
+      }
       scheduleMetricsEnrichment(nextItems, () => destroyed || epoch !== requestEpoch);
     } catch (err) {
       if (destroyed || epoch !== requestEpoch) return;
       if (append) {
         appendError = err?.message || 'Unable to load older posts.';
-      } else if ((feedStore.get().streams[streamName]?.items?.length || 0) === 0) {
-        setStreamLoading(false, err?.message || 'Unable to load timeline');
       } else {
-        setStreamLoading(false, null);
+        if ((feedStore.get().streams[streamName]?.items?.length || 0) === 0) {
+          await hydrateCachedStream(streamName).catch(() => {});
+          if (destroyed || epoch !== requestEpoch) return;
+        }
+        if ((feedStore.get().streams[streamName]?.items?.length || 0) === 0) {
+          setStreamLoading(false, err?.message || 'Unable to load timeline');
+        } else {
+          setStreamLoading(false, null);
+        }
       }
     } finally {
       if (epoch === requestEpoch) {
@@ -972,11 +1307,11 @@ export function mountFeedScreen(containerEl, {
     }
   }
 
-  function buildCardForPost(key, initialPost, showSanctuary, hasMasto, hasBsky, hasThreads) {
+  function buildCardForPost(key, initialPost, showSanctuary, hasMasto, hasBsky, hasThreads, streamVariant = 'default', slideIdx = 0) {
     const getLivePost = () => cardCache.get(key)?.post || initialPost;
     const postProto = initialPost?.protocol || (initialPost?.network === 'bluesky' ? 'bluesky' : initialPost?.network === 'threads' ? 'threads' : 'mastodon');
     const canModerateProto = Boolean(initialPost?.author?.id || initialPost?.author?.handle);
-    return createPostCard(initialPost, {
+    const commonHandlers = {
       onReply: () => {
         const p = getLivePost();
         void recordAuthorInteraction(p, p?.protocol, 1.8);
@@ -989,7 +1324,6 @@ export function mountFeedScreen(containerEl, {
       onOpenThread: onOpenPostThread
         ? (target) => {
             const resolved = target && target !== initialPost ? target : getLivePost();
-            void recordBehavioralSignal(resolved, 'open_thread');
             onOpenPostThread(resolved);
           }
         : undefined,
@@ -1004,26 +1338,18 @@ export function mountFeedScreen(containerEl, {
       onSelectAuthor: onSelectAuthor
         ? (author, item) => {
             const p = item || getLivePost();
-            void recordBehavioralSignal(p, 'profile_click');
             onSelectAuthor(author, p);
           }
         : undefined,
-      onEditPost: hasMasto && postProto === 'mastodon' ? () => {
+      onEditPost: ((hasMasto && postProto === 'mastodon') || (authStore.get().isBlueskyConnected && postProto === 'bluesky')) ? () => {
         const p = getLivePost();
         openEditPostDialog(p, {
-          onSaved: (updated) => mutatePostAcrossStreams(p.id || p.key, () => updated),
+          onSaved: (updated) => mutatePostAcrossStreams(
+            (it) => it?.id === p.id || it?.key === p.key || it?.id === updated?.id,
+            () => updated
+          ),
         });
       } : null,
-      onTogglePin: hasMasto && postProto === 'mastodon' ? async () => {
-        const p = getLivePost();
-        const updated = await pinUnified(p, Boolean(p._meta?.mastodon?.pinned));
-        if (updated) mutatePostAcrossStreams(p.id || p.key, () => updated);
-      } : null,
-      onRetryBridge: (retryEntry) => {
-        void runBridgeRetry(retryEntry.id).catch((err) => {
-          showAlert('Bridge Retry Failed', err?.message || 'Unable to retry bridge sync.');
-        });
-      },
       onDeletePost: () => {
         const p = getLivePost();
         const linked = p._meta?.linkedIds || {};
@@ -1046,7 +1372,11 @@ export function mountFeedScreen(containerEl, {
           }
         );
       },
-      onInterested: () => void applyPostInterestFeedback(getLivePost(), 'interested'),
+      onInterested: () => {
+        void applyPostInterestFeedback(getLivePost(), 'interested').then(() => {
+          if (!destroyed) persistActiveStreamIfNeeded();
+        });
+      },
       onNotInterested: () => void applyPostInterestFeedback(getLivePost(), 'not_interested'),
       onMuteAuthor: canModerateProto ? (_raw, u) => {
         const cleanH = String(u?.author?.handle || '').replace(/^@/, '');
@@ -1097,11 +1427,170 @@ export function mountFeedScreen(containerEl, {
         });
       } : null,
       showSanctuaryAction: showSanctuary,
+    };
+
+    if (streamVariant === 'loops') {
+      return createLoopsSlide(initialPost, {
+        ...commonHandlers,
+        isFirstSlide: slideIdx === 0,
+        initialMuted: loopsMuted,
+        onToggleSound: () => {
+          loopsMuted = !loopsMuted;
+          syncLoopsSoundButtons();
+        },
+        onRequestPlay: (slideEl) => activateLoopsSlide(slideEl),
+      });
+    }
+
+    if (streamVariant === 'photo_mosaic') {
+      return createPhotoMosaicTile(initialPost, commonHandlers, slideIdx);
+    }
+
+    return createPostCard(initialPost, {
+      ...commonHandlers,
+      onTogglePin: hasMasto && postProto === 'mastodon' ? async () => {
+        const p = getLivePost();
+        const updated = await pinUnified(p, Boolean(p._meta?.mastodon?.pinned));
+        if (updated) mutatePostAcrossStreams(p.id || p.key, () => updated);
+      } : null,
+      onRetryBridge: (retryEntry) => {
+        void runBridgeRetry(retryEntry.id).catch((err) => {
+          showAlert('Bridge Retry Failed', err?.message || 'Unable to retry bridge sync.');
+        });
+      },
+      layoutVariant: streamVariant,
+      mediaPriority: slideIdx === 0 ? 'high' : (slideIdx < 3 ? 'eager' : 'lazy'),
     });
   }
 
+  function createPhotoMosaicTile(rawPost, handlers, idx = 0) {
+    const tile = doc.createElement('article');
+    tile.className = 'photo-mosaic-tile';
+    tile.dataset.postId = rawPost?.id || '';
+    tile.dataset.postKey = rawPost?.key || rawPost?.id || '';
+    tile.dataset.protocol = rawPost?.protocol || 'mastodon';
+
+    const atts = Array.isArray(rawPost?.attachments) ? rawPost.attachments : [];
+    const firstAtt = atts[0] || {};
+    const sensitiveWarning = getSensitiveMediaWarning(rawPost, feedStore.get().rankingManifest);
+
+    const thumbBtn = doc.createElement('button');
+    thumbBtn.type = 'button';
+    thumbBtn.className = `photo-mosaic-thumb-btn${sensitiveWarning ? ' is-blurred' : ''}`;
+    const altDesc = String(firstAtt.alt_text || firstAtt.description || '').trim();
+    thumbBtn.setAttribute(
+      'aria-label',
+      altDesc ? `Open photo: ${altDesc}` : `Open photo by @${String(rawPost?.author?.handle || 'creator').replace(/^@/, '')}`
+    );
+
+    const img = doc.createElement('img');
+    img.className = 'photo-mosaic-img';
+    img.alt = altDesc || 'Photo attachment';
+    img.decoding = 'async';
+    img.referrerPolicy = 'no-referrer';
+    img.setAttribute('referrerpolicy', 'no-referrer');
+    if (idx === 0) {
+      img.fetchPriority = 'high';
+      img.setAttribute('fetchpriority', 'high');
+    } else if (idx >= 6) {
+      img.loading = 'lazy';
+      img.setAttribute('loading', 'lazy');
+    }
+    const w = Number.parseInt(firstAtt.width, 10);
+    const h = Number.parseInt(firstAtt.height, 10);
+    if (Number.isFinite(w) && w > 0 && Number.isFinite(h) && h > 0) {
+      img.width = w;
+      img.height = h;
+      img.setAttribute('width', String(w));
+      img.setAttribute('height', String(h));
+    }
+    const primaryUrl = firstAtt.url || firstAtt.previewUrl || '';
+    const fallbackUrl = firstAtt.previewUrl || '';
+    if (fallbackUrl && fallbackUrl !== primaryUrl) {
+      img.addEventListener('error', () => {
+        if (img.src !== fallbackUrl) img.src = fallbackUrl;
+      }, { once: true });
+    }
+    img.src = primaryUrl;
+    thumbBtn.appendChild(img);
+
+    let revealed = !sensitiveWarning;
+    let cwOverlay = null;
+    if (sensitiveWarning) {
+      cwOverlay = doc.createElement('span');
+      cwOverlay.className = 'photo-mosaic-cw-badge';
+      cwOverlay.textContent = `Show · ${sensitiveWarning}`;
+      thumbBtn.appendChild(cwOverlay);
+    }
+
+    thumbBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (!revealed) {
+        revealed = true;
+        thumbBtn.classList.remove('is-blurred');
+        cwOverlay?.remove?.();
+        return;
+      }
+      openMediaLightbox(firstAtt.url || firstAtt.previewUrl, {
+        source: 'social',
+        initialIndex: 0,
+        prompt: altDesc,
+        type: String(firstAtt.type || firstAtt.mime_type || firstAtt.mimeType || 'image'),
+        mimeType: String(firstAtt.mime_type || firstAtt.mimeType || ''),
+        galleryItems: atts.map((m) => ({
+          url: m.url || m.previewUrl || '',
+          prompt: m.alt_text || m.description || '',
+          type: String(m.type || m.mime_type || m.mimeType || 'image'),
+          mimeType: String(m.mime_type || m.mimeType || ''),
+        })),
+      });
+    });
+    tile.appendChild(thumbBtn);
+
+    if (atts.length > 1) {
+      const badges = doc.createElement('div');
+      badges.className = 'photo-mosaic-badges';
+      const countBadge = doc.createElement('span');
+      countBadge.className = 'photo-mosaic-badge';
+      countBadge.textContent = `1/${atts.length}`;
+      badges.appendChild(countBadge);
+      tile.appendChild(badges);
+    }
+
+    const metaBar = doc.createElement('div');
+    metaBar.className = 'photo-mosaic-meta';
+    const handleBtn = doc.createElement('button');
+    handleBtn.type = 'button';
+    handleBtn.className = 'photo-mosaic-author';
+    const cleanH = String(rawPost?.author?.handle || rawPost?.author?.name || 'creator').replace(/^@/, '');
+    handleBtn.textContent = `@${cleanH}`;
+    handleBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      handlers.onSelectAuthor?.(rawPost?.author, rawPost);
+    });
+    const openBtn = doc.createElement('button');
+    openBtn.type = 'button';
+    openBtn.className = 'photo-mosaic-open-btn';
+    openBtn.textContent = `♥ ${Number(rawPost?.metrics?.likes || 0)}`;
+    openBtn.setAttribute('aria-label', `Open post by @${cleanH}`);
+    openBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      handlers.onOpenThread?.(rawPost);
+    });
+    metaBar.append(handleBtn, openBtn);
+    tile.appendChild(metaBar);
+    return tile;
+  }
+
   function resolveStableOrderedItems(streamName, bucket, state) {
-    const rawItems = Array.isArray(bucket?.items) ? bucket.items : [];
+    const isDiscovery = DISCOVERY_STREAMS.has(streamName);
+    const ownAccountKeys = isDiscovery ? buildOwnAccountKeySet(authStore.get().accounts || []) : null;
+    const rawItems = (Array.isArray(bucket?.items) ? bucket.items : [])
+      .filter(
+        (p) =>
+          (!isDiscovery || !isOwnOrSelfBoostedUnifiedItem(p, ownAccountKeys))
+          && (streamName !== 'feed' || !hasVisualMediaAttachment(p))
+      );
     const byId = new Map();
     for (const p of rawItems) {
       const id = String(p?.id || p?.key || '');
@@ -1113,24 +1602,33 @@ export function mountFeedScreen(containerEl, {
     }
 
     const gen = Number(bucket?.generation || 0);
-    const tuningSig = computeTuningSig(state.tuning);
+    const curUserEpoch = Number(state.userTuningEpoch || 0);
+    const tuningSig = computeTuningSig(state.tuning, state.rankingManifest);
     let order = streamOrders.get(streamName);
 
-    const isFeedStream = streamName === 'feed';
-
-    if (!order || order.generation !== gen || (order.tuningSig !== tuningSig && state.tuning?.updatedBy !== 'feedback')) {
+    const isReRank = Boolean(order && order.generation === gen && order.userTuningEpoch !== curUserEpoch);
+    const effectiveDiscoveryTaste = isDiscovery
+      ? mergeTasteMemoryWithFollowing(state.tasteMemory, state.streams?.following?.items)
+      : undefined;
+    if (!order || order.generation !== gen || order.userTuningEpoch !== curUserEpoch) {
+      if (isReRank && scrollTarget) {
+        scrollTarget.scrollTop = 0;
+      }
       const ranked = rankFeedItems(rawItems, state.tuning, {
         nowMs: bucket.updatedAt || Date.now(),
-        shuffleSeed: isFeedStream ? (bucket.shuffleSeed || '') : '',
-        streamMode: streamName,
+        shuffleSeed: isDiscovery ? (bucket.shuffleSeed || '') : '',
+        deprioritizeIds: isDiscovery ? bucket.deprioritizeIds : undefined,
+        streamMode: isDiscovery ? 'feed' : streamName,
+        discoveryMode: streamName,
+        manifest: state.rankingManifest,
         interactedAuthors: state.interactedAuthors,
-        implicitAuthors: isFeedStream ? state.implicitAuthors : undefined,
         semanticScores: state.semanticScores,
-        tasteScores: isFeedStream ? state.tasteScores : undefined,
-        tasteMemory: isFeedStream ? state.tasteMemory : undefined,
+        tasteScores: isDiscovery ? state.tasteScores : undefined,
+        tasteMemory: effectiveDiscoveryTaste,
       });
       order = {
         generation: gen,
+        userTuningEpoch: curUserEpoch,
         tuningSig,
         orderedIds: ranked.map((p) => String(p?.id || p?.key || '')).filter(Boolean),
         seenIds: new Set(byId.keys()),
@@ -1138,6 +1636,7 @@ export function mountFeedScreen(containerEl, {
       streamOrders.set(streamName, order);
     } else {
       order.tuningSig = tuningSig;
+      order.userTuningEpoch = curUserEpoch;
       order.orderedIds = order.orderedIds.filter((id) => byId.has(id));
       let leadCount = 0;
       while (leadCount < rawItems.length) {
@@ -1168,12 +1667,13 @@ export function mountFeedScreen(containerEl, {
         const rankedAppended = rankFeedItems(appendedItems, state.tuning, {
           nowMs: bucket.updatedAt || Date.now(),
           shuffleSeed: '',
-          streamMode: streamName,
+          streamMode: isDiscovery ? 'feed' : streamName,
+          discoveryMode: streamName,
+          manifest: state.rankingManifest,
           interactedAuthors: state.interactedAuthors,
-          implicitAuthors: isFeedStream ? state.implicitAuthors : undefined,
           semanticScores: state.semanticScores,
-          tasteScores: isFeedStream ? state.tasteScores : undefined,
-          tasteMemory: isFeedStream ? state.tasteMemory : undefined,
+          tasteScores: isDiscovery ? state.tasteScores : undefined,
+          tasteMemory: effectiveDiscoveryTaste,
         });
         for (const p of rankedAppended) {
           const id = String(p?.id || p?.key || '');
@@ -1183,17 +1683,24 @@ export function mountFeedScreen(containerEl, {
     }
 
     const dismissed = new Set(state.dismissedPostIds || []);
-    const ordered = order.orderedIds
+    let ordered = order.orderedIds
       .filter((id) => !dismissed.has(id))
       .map((id) => byId.get(id))
       .filter(Boolean);
-    return applyKeywordFilters(ordered, state.filters || [], state.moderatedActors || []);
+    const keepBotsExplicitly = state.rankingManifest?.caps?.filterDiscoveryBotsByDefault === false;
+    if (isDiscovery && !keepBotsExplicitly) {
+      ordered = ordered.filter(
+        (p) => p?._meta?.feedSource === 'following' || !isAutomatedSyndicationOrBotItem(p, state.rankingManifest)
+      );
+    }
+    const contextualized = resolveContextualStreamItems(ordered, { streamMode: isDiscovery ? 'feed' : streamName });
+    return applyKeywordFilters(contextualized, state.filters || [], state.moderatedActors || []);
   }
 
-  function reconcilePostList(visibleItems, { streamName = 'feed', showSanctuary, hasMasto, hasBsky, hasThreads = false, retrySig = '', isLoading, errorMsg }) {
+  function reconcilePostList(visibleItems, { streamName = 'feed', showSanctuary, hasMasto, hasBsky, hasThreads = false, retrySig = '', manifestSig = '', isLoading, errorMsg }) {
     if (visibleItems.length === 0) {
       for (const entry of cardCache.values()) {
-        stopCardDwellObservation(entry.card);
+        unobserveCardLoops(entry.card);
       }
       cardCache.clear();
       if (errorMsg) {
@@ -1224,7 +1731,7 @@ export function mountFeedScreen(containerEl, {
 
     for (const [cachedKey, entry] of [...cardCache.entries()]) {
       if (!activeKeys.has(cachedKey)) {
-        stopCardDwellObservation(entry.card);
+        unobserveCardLoops(entry.card);
         entry.card.remove();
         cardCache.delete(cachedKey);
       }
@@ -1234,15 +1741,20 @@ export function mountFeedScreen(containerEl, {
       Object.hasOwn(globalThis.Element?.prototype || {}, 'moveBefore') &&
       typeof listEl.moveBefore === 'function';
 
+    const streamVariant = streamName === 'video'
+      ? 'loops'
+      : (streamName === 'photos' ? (photosViewMode === 'mosaic' ? 'photo_mosaic' : 'ig_photo') : 'default');
+    listEl.classList.toggle('is-photos-mosaic', streamVariant === 'photo_mosaic');
+    const prevActiveKey = activeLoopsSlide?.dataset?.postKey || activeLoopsSlide?.dataset?.postId || '';
     for (let idx = 0; idx < keyedEntries.length; idx += 1) {
       const { post, key } = keyedEntries[idx];
-      const structSig = computePostStructureSig(post, showSanctuary, hasMasto, hasBsky, hasThreads, retrySig);
+      const structSig = computePostStructureSig(post, showSanctuary, hasMasto, hasBsky, hasThreads, retrySig, manifestSig, streamVariant);
       const reactSig = computePostReactionSig(post);
       const existing = cardCache.get(key);
       let cardEl = existing?.card || null;
       if (!existing || existing.structSig !== structSig) {
-        if (existing?.card) stopCardDwellObservation(existing.card);
-        const nextCard = buildCardForPost(key, post, showSanctuary, hasMasto, hasBsky, hasThreads);
+        if (existing?.card) unobserveCardLoops(existing.card);
+        const nextCard = buildCardForPost(key, post, showSanctuary, hasMasto, hasBsky, hasThreads, streamVariant, idx);
         if (existing?.card && existing.card.parentNode === listEl) {
           listEl.replaceChild(nextCard, existing.card);
         }
@@ -1255,6 +1767,7 @@ export function mountFeedScreen(containerEl, {
           existing.reactSig = reactSig;
         }
       }
+      cardEl.classList.toggle('is-below-fold', streamVariant !== 'loops' && streamVariant !== 'photo_mosaic' && idx >= 5);
       const currentAtIdx = listEl.children[idx] || null;
       if (currentAtIdx !== cardEl) {
         if (canMoveBefore && cardEl.parentNode === listEl) {
@@ -1263,10 +1776,22 @@ export function mountFeedScreen(containerEl, {
           listEl.insertBefore(cardEl, currentAtIdx);
         }
       }
-      if (streamName === 'feed') {
-        startCardDwellObservation(cardEl, post, streamName);
+      if (streamVariant === 'loops') {
+        loopsSnapObserver?.observe?.(cardEl);
+        loopsPreloadObserver?.observe?.(cardEl);
       } else {
-        stopCardDwellObservation(cardEl);
+        unobserveCardLoops(cardEl);
+      }
+    }
+    if (streamVariant === 'loops') {
+      if (!activeLoopsSlide || activeLoopsSlide.parentNode !== listEl) {
+        const matched = prevActiveKey
+          ? [...listEl.querySelectorAll('.loops-slide')].find(
+              (el) => el.dataset?.postKey === prevActiveKey || el.dataset?.postId === prevActiveKey
+            )
+          : null;
+        const targetSlide = matched || listEl.querySelector('.loops-slide');
+        if (targetSlide) activateLoopsSlide(targetSlide);
       }
     }
   }
@@ -1278,13 +1803,43 @@ export function mountFeedScreen(containerEl, {
     const authState = authStore.get();
     const streamName = ALLOWED_STREAMS.has(state.activeStream) ? state.activeStream : 'feed';
     const bucket = state.streams[streamName] || { items: [], nextCursor: null };
+    const isLoops = streamName === 'video';
+
+    root.dataset.stream = streamName;
+    root.classList.toggle('is-loops-mode', isLoops);
+    photosViewBar.hidden = streamName !== 'photos';
+    inlineComposeForm.hidden = streamName === 'photos' || isLoops;
+    if (inlineComposeForm.hidden) {
+      inlineStatusEl.hidden = true;
+    }
+    feedFooterWrap.hidden = isLoops;
+
+    listEl.classList.toggle('is-loops-viewer', isLoops);
+    if (isLoops) {
+      listEl.setAttribute('role', 'region');
+      listEl.setAttribute('aria-label', 'Loops video viewer');
+      listEl.tabIndex = 0;
+    } else {
+      pauseAllLoopsVideos();
+      listEl.removeAttribute('role');
+      listEl.removeAttribute('aria-label');
+      listEl.removeAttribute('tabindex');
+    }
 
     composeAvatar.src = authState.accounts[0]?.avatar || DEFAULT_AVATAR_DATA_URI;
 
     for (const [key, btn] of tabButtons.entries()) {
       const active = streamName === key;
+      const wasActive = btn.classList.contains('active');
       btn.classList.toggle('active', active);
       btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+      if (active && !wasActive) {
+        try {
+          btn.scrollIntoView?.({ block: 'nearest', inline: 'nearest', container: 'nearest' });
+        } catch {
+          btn.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
+        }
+      }
     }
 
     const retries = Array.isArray(authState.retryQueue) ? authState.retryQueue : [];
@@ -1360,8 +1915,17 @@ export function mountFeedScreen(containerEl, {
       return;
     }
 
-    const visibleItems = resolveStableOrderedItems(streamName, bucket, state);
+    const isHashtagView = Boolean(activeHashtag && streamName === 'feed');
+    hashtagBar.hidden = !isHashtagView;
+    if (isHashtagView) {
+      hashtagLabel.textContent = `#${activeHashtag}`;
+    }
+
+    const visibleItems = isHashtagView
+      ? applyKeywordFilters(hashtagItems, state.filters || [], state.moderatedActors || [])
+      : resolveStableOrderedItems(streamName, bucket, state);
     const showSanctuary = conn.mode === 'online' || conn.programs.length > 0;
+    const manifestSig = JSON.stringify(state.rankingManifest || null);
     reconcilePostList(visibleItems, {
       streamName,
       showSanctuary,
@@ -1369,8 +1933,9 @@ export function mountFeedScreen(containerEl, {
       hasBsky,
       hasThreads,
       retrySig: getRetrySig(authState),
-      isLoading: Boolean(state.loading),
-      errorMsg: state.error,
+      manifestSig,
+      isLoading: isHashtagView ? hashtagLoading : Boolean(state.loading),
+      errorMsg: isHashtagView ? hashtagError : state.error,
     });
     syncInfiniteFooter();
   }
@@ -1413,11 +1978,98 @@ export function mountFeedScreen(containerEl, {
   }
   scrollTarget.addEventListener('scroll', handleScroll, { passive: true });
 
-  const DWELL_THRESHOLD_MS = 2800;
-  const FAST_SKIP_MIN_MS = 180;
-  const FAST_SKIP_MAX_MS = 750;
+  function onLoopsListScroll() {
+    if (destroyed || (feedStore.get().activeStream || 'feed') !== 'video') return;
+    if (!canLoadOlder()) return;
+    const scrollH = Number(listEl.scrollHeight || 0);
+    const clientH = Number(listEl.clientHeight || 0);
+    const scrollT = Number(listEl.scrollTop || 0);
+    if (scrollH > 0 && clientH > 0 && scrollH - scrollT - clientH <= 800) {
+      void loadStream(true);
+    }
+  }
+  listEl.addEventListener('scroll', onLoopsListScroll, { passive: true });
+
+  function onLoopsKeyDown(e) {
+    if (destroyed || (feedStore.get().activeStream || 'feed') !== 'video') return;
+    const tag = String(e.target?.tagName || '').toLowerCase();
+    if (tag === 'input' || tag === 'textarea' || tag === 'select') return;
+    const slides = [...listEl.querySelectorAll('.loops-slide')];
+    if (slides.length === 0) return;
+    const curIdx = Math.max(0, slides.indexOf(activeLoopsSlide));
+    if (e.key === 'ArrowDown' || e.key === 'PageDown') {
+      const next = slides[Math.min(slides.length - 1, curIdx + 1)];
+      if (next && next !== activeLoopsSlide) {
+        e.preventDefault();
+        next.scrollIntoView?.({ behavior: 'smooth', block: 'start' });
+        activateLoopsSlide(next);
+      }
+    } else if (e.key === 'ArrowUp' || e.key === 'PageUp') {
+      const prev = slides[Math.max(0, curIdx - 1)];
+      if (prev && prev !== activeLoopsSlide) {
+        e.preventDefault();
+        prev.scrollIntoView?.({ behavior: 'smooth', block: 'start' });
+        activateLoopsSlide(prev);
+      }
+    } else if (e.key === ' ' && (e.target === listEl || e.target?.classList?.contains?.('loops-slide'))) {
+      e.preventDefault();
+      const v = activeLoopsSlide?.querySelector?.('video.loops-video');
+      const stage = activeLoopsSlide?.querySelector?.('.loops-stage');
+      if (v && !stage?.classList?.contains('is-blurred')) {
+        if (v.paused) {
+          stage?.classList?.remove('is-user-paused');
+          v.play?.()?.catch?.(() => {});
+        } else {
+          stage?.classList?.add('is-user-paused');
+          v.pause?.();
+        }
+      }
+    } else if (e.key === 'm' || e.key === 'M') {
+      loopsMuted = !loopsMuted;
+      syncLoopsSoundButtons();
+    }
+  }
+  listEl.addEventListener('keydown', onLoopsKeyDown);
+
+  const hasScrollSnapChange = Boolean(globalThis.HTMLElement && 'onscrollsnapchange' in globalThis.HTMLElement.prototype);
+  const onLoopsSnapChange = hasScrollSnapChange
+    ? (ev) => {
+        if (destroyed || (feedStore.get().activeStream || 'feed') !== 'video') return;
+        const slide = ev.snapTargetBlock?.closest?.('.loops-slide');
+        if (slide) activateLoopsSlide(slide);
+      }
+    : null;
+  if (onLoopsSnapChange) {
+    listEl.addEventListener('scrollsnapchange', onLoopsSnapChange);
+  }
+
   let intersectionObserver = null;
   if (typeof globalThis.IntersectionObserver === 'function') {
+    if (!hasScrollSnapChange) {
+      loopsSnapObserver = new globalThis.IntersectionObserver(
+        (entries) => {
+          if (destroyed || (feedStore.get().activeStream || 'feed') !== 'video') return;
+          for (const entry of entries) {
+            if (entry.isIntersecting && Number(entry.intersectionRatio ?? 1) >= 0.6) {
+              activateLoopsSlide(entry.target);
+            }
+          }
+        },
+        { root: listEl, threshold: [0, 0.6] }
+      );
+    }
+    loopsPreloadObserver = new globalThis.IntersectionObserver(
+      (entries, observer) => {
+        if (destroyed) return;
+        for (const entry of entries) {
+          if (!entry.isIntersecting) continue;
+          const v = entry.target?.querySelector?.('video.loops-video');
+          if (v) hydrateLazyLoopsVideo(v);
+          observer.unobserve?.(entry.target);
+        }
+      },
+      { root: listEl, rootMargin: '300px 0px' }
+    );
     intersectionObserver = new globalThis.IntersectionObserver(
       (entries) => {
         for (const entry of entries) {
@@ -1432,57 +2084,6 @@ export function mountFeedScreen(containerEl, {
       { root: scrollRoot, rootMargin: `0px 0px ${INFINITE_SCROLL_THRESHOLD_PX}px 0px` }
     );
     intersectionObserver.observe(sentinelEl);
-
-    dwellObserver = new globalThis.IntersectionObserver(
-      (entries) => {
-        if (destroyed) return;
-        const activeName = feedStore.get().activeStream || 'feed';
-        if (activeName !== 'feed') return;
-        const now = Date.now();
-        for (const entry of entries) {
-          const obs = cardObservation.get(entry.target);
-          if (!obs || obs.streamName !== 'feed') continue;
-          const ratio = entry.intersectionRatio ?? 1;
-          const visible =
-            Boolean(entry.isIntersecting) &&
-            (Number(ratio) >= 0.5 || Number(entry.intersectionRect?.height || 0) >= 260);
-          if (visible) {
-            if (!obs.enteredAt) obs.enteredAt = now;
-            if (!obs.dwellTimer && !dwelledIds.has(obs.postKey)) {
-              obs.dwellTimer = setTimeout(() => {
-                obs.dwellTimer = 0;
-                if (destroyed || dwelledIds.has(obs.postKey)) return;
-                dwelledIds.add(obs.postKey);
-                recordBehavioralSignal(obs.post, 'dwell');
-              }, DWELL_THRESHOLD_MS);
-            }
-          } else {
-            if (obs.dwellTimer) {
-              clearTimeout(obs.dwellTimer);
-              obs.dwellTimer = 0;
-            }
-            if (obs.enteredAt) {
-              const duration = now - obs.enteredAt;
-              obs.enteredAt = 0;
-              const rootTop = Number(entry.rootBounds?.top ?? 0);
-              const rectTop = entry.boundingClientRect?.top;
-              const exitedAbove = typeof rectTop === 'number' && rectTop < rootTop;
-              if (
-                exitedAbove &&
-                !dwelledIds.has(obs.postKey) &&
-                !skippedIds.has(obs.postKey) &&
-                duration >= FAST_SKIP_MIN_MS &&
-                duration <= FAST_SKIP_MAX_MS
-              ) {
-                skippedIds.add(obs.postKey);
-                recordBehavioralSignal(obs.post, 'scroll_past');
-              }
-            }
-          }
-        }
-      },
-      { root: scrollRoot, threshold: [0, 0.35, 0.55] }
-    );
   }
 
   let prevSocialIdsSig = getSocialIdsSig(authStore.get());
@@ -1493,10 +2094,13 @@ export function mountFeedScreen(containerEl, {
     render();
     if (!prefsHydrated || destroyed) return;
     const activeName = ALLOWED_STREAMS.has(nextState?.activeStream) ? nextState.activeStream : 'feed';
+    const nextUserEpoch = Number(nextState?.userTuningEpoch || 0);
+    const userEpochChanged = nextUserEpoch !== lastUserTuningEpoch;
+    lastUserTuningEpoch = nextUserEpoch;
     const nextSourceSig = computeHarvestSourceSig(nextState?.tuning);
-    if (activeName === 'feed' && nextSourceSig !== lastHarvestSourceSig) {
+    if (nextSourceSig !== lastHarvestSourceSig) {
       lastHarvestSourceSig = nextSourceSig;
-      if (!inFlightRefresh) {
+      if (userEpochChanged && DISCOVERY_STREAMS.has(activeName) && !inFlightRefresh) {
         clearTimeout(sourceRefreshTimer);
         sourceRefreshTimer = setTimeout(() => {
           if (!destroyed && !inFlightRefresh) {
@@ -1526,6 +2130,8 @@ export function mountFeedScreen(containerEl, {
     prevAccountsUiSig = nextAccountsUiSig;
     prevRetrySig = nextRetrySig;
     if (socialChanged) {
+      syncedFilterAccountsSig = '';
+      void fetchKeywordFilters().catch(() => {});
       const activeName = ALLOWED_STREAMS.has(feedStore.get().activeStream) ? feedStore.get().activeStream : 'feed';
       const curItems = feedStore.get().streams[activeName]?.items || [];
       render();
@@ -1537,10 +2143,81 @@ export function mountFeedScreen(containerEl, {
     render();
   });
 
+  const onFeedReset = () => {
+    if (destroyed || inFlightRefresh) return;
+    for (const sName of DISCOVERY_STREAMS) streamOrders.delete(sName);
+    const active = ALLOWED_STREAMS.has(feedStore.get().activeStream) ? feedStore.get().activeStream : 'feed';
+    if (DISCOVERY_STREAMS.has(active)) {
+      void loadStream(false, { showSpinner: true, forceRefresh: true });
+    }
+  };
+  const onManifestUpdated = () => {
+    if (destroyed) return;
+    streamOrders.clear();
+    cardCache.clear();
+    render();
+  };
+  const onTasteReset = () => {
+    if (destroyed) return;
+    clearTimeout(tasteRescoreTimer);
+  };
+  async function openHashtagFeed(rawTag) {
+    const cleanTag = String(rawTag || '').replace(/^#+/, '').trim();
+    if (!cleanTag || destroyed) return;
+    activeHashtag = cleanTag;
+    hashtagItems = [];
+    hashtagLoading = true;
+    hashtagError = '';
+    const hEpoch = ++hashtagRequestEpoch;
+    if (feedStore.get().activeStream !== 'feed') {
+      setActiveStream('feed');
+    }
+    render();
+    try {
+      const rows = await fetchHashtagPosts(cleanTag, { limit: 30 });
+      if (destroyed || hEpoch !== hashtagRequestEpoch) return;
+      hashtagItems = Array.isArray(rows) ? rows : [];
+      hashtagLoading = false;
+      render();
+    } catch (err) {
+      if (destroyed || hEpoch !== hashtagRequestEpoch) return;
+      hashtagLoading = false;
+      hashtagError = err?.message || `Unable to load #${cleanTag}.`;
+      render();
+    }
+  }
+  const onOpenHashtag = (e) => {
+    if (destroyed) return;
+    const tag = e?.detail?.tag;
+    if (tag) void openHashtagFeed(tag);
+  };
+  doc.addEventListener?.('sanctuary:open-hashtag', onOpenHashtag);
+  globalThis.addEventListener?.('sanctuary:feed-reset', onFeedReset);
+  globalThis.addEventListener?.('sanctuary:manifest-updated', onManifestUpdated);
+  globalThis.addEventListener?.('sanctuary:taste-reset', onTasteReset);
+
   render();
   const initialStream = ALLOWED_STREAMS.has(feedStore.get().activeStream) ? feedStore.get().activeStream : 'feed';
+  let idleWarmHydrateTimer = 0;
+  const scheduleIdleMediaWarmHydrate = () => {
+    clearTimeout(idleWarmHydrateTimer);
+    idleWarmHydrateTimer = setTimeout(() => {
+      if (destroyed) return;
+      const curStreams = feedStore.get().streams || {};
+      if ((curStreams.photos?.items?.length || 0) === 0) {
+        void hydrateCachedStream('photos').catch(() => {});
+      }
+      if ((curStreams.video?.items?.length || 0) === 0) {
+        void hydrateCachedStream('video').catch(() => {});
+      }
+    }, 600);
+  };
   if ((feedStore.get().streams[initialStream]?.items?.length || 0) === 0) {
-    void loadStream(false);
+    void loadStream(false).finally(() => {
+      if (!destroyed) scheduleIdleMediaWarmHydrate();
+    });
+  } else {
+    scheduleIdleMediaWarmHydrate();
   }
 
   return {
@@ -1548,18 +2225,24 @@ export function mountFeedScreen(containerEl, {
     destroy() {
       destroyed = true;
       requestEpoch += 1;
+      hashtagRequestEpoch += 1;
+      clearTimeout(idleWarmHydrateTimer);
+      doc.removeEventListener?.('sanctuary:open-hashtag', onOpenHashtag);
+      globalThis.removeEventListener?.('sanctuary:feed-reset', onFeedReset);
+      globalThis.removeEventListener?.('sanctuary:manifest-updated', onManifestUpdated);
+      globalThis.removeEventListener?.('sanctuary:taste-reset', onTasteReset);
       clearTimeout(autoCheckTimer);
       clearTimeout(sourceRefreshTimer);
+      clearTimeout(tasteRescoreTimer);
       detachPull();
       scrollTarget.removeEventListener('scroll', handleScroll);
+      listEl.removeEventListener('scroll', onLoopsListScroll);
+      listEl.removeEventListener('keydown', onLoopsKeyDown);
+      if (onLoopsSnapChange) listEl.removeEventListener('scrollsnapchange', onLoopsSnapChange);
+      pauseAllLoopsVideos();
+      loopsSnapObserver?.disconnect();
+      loopsPreloadObserver?.disconnect();
       intersectionObserver?.disconnect();
-      for (const obs of cardObservation.values()) {
-        clearTimeout(obs.dwellTimer);
-      }
-      cardObservation.clear();
-      dwelledIds.clear();
-      skippedIds.clear();
-      dwellObserver?.disconnect();
       cardCache.clear();
       streamOrders.clear();
       pendingReactions.clear();

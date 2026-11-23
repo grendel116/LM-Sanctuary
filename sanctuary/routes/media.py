@@ -27,6 +27,25 @@ _cached_portrait_tags: dict[tuple[str, str], str] = {}
 
 media_bp = Blueprint("media_bp", __name__)
 
+_DEFAULT_PROGRAM_AVATAR_SVG = (
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40" fill="none">'
+    '<rect width="40" height="40" rx="20" fill="#1c1c22"/>'
+    '<g transform="translate(8 8)" stroke="#98a0b0" stroke-width="2" '
+    'stroke-linecap="round" stroke-linejoin="round">'
+    '<path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path>'
+    '<circle cx="12" cy="7" r="4"></circle>'
+    '</g></svg>'
+)
+
+
+def _default_avatar_response() -> Response:
+    return Response(
+        _DEFAULT_PROGRAM_AVATAR_SVG,
+        status=200,
+        mimetype="image/svg+xml",
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"},
+    )
+
 
 @media_bp.route('/profile.png')
 def profile_png():
@@ -42,8 +61,7 @@ def profile_png():
         res = make_response(response)
         res.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
         return res
-    else:
-        return "Profile image not found", 404
+    return _default_avatar_response()
 
 
 @media_bp.route('/programs/<program_id>/profile.png')
@@ -59,8 +77,7 @@ def program_profile_png(program_id):
         res = make_response(response)
         res.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
         return res
-    else:
-        return "Profile image not found", 404
+    return _default_avatar_response()
 
 
 @media_bp.route('/api/programs/profile_picture/crop', methods=['POST'])
@@ -311,7 +328,6 @@ def upload_media():
     active_program = os.getenv("ACTIVE_PROGRAM", "sebile")
     uploads_dir = os.path.normpath(os.path.join(st.get_program_dir(active_program), 'uploads'))
     os.makedirs(uploads_dir, exist_ok=True)
-    
     local_path = os.path.join(uploads_dir, unique_name)
     file.save(local_path)
 
@@ -429,8 +445,8 @@ def _regenerate_image(resolved_msg_id):
 
         if not old_image_url and msg_id and chat_history:
             existing_msg = next((m for m in chat_history if m.get('id') == msg_id), None)
-            if existing_msg and len(existing_msg.get('media') or []) >= 3:
-                return jsonify({'error': 'Each image message row can hold at most 3 images.'}), 400
+            if existing_msg and len(existing_msg.get('media') or []) >= 2:
+                return jsonify({'error': 'Each image message row can hold at most 2 images.'}), 400
 
         if filename:
             try:
@@ -709,7 +725,7 @@ def api_generate_portrait():
     session_id = req_body.get('session_id', 'default')
     custom_prompt = req_body.get('prompt', '')
     requested_speaker = req_body.get('speaker_id')
-    count = max(1, min(3, int(req_body.get('count', 3))))
+    count = max(1, min(2, int(req_body.get('count', 2))))
     stream = bool(req_body.get('stream', False))
     cancelled_sessions.discard(session_id)
 
@@ -766,7 +782,7 @@ def api_generate_portrait():
 
                     def _on_slot_ready(slot_idx: int, slot_url: str):
                         nonlocal message_created
-                        if slot_idx >= 3 or len(emitted_urls) >= 3:
+                        if slot_idx >= 2 or len(emitted_urls) >= 2:
                             return
                         emitted_urls.append(slot_url)
                         msg_payload = None

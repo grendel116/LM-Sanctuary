@@ -2,15 +2,29 @@ import { isAllowedSocialUrl } from '../constants/endpoints.js';
 import {
   extractLearnedTasteTopics,
   getCanonicalAuthorKey,
-  isLowEffortRageDunk,
+  getCanonicalBoosterKey,
+  hasPostExternalLink,
+  hasVisualMediaAttachment,
+  isAutomatedSyndicationOrBotItem,
   normalizeFeedTuning,
-  scoreBourgeoisPoliticsSignal,
+  normalizeRankingManifest,
   scoreCommercialSignal,
+  scoreLinkAndSubstackSignal,
 } from '../core/feedRanker.js';
 import {
+  actorMatchesOwnAccountSet,
+  addActorToKeySet,
+  applyKeywordFilters,
+  buildFollowedActorKeySet,
+  buildOwnAccountKeySet,
   canonicalizeActorHandle,
   deduplicateUnifiedItems,
+  isOwnOrSelfBoostedUnifiedItem,
+  isReplyUnifiedItem,
   isUnifiedItemModerated,
+  mergeViewerActivityMeta,
+  normalizeNativeUri,
+  resolveContextualStreamItems,
   toUnifiedItem,
 } from '../core/schema/unifiedItem.js';
 import { updateAccountTokens } from '../state/authStore.js';
@@ -19,43 +33,36 @@ import {
   getBskyActorLikes,
   getBskyAuthorFeed,
   getBskyCustomFeed,
+  getBskyFollows,
+  getBskyPostLikes,
+  getBskySavedFeedUris,
   getBskyTimeline,
+  harvestBlueskyJetstreamBurst,
   searchBskyFeedGenerators,
   searchBskyPosts,
 } from './bluesky.js';
 import {
+  clearFediverseDiscoveryCacheForTests,
   getAccountStatuses,
+  getFavouritedStatuses,
+  getFollowedTags,
   getLemmyLocalPosts,
+  getStatus,
+  getStatusBoostersAndLikers,
   getTagTimeline,
   getTimeline,
   getTrendingStatuses,
+  getUserLists,
   isLemmyInstanceHost,
+  isPublicDiscoveryOptOut,
   lookupAccountByAcct,
 } from './fediverse.js';
 import { normalizeThreadsPostRecord, searchThreadsKeyword } from './threads.js';
 
-export const BSKY_WHATS_HOT_URI = 'at://did:plc:z72i7hdynmk6r22z27h6tvur/app.bsky.feed.generator/whats-hot';
-const DEFAULT_PUBLIC_MASTO_HOST = 'https://mastodon.social';
+const DEFAULT_PUBLIC_MASTO_HOST = 'https://mastodon.world';
 
-export const DEFAULT_SANCTUARY_CHANNELS = Object.freeze([
-  'news',
-  'technology',
-  'science',
-  'culture',
-  'music',
-]);
-
-export const DEFAULT_SANCTUARY_INSTANCES = Object.freeze([
-  'mastodon.social',
-  'mastodon.online',
-  'mstdn.social',
-  'mas.to',
-  'infosec.exchange',
-  'lemmy.world',
-  'lemmy.ml',
-]);
-
-const MEGA_FIREHOSE_HOSTS = new Set(['mastodon.social', 'mastodon.online', 'mas.to']);
+export const DEFAULT_SANCTUARY_CHANNELS = Object.freeze([]);
+export const DEFAULT_SANCTUARY_INSTANCES = Object.freeze([]);
 
 const CONCEPT_HASHTAG_MAP = Object.freeze({
   'mutual aid': 'mutualaid',
@@ -66,26 +73,14 @@ const CONCEPT_HASHTAG_MAP = Object.freeze({
   'class struggle': 'classstruggle',
   'proletarian struggle': 'classstruggle',
   'decentralized infrastructure': 'selfhosted',
-  'use-value': 'marxism',
-  'use value': 'marxism',
   'open source': 'opensource',
   'small web': 'indieweb',
-  anarchist: 'anarchism',
+  'everyday life': 'everydaylife',
+  'slice of life': 'sliceoflife',
+  'today i learned': 'til',
 });
 
-const CURATED_BSKY_GENERATORS = Object.freeze([
-  [['marxism', 'marxist', 'use-value', 'use value', 'dialectical', 'historical materialism'], 'at://did:plc:3oezhi4yroqopcpgvjmrzmjx/app.bsky.feed.generator/aaanvoqwgmkns'],
-  [['communism', 'communist', 'council communism', 'left communism', 'pannekoek', 'class struggle', 'proletarian', 'proletariat'], 'at://did:plc:ktbwe4wwzftcrvirivplbztw/app.bsky.feed.generator/aaagd5qfrout4'],
-  [['socialism', 'socialist', 'anarchist', 'anarchism', 'cooperative', 'cooperatives', 'workers councils', 'worker councils', 'worker', 'labor', 'union'], 'at://did:plc:b3463o3pz3pdiyh355p6a7a6/app.bsky.feed.generator/aaaemd3r3s236'],
-  [['mutual aid'], 'at://did:plc:yupjodsb265htel3yennasoq/app.bsky.feed.generator/aaagjqttv5lhi'],
-  [['seattle'], 'at://did:plc:ge4ydexhvt6tsaayyjq6cqag/app.bsky.feed.generator/aaapihpt7x2fo'],
-  [['linux', 'foss', 'open source', 'decentralized', 'self-hosted', 'selfhosted'], 'at://did:plc:6yoy2i3u62ijc5dsuhdc3rwo/app.bsky.feed.generator/aaanf5hmpcpvs'],
-  [['indieweb', 'small web', 'solarpunk'], 'at://did:plc:kn4dz4f67maytvsbcnbry36k/app.bsky.feed.generator/aaact2ln2gffk'],
-  [['philosophy'], 'at://did:plc:3bybp6nqszlhuan2ch2cmv66/app.bsky.feed.generator/philsky'],
-  [['science', 'physics', 'biology', 'mathematics'], 'at://did:plc:jfhpnnst6flqway4eaeqzj2a/app.bsky.feed.generator/for-science'],
-]);
-
-const REJECTED_GENERATOR_RE = /\b(whats-hot|what's\s+hot|furry|yiff|nsfw|foxhole|politics\s+trending|breaking\s+news|democrat(?:s|ic)|republican|gop|maga)\b/i;
+const REJECTED_GENERATOR_RE = /\b(furry|yiff|nsfw|foxhole)\b/i;
 const GENERATOR_CACHE_KV_KEY = 'sanctuary_bsky_gen_cache_v1';
 const GENERATOR_CACHE_TTL_MS = 30 * 60_000;
 const bskyGeneratorCache = new Map();
@@ -122,6 +117,7 @@ function persistGeneratorCache(fetchImpl) {
 export function clearHarvesterCacheForTests() {
   bskyGeneratorCache.clear();
   generatorCacheHydrated = false;
+  clearFediverseDiscoveryCacheForTests();
 }
 
 function getBskyReadOpts(bskyAuth, fetchImpl) {
@@ -155,23 +151,9 @@ export function conceptToHashtag(raw) {
   return collapsed.length >= 2 && collapsed.length <= 40 ? collapsed : '';
 }
 
-function findCuratedBskyGenerator(channel) {
-  const low = String(channel || '').trim().toLowerCase();
-  if (!low) return '';
-  if (low.startsWith('at://')) {
-    return low === BSKY_WHATS_HOT_URI.toLowerCase() ? '' : String(channel).trim();
-  }
-  for (const [keywords, uri] of CURATED_BSKY_GENERATORS) {
-    if (keywords.some((kw) => low === kw || low.includes(kw))) {
-      return uri;
-    }
-  }
-  return '';
-}
-
 function isAcceptableFeedGenerator(gen, query) {
   const uri = String(gen?.uri || '').trim();
-  if (!uri.startsWith('at://') || uri.toLowerCase() === BSKY_WHATS_HOT_URI.toLowerCase()) {
+  if (!uri.startsWith('at://')) {
     return false;
   }
   const combined = `${gen?.displayName || ''} ${gen?.description || ''}`;
@@ -192,7 +174,7 @@ async function resolveCommunityBskyGenerators(channels, bskyAuth, fetchImpl, max
   const seen = new Set();
   const addUri = (uri) => {
     const clean = String(uri || '').trim();
-    if (!clean.startsWith('at://') || clean.toLowerCase() === BSKY_WHATS_HOT_URI.toLowerCase()) return;
+    if (!clean.startsWith('at://')) return;
     if (seen.has(clean)) return;
     seen.add(clean);
     uris.push(clean);
@@ -200,11 +182,12 @@ async function resolveCommunityBskyGenerators(channels, bskyAuth, fetchImpl, max
 
   const toLookup = [];
   for (const ch of channels) {
-    const curated = findCuratedBskyGenerator(ch);
-    if (curated) {
-      addUri(curated);
-    } else if (!String(ch).trim().toLowerCase().startsWith('at://')) {
-      toLookup.push(String(ch).trim());
+    const clean = String(ch || '').trim();
+    if (!clean) continue;
+    if (clean.toLowerCase().startsWith('at://')) {
+      addUri(clean);
+    } else {
+      toLookup.push(clean.replace(/^#+/, ''));
     }
   }
 
@@ -261,14 +244,12 @@ export function resolveDiscoverySources(rawTuning, fediAuth = null) {
     seenCh.add(low);
     channelOut.push(clean);
   }
-  const activeChannels = channelOut.length > 0 ? channelOut : [...DEFAULT_SANCTUARY_CHANNELS];
+  const activeChannels = channelOut.length > 0 ? channelOut : [];
 
-  const baseInstances = tuning.discoveryInstances.length > 0
-    ? [...tuning.discoveryInstances]
-    : [...DEFAULT_SANCTUARY_INSTANCES];
+  const activeInstances = [...tuning.discoveryInstances];
   const fediHost = normalizeHostName(fediAuth?.meta?.instanceUrl || '');
-  if (fediHost && !MEGA_FIREHOSE_HOSTS.has(fediHost) && !baseInstances.includes(fediHost)) {
-    baseInstances.unshift(fediHost);
+  if (fediHost && !activeInstances.includes(fediHost)) {
+    activeInstances.unshift(fediHost);
   }
 
   const tagList = [];
@@ -279,24 +260,19 @@ export function resolveDiscoverySources(rawTuning, fediAuth = null) {
     seenTags.add(tag);
     tagList.push(tag);
   }
-  if (tagList.length === 0) {
-    for (const defCh of DEFAULT_SANCTUARY_CHANNELS) {
-      const t = conceptToHashtag(defCh);
-      if (t && !seenTags.has(t)) {
-        seenTags.add(t);
-        tagList.push(t);
-      }
-    }
-  }
 
   const searchQueries = activeChannels.filter((c) => !c.toLowerCase().startsWith('at://'));
+  const hasCustomChannels = channelOut.length > 0;
+  const hasCustomInstances = activeInstances.length > 0;
 
   return {
     tuning,
     activeChannels,
+    hasCustomChannels,
+    hasCustomInstances,
     tagList,
-    activeInstances: baseInstances,
-    searchQueries: searchQueries.length > 0 ? searchQueries : [...DEFAULT_SANCTUARY_CHANNELS],
+    activeInstances,
+    searchQueries,
   };
 }
 
@@ -321,30 +297,6 @@ function tagFeedSource(rawItems = [], defaultSource = 'discovery', endorsedBy = 
   return out;
 }
 
-function isSubstantiveConversationalItem(item) {
-  if (!item || typeof item !== 'object') return false;
-  const m = item._meta?.mastodon || {};
-  const b = item._meta?.bluesky || {};
-  const t = item._meta?.threads || {};
-  const isReply = Boolean(m.inReplyToId || b.reply || t.repliedToId);
-  if (!isReply) return true;
-
-  const authorId = String(item.author?.id || '');
-  const isMastoSelfThread = Boolean(m.inReplyToAccountId && authorId && String(m.inReplyToAccountId) === authorId);
-  const parentUri = String(b.reply?.parent?.uri || '');
-  const isBskySelfThread = Boolean(authorId && parentUri && parentUri.includes(`/${authorId}/`));
-  if (isMastoSelfThread || isBskySelfThread) return true;
-
-  const source = item._meta?.feedSource || '';
-  if (source === 'following' || source === 'second_degree') {
-    const textLen = String(item.content_text || '').trim().length;
-    const metrics = item.metrics || {};
-    const engagement = Number(metrics.likes || 0) + Number(metrics.replies || 0);
-    if (textLen >= 90 && engagement >= 2) return true;
-  }
-  return false;
-}
-
 function sourcePriority(item) {
   const src = item?._meta?.feedSource || '';
   if (src === 'following') return 0;
@@ -352,66 +304,182 @@ function sourcePriority(item) {
   return 2;
 }
 
+function hasAttachmentMatchingMode(item, discoveryMode = 'default') {
+  const atts = Array.isArray(item?.attachments) ? item.attachments : [];
+  if (atts.length === 0) return false;
+  const isVideoAtt = (att) => {
+    const t = String(att?.type || '').toLowerCase();
+    const mime = String(att?.mime_type || att?.mimeType || '').toLowerCase();
+    return t === 'video' || t === 'gifv' || mime.startsWith('video/') || Boolean(att?.hlsUrl);
+  };
+  if (discoveryMode === 'video') {
+    return atts.some(isVideoAtt);
+  }
+  if (discoveryMode === 'photos') {
+    const allStaticImages = atts.every(
+      (att) =>
+        !isVideoAtt(att)
+        && String(att?.type || 'image').toLowerCase() === 'image'
+        && String(att?.mimeType || att?.mime_type || '').toLowerCase() !== 'image/gif'
+    );
+    if (!allStaticImages) return false;
+    return atts.every((att) => {
+      const w = Number.parseInt(att?.width, 10) || 0;
+      const h = Number.parseInt(att?.height, 10) || 0;
+      if (w > 0 && h > 0) {
+        const ratio = w / h;
+        return ratio >= 0.75 && ratio <= 1.35;
+      }
+      return true;
+    });
+  }
+  if (discoveryMode === 'visual') {
+    return atts.some((att) => isVideoAtt(att) || String(att?.type || 'image').toLowerCase() === 'image');
+  }
+  return true;
+}
+
 /**
- * Filter upstream candidates at the admission boundary and cap per-author flooding.
+ * Filter upstream candidates at the admission boundary using the user's local RankingManifest
+ * caps, unfollowed-voice enforcement, privacy opt-outs, and discoveryMode requirements.
  */
 export function sieveSovereignCandidates(
   items = [],
   rawTuning = null,
-  { maxPerAuthor = 2, ownAccounts = [], moderatedActors = [] } = {}
+  {
+    maxPerAuthor = null,
+    ownAccounts = [],
+    followedActors = null,
+    moderatedActors = [],
+    filterRules = [],
+    discoveryMode = 'default',
+    manifest: rawManifest = null,
+  } = {}
 ) {
-  const tuning = normalizeFeedTuning(rawTuning);
-  const allowCommercial = Number(tuning.sliders?.commercial || 0) > 0;
-  const allowPolitics = Number(tuning.sliders?.bourgeoisPolitics || 0) > 0;
+  normalizeFeedTuning(rawTuning);
+  const manifest = normalizeRankingManifest(rawManifest);
+  const caps = manifest.caps;
+  const filterBots = caps.filterDiscoveryBotsByDefault !== false;
+  const capDiscoveryLinks = discoveryMode === 'default';
+  const explicitMax = maxPerAuthor !== null && maxPerAuthor !== undefined ? Number(maxPerAuthor) : null;
+  const isMediaMode = discoveryMode === 'visual' || discoveryMode === 'photos' || discoveryMode === 'video';
+
   const modSet = moderatedActors instanceof Set
     ? moderatedActors
     : new Set((Array.isArray(moderatedActors) ? moderatedActors : []).map((a) => String(a || '').trim().toLowerCase()).filter(Boolean));
+  const followedSet = followedActors instanceof Set
+    ? followedActors
+    : buildFollowedActorKeySet(Array.isArray(followedActors) ? followedActors : []);
 
+  const contextualized = resolveContextualStreamItems(
+    Array.isArray(items) ? items : [],
+    { streamMode: 'feed' }
+  );
+  const keywordSafe = applyKeywordFilters(
+    contextualized,
+    Array.isArray(filterRules) ? filterRules : [],
+    modSet
+  );
+
+  const ownAccountKeys = buildOwnAccountKeySet(ownAccounts);
   const passed = [];
-  for (const raw of Array.isArray(items) ? items : []) {
-    if (!raw || typeof raw !== 'object') continue;
-    const u = toUnifiedItem(raw);
+  for (const u of keywordSafe) {
+    if (!u || typeof u !== 'object') continue;
     if (isUnifiedItemModerated(u, modSet)) continue;
-    if (!isSubstantiveConversationalItem(u)) continue;
-    if (!allowCommercial && scoreCommercialSignal(u) >= 0.5) continue;
-    if (!allowPolitics && scoreBourgeoisPoliticsSignal(u) >= 0.35) continue;
-    if (isLowEffortRageDunk(u)) continue;
+    if (isOwnOrSelfBoostedUnifiedItem(u, ownAccountKeys)) continue;
+    if (ownAccountKeys.size > 0 && Boolean(u._meta?.mastodon?.reblogged || u._meta?.bluesky?.repostUri)) continue;
+    if (followedSet.size > 0 && actorMatchesOwnAccountSet(u.author, u.protocol, u._meta?.mastodon?.instanceUrl || '', followedSet)) {
+      continue;
+    }
+    const feedSource = u._meta?.feedSource || '';
+    if (feedSource !== 'following' && isPublicDiscoveryOptOut(u)) continue;
+    if (isReplyUnifiedItem(u)) continue;
+    if (isMediaMode && !hasAttachmentMatchingMode(u, discoveryMode)) continue;
+    if ((discoveryMode === 'photos' || discoveryMode === 'video') && (hasPostExternalLink(u) || u._meta?.quotePost || u.quotePost)) {
+      continue;
+    }
+    if (discoveryMode === 'default' && hasVisualMediaAttachment(u)) {
+      continue;
+    }
+    if (filterBots && feedSource !== 'following' && isAutomatedSyndicationOrBotItem(u, manifest)) continue;
+    const hasExtLink = hasPostExternalLink(u);
+    if (capDiscoveryLinks && feedSource !== 'following' && hasExtLink) {
+      const proseLen = String(u.content_text || '')
+        .replace(/https?:\/\/\S+/gi, '')
+        .replace(/#[\p{L}\p{N}_]+/gu, '')
+        .trim().length;
+      const m = u.metrics || {};
+      const totalEng = Number(m.likes || 0) + Number(m.replies || 0) + Number(m.reposts || 0);
+      if ((!u.attachments?.length && proseLen < caps.minUnfollowedLinkProseChars) || (totalEng === 0 && scoreLinkAndSubstackSignal(u) >= 0.7)) {
+        continue;
+      }
+    }
+    if (scoreCommercialSignal(u) >= 0.75) continue;
     passed.push(u);
   }
 
   passed.sort((a, b) => sourcePriority(a) - sourcePriority(b));
   const deduped = deduplicateUnifiedItems(passed, 120_000, { ownAccounts });
+
+  const discoveryTotals = new Map();
+  const discoveryLinkTotals = new Map();
+  let nonLinkTotal = 0;
+  for (const u of deduped) {
+    const ak = getCanonicalAuthorKey(u) || String(u.id || '');
+    const hasExt = hasPostExternalLink(u);
+    if (!hasExt) nonLinkTotal += 1;
+    if (u._meta?.feedSource !== 'following') {
+      discoveryTotals.set(ak, (discoveryTotals.get(ak) || 0) + 1);
+      if (hasExt) discoveryLinkTotals.set(ak, (discoveryLinkTotals.get(ak) || 0) + 1);
+    }
+  }
+
+  const maxDiscoveryLinkTotal = Math.max(caps.minDiscoveryLinkBudget, Math.ceil(nonLinkTotal * caps.maxDiscoveryLinkShare));
+  let discoveryLinkCount = 0;
   const authorCounts = new Map();
+  const boosterCounts = new Map();
+  const discoveryAuthorLinkCounts = new Map();
+  const maxBoostsPerBooster = explicitMax !== null ? explicitMax : (caps.maxBoostsPerBooster || 2);
   const capped = [];
   for (const u of deduped) {
     const authorKey = getCanonicalAuthorKey(u) || String(u.id || '');
+    const boosterKey = getCanonicalBoosterKey(u);
+    const isFollowing = u._meta?.feedSource === 'following';
+    if (
+      !isFollowing
+      && discoveryMode === 'default'
+      && (discoveryTotals.get(authorKey) || 0) >= caps.linkSyndicatorBurstThreshold
+      && (discoveryLinkTotals.get(authorKey) || 0) === (discoveryTotals.get(authorKey) || 0)
+    ) {
+      continue;
+    }
     const count = authorCounts.get(authorKey) || 0;
-    const cap = u._meta?.feedSource === 'following' ? Math.max(maxPerAuthor, 3) : maxPerAuthor;
+    const discoveryCap = explicitMax !== null ? explicitMax : caps.maxDiscoveryPerAuthor;
+    const cap = isFollowing ? (explicitMax !== null ? explicitMax : Math.max(discoveryCap, caps.maxFollowingPerAuthor)) : discoveryCap;
     if (count >= cap) continue;
+    if (boosterKey && (boosterCounts.get(boosterKey) || 0) >= maxBoostsPerBooster) continue;
+    if (!isFollowing && capDiscoveryLinks && hasPostExternalLink(u)) {
+      const aLinks = discoveryAuthorLinkCounts.get(authorKey) || 0;
+      if (aLinks >= caps.maxDiscoveryLinksPerAuthor || discoveryLinkCount >= maxDiscoveryLinkTotal) continue;
+      discoveryAuthorLinkCounts.set(authorKey, aLinks + 1);
+      discoveryLinkCount += 1;
+    }
     authorCounts.set(authorKey, count + 1);
+    if (boosterKey) boosterCounts.set(boosterKey, (boosterCounts.get(boosterKey) || 0) + 1);
     capped.push(u);
   }
   return capped;
 }
 
-function mergeAffinityMaps(explicitMap = {}, implicitMap = {}) {
-  const merged = {};
-  for (const [k, v] of Object.entries(explicitMap && typeof explicitMap === 'object' ? explicitMap : {})) {
-    merged[k] = Number(v || 0);
-  }
-  for (const [k, v] of Object.entries(implicitMap && typeof implicitMap === 'object' ? implicitMap : {})) {
-    merged[k] = (merged[k] || 0) + Number(v || 0) * 0.65;
-  }
-  return merged;
-}
-
-function topAffinityActors(mergedAffinities = {}, proto = 'bluesky', limit = 2) {
+function topAffinityActors(affinities = {}, proto = 'bluesky', limit = 3, ownAccountKeys = null) {
   const prefix = `${proto}:`;
-  return Object.entries(mergedAffinities)
+  const canonProto = proto === 'fediverse' ? 'mastodon' : proto;
+  return Object.entries(affinities && typeof affinities === 'object' ? affinities : {})
     .filter(([key, weight]) => key.startsWith(prefix) && Number(weight || 0) > 0)
     .sort((a, b) => Number(b[1] || 0) - Number(a[1] || 0))
     .map(([key]) => canonicalizeActorHandle(key, proto).replace(new RegExp(`^${proto}:`), ''))
     .filter((handle) => (proto === 'bluesky' ? Boolean(handle) && handle.includes('.') : Boolean(handle) && handle.includes('@')))
+    .filter((handle) => !(ownAccountKeys?.size > 0 && ownAccountKeys.has(canonicalizeActorHandle(handle, canonProto))))
     .slice(0, limit);
 }
 
@@ -431,12 +499,15 @@ function buildKeyedBatch(keys, prevCursorMap, page, windowSize) {
 }
 
 /**
- * Fetch local posts from a Mastodon-compatible, auth-gated trends fallback, or Lemmy v3 instance.
+ * Fetch trending/community statuses from a Mastodon-compatible or Lemmy v3 instance.
  */
 export async function fetchDiscoveryInstanceTimeline({
   host,
   maxId = '',
-  limit = 12,
+  limit = 40,
+  accessToken = '',
+  stream = 'federated',
+  cache,
   timeoutMs,
   fetchImpl,
 }) {
@@ -446,16 +517,48 @@ export async function fetchDiscoveryInstanceTimeline({
       instanceUrl,
       pageCursor: maxId,
       limit,
+      ...(cache !== undefined ? { cache } : {}),
       ...(timeoutMs ? { timeoutMs } : {}),
       fetchImpl,
     });
   }
+  if (stream === 'trends') {
+    try {
+      const res = await getTrendingStatuses({
+        instanceUrl,
+        accessToken,
+        limit,
+        offset: Number(maxId) || 0,
+        ...(cache !== undefined ? { cache } : {}),
+        ...(timeoutMs ? { timeoutMs } : {}),
+        fetchImpl,
+      });
+      return {
+        items: res.items,
+        nextCursor: res.nextOffset ? String(res.nextOffset) : null,
+      };
+    } catch (err) {
+      if (err?.status === 404) {
+        return getLemmyLocalPosts({
+          instanceUrl,
+          pageCursor: maxId,
+          limit,
+          ...(cache !== undefined ? { cache } : {}),
+          ...(timeoutMs ? { timeoutMs } : {}),
+          fetchImpl,
+        });
+      }
+      throw err;
+    }
+  }
   try {
     return await getTimeline({
       instanceUrl,
-      stream: 'local',
+      accessToken,
+      stream,
       maxId,
       limit,
+      ...(cache !== undefined ? { cache } : {}),
       ...(timeoutMs ? { timeoutMs } : {}),
       fetchImpl,
     });
@@ -465,6 +568,7 @@ export async function fetchDiscoveryInstanceTimeline({
         instanceUrl,
         pageCursor: maxId,
         limit,
+        ...(cache !== undefined ? { cache } : {}),
         ...(timeoutMs ? { timeoutMs } : {}),
         fetchImpl,
       });
@@ -474,6 +578,7 @@ export async function fetchDiscoveryInstanceTimeline({
         instanceUrl,
         limit,
         offset: Number(maxId) || 0,
+        ...(cache !== undefined ? { cache } : {}),
         ...(timeoutMs ? { timeoutMs } : {}),
         fetchImpl,
       });
@@ -486,149 +591,490 @@ export async function fetchDiscoveryInstanceTimeline({
   }
 }
 
+function buildJetstreamRecordMatcher(topicTerms = []) {
+  const topicTokens = (Array.isArray(topicTerms) ? topicTerms : [])
+    .flatMap((c) => String(c || '').toLowerCase().split(/[^a-z0-9\p{L}]+/u))
+    .filter((t) => t.length >= 3);
+
+  return (record) => {
+    const text = String(record?.text || '');
+    const hashCount = (text.match(/#[\p{L}\p{N}_]+/gu) || []).length;
+    if (hashCount > 5) return 'skip';
+    if (/\b(#ad|#sponsored|#affiliate|promo\s+code|shop\s+now|buy\s+now)\b/i.test(text)) {
+      return 'skip';
+    }
+    if (topicTokens.length > 0) {
+      const tagStr = Array.isArray(record?.tags) ? record.tags.join(' ') : '';
+      const hay = `${text} ${tagStr}`.toLowerCase();
+      return topicTokens.some((tok) => hay.includes(tok)) ? 'prefer' : 'skip';
+    }
+    const embedType = String(record?.embed?.$type || '');
+    if (embedType === 'app.bsky.embed.external' || embedType.startsWith('app.bsky.embed.record')) return 'accept';
+    return text.length >= 25 && text.length <= 360 ? 'prefer' : 'accept';
+  };
+}
+
+const repliedParentKeysCache = new Map();
+
+function buildItemLookupKeys(raw) {
+  const u = toUnifiedItem(raw);
+  const keys = [];
+  if (u.id) keys.push(String(u.id));
+  const mUri = normalizeNativeUri(u._meta?.mastodon?.uri || '');
+  if (mUri) keys.push(mUri);
+  const bUri = String(u._meta?.bluesky?.uri || '').trim();
+  if (bUri) keys.push(bUri);
+  const normUrl = normalizeNativeUri(u.url || '');
+  if (normUrl) keys.push(normUrl);
+  return { u, keys: [...new Set(keys)] };
+}
+
 /**
- * Harvest sovereign candidates from connected Following timelines, 2nd-degree peer likes/boosts,
- * Fediverse hashtags, independent instances, community ATProto generators, and learned-taste queries.
+ * Fetch the signed-in user's recent Mastodon & Bluesky likes, boosts, and replies
+ * (resolving remote Mastodon reply targets to canonical URIs/URLs) so feed cards
+ * accurately show viewer activity even on posts harvested from remote servers.
+ */
+export async function syncOwnViewerActivity({
+  fediAuth = null,
+  bskyAuth = null,
+  timeoutMs = 5500,
+  fetchImpl,
+} = {}) {
+  const entries = [];
+  const tasks = [];
+
+  const fediToken = fediAuth?.secrets?.accessToken || '';
+  const fediOrigin = fediAuth?.meta?.instanceUrl || '';
+  if (fediToken && fediOrigin && isAllowedSocialUrl(fediOrigin)) {
+    tasks.push((async () => {
+      let accountId = String(fediAuth?.meta?.userId || '').trim();
+      if (!accountId) {
+        const acct = String(fediAuth?.meta?.acct || fediAuth?.meta?.handle || '').trim();
+        if (acct) {
+          const prof = await lookupAccountByAcct({
+            instanceUrl: fediOrigin,
+            accessToken: fediToken,
+            acct,
+            ...(timeoutMs ? { timeoutMs } : {}),
+            fetchImpl,
+          }).catch(() => null);
+          if (prof?.id) accountId = String(prof.id);
+        }
+      }
+
+      const [favs, ownStatuses] = await Promise.all([
+        getFavouritedStatuses({
+          instanceUrl: fediOrigin,
+          accessToken: fediToken,
+          limit: 30,
+          ...(timeoutMs ? { timeoutMs } : {}),
+          fetchImpl,
+        }).catch(() => []),
+        accountId
+          ? getAccountStatuses({
+              instanceUrl: fediOrigin,
+              accessToken: fediToken,
+              accountId,
+              excludeReplies: false,
+              excludeReblogs: false,
+              limit: 40,
+              ...(timeoutMs ? { timeoutMs } : {}),
+              fetchImpl,
+            }).catch(() => [])
+          : Promise.resolve([]),
+      ]);
+
+      for (const fav of Array.isArray(favs) ? favs : []) {
+        const { keys } = buildItemLookupKeys(fav);
+        if (keys.length > 0) entries.push({ keys, favourited: true });
+      }
+
+      const missingParentIds = [];
+      for (const st of Array.isArray(ownStatuses) ? ownStatuses : []) {
+        if (!st || typeof st !== 'object') continue;
+        if (st.rebloggedBy || st.raw?.reblog) {
+          const { keys } = buildItemLookupKeys(st);
+          if (keys.length > 0) entries.push({ keys, reblogged: true });
+        }
+        const pid = String(st.inReplyToId || st._meta?.mastodon?.inReplyToId || '').trim();
+        if (pid) {
+          const cacheKey = `${fediOrigin}:${pid}`;
+          const cached = repliedParentKeysCache.get(cacheKey);
+          if (cached) {
+            entries.push({ keys: cached, replied: true });
+          } else {
+            entries.push({ keys: [`mastodon:${pid}`], replied: true });
+            if (!missingParentIds.includes(pid)) missingParentIds.push(pid);
+          }
+        }
+      }
+
+      if (missingParentIds.length > 0) {
+        await Promise.allSettled(
+          missingParentIds.slice(0, 12).map(async (pid) => {
+            const parent = await getStatus({
+              instanceUrl: fediOrigin,
+              accessToken: fediToken,
+              statusId: pid,
+              fetchImpl,
+            }).catch(() => null);
+            if (!parent?.id) return;
+            const { u, keys } = buildItemLookupKeys(parent);
+            if (keys.length === 0) return;
+            const cacheKey = `${fediOrigin}:${pid}`;
+            repliedParentKeysCache.set(cacheKey, keys);
+            entries.push({
+              keys,
+              replied: true,
+              ...(u._meta?.mastodon?.favourited ? { favourited: true } : {}),
+              ...(u._meta?.mastodon?.reblogged ? { reblogged: true } : {}),
+              ...(u._meta?.mastodon?.bookmarked ? { bookmarked: true } : {}),
+            });
+          })
+        );
+      }
+    })());
+  }
+
+  const bskyJwt = bskyAuth?.secrets?.accessJwt || '';
+  const bskyActor = bskyAuth?.meta?.did || bskyAuth?.meta?.handle || bskyAuth?.meta?.acct || '';
+  if (bskyJwt && bskyActor) {
+    const bskyOpts = {
+      ...getBskyReadOpts(bskyAuth, fetchImpl),
+      ...(timeoutMs ? { timeoutMs } : {}),
+    };
+    tasks.push((async () => {
+      const [likesRes, feedRes] = await Promise.all([
+        getBskyActorLikes({ actor: bskyActor, limit: 30, ...bskyOpts }).catch(() => ({ items: [] })),
+        getBskyAuthorFeed({ actor: bskyActor, filter: 'posts_with_replies', limit: 40, ...bskyOpts }).catch(() => ({ items: [] })),
+      ]);
+      for (const item of Array.isArray(likesRes?.items) ? likesRes.items : []) {
+        const { u, keys } = buildItemLookupKeys(item);
+        if (keys.length > 0) {
+          entries.push({ keys, likeUri: u._meta?.bluesky?.likeUri || 'liked' });
+        }
+      }
+      for (const item of Array.isArray(feedRes?.items) ? feedRes.items : []) {
+        if (!item || typeof item !== 'object') continue;
+        if (item.rebloggedBy) {
+          const { u, keys } = buildItemLookupKeys(item);
+          if (keys.length > 0) {
+            entries.push({ keys, repostUri: u._meta?.bluesky?.repostUri || item.rebloggedBy?.uri || 'reposted' });
+          }
+        }
+        const parentUri = String(item.reply?.parent?.uri || item._meta?.bluesky?.reply?.parent?.uri || '').trim();
+        if (parentUri) {
+          entries.push({ keys: [`bluesky:${parentUri}`, parentUri], replied: true });
+        }
+      }
+    })());
+  }
+
+  if (tasks.length > 0) {
+    await Promise.allSettled(tasks);
+  }
+  return entries;
+}
+
+/**
+ * Harvest Discovery (`Feed`) candidates from 2-hop peer activity (Home boosts, co-likers /
+ * taste twins, peer likes), auto-synced subscriptions, explicit taste `top` searches,
+ * trusted server `/api/v1/trends/statuses`, and minimal gated Jetstream serendipity.
  */
 export async function harvestSanctuaryFeed({
   fediAuth = null,
   bskyAuth = null,
   threadsAuth = null,
   tuning: rawTuning = null,
+  manifest: rawManifest = null,
+  discoveryMode = 'default',
   interactedAuthors = {},
-  implicitAuthors = {},
   tasteMemory = null,
   moderatedActors = [],
+  filterRules = [],
   cursor = null,
   append = false,
+  forceRefresh = false,
+  WebSocketImpl,
   fetchImpl,
 } = {}) {
   const page = append ? Math.max(0, Number(cursor?.page || 0)) : 0;
   const cursorState = append && cursor && typeof cursor === 'object' ? cursor : {};
-  const { tuning, activeChannels, tagList, activeInstances, searchQueries } = resolveDiscoverySources(rawTuning, fediAuth);
+  const manifest = normalizeRankingManifest(rawManifest);
+  const isMediaMode = discoveryMode === 'visual' || discoveryMode === 'photos' || discoveryMode === 'video';
+  const {
+    tuning,
+    activeChannels,
+    hasCustomChannels,
+    tagList,
+    activeInstances,
+    searchQueries,
+  } = resolveDiscoverySources(rawTuning, fediAuth);
 
-  const learnedTopics = extractLearnedTasteTopics(tasteMemory, 2);
-  const seenQueries = new Set();
+  const learnedTopics = extractLearnedTasteTopics(tasteMemory, 4);
+  const fediHost = normalizeHostName(fediAuth?.meta?.instanceUrl || '');
+  const tagHomeOrigin = fediAuth?.meta?.instanceUrl && isAllowedSocialUrl(fediAuth.meta.instanceUrl)
+    ? fediAuth.meta.instanceUrl
+    : (activeInstances[0] ? `https://${activeInstances[0]}` : DEFAULT_PUBLIC_MASTO_HOST);
+  const tagToken = fediAuth?.secrets?.accessToken || '';
+  const legTimeoutMs = typeof fetchImpl === 'function' ? undefined : 6500;
+  const reqCache = forceRefresh && !append ? 'no-store' : undefined;
+  const bskyReadOpts = {
+    ...getBskyReadOpts(bskyAuth, fetchImpl),
+    ...(reqCache ? { cache: reqCache } : {}),
+    ...(legTimeoutMs ? { timeoutMs: legTimeoutMs } : {}),
+  };
+  const hasBskyToken = Boolean(bskyAuth?.secrets?.accessJwt);
+  const hasFediToken = Boolean(fediAuth?.secrets?.accessToken);
+  const ownAccounts = [fediAuth?.meta, bskyAuth?.meta, threadsAuth?.meta].filter(Boolean);
+  const ownAccountKeys = buildOwnAccountKeySet(ownAccounts);
+
+  // Page 0 pre-fetch: auto-synced Mastodon followed tags/lists & Bluesky saved feeds/follows
+  let syncedFollowedTags = Array.isArray(cursorState.syncedFollowedTags) ? cursorState.syncedFollowedTags : [];
+  let syncedSavedBskyFeeds = Array.isArray(cursorState.syncedSavedBskyFeeds) ? cursorState.syncedSavedBskyFeeds : [];
+  let fediLists = [];
+  const followedActorKeys = new Set();
+
+  if (page === 0) {
+    const preTasks = [];
+    if (hasFediToken) {
+      preTasks.push(
+        getFollowedTags({
+          instanceUrl: tagHomeOrigin,
+          accessToken: tagToken,
+          limit: 30,
+          ...(reqCache ? { cache: reqCache } : {}),
+          ...(legTimeoutMs ? { timeoutMs: legTimeoutMs } : {}),
+          fetchImpl,
+        }).then((tags) => { syncedFollowedTags = tags; }).catch(() => {})
+      );
+      preTasks.push(
+        getUserLists({
+          instanceUrl: tagHomeOrigin,
+          accessToken: tagToken,
+          fetchImpl,
+        }).then((lists) => { fediLists = Array.isArray(lists) ? lists : []; }).catch(() => {})
+      );
+    }
+    if (hasBskyToken) {
+      preTasks.push(
+        getBskySavedFeedUris(bskyReadOpts)
+          .then((uris) => { syncedSavedBskyFeeds = uris; })
+          .catch(() => {})
+      );
+      const bskyActor = bskyAuth?.meta?.did || bskyAuth?.meta?.handle || '';
+      if (bskyActor) {
+        preTasks.push(
+          getBskyFollows({ actor: bskyActor, limit: 100, ...bskyReadOpts })
+            .then((res) => {
+              for (const actor of Array.isArray(res?.follows) ? res.follows : []) {
+                addActorToKeySet(actor, 'bluesky', '', followedActorKeys);
+              }
+            })
+            .catch(() => {})
+        );
+      }
+    }
+    if (preTasks.length > 0) {
+      await Promise.allSettled(preTasks);
+    }
+  }
+
+  const effectiveTags = [...tagList];
+  const seenEffTags = new Set(effectiveTags);
+  const modeDefaultTags = discoveryMode === 'photos'
+    ? ['pixelfed', 'fediphoto']
+    : (discoveryMode === 'video' ? ['loops'] : []);
+  for (const t of [...modeDefaultTags, ...syncedFollowedTags, ...learnedTopics.map((q) => conceptToHashtag(q))]) {
+    if (!t || seenEffTags.has(t)) continue;
+    seenEffTags.add(t);
+    effectiveTags.push(t);
+    if (effectiveTags.length >= 8) break;
+  }
+
   const effectiveSearchQueries = [];
+  const seenQueries = new Set();
   for (const q of [...learnedTopics, ...searchQueries]) {
     const clean = String(q || '').trim();
     const low = clean.toLowerCase();
     if (!clean || seenQueries.has(low)) continue;
     seenQueries.add(low);
     effectiveSearchQueries.push(clean);
+    if (effectiveSearchQueries.length >= 6) break;
   }
 
-  const tagHomeOrigin = fediAuth?.meta?.instanceUrl && isAllowedSocialUrl(fediAuth.meta.instanceUrl)
-    ? fediAuth.meta.instanceUrl
-    : DEFAULT_PUBLIC_MASTO_HOST;
-  const tagToken = fediAuth?.secrets?.accessToken || '';
-  const legTimeoutMs = typeof fetchImpl === 'function' ? undefined : 5500;
-  const bskyReadOpts = {
-    ...getBskyReadOpts(bskyAuth, fetchImpl),
-    ...(legTimeoutMs ? { timeoutMs: legTimeoutMs } : {}),
-  };
-  const hasBskyToken = Boolean(bskyAuth?.secrets?.accessJwt);
-  const hasFediToken = Boolean(fediAuth?.secrets?.accessToken);
-
+  const bskyFeedCandidates = [...activeChannels, ...learnedTopics, ...syncedSavedBskyFeeds];
   const bskyFeedUris = Array.isArray(cursorState.bskyFeedUris) && cursorState.bskyFeedUris.length > 0
     ? cursorState.bskyFeedUris
-    : await resolveCommunityBskyGenerators(activeChannels, bskyAuth, fetchImpl, 5);
+    : (bskyFeedCandidates.length > 0
+        ? await resolveCommunityBskyGenerators(bskyFeedCandidates, bskyAuth, fetchImpl, 6)
+        : []);
 
-  const tagBatch = buildKeyedBatch(tagList, cursorState.tagCursors, page, 3);
-  const instanceBatch = buildKeyedBatch(activeInstances, cursorState.instanceCursors, page, 2);
-  const bskyFeedBatch = buildKeyedBatch(bskyFeedUris, cursorState.bskyFeedCursors, page, 3);
-  const bskySearchBatch = hasBskyToken
-    ? buildKeyedBatch(effectiveSearchQueries, cursorState.bskySearchCursors, page, 2)
+  const hasTagSource = hasFediToken || activeInstances.length > 0 || hasCustomChannels || effectiveTags.length > 0;
+  const tagBatch = hasTagSource ? buildKeyedBatch(effectiveTags, cursorState.tagCursors, page, 4) : [];
+  const instanceBatch = activeInstances.length > 0
+    ? buildKeyedBatch(activeInstances, cursorState.instanceCursors, page, 4)
+    : [];
+  const bskyFeedBatch = bskyFeedUris.length > 0
+    ? buildKeyedBatch(bskyFeedUris, cursorState.bskyFeedCursors, page, 4)
+    : [];
+  const bskySearchBatch = effectiveSearchQueries.length > 0
+    ? buildKeyedBatch(effectiveSearchQueries, cursorState.bskySearchCursors, page, 3)
     : [];
 
-  const mergedAffinities = mergeAffinityMaps(interactedAuthors, implicitAuthors);
   const tasks = [];
 
-  // 1. Connected Following timelines (Inventory Step 1)
-  if (hasFediToken && (!append || cursorState.fediHomeCursor)) {
+  // 1. Home Timelines: collect followed authors AND extract Home boosts of unfollowed authors (2-hop)
+  if (hasFediToken && discoveryMode === 'default' && (!append || cursorState.fediHomeCursor)) {
     tasks.push(
       getTimeline({
         instanceUrl: tagHomeOrigin,
         accessToken: tagToken,
         stream: 'home',
+        onlyMedia: isMediaMode,
         maxId: append ? (cursorState.fediHomeCursor || '') : '',
-        limit: 18,
+        limit: 40,
+        ...(reqCache ? { cache: reqCache } : {}),
         ...(legTimeoutMs ? { timeoutMs: legTimeoutMs } : {}),
         fetchImpl,
-      }).then((res) => ({
-        kind: 'fediHome',
-        key: 'home',
-        items: tagFeedSource(res.items || [], 'following'),
-        nextCursor: res.nextCursor || null,
-      }))
+      }).then((res) => {
+        const homeBoosts = [];
+        for (const raw of res.items || []) {
+          const u = toUnifiedItem(raw);
+          const reblogger = u._meta?.mastodon?.rebloggedBy;
+          if (reblogger) {
+            addActorToKeySet(reblogger, 'mastodon', tagHomeOrigin, followedActorKeys);
+            homeBoosts.push(u);
+          } else {
+            addActorToKeySet(u.author, 'mastodon', u._meta?.mastodon?.instanceUrl || tagHomeOrigin, followedActorKeys);
+          }
+        }
+        return {
+          kind: 'fediHome',
+          key: 'home',
+          items: tagFeedSource(homeBoosts, 'second_degree'),
+          nextCursor: res.nextCursor || null,
+        };
+      })
     );
   }
 
-  if (hasBskyToken && (!append || cursorState.bskyHomeCursor)) {
+  if (hasBskyToken && discoveryMode === 'default' && (!append || cursorState.bskyHomeCursor)) {
     tasks.push(
       getBskyTimeline({
         ...bskyReadOpts,
         cursor: append ? (cursorState.bskyHomeCursor || '') : '',
-        limit: 20,
-      }).then((res) => ({
-        kind: 'bskyHome',
-        key: 'home',
-        items: tagFeedSource(res.items || [], 'following'),
-        nextCursor: res.nextCursor || null,
-      }))
+        limit: 40,
+      }).then((res) => {
+        const homeBoosts = [];
+        for (const raw of res.items || []) {
+          const u = toUnifiedItem(raw);
+          const reblogger = u._meta?.bluesky?.rebloggedBy;
+          if (reblogger) {
+            addActorToKeySet(reblogger, 'bluesky', '', followedActorKeys);
+            homeBoosts.push(u);
+          } else {
+            addActorToKeySet(u.author, 'bluesky', '', followedActorKeys);
+          }
+        }
+        return {
+          kind: 'bskyHome',
+          key: 'home',
+          items: tagFeedSource(homeBoosts, 'second_degree'),
+          nextCursor: res.nextCursor || null,
+        };
+      })
     );
   }
 
-  // 2. Discovery channels: hashtags, community instances, ATProto generators, search
-  for (const { key: tag, cursor: maxId } of tagBatch) {
-    tasks.push(
-      getTagTimeline({
-        instanceUrl: tagHomeOrigin,
-        accessToken: tagToken,
-        tag,
-        maxId,
-        limit: 12,
-        ...(legTimeoutMs ? { timeoutMs: legTimeoutMs } : {}),
-        fetchImpl,
-      }).then((res) => ({
-        kind: 'tag',
-        key: tag,
-        items: tagFeedSource(res.items || [], 'discovery'),
-        nextCursor: res.nextCursor || null,
-      }))
-    );
+  // 2. Mastodon List Timelines (page 0, up to 3 lists — unfollowed voices surface; followed are sieved out)
+  if (page === 0 && hasFediToken && fediLists.length > 0) {
+    for (const list of fediLists.slice(0, 3)) {
+      if (!list?.id) continue;
+      tasks.push(
+        getTimeline({
+          instanceUrl: tagHomeOrigin,
+          accessToken: tagToken,
+          stream: 'list',
+          listId: list.id,
+          onlyMedia: isMediaMode,
+          limit: 20,
+          ...(reqCache ? { cache: reqCache } : {}),
+          ...(legTimeoutMs ? { timeoutMs: legTimeoutMs } : {}),
+          fetchImpl,
+        })
+          .then((res) => ({
+            kind: 'fediList',
+            key: String(list.id),
+            items: tagFeedSource(res.items || [], 'second_degree'),
+            nextCursor: null,
+          }))
+          .catch(() => ({ kind: 'fediList', key: String(list.id), items: [], nextCursor: null }))
+      );
+    }
   }
 
+  // 3. Trusted Server /api/v1/trends/statuses (strictly connected home + manual discoveryInstances)
   for (const { key: host, cursor: maxId } of instanceBatch) {
     tasks.push(
       fetchDiscoveryInstanceTimeline({
         host,
         maxId,
-        limit: 12,
+        limit: 30,
+        stream: 'trends',
+        accessToken: host === fediHost ? tagToken : '',
+        ...(reqCache ? { cache: reqCache } : {}),
         ...(legTimeoutMs ? { timeoutMs: legTimeoutMs } : {}),
         fetchImpl,
-      }).then((res) => ({
-        kind: 'instance',
-        key: host,
-        items: tagFeedSource(res.items || [], 'discovery'),
-        nextCursor: res.nextCursor || null,
-      }))
+      })
+        .then((res) => ({
+          kind: 'instance',
+          key: host,
+          items: tagFeedSource(res.items || [], 'discovery'),
+          nextCursor: res.nextCursor || null,
+        }))
+        .catch(() => ({ kind: 'instance', key: host, items: [], nextCursor: null }))
     );
   }
 
+  // 4. Bluesky Custom Feeds, Mastodon Hashtags, & Taste-Topic `top` Search
   for (const { key: feedUri, cursor: bskyCursor } of bskyFeedBatch) {
     tasks.push(
       getBskyCustomFeed({
         feed: feedUri,
         cursor: bskyCursor,
-        limit: 15,
+        limit: 35,
         ...bskyReadOpts,
-      }).then((res) => ({
-        kind: 'bskyFeed',
-        key: feedUri,
-        items: tagFeedSource(res.items || [], 'discovery'),
-        nextCursor: res.nextCursor || null,
-      }))
+      })
+        .then((res) => ({
+          kind: 'bskyFeed',
+          key: feedUri,
+          items: tagFeedSource(res.items || [], 'discovery'),
+          nextCursor: res.nextCursor || null,
+        }))
+        .catch(() => ({ kind: 'bskyFeed', key: feedUri, items: [], nextCursor: null }))
+    );
+  }
+
+  for (const { key: tag, cursor: maxId } of tagBatch) {
+    tasks.push(
+      getTagTimeline({
+        instanceUrl: tagHomeOrigin,
+        accessToken: hasFediToken ? tagToken : '',
+        tag,
+        maxId,
+        limit: 25,
+        ...(reqCache ? { cache: reqCache } : {}),
+        ...(legTimeoutMs ? { timeoutMs: legTimeoutMs } : {}),
+        fetchImpl,
+      })
+        .then((res) => ({
+          kind: 'tag',
+          key: tag,
+          items: tagFeedSource(res.items || [], 'discovery'),
+          nextCursor: res.nextCursor || null,
+        }))
+        .catch(() => ({ kind: 'tag', key: tag, items: [], nextCursor: null }))
     );
   }
 
@@ -636,41 +1082,26 @@ export async function harvestSanctuaryFeed({
     tasks.push(
       searchBskyPosts({
         query,
-        sort: 'latest',
+        sort: 'top',
         cursor: searchCursor,
-        limit: 15,
+        limit: 25,
         ...bskyReadOpts,
-      }).then((res) => ({
-        kind: 'bskySearch',
-        key: query,
-        items: tagFeedSource(res.items || [], 'discovery'),
-        nextCursor: res.nextCursor || null,
-      }))
+      })
+        .then((res) => ({
+          kind: 'bskySearch',
+          key: query,
+          items: tagFeedSource(res.items || [], 'discovery'),
+          nextCursor: res.nextCursor || null,
+        }))
+        .catch(() => ({ kind: 'bskySearch', key: query, items: [], nextCursor: null }))
     );
   }
 
-  // 3. 2nd-Degree Graph Expansion: likes, boosts, and recent notes from high-affinity peers
-  if (page === 0 && hasBskyToken) {
-    for (const actor of topAffinityActors(mergedAffinities, 'bluesky', 2)) {
+  // 5. 2-Hop Peer Likes & Co-Likers ("Taste Twins")
+  if (page === 0 && discoveryMode === 'default') {
+    for (const actor of topAffinityActors(interactedAuthors, 'bluesky', 3, ownAccountKeys)) {
       tasks.push(
-        getBskyAuthorFeed({
-          actor,
-          limit: 8,
-          filter: 'posts_with_replies',
-          ...bskyReadOpts,
-        }).then((res) => ({
-          kind: 'reciprocity',
-          key: actor,
-          items: tagFeedSource(res.items || [], 'following', actor),
-          nextCursor: null,
-        }))
-      );
-      tasks.push(
-        getBskyActorLikes({
-          actor,
-          limit: 8,
-          ...bskyReadOpts,
-        })
+        getBskyActorLikes({ actor, limit: 8, ...bskyReadOpts })
           .then((res) => ({
             kind: 'secondDegree',
             key: `likes:${actor}`,
@@ -680,48 +1111,174 @@ export async function harvestSanctuaryFeed({
           .catch(() => ({ kind: 'secondDegree', key: `likes:${actor}`, items: [], nextCursor: null }))
       );
     }
-  }
 
-  if (page === 0 && hasFediToken) {
-    for (const acct of topAffinityActors(mergedAffinities, 'mastodon', 2)) {
+    const ownBskyActor = bskyAuth?.meta?.did || bskyAuth?.meta?.handle || '';
+    if (hasBskyToken && ownBskyActor) {
       tasks.push(
-        lookupAccountByAcct({
-          instanceUrl: tagHomeOrigin,
-          accessToken: tagToken,
-          acct,
-          ...(legTimeoutMs ? { timeoutMs: legTimeoutMs } : {}),
-          fetchImpl,
-        })
-          .then((prof) => (prof?.id
-            ? getAccountStatuses({
+        (async () => {
+          const ownLikes = await getBskyActorLikes({ actor: ownBskyActor, limit: 10, ...bskyReadOpts }).catch(() => ({ items: [] }));
+          const likedUris = (ownLikes.items || []).map((it) => it?.uri).filter(Boolean).slice(0, 4);
+          if (likedUris.length === 0) return { kind: 'coLikersBsky', key: 'twins', items: [], nextCursor: null };
+
+          const likeLists = await Promise.all(
+            likedUris.map((uri) => getBskyPostLikes({ uri, limit: 25, ...bskyReadOpts }).catch(() => ({ likes: [] })))
+          );
+          const twinCounts = new Map();
+          const twinHandles = new Map();
+          for (const res of likeLists) {
+            for (const actor of res.likes || []) {
+              const handle = String(actor?.handle || actor?.did || '').trim();
+              if (!handle) continue;
+              if (actorMatchesOwnAccountSet(actor, 'bluesky', '', ownAccountKeys)) continue;
+              const key = String(actor?.did || handle).toLowerCase();
+              twinCounts.set(key, (twinCounts.get(key) || 0) + 1);
+              twinHandles.set(key, actor?.handle || actor?.did);
+            }
+          }
+          const topTwins = [...twinCounts.entries()]
+            .sort((a, b) => b[1] - a[1])
+            .slice(0, 4)
+            .map(([k]) => twinHandles.get(k))
+            .filter(Boolean);
+          const twinFeeds = await Promise.all(
+            topTwins.map((twin) =>
+              getBskyActorLikes({ actor: twin, limit: 8, ...bskyReadOpts })
+                .then((r) => tagFeedSource(r.items || [], 'second_degree', twin))
+                .catch(() => [])
+            )
+          );
+          return { kind: 'coLikersBsky', key: 'twins', items: twinFeeds.flat(), ownLikedItems: ownLikes.items || [], nextCursor: null };
+        })()
+      );
+    }
+
+    if (hasFediToken) {
+      for (const acct of topAffinityActors(interactedAuthors, 'mastodon', 3, ownAccountKeys)) {
+        tasks.push(
+          lookupAccountByAcct({
+            instanceUrl: tagHomeOrigin,
+            accessToken: tagToken,
+            acct,
+            ...(legTimeoutMs ? { timeoutMs: legTimeoutMs } : {}),
+            fetchImpl,
+          })
+            .then((prof) => (prof?.id
+              ? getAccountStatuses({
+                  instanceUrl: tagHomeOrigin,
+                  accessToken: tagToken,
+                  accountId: prof.id,
+                  excludeReblogs: false,
+                  excludeReplies: true,
+                  limit: 6,
+                  ...(legTimeoutMs ? { timeoutMs: legTimeoutMs } : {}),
+                  fetchImpl,
+                })
+              : []))
+            .then((list) => ({
+              kind: 'secondDegreeMasto',
+              key: acct,
+              items: tagFeedSource(list || [], 'second_degree', acct),
+              nextCursor: null,
+            }))
+            .catch(() => ({ kind: 'secondDegreeMasto', key: acct, items: [], nextCursor: null }))
+        );
+      }
+
+      tasks.push(
+        (async () => {
+          const favs = await getFavouritedStatuses({
+            instanceUrl: tagHomeOrigin,
+            accessToken: tagToken,
+            limit: 8,
+            ...(legTimeoutMs ? { timeoutMs: legTimeoutMs } : {}),
+            fetchImpl,
+          }).catch(() => []);
+          const topIds = favs.map((s) => s?.id).filter(Boolean).slice(0, 3);
+          if (topIds.length === 0) return { kind: 'coLikersMasto', key: 'twins', items: [], nextCursor: null };
+
+          const peerLists = await Promise.all(
+            topIds.map((statusId) =>
+              getStatusBoostersAndLikers({
                 instanceUrl: tagHomeOrigin,
                 accessToken: tagToken,
-                accountId: prof.id,
+                statusId,
+                limit: 15,
+                ...(legTimeoutMs ? { timeoutMs: legTimeoutMs } : {}),
+                fetchImpl,
+              }).catch(() => [])
+            )
+          );
+          const twinCounts = new Map();
+          const twinMeta = new Map();
+          for (const peers of peerLists) {
+            for (const peer of peers) {
+              if (!peer?.id) continue;
+              if (actorMatchesOwnAccountSet(peer, 'mastodon', tagHomeOrigin, ownAccountKeys)) continue;
+              const k = String(peer.id);
+              twinCounts.set(k, (twinCounts.get(k) || 0) + 1);
+              twinMeta.set(k, peer.acct || peer.username || k);
+            }
+          }
+          const topTwins = [...twinCounts.entries()]
+            .sort((a, b) => b[1] - a[1])
+            .slice(0, 3)
+            .map(([id]) => id);
+          const twinFeeds = await Promise.all(
+            topTwins.map((accountId) =>
+              getAccountStatuses({
+                instanceUrl: tagHomeOrigin,
+                accessToken: tagToken,
+                accountId,
                 excludeReblogs: false,
-                excludeReplies: false,
-                limit: 8,
+                excludeReplies: true,
+                limit: 6,
                 ...(legTimeoutMs ? { timeoutMs: legTimeoutMs } : {}),
                 fetchImpl,
               })
-            : []))
-          .then((list) => ({
-            kind: 'secondDegreeMasto',
-            key: acct,
-            items: tagFeedSource(list || [], 'second_degree', acct),
-            nextCursor: null,
-          }))
-          .catch(() => ({ kind: 'secondDegreeMasto', key: acct, items: [], nextCursor: null }))
+                .then((list) => tagFeedSource(list || [], 'second_degree', twinMeta.get(accountId) || ''))
+                .catch(() => [])
+            )
+          );
+          return { kind: 'coLikersMasto', key: 'twins', items: twinFeeds.flat(), ownFavItems: favs || [], nextCursor: null };
+        })()
       );
     }
   }
 
-  if (page === 0 && threadsAuth?.secrets?.accessToken && effectiveSearchQueries.length > 0) {
+  // 6. Minimal Gated Bluesky Jetstream Serendipity (capped to 10 items)
+  const jetstreamMediaFilter = discoveryMode === 'photos'
+    ? 'images'
+    : (discoveryMode === 'video' ? 'video' : (discoveryMode === 'visual' ? 'media' : 'text'));
+  const recordMatcher = buildJetstreamRecordMatcher([...searchQueries, ...learnedTopics]);
+  tasks.push(
+    harvestBlueskyJetstreamBurst({
+      targetCount: 10,
+      maxDurationMs: 1800,
+      mediaOnly: isMediaMode,
+      mediaFilter: jetstreamMediaFilter,
+      blockedSelfLabels: manifest.sensitiveContentTriggers.jetstreamBlockedSelfLabels,
+      recordMatcher,
+      timeoutMs: legTimeoutMs || 3500,
+      ...(WebSocketImpl ? { WebSocketImpl } : {}),
+      fetchImpl,
+      ...bskyReadOpts,
+    })
+      .then((resItems) => ({
+        kind: 'jetstream',
+        key: discoveryMode,
+        items: tagFeedSource(resItems || [], 'discovery'),
+        nextCursor: null,
+      }))
+      .catch(() => ({ kind: 'jetstream', key: discoveryMode, items: [], nextCursor: null }))
+  );
+
+  if (page === 0 && hasCustomChannels && threadsAuth?.secrets?.accessToken && effectiveSearchQueries.length > 0) {
     for (const q of effectiveSearchQueries.slice(0, 2)) {
       tasks.push(
         searchThreadsKeyword({
           query: q,
           searchType: 'RECENT',
-          limit: 10,
+          limit: 20,
           accessToken: threadsAuth.secrets.accessToken,
           ...(legTimeoutMs ? { timeoutMs: legTimeoutMs } : {}),
           fetchImpl,
@@ -740,12 +1297,26 @@ export async function harvestSanctuaryFeed({
     }
   }
 
+  if (page === 0) {
+    tasks.push(
+      syncOwnViewerActivity({
+        fediAuth,
+        bskyAuth,
+        timeoutMs: legTimeoutMs || 5500,
+        fetchImpl,
+      })
+        .then((viewerEntries) => ({ kind: 'viewerActivity', key: 'own', items: [], viewerEntries, nextCursor: null }))
+        .catch(() => ({ kind: 'viewerActivity', key: 'own', items: [], viewerEntries: [], nextCursor: null }))
+    );
+  }
+
   if (tasks.length === 0) {
     return { items: [], nextCursor: null };
   }
 
   const settled = await Promise.allSettled(tasks);
   const rawCollected = [];
+  const ownInteractedItems = [];
   const nextTagCursors = {};
   const nextInstanceCursors = {};
   const nextBskyFeedCursors = {};
@@ -755,17 +1326,32 @@ export async function harvestSanctuaryFeed({
   let anySucceeded = false;
   let firstError = '';
 
-  const optionalKinds = new Set(['threadsSearch', 'secondDegree', 'secondDegreeMasto']);
+  const optionalKinds = new Set([
+    'fediList',
+    'threadsSearch',
+    'secondDegree',
+    'secondDegreeMasto',
+    'coLikersBsky',
+    'coLikersMasto',
+    'jetstream',
+    'viewerActivity',
+  ]);
+  let hadPoolResponse = false;
+  const discoveredViewerEntries = [];
   for (const entry of settled) {
     if (entry.status !== 'fulfilled') {
       if (!firstError) firstError = entry.reason?.message || 'Unable to load Sanctuary feed.';
       continue;
     }
-    const { kind, key, items, nextCursor } = entry.value;
+    const { kind, key, items, nextCursor, ownLikedItems, ownFavItems, viewerEntries } = entry.value;
+    if (kind === 'jetstream') hadPoolResponse = true;
     if (!optionalKinds.has(kind) || items.length > 0) {
       anySucceeded = true;
     }
     rawCollected.push(...(items || []));
+    if (Array.isArray(ownLikedItems) && ownLikedItems.length > 0) ownInteractedItems.push(...ownLikedItems);
+    if (Array.isArray(ownFavItems) && ownFavItems.length > 0) ownInteractedItems.push(...ownFavItems);
+    if (Array.isArray(viewerEntries) && viewerEntries.length > 0) discoveredViewerEntries.push(...viewerEntries);
     if (kind === 'fediHome' && nextCursor) nextFediHomeCursor = nextCursor;
     else if (kind === 'bskyHome' && nextCursor) nextBskyHomeCursor = nextCursor;
     else if (kind === 'tag' && nextCursor) nextTagCursors[key] = nextCursor;
@@ -774,24 +1360,80 @@ export async function harvestSanctuaryFeed({
     else if (kind === 'bskySearch' && nextCursor) nextBskySearchCursors[key] = nextCursor;
   }
 
-  if (!anySucceeded) {
+  if (!anySucceeded && !hadPoolResponse) {
     throw new Error(firstError || 'Unable to load Sanctuary feed.');
   }
 
-  const ownAccounts = [fediAuth?.meta, bskyAuth?.meta, threadsAuth?.meta].filter(Boolean);
+  if ((ownInteractedItems.length > 0 || discoveredViewerEntries.length > 0) && rawCollected.length > 0) {
+    const interactedByKey = new Map();
+    const recordPatch = (key, patch) => {
+      if (!key) return;
+      const cur = interactedByKey.get(key) || {};
+      interactedByKey.set(key, mergeViewerActivityMeta(cur, patch));
+    };
+    for (const raw of ownInteractedItems) {
+      const { u, keys } = buildItemLookupKeys(raw);
+      for (const k of keys) recordPatch(k, u._meta);
+    }
+    for (const ent of discoveredViewerEntries) {
+      const patch = {
+        ...(ent.replied ? { viewerReplied: true } : {}),
+        ...(ent.favourited || ent.reblogged || ent.bookmarked || ent.replied
+          ? {
+              mastodon: {
+                ...(ent.favourited ? { favourited: true } : {}),
+                ...(ent.reblogged ? { reblogged: true } : {}),
+                ...(ent.bookmarked ? { bookmarked: true } : {}),
+                ...(ent.replied ? { replied: true } : {}),
+              },
+            }
+          : {}),
+        ...(ent.likeUri || ent.repostUri || ent.replied
+          ? {
+              bluesky: {
+                ...(ent.likeUri ? { likeUri: ent.likeUri } : {}),
+                ...(ent.repostUri ? { repostUri: ent.repostUri } : {}),
+                ...(ent.replied ? { replied: true } : {}),
+              },
+            }
+          : {}),
+      };
+      for (const k of Array.isArray(ent.keys) ? ent.keys : []) {
+        recordPatch(k, patch);
+      }
+    }
+    for (let i = 0; i < rawCollected.length; i += 1) {
+      const { u, keys } = buildItemLookupKeys(rawCollected[i]);
+      let matchedMeta = null;
+      for (const k of keys) {
+        const hit = interactedByKey.get(k);
+        if (hit) matchedMeta = matchedMeta ? mergeViewerActivityMeta(matchedMeta, hit) : hit;
+      }
+      if (matchedMeta) {
+        rawCollected[i] = {
+          ...u,
+          _meta: mergeViewerActivityMeta(u._meta, matchedMeta),
+        };
+      }
+    }
+  }
+
   const items = sieveSovereignCandidates(rawCollected, tuning, {
-    maxPerAuthor: 2,
     ownAccounts,
+    followedActors: followedActorKeys,
     moderatedActors,
+    filterRules,
+    discoveryMode,
+    manifest,
   });
   const nextPage = page + 1;
   const hasMoreSlices =
     nextPage < 6
     && (
-      nextPage * 3 < tagList.length
-      || nextPage * 2 < activeInstances.length
-      || nextPage * 3 < bskyFeedUris.length
-      || (hasBskyToken && nextPage * 2 < effectiveSearchQueries.length)
+      (hasTagSource && nextPage * 4 < effectiveTags.length)
+      || (activeInstances.length > 0 && nextPage * 4 < activeInstances.length)
+      || (bskyFeedUris.length > 0 && nextPage * 4 < bskyFeedUris.length)
+      || (bskySearchBatch.length > 0 && nextPage * 3 < effectiveSearchQueries.length)
     );
   const hasUpstreamCursors =
     nextPage < 8
@@ -808,6 +1450,8 @@ export async function harvestSanctuaryFeed({
     ? {
         page: nextPage,
         bskyFeedUris,
+        syncedFollowedTags,
+        syncedSavedBskyFeeds,
         ...(nextFediHomeCursor ? { fediHomeCursor: nextFediHomeCursor } : {}),
         ...(nextBskyHomeCursor ? { bskyHomeCursor: nextBskyHomeCursor } : {}),
         tagCursors: nextTagCursors,

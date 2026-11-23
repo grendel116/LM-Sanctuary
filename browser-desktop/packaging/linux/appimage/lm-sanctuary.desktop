@@ -1,0 +1,10 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Sanctuary Browser
+GenericName=Web Browser & AI Sanctuary
+Exec=AppRun %u
+Icon=lm-sanctuary
+Terminal=false
+Categories=Network;WebBrowser;
+StartupWMClass=lm-sanctuary

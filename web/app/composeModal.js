@@ -1,19 +1,22 @@
 import { createEmojiPicker } from '../components/EmojiPickerPopover.js';
 import { createEmbedCard } from '../components/EmbedCard.js';
 import { createComposerMediaEditor } from '../components/MediaAttachment.js';
+import { createReplyContextBlock } from '../components/PostCard.js';
 import { createClassicModalDialog, showAlert } from '../components/sanctuary/SanctuaryDialog.js';
 import { DEFAULT_AVATAR_DATA_URI } from '../constants/avatars.js';
 import { BLUESKY_MAX_GRAPHEMES, MASTODON_MAX_CHARS } from '../constants/endpoints.js';
-import { toUnifiedItem } from '../core/schema/unifiedItem.js';
+import { buildSynthesizedReplyContext, toUnifiedItem } from '../core/schema/unifiedItem.js';
 import { createBskyPost, uploadBskyBlob } from '../queries/bluesky.js';
 import { extractFirstHttpsUrl, fetchLinkPreview } from '../queries/linkPreview.js';
 import { resolveSanctuaryMediaUrl } from '../queries/sanctuary.js';
 import { publishUnified, replyUnified, syncRecentUserPostsToSanctuary } from '../queries/socialClient.js';
 import { publishThreadsPost } from '../queries/threads.js';
 import { authStore, getAuthenticatedAccount, updateAccountTokens } from '../state/authStore.js';
+import { feedStore, mutatePostAcrossStreams, persistStreamCache, recordViewerInteraction } from '../state/feedStore.js';
 import {
   addMediaAttachment,
   addThreadItem,
+  clearComposeReply,
   closeCompose,
   composeStore,
   computeRemainingCounts,
@@ -663,6 +666,8 @@ export function mountComposeModal(hostEl, { onPublished } = {}) {
   }
 
   async function refreshDraftsList() {
+    draftsList = await listLocalComposeDrafts();
+    renderDraftsView();
     try {
       draftsList = await listComposeDrafts();
       statusLine.textContent = '';
@@ -845,6 +850,42 @@ export function mountComposeModal(hostEl, { onPublished } = {}) {
         }
         await refreshDraftsList();
       }
+      if (s.replyTo && Array.isArray(results) && results.length > 0) {
+        const parentTarget = toUnifiedItem(s.replyTo);
+        const parentId = String(parentTarget.id || '');
+        const parentMastoId = String(parentTarget._meta?.mastodon?.statusId || '');
+        const parentBskyUri = String(parentTarget._meta?.bluesky?.uri || '');
+        const parentUrl = String(parentTarget.url || '');
+        const markReplied = (item) => {
+          const base = toUnifiedItem(item);
+          const nextMeta = { ...(base._meta || {}), viewerReplied: true };
+          if (base.protocol === 'mastodon' || nextMeta.mastodon) {
+            nextMeta.mastodon = { ...(nextMeta.mastodon || {}), replied: true };
+          }
+          if (base.protocol === 'bluesky' || nextMeta.bluesky) {
+            nextMeta.bluesky = { ...(nextMeta.bluesky || {}), replied: true };
+          }
+          return {
+            ...base,
+            metrics: {
+              ...(base.metrics || { replies: 0, reposts: 0, likes: 0 }),
+              replies: Number(base.metrics?.replies ?? 0) + 1,
+            },
+            _meta: nextMeta,
+          };
+        };
+        recordViewerInteraction(markReplied(parentTarget));
+        mutatePostAcrossStreams(
+          (item) =>
+            (parentId && item?.id === parentId)
+            || (parentMastoId && item?._meta?.mastodon?.statusId === parentMastoId)
+            || (parentBskyUri && item?._meta?.bluesky?.uri === parentBskyUri)
+            || (parentUrl && item?.url === parentUrl),
+          markReplied
+        );
+        const activeName = feedStore.get().activeStream || 'feed';
+        void persistStreamCache(activeName).catch(() => {});
+      }
       if (!s.replyTo && Array.isArray(results) && results.length > 0) {
         void syncRecentUserPostsToSanctuary({ freshItems: results }).catch(() => {});
       }
@@ -885,6 +926,8 @@ export function mountComposeModal(hostEl, { onPublished } = {}) {
     const extraItems = Array.isArray(s.threadItems) ? s.threadItems : [];
     const wasBodyHidden = Boolean(body.hidden);
     titleEl.textContent = viewingDrafts ? 'Drafts' : (s.replyTo ? 'Reply' : 'New post');
+    publishBtn.textContent = s.replyTo ? 'Reply' : 'Post';
+    textarea.placeholder = s.replyTo ? 'Write your reply...' : "What's new?";
     cancelBtn.textContent = viewingDrafts ? '← Back' : 'Cancel';
     countsEl.hidden = viewingDrafts;
     body.hidden = viewingDrafts;
@@ -898,9 +941,40 @@ export function mountComposeModal(hostEl, { onPublished } = {}) {
 
     if (s.replyTo) {
       replyBanner.hidden = false;
-      replyBanner.textContent = `Replying to @${String(s.replyTo.author?.acct || s.replyTo.author?.handle || 'post').replace(/^@/, '')}`;
+      replyBanner.replaceChildren();
+      const replyHeader = doc.createElement('div');
+      replyHeader.className = 'compose-reply-header';
+      const replyLabel = doc.createElement('span');
+      replyLabel.className = 'compose-reply-label';
+      const replyHandle = String(
+        s.replyTo?._meta?.notification?.actor?.handle
+        || s.replyTo?.author?.acct
+        || s.replyTo?.author?.handle
+        || 'post'
+      ).replace(/^@/, '');
+      replyLabel.textContent = `Replying to @${replyHandle}`;
+      const clearReplyBtn = doc.createElement('button');
+      clearReplyBtn.type = 'button';
+      clearReplyBtn.className = 'compose-reply-clear-btn';
+      clearReplyBtn.setAttribute('aria-label', 'Cancel reply and post standalone');
+      clearReplyBtn.title = 'Convert to standalone post';
+      clearReplyBtn.textContent = '×';
+      clearReplyBtn.addEventListener('click', () => clearComposeReply());
+      replyHeader.append(replyLabel, clearReplyBtn);
+      replyBanner.appendChild(replyHeader);
+
+      const replyCtx = buildSynthesizedReplyContext(s.replyTo);
+      const replyCard = createReplyContextBlock(doc, replyCtx);
+      if (replyCard) {
+        replyCard.removeAttribute('href');
+        replyCard.removeAttribute('target');
+        replyCard.removeAttribute('rel');
+        replyCard.classList.add('is-static-preview');
+        replyBanner.appendChild(replyCard);
+      }
     } else {
       replyBanner.hidden = true;
+      replyBanner.replaceChildren();
     }
 
     if (textarea.value !== s.text) {

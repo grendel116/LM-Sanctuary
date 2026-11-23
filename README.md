@@ -31,12 +31,13 @@ Here is what the LM-Sanctuary workspace looks like:
   <img src="./web/assets/img/samplechat.jpg" alt="LM-Sanctuary Workspace Preview" width="100%">
 </p>
 
-* **3-Column Desktop, PWA & Android Shell**: Desktop renders a left navigation rail (`Home`, `Search`, `Messages`, `Activity`, `Profile`, `Settings`, `+` Compose), a hairline center Fediverse stage, and a collapsible right Sanctuary dock (`sanctuary/`) so social browsing never interrupts active AI generations or voice calls. Mobile adapts into a bottom navigation bar (`Home`, `Messages`, `Activity`, `Profile`) with top-bar `Search`, `Settings`, and floating `+` Compose triggers, sharing the same pure-static `web/` bundle with Capacitor Android (`android/`).
+* **3-Column Desktop, PWA & Android Shell**: Desktop renders a left navigation rail (`Browser`, `Home`, `Search`, `Messages`, `Activity`, `Profile`, `Settings`, `+` Compose), a center stage hosting either the integrated **Browser** workspace or hairline Fediverse streams, and a collapsible, resizable right Sanctuary dock (`sanctuary/`) so browsing and social feeds never interrupt active AI generations or voice calls. Mobile adapts into a 5-slot bottom navigation bar (`Home`, `Messages`, **`Browser`** centered, `Activity`, `Profile`) with top-bar `Search` and `Settings` triggers, sharing the same pure-static `web/` bundle with Capacitor Android (`android/`).
+* **Integrated Sovereign Browser Workspace**: Minimalist unified search/URL bar (prompting to configure your preferred search engine with zero forced default, plus instant `github:`, `arxiv:`, `hn:`, `wikipedia:`, `bandcamp:`, and `kexp:` prefixes), single-row tabs, 2-pane Browser Split View beside the resizable Sanctuary dock, Reader View, encrypted bookmark synchronization across desktop and mobile (`/api/browser/bookmarks`), URL tracking-parameter stripping, per-site JavaScript shield toggles, direct new-tab link routing (no Quick Peek), `Ask Sanctuary` / `Data Bank` page clipping, and `KeePassXC-Browser` (`keepassxc-browser@keepassxc.org`) / Android `KeePassDX` password workflow support.
 * **Mastodon-First ActivityPub Client**: OAuth 2.0 and access-token sign-in (`mastodon.social` default or any ActivityPub server), `Feed` and `Following` timelines with stable scroll anchoring, nested conversation threads, rich link previews and privacy-preserving YouTube/Vimeo embed façades, multi-media carousels and classic lightbox viewer, snapshot post drafts, lists, keyword filters, follow/mutual graph explorer, profile studio, and Direct Messages (`Direct | Programs`).
-* **Unified `Bluesky` & `Threads` Bridges**: Optional AT Protocol (`Bluesky`) and Meta `Threads` bridges fan out posts and multi-part threads concurrently (auto-splitting at `300` graphemes for Bluesky and `500` characters for Mastodon and Threads), forward media and link embeds, synchronize post edits (in-place on Mastodon, delete-and-republish across bridges) and deletions with automatic retry queuing, and include a `.zip` archive importer to migrate Threads following and mutuals onto the Fediverse.
+* **Unified `Bluesky` & `Threads` Bridges**: Optional AT Protocol (`Bluesky`) and Meta `Threads` bridges fan out posts and multi-part threads concurrently (auto-splitting at `300` graphemes for Bluesky and `500` characters for Mastodon and Threads), forward media and link embeds, support simplified organic `Update` editing (in-place on Mastodon and Bluesky, concurrent delete-and-republish across linked bridges without per-network toggle clutter) and deletions with automatic retry queuing, and include a `.zip` archive importer to migrate Threads following and mutuals onto the Fediverse.
 * **Aggregated Cross-Platform Activity**: Unified `Activity` view merging Mastodon, Bluesky, and Threads notifications with grouped likes and reposts, cross-network engagement totals, unread nav indicator, and persistent notification deletion.
-* **Transparent Local Feed Tuning**: Declarative local feed sliders and optional local CPU semantic concept anchors (`web/core/feedRanker.js`, `sanctuary/utils/semantic_scorer.py`, `tune_feed_algorithm`) stored in `sanctuary/variables/feed_profile.json`—zero opaque remote ranking.
-* **Social Credential Storage & Zero AI Social Dispatch**: Social credentials stay in the client vault (Capacitor Android `AndroidKeyStore`, or secure browser/WebView2 IndexedDB `AES-GCM`). When connected, clients sync credentials, saved post drafts, and cross-post IDs to the Sanctuary server without app credentials; these records are encrypted at rest. The social sync API is unauthenticated, so any client that can reach it can retrieve synced credentials, drafts, and post IDs. When older cross-post IDs are missing, the client can recover unique matches by comparing exact post text and close timestamps across connected accounts. Tailscale HTTP browsers keep synced tokens in memory and reload them from the server. Remote LAN clients require HTTPS; HTTP is allowed on localhost or over Tailscale's encrypted tunnel. AI Programs do not receive those credentials or social publishing/timeline tools. See [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) for the module map.
+* **Transparent Local Feed Tuning**: Declarative local feed sliders and optional local CPU semantic concept anchors (`web/core/feedRanker.js`, `sanctuary/utils/semantic_scorer.py`, `tune_feed_algorithm`) stored in `sanctuary/variables/feed_profile.json`—no opaque remote ranking.
+* **Social Credential Storage**: Social credentials stay in the client vault (Capacitor Android `AndroidKeyStore`, or secure browser/WebView2 IndexedDB `AES-GCM`). When connected, clients sync credentials, saved post drafts, and cross-post IDs to the Sanctuary server without app credentials; these records are encrypted at rest. The social sync API is unauthenticated, so any client that can reach it can retrieve synced credentials, drafts, and post IDs. When older cross-post IDs are missing, the client can recover unique matches by comparing exact post text and close timestamps across connected accounts. Tailscale HTTP browsers keep synced tokens in memory and reload them from the server. Remote LAN clients require HTTPS; HTTP is allowed on localhost or over Tailscale's encrypted tunnel. AI Programs do not receive those credentials or social publishing/timeline tools. See [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) for the module map.
 
 ---
 
@@ -45,30 +46,27 @@ Here is what the LM-Sanctuary workspace looks like:
 Programs can call the local tools below during a chat. Tool activity is available from `/api/session_tool_calls`.
 
 > [!WARNING]
-> **Security Warning**: The Antigravity coding bridge can modify files and execute commands in its selected workspace. The default `ask_always` security preset requests approval for file edits, file creation, and commands. Auto Mode removes those approval prompts; use it only with models and tasks you trust.
+> **Security Warning**: In-process workspace coding tools and optional OpenHands delegation can modify files and execute commands in the active workspace. The default `ask_always` security preset requests approval for file edits, file creation, and commands. Auto Mode removes those approval prompts; use it only with models and tasks you trust.
 
 ### Sanctuary Program Tools
 * **Web Search** (`web_search`): Search across configured providers, with explicit routing prefixes such as `github:`, `arxiv:`, `hn:`, and `wikipedia:`. `google_search` remains an alias.
-* **Read Webpage** (`read_webpage`): Fetch a URL and extract its readable content as Markdown.
+* **Read Webpage & Open in Browser** (`read_webpage`, `open_in_browser`): Fetch a URL (with tracking parameters stripped) to extract readable Markdown, or open links directly inside the Sanctuary Browser workspace (optionally in Split View).
 * **Music Discovery** (`search_music`): Search music using `deep_cuts`, `kexp`, `theme_time`, `bandcamp`, and `artist` modes.
 * **Feed Tuning** (`tune_feed_algorithm`): Inspect or update local feed presets, ranking weights, discovery sources, and concept anchors. This tool does not read social credentials or timelines.
 * **Quests & Journal** (`add_quest`, `add_journal_entry`): Add tasks to the local quest log and save program journal memories.
 * **Local Media** (`generate_local_image`, `apply_comfy_workflow`, `generate_video_from_image`): Generate images or video with the configured local diffusion/ComfyUI workflows.
 
-### Antigravity Coding Bridge
-* **Delegate Coding** (`delegate_coding(task, path="", model="", resume=True)`): Delegate coding, debugging, refactoring, workspace inspection, and verification to the Google Antigravity SDK. `path` selects a workspace (otherwise the active workspace is used); `model` optionally selects an Antigravity model/tier; `resume` continues the saved conversation for the same program, Sanctuary session, and workspace.
-* **Workspace tools**: The delegated agent can inspect and search the workspace, edit or create files, and run commands. It can also use Antigravity subagents. Tool calls appear in `/api/session_tool_calls` as `antigravity:<tool>`.
-* **Approval flow**: By default, file edits, file creation, and commands require approval through Sanctuary. Antigravity questions and decision requests are routed through the active local Program as a decision broker and, according to the Project Settings review policy, may require user approval. Auto Mode allows the delegated agent to proceed without those prompts.
-* **Results and resume data**: Each completed delegation returns a digest with the model, workspace, completion reason, changed files, commands, decisions, and agent summary. Conversation IDs are saved in `sanctuary/data/antigravity/sessions.json`; Antigravity trajectories and app data are stored under `sanctuary/data/antigravity/`.
-* **Authentication**: Configure a Gemini API key in Project Settings or `GEMINI_API_KEY` in `.env`, or enable Vertex AI/Enterprise ADC with `GOOGLE_GENAI_USE_VERTEXAI=true` or `GOOGLE_GENAI_USE_ENTERPRISE=true`. Project Settings takes precedence over the environment variable. The `google-antigravity` package is installed from `requirements.txt`.
-* **Models**: The default is `Orchestrator (Neon)` (`gemini-4-neon`), configurable with `ANTIGRAVITY_MODEL`; per-call overrides also support the configured Antigravity model aliases.
-* **Cancellation**: Cancelling the Sanctuary chat session cancels its active Antigravity job and terminates its managed process tree.
+### In-Process Coding, Automatic Gear Transmission & Cloud Routing
+* **In-Process Workspace Tools** (`sanctuary/tools/coding_tools.py`): Native `list_dir`, `read_file`, `grep_search` (fixed-string, zero-regex), `edit_file` (CRLF-preserving), `write_file`, and headless `run_command` execute directly in-process with `ask_always` HITL approval cards for mutating actions and read-only band enforcement during `/plan` mode.
+* **Automatic Gear Transmission & 2-Strike Rule** (`sanctuary/core/transmission.py`): Dynamically shifts between **Park** (local `llama-server` GGUF), **1st Gear** (fast cloud cruise), **2nd Gear** (deep cloud planning & recovery), and **Vision** (multimodal turns) based on prompt complexity, token load, and tool state. `/plan` mode always locks to the deep model (`2nd`), and **2 consecutive tool strikes** automatically shift up to `2nd` gear for root-cause recovery.
+* **Open Multi-Provider `/v1` Cloud Router**: Supports **GreenPT** (`https://api.greenpt.ai/v1`), **Inference.coop** (`https://api.inference.coop/v1`), **Tinfoil** confidential TEE (`https://inference.tinfoil.sh/v1`), **Regolo**, or any custom OpenAI-compatible `/v1` endpoint configured in **Settings → Cloud / Project** or `.env`.
+* **Optional OpenHands Subagent & Worktree Delegation**: `delegate_coding` (`OPENHANDS_MODE=cli|server`, backed by `openhands-sdk`, `openhands-tools`, and `openhands-agent-server`) remains available for isolated multi-agent or background server runs, with cooperative cancellation that cleans up active worker subprocesses.
 
 ---
 
 ## 📁 MODELS DIRECTORY & RECOMMENDED DOWNLOADS
 
-Place your local models into the `sanctuary/models/` directory for **GGUF LLMs** and **SDXL Checkpoints** used inside the app via **Settings → Models / Project Settings** and the **Program Inspector**:
+Place your local models into the `sanctuary/models/` directory for **GGUF LLMs** and **SDXL Checkpoints** used inside the app via **Settings → Models / Project** and the **Program Inspector**:
 
 * **`sanctuary/models/llm/`**: Place GGUF chat models (models inside `~/.lmstudio/models/` are also auto-detected).
 * **`sanctuary/models/checkpoints/`**: Place Stable Diffusion / SDXL SafeTensors checkpoints (e.g. `sd_xl_base_1.0.safetensors`).
@@ -96,6 +94,7 @@ Image generation and local LLM mode share GPU memory. Sanctuary waits for an act
 * **Quest Log & Calendar Export**: Integrated quest system to track and display user objectives in the UI. Programs can assign quests (chores, habits, tasks) using the local `add_quest` tool. Each quest card provides a quick-action to export the task:
   * **Download ICS**: Download a standard `.ics` file containing a `VALARM` notification alert for native desktop/mobile task/calendar clients.
 * **Offline Outbox Queue**: When a configured Sanctuary node is temporarily unreachable over LAN or Tailscale, queued messages are stored locally on the client (Android SQLite / browser IndexedDB) and replayed in strict FIFO order on reconnect.
+* **Staged-Until-Send Attachment Composer**: Paste (`Ctrl+V`), drag-and-drop, or select images into a compact preview card (`48x48` thumbnail, filename, size, `×` clear) held locally in memory until the turn is sent—preventing unsent drafts from polluting the gallery.
 * **Program Editing, Imports & Exports**: Edit program profiles, import SillyTavern character cards (PNG & `chara_card_v3` `.json`), import World Info lorebooks (`.json`), and export cards and lorebooks back to SillyTavern format.
 * **Character Accent Palette**: Dynamic accent colors resolved from your program's profile card that automatically generate and update themed CSS variables (buttons, borders, highlights, and active states).
 * **Idle Thoughts**: Inline monologue bubbles (`.thought-row`) showing a program's thoughts during inactivity.
@@ -141,19 +140,28 @@ On first launch, `setup_env.py` automatically:
 5. Verify tests & Android PWA bundle:
    * Frontend unit tests: `npm test`
    * Backend node tests: `.venv/Scripts/python.exe __tests__/backend/test_sanctuary_node.py`
+   * Transmission & coding tools tests: `.venv/Scripts/python.exe __tests__/backend/test_transmission_and_coding.py`
+   * Cloud compliance & skill tests: `.venv/Scripts/python.exe __tests__/backend/test_greenpt_compliance.py`
    * Social bridge backend tests: `.venv/Scripts/python.exe __tests__/backend/test_social_bridge.py`
    * Social account vault tests: `.venv/Scripts/python.exe __tests__/backend/test_social_account_vault.py`
    * Session data encryption tests: `.venv/Scripts/python.exe __tests__/backend/test_session_data_encryption.py`
    * Capacitor Android verification / sync: `npm run build:android`
+
+### Native Desktop Browser (Windows & Linux — Sval / Gecko)
+`sanctuary/desktop.py` automatically launches the compiled **LM-Sanctuary** Gecko browser (`lm-sanctuary` / `lm-sanctuary.exe`) when built, falling back cleanly to `pywebview` otherwise while serving the `:5000` node across loopback, LAN, and Tailscale for desktop and mobile linking:
+* Verify desktop overlay templates: `npm run verify:desktop` (or `python browser-desktop/bootstrap_gecko.py --verify-templates`)
+* Stage/compile desktop host (Artifact or full Gecko build): `python browser-desktop/bootstrap_gecko.py --mode artifact` (or `--mode gecko`)
+* Package Windows / Linux installers: see [browser-desktop/README.md](./browser-desktop/README.md) (`browser-desktop/packaging/package_windows.ps1` and `browser-desktop/packaging/package_linux.sh`), with automatic `KeePassXC-Browser` Native Messaging registration via [keepassxc_nmh.py](./browser-desktop/keepassxc_nmh.py).
 
 
 ---
 
 ## 📜 LICENSE
 
-Copyright (C) 2026 Davy & Sebile
+Copyright (C) 2026 Davy & Sebile  
+Based in part on [Sval](https://gitlab.com/sval-browser/sval) (`AGPL-3.0-only WITH AdditionRef-sval-app-store`, Copyright 2026 Ellm Tree, Inc., https://sval.app), Mozilla Gecko (`MPL-2.0`), [SillyTavern](https://github.com/SillyTavern/SillyTavern) (`AGPL-3.0` / `chara_card_v3` & World Info schema compatibility), and [ComfyUI](https://github.com/comfyanonymous/ComfyUI) (`GPL-3.0` combined via AGPLv3 Section 13). LM-Sanctuary is an independent project and is not affiliated with or endorsed by Sval, Ellm Tree, Inc., the Mozilla Foundation, SillyTavern, or ComfyUI.
 
-This program is free software: you can redistribute it and/or modify it under the terms of the **GNU Affero General Public License** as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
+This program is free software: you can redistribute it and/or modify it under the terms of the **GNU Affero General Public License** as published by the Free Software Foundation, **version 3 only (`AGPL-3.0-only`)**, with the [Sval App Store Permission](./LICENSES/AdditionRef-sval-app-store.txt) under section 7 of the License. See [LICENSING.md](./LICENSING.md) for the full multi-license breakdown including [MPL-2.0](./LICENSES/MPL-2.0.txt) and [GPL-3.0](./LICENSES/GPL-3.0.txt) components.
 
 This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the [GNU Affero General Public License](./LICENSE) for more details.
 

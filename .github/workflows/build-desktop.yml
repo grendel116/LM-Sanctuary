@@ -1,0 +1,137 @@
+# SPDX-License-Identifier: AGPL-3.0-only WITH AdditionRef-sval-app-store
+name: Build Desktop Browser
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Gecko build mode (gecko compiles native Sval adblock-rust; artifact uses prebuilt binaries)
+        required: true
+        default: gecko
+        type: choice
+        options:
+          - gecko
+          - artifact
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Verify Overlay & Test Suites
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Run frontend unit tests
+        run: npm test
+
+      - name: Verify desktop Gecko templates and compliance
+        run: |
+          python3 browser-desktop/bootstrap_gecko.py --verify-templates
+          python3 __tests__/backend/test_browser_desktop.py
+
+  build-linux:
+    name: Build Linux Packages (${{ github.event.inputs.mode || 'gecko' }})
+    needs: verify
+    runs-on: ubuntu-24.04
+    env:
+      BUILD_MODE: ${{ github.event.inputs.mode || 'gecko' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Firefox & Linux packaging dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            python3-pip git curl zip unzip xz-utils \
+            dpkg-dev debhelper rpm clang lld nasm nodejs cbindgen \
+            libgtk-3-dev libdbus-glib-1-dev libasound2-dev \
+            libx11-xcb-dev libxt-dev libpulse-dev libdrm-dev
+
+      - name: Cache Mozbuild toolchain
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.mozbuild
+            ~/.cargo
+          key: mozbuild-linux-${{ runner.os }}-${{ hashFiles('browser-desktop/upstream.json', 'browser-desktop/mozconfig*') }}
+          restore-keys: |
+            mozbuild-linux-${{ runner.os }}-
+
+      - name: Bootstrap, stage Sval overlay, build, and package
+        run: |
+          python3 browser-desktop/bootstrap_gecko.py --bootstrap --mode "$BUILD_MODE"
+          TAR_PATH=$(ls browser-desktop/build/firefox/objdir-sanctuary-"$BUILD_MODE"/dist/lm-sanctuary-*.tar.xz | head -n 1)
+          chmod +x browser-desktop/packaging/package_linux.sh
+          ./browser-desktop/packaging/package_linux.sh "$TAR_PATH" 2.0.0 1
+
+      - name: Upload Linux packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: lm-sanctuary-browser-linux-${{ github.event.inputs.mode || 'gecko' }}
+          path: browser-desktop/dist/*
+
+  build-windows:
+    name: Build Windows Installer (${{ github.event.inputs.mode || 'gecko' }})
+    needs: verify
+    runs-on: windows-2022
+    env:
+      BUILD_MODE: ${{ github.event.inputs.mode || 'gecko' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install MozillaBuild
+        shell: pwsh
+        run: |
+          $mbUrl = "https://ftp.mozilla.org/pub/mozilla/libraries/win32/MozillaBuildSetup-Latest.exe"
+          $mbExe = "$env:TEMP\MozillaBuildSetup-Latest.exe"
+          Invoke-WebRequest -Uri $mbUrl -OutFile $mbExe
+          Start-Process -FilePath $mbExe -ArgumentList "/S", "/D=C:\mozilla-build" -Wait
+
+      - name: Cache Mozbuild toolchain
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~\.mozbuild
+            ~\.cargo
+          key: mozbuild-win-${{ runner.os }}-${{ hashFiles('browser-desktop/upstream.json', 'browser-desktop/mozconfig*') }}
+          restore-keys: |
+            mozbuild-win-${{ runner.os }}-
+
+      - name: Bootstrap, stage Sval overlay, and build via MozillaBuild
+        shell: pwsh
+        run: |
+          git config --global core.longpaths true
+          $env:MOZILLABUILD = "C:\mozilla-build\"
+          $env:MSYS2_PATH_TYPE = "inherit"
+          $repoPosix = ($PWD.Path -replace '\\', '/') -replace '^([A-Za-z]):', { '/' + $_.Groups[1].Value.ToLower() }
+          & "C:\mozilla-build\msys2\usr\bin\bash.exe" -lc "cd '$repoPosix' && python browser-desktop/bootstrap_gecko.py --bootstrap --mode $env:BUILD_MODE"
+
+      - name: Package Windows ZIP / NSIS installer
+        shell: pwsh
+        run: |
+          powershell -ExecutionPolicy Bypass -File browser-desktop/packaging/package_windows.ps1 -Mode "$env:BUILD_MODE"
+
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: lm-sanctuary-browser-windows-${{ github.event.inputs.mode || 'gecko' }}
+          path: |
+            browser-desktop/dist/*.zip
+            browser-desktop/dist/*.exe

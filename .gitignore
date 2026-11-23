@@ -64,6 +64,7 @@ sanctuary/core/programs/*/databank.db
 sanctuary/core/programs/*/databank.json
 sanctuary/core/programs/*/journals.json
 sanctuary/core/programs/*/quest_log.json
+sanctuary/core/programs/*/AGENTS.md
 sanctuary/core/programs/*/lorebooks/
 !sanctuary/core/programs/sebile/lorebooks/
 !sanctuary/core/programs/sebile/lorebooks/marxist_theory.json
@@ -113,3 +114,8 @@ sanctuary/core/comfy_engine/**/*.jpeg
 sanctuary/core/comfy_engine/**/*.webp
 sanctuary/core/comfy_engine/**/*.gif
 sanctuary/core/comfy_engine/**/*.bmp
+
+# Stage 2 Desktop Browser (Sval / Firefox ESR build artifacts & profile)
+browser-desktop/build/
+browser-desktop/dist/
+gecko_profile/

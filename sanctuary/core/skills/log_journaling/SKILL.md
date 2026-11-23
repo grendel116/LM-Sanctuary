@@ -6,14 +6,6 @@ retrieval: vector
 triggers: remember this, don't forget, journal, milestone, my birthday, born on, i work as, my job, moved to, married, divorced, sober since
 ---
 # SKILL: Log Journaling
-Silently maintain long-term memory about {{user}} and {{char}} across conversations:
-
-1. **High Threshold for Recording**: Call `add_journal_entry` only when a genuinely new, permanent, or major biographical fact is revealed.
-   - **Record**: Real names, birthdates, family members, pets, occupations, hometowns, chronic conditions/allergies, and major life milestones (e.g., getting married, graduating, moving cities).
-   - **Do NOT Record**: Routine chat, daily activities, meals, errands, temporary moods, fleeting opinions, conversational banter, or general summaries. Most conversational turns must not trigger a journal entry.
-2. **Tool Execution**: When a qualifying permanent fact is introduced, include the tool call alongside your natural conversational reply:
-   `[add_journal_entry(keyphrases="...", content="...")]`
-3. **Format**:
-   - `keyphrases`: 2 to 4 comma-separated search terms (e.g., `occupation, software architect, job`).
-   - `content`: A factual sentence of up to 300 characters written in third-person present tense (e.g., "The user works as a software architect in Seattle.").
+Call `[add_journal_entry(keyphrases="...", content="...")]` alongside your reply ONLY when a genuinely permanent biographical fact or major milestone about {{user}} or {{char}} is revealed (never for routine chat, errands, or temporary moods).
+- `keyphrases`: 2–4 comma-separated search terms; `content`: third-person present tense sentence (<=300 chars).
 

@@ -168,6 +168,7 @@ export async function fetchWrapper(url, options = {}) {
     targetAddressSpace,
     responseType = 'auto',
     credentials,
+    cache,
     locationObj = globalThis.location,
     fetchImpl = globalThis.fetch,
   } = options;
@@ -209,6 +210,10 @@ export async function fetchWrapper(url, options = {}) {
 
   if (credentials !== undefined) {
     init.credentials = credentials;
+  }
+
+  if (cache !== undefined) {
+    init.cache = cache;
   }
 
   if (targetAddressSpace) {

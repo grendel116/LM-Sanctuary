@@ -293,13 +293,12 @@ def load_dynamic_runtime_context(previous_message_ts: float | None = None) -> st
     )
 
     quest_block = _quest_schedule_block(now)
-    social_block = _recent_social_posts_block()
-    blocks = [b for b in (temporal_block, quest_block, social_block) if b]
+    blocks = [b for b in (temporal_block, quest_block) if b]
     return "\n\n# DYNAMIC RUNTIME CONTEXT\n" + "\n".join(blocks)
 
 
 def _recent_social_posts_block() -> str:
-    """Reads up to 3 token-free recent public social posts for the active user profile."""
+    """Reads up to 3 token-free recent public social posts sorted newest-first with full local timestamps."""
     import json
     from runners.program import get_active_user
 
@@ -316,17 +315,42 @@ def _recent_social_posts_block() -> str:
     if not isinstance(posts, list) or not posts:
         return ""
 
-    lines = ["### USER'S RECENT SOCIAL POSTS"]
-    for item in posts[:3]:
+    now = datetime.datetime.now().astimezone()
+    parsed_entries: list[tuple[float, str, str]] = []
+    for item in posts:
         if not isinstance(item, dict):
             continue
         txt = str(item.get("text") or "").strip()
         if not txt:
             continue
         ts = str(item.get("created_at") or "").strip()
-        date_prefix = f"[{ts[:10]}] " if len(ts) >= 10 else ""
+        sort_ts = 0.0
+        date_prefix = ""
+        if ts:
+            try:
+                dt = datetime.datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=datetime.timezone.utc)
+                dt_local = dt.astimezone()
+                if (now - dt_local).total_seconds() > 72 * 3600:
+                    continue
+                sort_ts = dt_local.timestamp()
+                date_prefix = f"[{dt_local.strftime('%Y-%m-%d %I:%M %p')}] "
+            except Exception:
+                date_prefix = f"[{ts[:10]}] " if len(ts) >= 10 else ""
+        parsed_entries.append((sort_ts, date_prefix, txt))
+
+    if not parsed_entries:
+        return ""
+
+    parsed_entries.sort(key=lambda entry: entry[0], reverse=True)
+    lines = [
+        "### USER'S RECENT PUBLIC POSTS (Passive Background Only)",
+        "(Compare post timestamps against Current Local Time. Treat posts more than ~1 hour old as past background—do not bring them up unsolicited unless the user's message directly relates to them.)",
+    ]
+    for _sort_ts, date_prefix, txt in parsed_entries[:3]:
         lines.append(f"- {date_prefix}{txt}")
-    return ("\n".join(lines) + "\n") if len(lines) > 1 else ""
+    return "\n".join(lines) + "\n"
 
 def load_user_instructions() -> str:
     """Reads the active user profile configuration from variables/user_profiles/*.md 
@@ -361,7 +385,7 @@ def load_user_instructions() -> str:
     try:
         with open(profile_path, "r", encoding="utf-8") as f:
             content = f.read().strip()
-            return f"\n\n# USER PROFILE & RELATIONSHIP CONTEXT\n{content}\n"
+            result = f"\n\n# USER PROFILE & RELATIONSHIP CONTEXT\n{content}\n"
     except Exception as e:
         print(f"Failed to read user instructions from {profile_path}: {e}")
         default_msg = (
@@ -369,7 +393,12 @@ def load_user_instructions() -> str:
             "- A software developer and code builder.\n"
             "- Hobby: Collects cute AI program programs in the Sanctuary.\n"
         )
-        return f"\n\n# USER PROFILE & RELATIONSHIP CONTEXT\n{default_msg}"
+        result = f"\n\n# USER PROFILE & RELATIONSHIP CONTEXT\n{default_msg}\n"
+
+    social_block = _recent_social_posts_block()
+    if social_block:
+        result = f"{result.rstrip()}\n\n{social_block}"
+    return result
 
 def is_story_mode(program_name: str = None) -> bool:
     """Checks if story mode is enabled for a specific program card."""
@@ -411,10 +440,17 @@ _DEFAULT_ROOT_CODE_DIRECTIVES = """<rules>
 </rules>"""
 
 
-def _read_global_gemini_rules() -> str:
-    """Reads ~/.gemini/GEMINI.md and strips optional YAML frontmatter and HTML comments."""
-    global_path = os.path.join(os.path.expanduser("~"), ".gemini", "GEMINI.md")
-    if os.path.isfile(global_path):
+def _read_global_coding_rules() -> str:
+    """Reads global AGENTS.md/GEMINI.md rules and strips optional YAML frontmatter and HTML comments."""
+    home = os.path.expanduser("~")
+    candidates = (
+        os.path.join(home, ".openhands", "AGENTS.md"),
+        os.path.join(home, ".agents", "AGENTS.md"),
+        os.path.join(home, ".gemini", "GEMINI.md"),
+    )
+    for global_path in candidates:
+        if not os.path.isfile(global_path):
+            continue
         try:
             with open(global_path, "r", encoding="utf-8") as f:
                 raw = f.read().strip()
@@ -426,18 +462,18 @@ def _read_global_gemini_rules() -> str:
             if raw:
                 return raw
         except Exception as e:
-            print(f"[program_config] Error reading global GEMINI.md: {e}")
+            print(f"[program_config] Error reading global rules from {global_path}: {e}")
     return _DEFAULT_ROOT_CODE_DIRECTIVES
 
 
-def compile_program_gemini_md(program_id: str = None) -> str:
-    """Compiles a program-specific GEMINI.md combining global root-code rules with the program's ethos."""
+def compile_program_agents_md(program_id: str = None) -> str:
+    """Compiles a program-specific AGENTS.md combining global root-code rules with the program's ethos."""
     active_program = program_id or get_active_program()
     card = _load_card_data(active_program)
     program_name = get_program_name(active_program)
     user_name = get_active_user_display_name()
 
-    base_rules = _read_global_gemini_rules()
+    base_rules = _read_global_coding_rules()
     description = replace_placeholders((card.get("description") or "").strip(), program_id=active_program)
     personality = replace_placeholders((card.get("personality") or "").strip(), program_id=active_program)
     system_prompt = replace_placeholders((card.get("system_prompt") or "").strip(), program_id=active_program)
@@ -452,9 +488,12 @@ def compile_program_gemini_md(program_id: str = None) -> str:
 
     contract = (
         "# DELEGATION CONTRACT\n"
-        f"- **Directing Counterpart**: You are executing coding work delegated by **{program_name}** on behalf of **{user_name}**.\n"
-        f"- **Decision Escalation**: Whenever a requirement ambiguity, design trade-off, or permission boundary requires a choice, ask a concise, concrete question (preferring `ask_question` with explicit options) so {program_name} can decide immediately.\n"
-        "- **Read-Only Tool Preference**: Use built-in read-only file, search, and directory-inspection tools instead of shell `run_command` whenever exploring, listing directories, or reading files.\n"
+        f"- **Directing Counterpart**: You are executing coding work via OpenHands delegated by **{program_name}** on behalf of **{user_name}**.\n"
+        "- **Structured Pre-Edit Contract**: Before modifying any file or running any mutating command, explicitly output `intent`, `files_to_touch`, `exact_diff`, and `how_I_will_verify`. If you cannot fill all four from concrete source evidence, do not edit any files.\n"
+        "- **No Error Budget (2-Strike Hard Stop)**: After 2 failed fixes or 2 failed tool calls on the same error, stop immediately, write a 2-sentence hypothesis of why it failed, and escalate via `ask_user` or `HAND_BACK_NEEDED:` instead of spiraling.\n"
+        "- **Subagent Delegation**: When splitting complex research, multi-file implementation, or test/build verification, use the `task` tool (`TaskToolSet`) to spawn specialized subagents (`researcher`, `implementer`, `verifier`, or workspace `.agents/agents/*.md` / `.openhands/agents/*.md`).\n"
+        f"- **Decision Escalation**: Whenever a requirement ambiguity, design trade-off, or permission boundary requires a choice, ask a concise, concrete question (preferring `ask_user` with explicit options when available) so {program_name} can decide immediately.\n"
+        "- **Read-Only Exploration Preference**: Inspect files and directories with `file_editor` (`command=\"view\"`) before modifying code or invoking shell commands.\n"
         f"- **Verification & Final Summary**: Verify edits against concrete source conditions (tests, linters, type checks, or builds) and conclude your final response with a concise factual summary of root causes, files modified, and exact check results so {program_name} can report accurately to {user_name}."
     )
 
@@ -463,12 +502,12 @@ def compile_program_gemini_md(program_id: str = None) -> str:
     prog_dir = os.path.join(PROGRAMS_DIR, active_program)
     try:
         os.makedirs(prog_dir, exist_ok=True)
-        out_path = os.path.join(prog_dir, "GEMINI.md")
+        out_path = os.path.join(prog_dir, "AGENTS.md")
         tmp_path = out_path + ".tmp"
         with open(tmp_path, "w", encoding="utf-8") as f:
             f.write(compiled)
         os.replace(tmp_path, out_path)
     except Exception as e:
-        print(f"[program_config] Error writing GEMINI.md for '{active_program}': {e}")
+        print(f"[program_config] Error writing AGENTS.md for '{active_program}': {e}")
 
     return compiled

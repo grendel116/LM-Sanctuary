@@ -85,6 +85,9 @@ function openIdb() {
           db.close();
           idbPromise = null;
         };
+        db.onclose = () => {
+          idbPromise = null;
+        };
         resolve(db);
       };
       req.onerror = () => {
@@ -133,6 +136,21 @@ function idbRun(db, storeName, mode, fn) {
   });
 }
 
+async function runIdbWithRetry(storeName, mode, fn) {
+  let db = await openIdb();
+  if (!db) return { usedIdb: false, value: undefined };
+  try {
+    const value = await idbRun(db, storeName, mode, fn);
+    return { usedIdb: true, value };
+  } catch (err) {
+    idbPromise = null;
+    db = await openIdb();
+    if (!db) throw err;
+    const value = await idbRun(db, storeName, mode, fn);
+    return { usedIdb: true, value };
+  }
+}
+
 export function resetMemoryStorageForTests() {
   for (const store of memoryStores.values()) {
     store.clear();
@@ -157,15 +175,13 @@ export async function storeGet(storeName, key) {
     return res?.value ? JSON.parse(res.value) : null;
   }
 
-  const db = await openIdb();
-  if (db) {
-    return idbRun(db, storeName, 'readonly', (store, setResult) => {
-      const req = store.get(strKey);
-      req.onsuccess = () => {
-        setResult(req.result === undefined ? null : req.result);
-      };
-    });
-  }
+  const res = await runIdbWithRetry(storeName, 'readonly', (store, setResult) => {
+    const req = store.get(strKey);
+    req.onsuccess = () => {
+      setResult(req.result === undefined ? null : req.result);
+    };
+  });
+  if (res.usedIdb) return res.value;
 
   const entry = memoryStores.get(storeName).get(strKey);
   return entry === undefined ? null : safeClone(entry);
@@ -181,15 +197,10 @@ export async function storePut(storeName, key, value) {
     return;
   }
 
-  const db = await openIdb();
-  if (db) {
-    await idbRun(db, storeName, 'readwrite', (store) => {
-      store.put(value === undefined ? null : value, strKey);
-    });
-    return;
-  }
-
   memoryStores.get(storeName).set(strKey, safeClone(value));
+  await runIdbWithRetry(storeName, 'readwrite', (store) => {
+    store.put(value === undefined ? null : value, strKey);
+  });
 }
 
 export async function storeDelete(storeName, key) {
@@ -202,15 +213,10 @@ export async function storeDelete(storeName, key) {
     return;
   }
 
-  const db = await openIdb();
-  if (db) {
-    await idbRun(db, storeName, 'readwrite', (store) => {
-      store.delete(strKey);
-    });
-    return;
-  }
-
   memoryStores.get(storeName).delete(strKey);
+  await runIdbWithRetry(storeName, 'readwrite', (store) => {
+    store.delete(strKey);
+  });
 }
 
 export async function storeGetAll(storeName) {
@@ -223,28 +229,26 @@ export async function storeGetAll(storeName) {
     return rows.map((r) => ({ key: String(r.key), value: r.value ? JSON.parse(r.value) : null }));
   }
 
-  const db = await openIdb();
-  if (db) {
-    return idbRun(db, storeName, 'readonly', (store, setResult) => {
-      const keysReq = store.getAllKeys();
-      const valsReq = store.getAll();
-      let keys = null;
-      let vals = null;
-      const finish = () => {
-        if (keys !== null && vals !== null) {
-          setResult(keys.map((k, i) => ({ key: String(k), value: vals[i] })));
-        }
-      };
-      keysReq.onsuccess = () => {
-        keys = keysReq.result || [];
-        finish();
-      };
-      valsReq.onsuccess = () => {
-        vals = valsReq.result || [];
-        finish();
-      };
-    });
-  }
+  const res = await runIdbWithRetry(storeName, 'readonly', (store, setResult) => {
+    const keysReq = store.getAllKeys();
+    const valsReq = store.getAll();
+    let keys = null;
+    let vals = null;
+    const finish = () => {
+      if (keys !== null && vals !== null) {
+        setResult(keys.map((k, i) => ({ key: String(k), value: vals[i] })));
+      }
+    };
+    keysReq.onsuccess = () => {
+      keys = keysReq.result || [];
+      finish();
+    };
+    valsReq.onsuccess = () => {
+      vals = valsReq.result || [];
+      finish();
+    };
+  });
+  if (res.usedIdb) return res.value;
 
   const out = [];
   for (const [key, value] of memoryStores.get(storeName).entries()) {
@@ -262,15 +266,10 @@ export async function storeClear(storeName) {
     return;
   }
 
-  const db = await openIdb();
-  if (db) {
-    await idbRun(db, storeName, 'readwrite', (store) => {
-      store.clear();
-    });
-    return;
-  }
-
   memoryStores.get(storeName).clear();
+  await runIdbWithRetry(storeName, 'readwrite', (store) => {
+    store.clear();
+  });
 }
 
 export async function kvGet(key, fallback = null) {
@@ -654,6 +653,21 @@ export async function cacheProgramHistory(programId, sessionId = 'default', payl
 
 export async function getCachedProgramHistory(programId, sessionId = 'default') {
   return storeGet('chat_history', historyCacheKey(programId, sessionId));
+}
+
+export async function purgeCachedProgramData(programId) {
+  const cleanId = String(programId || '').trim();
+  if (!cleanId) return;
+  const prefix = `${cleanId}::`;
+  for (const storeName of ['chat_history', 'journals_quests']) {
+    const entries = await storeGetAll(storeName).catch(() => []);
+    for (const entry of entries) {
+      const k = String(entry?.key || '');
+      if (k === cleanId || k.startsWith(prefix)) {
+        await storeDelete(storeName, k).catch(() => {});
+      }
+    }
+  }
 }
 
 export async function cacheProgramsDirectory(programs) {

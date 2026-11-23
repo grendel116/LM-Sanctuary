@@ -2,6 +2,20 @@ import { requestNodeRaw } from '../../queries/sanctuary.js';
 
 const CLOSE_MODAL_HANDLER_BOUND = new WeakSet();
 
+function notifyOverlayChange(doc) {
+  const dispatch = () => {
+    try {
+      doc?.dispatchEvent?.(new Event('sanctuary:overlay-change'));
+    } catch {
+      // Ignore environments without Event constructor
+    }
+  };
+  dispatch();
+  if (typeof queueMicrotask === 'function') {
+    queueMicrotask(dispatch);
+  }
+}
+
 function cardBoundsContainPointer(e, cardEl) {
   if (typeof cardEl?.getBoundingClientRect !== 'function') return false;
   const r = cardEl.getBoundingClientRect();
@@ -87,6 +101,7 @@ export function createClassicModalDialog({
       dialog.returnValue = '';
       restoreParents();
       onClose?.();
+      notifyOverlayChange(doc);
     });
   }
 
@@ -104,12 +119,14 @@ export function createClassicModalDialog({
     if (!dialog.open) {
       dialog.showModal();
     }
+    notifyOverlayChange(doc);
   }
 
   function close() {
     restoreParents();
     if (dialog.open) {
       dialog.close();
+      notifyOverlayChange(doc);
     }
   }
 

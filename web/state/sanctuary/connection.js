@@ -4,6 +4,7 @@ import {
   normalizeNodeUrl,
   resolveNodeUrl,
 } from '../../constants/endpoints.js';
+import { applyRootProgramTheme } from '../../constants/theme.js';
 import { fetchWrapper } from '../../queries/fetch/fetchWrapper.js';
 import {
   cacheProgramsDirectory,
@@ -224,6 +225,11 @@ export async function checkSanctuaryHealth(options = {}) {
       lastCheckedAt: Date.now(),
       error: null,
     });
+
+    const activeProg = programs.find((p) => p?.id === health?.active_program) || programs[0];
+    if (activeProg) {
+      applyRootProgramTheme(activeProg.theme || activeProg.accent_color || activeProg.theme_color);
+    }
 
     emitSanctuaryEvent('sanctuary:health', health);
     if (!wasOnline) {

@@ -27,7 +27,7 @@ export function openThreadsImportModal({ onImported } = {}) {
   let closed = false;
   let pollTimer = null;
   let archiveState = null;
-  let jobState = { status: 'idle', total: 0, processed: 0, followed: 0, notFederated: 0, errors: 0 };
+  let jobState = { status: 'idle', total: 0, processed: 0, followed: 0, requested: 0, notFederated: 0, errors: 0 };
 
   const modal = createClassicModalDialog({
     id: 'threads-import-dialog',
@@ -179,7 +179,20 @@ export function openThreadsImportModal({ onImported } = {}) {
       : (job.status === 'cancelled'
           ? 'Sync stopped:'
           : (job.status === 'error' ? `Sync error (${job.errorMessage || 'failed'}):` : 'Sync complete:'));
-    return `${prefix} ${job.processed || 0}/${job.total || 0} checked · ${job.followed || 0} followed · ${job.notFederated || 0} not federated`;
+    const errCount = Number(job.errors || 0);
+    const errPart = errCount > 0
+      ? ` · ${errCount} error${errCount === 1 ? '' : 's'}${job.errorMessage ? ` (${job.errorMessage})` : ''}`
+      : '';
+    const unsharedHint =
+      job.status === 'completed'
+      && (job.followed || 0) === 0
+      && (job.notFederated || 0) > 0
+      && errCount === 0
+        ? ' — None of these accounts have Fediverse sharing enabled on Threads (or your Mastodon server blocks threads.net).'
+        : '';
+    const requestedCount = Number(job.requested || 0);
+    const requestedPart = requestedCount > 0 ? ` (${requestedCount} pending remote accept)` : '';
+    return `${prefix} ${job.processed || 0}/${job.total || 0} checked · ${job.followed || 0} followed${requestedPart} · ${job.notFederated || 0} not federated${errPart}${unsharedHint}`;
   }
 
   function syncUi() {
@@ -198,6 +211,7 @@ export function openThreadsImportModal({ onImported } = {}) {
       const stats = [
         ['Mutuals', counts.mutuals || 0],
         ['Following', counts.following || 0],
+        ...(Number(counts.hiddenWords || 0) > 0 ? [['Hidden Words', counts.hiddenWords]] : []),
       ];
       for (const [k, v] of stats) {
         const pill = doc.createElement('span');
@@ -284,7 +298,9 @@ export function openThreadsImportModal({ onImported } = {}) {
         counts: parsed.counts || {},
       };
       if (parsed.job) jobState = parsed.job;
-      setStatus(`Loaded ${parsed.counts?.mutuals || 0} mutuals and ${parsed.counts?.following || 0} following.`);
+      const hiddenWordsCount = Number(parsed.counts?.hiddenWords || 0);
+      const hiddenPart = hiddenWordsCount > 0 ? ` and synced ${hiddenWordsCount} hidden word${hiddenWordsCount === 1 ? '' : 's'}` : '';
+      setStatus(`Loaded ${parsed.counts?.mutuals || 0} mutuals and ${parsed.counts?.following || 0} following${hiddenPart}. Click "Follow on Mastodon" below to start following.`);
       await onImported?.(archiveState);
     } catch (err) {
       setStatus(err?.message || 'Unable to parse Threads archive.');

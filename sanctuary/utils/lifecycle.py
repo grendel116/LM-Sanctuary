@@ -58,6 +58,26 @@ def _suppress_headless_windows_consoles(*, force: bool = False) -> bool:
         return orig_init(self, *args, **kwargs)
 
     subprocess.Popen.__init__ = _no_window_popen_init
+
+    try:
+        import asyncio.base_events as _abe
+
+        orig_sub_exec = _abe.BaseEventLoop.subprocess_exec
+        orig_sub_shell = _abe.BaseEventLoop.subprocess_shell
+
+        async def _no_window_sub_exec(self, protocol_factory, *args, **kwargs):
+            _apply_no_window_popen_defaults(kwargs)
+            return await orig_sub_exec(self, protocol_factory, *args, **kwargs)
+
+        async def _no_window_sub_shell(self, protocol_factory, cmd, **kwargs):
+            _apply_no_window_popen_defaults(kwargs)
+            return await orig_sub_shell(self, protocol_factory, cmd, **kwargs)
+
+        _abe.BaseEventLoop.subprocess_exec = _no_window_sub_exec
+        _abe.BaseEventLoop.subprocess_shell = _no_window_sub_shell
+    except Exception:
+        pass
+
     _popen_wrapped = True
     return True
 
@@ -102,9 +122,23 @@ def shutdown():
         _shutdown_done = True
 
     try:
-        from tools import antigravity_job
+        from core import scheduler
 
-        antigravity_job.cancel_all_antigravity_jobs(grace=0.3, timeout=1.5)
+        scheduler.stop_scheduler()
+    except Exception:
+        pass
+
+    try:
+        from tools import openhands_job
+
+        openhands_job.cancel_all_openhands_jobs(grace=0.3, timeout=1.5)
+    except Exception:
+        pass
+
+    try:
+        from runners import openhands_server
+
+        openhands_server.stop_openhands_server()
     except Exception:
         pass
 

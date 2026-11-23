@@ -1,0 +1,4 @@
+#!/usr/bin/env sh
+# SPDX-License-Identifier: AGPL-3.0-only WITH AdditionRef-sval-app-store
+HERE="$(dirname "$(readlink -f "$0")")"
+exec "$HERE/usr/lib/lm-sanctuary/lm-sanctuary" --profile "${XDG_DATA_HOME:-$HOME/.local/share}/lm-sanctuary/profile" "$@"

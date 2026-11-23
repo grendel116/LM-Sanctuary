@@ -77,40 +77,79 @@ def _save_settings(settings: dict):
     except Exception as e:
         print(f"Error saving project settings: {e}")
 
+def _has_valid_program_files(folder_path: str, prog_id: str) -> bool:
+    if not prog_id or not folder_path or not os.path.isdir(folder_path):
+        return False
+    if os.path.isfile(os.path.join(folder_path, f"{prog_id}.json")):
+        return True
+    try:
+        return any(f.lower().endswith(".md") for f in os.listdir(folder_path))
+    except OSError:
+        return False
+
+def _is_managed_program_dir(folder_path: str, programs_root: str) -> bool:
+    if not folder_path or not programs_root:
+        return False
+    norm_folder = os.path.normcase(os.path.normpath(folder_path))
+    norm_root = os.path.normcase(os.path.normpath(programs_root))
+    return norm_folder == norm_root or norm_folder.startswith(norm_root + os.sep)
+
+
 def get_active_program() -> str:
     # Determine active program from settings first
     settings = _load_settings()
+    programs_root = os.path.join(PARENT_DIR, 'core', 'programs')
     active_prog = settings.get("active_program")
-    if not active_prog:
-        # Fall back to environment variable, then to default
-        active_prog = os.getenv("ACTIVE_PROGRAM")
-        if not active_prog:
-            active_prog = "sebile"
+    if active_prog is None:
+        # Fall back to environment variable when not yet configured
+        active_prog = os.getenv("ACTIVE_PROGRAM") or ""
 
-    target_folder = os.path.normpath(os.path.join(PARENT_DIR, 'core', 'programs', active_prog))
-    if not os.path.isdir(target_folder) and active_prog != "sebile":
-        active_prog = "sebile"
-        target_folder = os.path.normpath(os.path.join(PARENT_DIR, 'core', 'programs', active_prog))
+    target_folder = os.path.normpath(os.path.join(programs_root, active_prog)) if active_prog else ""
+    if not _has_valid_program_files(target_folder, active_prog):
+        fallback_prog = ""
+        if os.path.isdir(programs_root):
+            try:
+                candidates = sorted(
+                    d for d in os.listdir(programs_root)
+                    if _has_valid_program_files(os.path.join(programs_root, d), d)
+                )
+                if "sebile" in candidates:
+                    fallback_prog = "sebile"
+                elif candidates:
+                    fallback_prog = candidates[0]
+            except OSError:
+                fallback_prog = ""
+        active_prog = fallback_prog
+        target_folder = os.path.normpath(os.path.join(programs_root, active_prog)) if active_prog else ""
 
     # Set environment variable
     os.environ["ACTIVE_PROGRAM"] = active_prog
 
-    # Ensure settings file is in sync
+    # Ensure settings file is in sync without fabricating deleted folders
     current_folders = settings.get("folders", [])
     current_active = settings.get("active_program")
 
     needs_update = False
     if current_active != active_prog:
         needs_update = True
-    if not current_folders or os.path.normpath(current_folders[0]) != target_folder:
+    if target_folder:
+        first_folder = os.path.normpath(current_folders[0]) if current_folders else ""
+        if not current_folders or (_is_managed_program_dir(first_folder, programs_root) and first_folder != target_folder):
+            needs_update = True
+    elif current_active not in ("", None):
         needs_update = True
 
     if needs_update:
         settings["active_program"] = active_prog
-        extra_folders = [f for f in current_folders[1:] if os.path.normpath(f) != target_folder]
-        settings["folders"] = [target_folder] + extra_folders
+        if target_folder and (
+            not current_folders
+            or _is_managed_program_dir(current_folders[0], programs_root)
+        ):
+            extra_folders = [f for f in current_folders[1:] if os.path.normpath(f) != target_folder]
+            settings["folders"] = [target_folder] + extra_folders
         _save_settings(settings)
-        print(f"[Settings] Synced active program '{active_prog}' and folder '{target_folder}' to project settings")
+        if active_prog:
+            print(f"[Settings] Synced active program '{active_prog}' and folder '{settings.get('folders', [target_folder])[0]}' to project settings")
 
     return active_prog
 
@@ -118,10 +157,12 @@ def set_active_program(program_id: str):
     os.environ["ACTIVE_PROGRAM"] = program_id
     settings = _load_settings()
     settings["active_program"] = program_id
-    default_folder = os.path.normpath(os.path.join(PARENT_DIR, 'core', 'programs', program_id))
+    programs_root = os.path.join(PARENT_DIR, 'core', 'programs')
+    default_folder = os.path.normpath(os.path.join(programs_root, program_id))
     current_folders = settings.get("folders", [])
-    extra_folders = [f for f in current_folders[1:] if os.path.normpath(f) != default_folder]
-    settings["folders"] = [default_folder] + extra_folders
+    if not current_folders or _is_managed_program_dir(current_folders[0], programs_root):
+        extra_folders = [f for f in current_folders[1:] if os.path.normpath(f) != default_folder]
+        settings["folders"] = [default_folder] + extra_folders
     _save_settings(settings)
 
 def get_active_session() -> str:
