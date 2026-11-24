@@ -16,10 +16,10 @@ LM-Sanctuary keeps your web browsing, social feeds, AI chats, and passwords toge
 
 ## What's Inside
 
-* **Open Social Feeds (No Algorithms)**: Read and post on Mastodon and the Fediverse in chronological order. Optionally cross-post to Bluesky and Threads at the same time, view unified notifications, and adjust your feed with simple local sliders.
+* **Social Feeds You Control**: Read and post on Mastodon and the Fediverse, and optionally post to Bluesky and Threads at the same time. **Following** stays in time order. The **Feed** tab ranks posts on your own computer: subscribe to Bluesky custom feeds, #hashtags, or trusted Fediverse/Lemmy servers, mark posts Interested / Not Interested, and export your ranking settings as JSON. Notifications from all your accounts show up in one place.
 * **Local AI Chat, Voice & Creative Tools**: Chat or hop on a live voice call with AI Programs running on your own PC, generate images locally, keep quests and journals, or import SillyTavern character cards and lorebooks.
 * **Coding & Web Research (With Your Permission)**: Ask your AI to search the web, read pages, or help edit files and run commands in your project folder. By default (**Always Ask**), Sanctuary asks your permission before editing any file or running any command.
-* **Private Browser & One-Password Vault (`.kdbx`)**: Browse with split view, reader mode, tracker stripping, and encrypted bookmark sync. In **Settings → Project**, lock all of your sensitive data—website logins, social accounts, chat history, journals, quests, documents, and cloud API keys—behind one master password. Create a new `.kdbx` vault in one click, or open an existing `.kdbx` file you already sync across your phone and desktop (compatible with **KeePassXC** and **KeePassDX**). While locked, chats are hidden and social post actions are disabled until you unlock.
+* **Private Browser & One-Password Vault (`.kdbx`)**: Browse with split view, reader mode, ad & tracker blocking, and encrypted bookmarks. In **Settings → Project**, lock all of your sensitive data—website logins, social accounts, chat history, journals, quests, documents, and cloud API keys—behind one master password. Create a new `.kdbx` vault in one click, or open an existing `.kdbx` file you already sync across your phone and desktop (compatible with **KeePassXC** and **KeePassDX**). While locked, chats are hidden and social post actions are disabled until you unlock.
 
 ---
 

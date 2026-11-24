@@ -63,7 +63,7 @@
       align-items: center;
       justify-content: space-between;
       gap: 16px;
-      padding: 18px 0;
+      padding: 18px 24px;
     }
 
     .brand {
@@ -220,10 +220,10 @@
       font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
     }
 
-    footer {
-      margin-top: 64px;
+    footer.wrap {
+      margin: 64px auto 0;
       border-top: 1px solid var(--hairline);
-      padding: 24px 0 40px;
+      padding: 24px 24px 40px;
       display: flex;
       flex-wrap: wrap;
       justify-content: space-between;
@@ -260,7 +260,6 @@
       </a>
       <nav class="nav-links" aria-label="Primary">
         <a href="https://github.com/grendel116/LM-Sanctuary">GitHub</a>
-        <a href="https://github.com/grendel116/LM-Sanctuary/blob/main/docs/ARCHITECTURE.md">Architecture</a>
         <a href="https://github.com/grendel116/LM-Sanctuary/blob/main/LICENSING.md">License</a>
       </nav>
     </div>
@@ -272,7 +271,6 @@
       <p class="lead">A private browser, open social app, local AI companion, and encrypted .kdbx vault running on your own computer.</p>
       <div class="actions">
         <a class="btn btn-primary" href="https://github.com/grendel116/LM-Sanctuary">Source Code</a>
-        <a class="btn" href="#run">Run Locally</a>
       </div>
     </section>
 
@@ -283,7 +281,7 @@
     <section class="grid" aria-label="Capabilities">
       <div class="cell">
         <h2>Fediverse &amp; Bridges</h2>
-        <p>Chronological Mastodon feeds, optional Bluesky and Threads cross-posting, and simple local sliders instead of corporate algorithms.</p>
+        <p>Mastodon and Fediverse feeds, optional Bluesky and Threads cross-posting, and a transparent feed ranking that runs on your own computer.</p>
       </div>
       <div class="cell">
         <h2>Local AI &amp; Coding</h2>
@@ -291,7 +289,7 @@
       </div>
       <div class="cell">
         <h2>Private Browser</h2>
-        <p>Built-in Gecko desktop browser with split view, reader mode, tracker stripping, and encrypted bookmark sync.</p>
+        <p>Built-in Gecko desktop browser with split view, reader mode, ad &amp; tracker blocking, and encrypted bookmarks.</p>
       </div>
       <div class="cell">
         <h2>Password Vault (.kdbx)</h2>
