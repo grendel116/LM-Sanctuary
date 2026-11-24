@@ -18,7 +18,35 @@ const REROLL_USER_SVG = `<svg width="14" height="14" viewBox="0 0 24 24" fill="n
 const REROLL_PROGRAM_SVG = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"></path></svg>`;
 const EDIT_SVG = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 1 1 3 3L12 15l-4 1 1-4z"></path></svg>`;
 const DELETE_SVG = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path><line x1="10" y1="11" x2="10" y2="17"></line><line x1="14" y1="11" x2="14" y2="17"></line></svg>`;
-const SPEAK_SVG = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"></path></svg>`;
+export const SPEAK_SVG = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"></path></svg>`;
+export const SPEAK_LOADING_SVG = `<svg class="animate-spin" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="9" opacity="0.28"></circle><path d="M21 12a9 9 0 0 0-9-9"></path></svg>`;
+export const SPEAK_STOP_SVG = `<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2.5"></rect></svg>`;
+
+export function syncSpeakButtonVisual(btn, state = 'idle') {
+  if (!btn) return;
+  const normalized = state === 'loading' || state === 'playing' ? state : 'idle';
+  const isLoading = normalized === 'loading';
+  const isPlaying = normalized === 'playing';
+  const isActive = isLoading || isPlaying;
+  btn.classList.toggle('is-loading', isLoading);
+  btn.classList.toggle('is-speaking', isPlaying);
+  btn.closest?.('.message')?.classList?.toggle?.('is-tts-active', isActive);
+  btn.setAttribute('aria-busy', isLoading ? 'true' : 'false');
+  btn.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+  if (isLoading) {
+    btn.innerHTML = SPEAK_LOADING_SVG;
+    btn.title = 'Generating speech… (click to cancel)';
+    btn.setAttribute('aria-label', 'Generating speech (click to cancel)');
+  } else if (isPlaying) {
+    btn.innerHTML = SPEAK_STOP_SVG;
+    btn.title = 'Stop speaking';
+    btn.setAttribute('aria-label', 'Stop speaking');
+  } else {
+    btn.innerHTML = SPEAK_SVG;
+    btn.title = 'Speak message';
+    btn.setAttribute('aria-label', 'Speak message');
+  }
+}
 const PHONE_SVG = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"></path></svg>`;
 const CHEVRON_DOWN_SVG = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"></polyline></svg>`;
 
@@ -1528,15 +1556,20 @@ export function buildMessageRow(msg, ctx = {}) {
           actions.appendChild(
             makeActionBtn('Delete message', DELETE_SVG, '', () => ctx.onDelete?.(msg, row))
           );
-          actions.appendChild(
-            makeActionBtn('Speak message', SPEAK_SVG, 'speak-btn', (btn) => ctx.onSpeak?.(msg, btn))
-          );
+          const speakBtn = makeActionBtn('Speak message', SPEAK_SVG, 'speak-btn', (btn) => ctx.onSpeak?.(msg, btn));
+          speakBtn.dataset.msgId = msgId;
+          actions.appendChild(speakBtn);
+          syncSpeakButtonVisual(speakBtn, ctx.getSpeakState?.(msgId) || 'idle');
         }
       }
     }
 
     if (actions.children.length > 0) {
       bubble.appendChild(actions);
+      const speakBtnInActions = actions.querySelector?.('.speak-btn');
+      if (speakBtnInActions) {
+        syncSpeakButtonVisual(speakBtnInActions, ctx.getSpeakState?.(msgId) || 'idle');
+      }
     }
 
     if (item.type === 'text') {

@@ -13,6 +13,11 @@ social_linked_posts_bp = Blueprint(
 )
 
 
+@social_linked_posts_bp.errorhandler(social_vault.VaultLockedError)
+def _handle_vault_locked(exc):
+    return jsonify({"error": str(exc), "locked": True, "vault": "keepassxc"}), 503
+
+
 @social_linked_posts_bp.route("", methods=["GET"])
 def list_linked_posts():
     return jsonify(social_vault.list_social_linked_posts())

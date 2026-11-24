@@ -2,6 +2,7 @@
 
 import {
   actOnBrowserHostTab,
+  clearBrowserHostHistory,
   closeBrowserHostTab,
   extractBrowserTabContent,
   loadBrowserTabPage,
@@ -486,6 +487,20 @@ export function goBackBrowserTab(tabId) {
 
 export function goForwardBrowserTab(tabId) {
   return stepBrowserHistory(tabId, 1);
+}
+
+export async function clearBrowserHistory() {
+  browserStore.set((prev) => ({
+    tabs: prev.tabs.map((t) => ({
+      ...t,
+      history: [t.url || NEWTAB_URL],
+      historyIndex: 0,
+      nativeCanGoBack: false,
+      nativeCanGoForward: false,
+    })),
+  }));
+  await clearBrowserHostHistory();
+  return { cleared: true };
 }
 
 export function closeBrowserTab(tabId) {

@@ -1456,6 +1456,7 @@ export async function getNotifications({
   accessToken,
   maxId = '',
   limit = 30,
+  cache,
   fetchImpl,
 }) {
   const origin = normalizeInstanceUrl(instanceUrl);
@@ -1463,6 +1464,7 @@ export async function getNotifications({
   if (maxId) params.set('max_id', maxId);
   const rows = await fetchWrapper(`${origin}/api/v1/notifications?${params.toString()}`, {
     headers: authHeaders(accessToken),
+    ...(cache ? { cache } : {}),
     fetchImpl,
   });
   return Array.isArray(rows)

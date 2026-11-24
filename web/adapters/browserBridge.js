@@ -5,8 +5,18 @@ import {
   extractHostname,
   stripTrackingParams,
 } from '../core/urlPrivacy.js';
-import { fetchSanctuaryBrowserReader } from '../queries/sanctuary.js';
-import { connectionStore } from '../state/sanctuary/connection.js';
+import {
+  associateKeePassXC,
+  fetchKeePassXCLogins,
+  fetchKeePassXCStatus,
+  fetchSanctuaryBrowserReader,
+  lockKeePassXC,
+  unlockKeePassXC,
+} from '../queries/sanctuary.js';
+import { authStore, lockSocialVaultSession, setKeePassVaultMode, syncSocialAccountsWithServer } from '../state/authStore.js';
+import { connectionStore, emitSanctuaryEvent } from '../state/sanctuary/connection.js';
+
+let cachedKeePassStatus = null;
 
 /**
  * Detect active browser engine host:
@@ -24,20 +34,33 @@ export function getBrowserHostKind() {
   return 'web-companion';
 }
 
+export async function refreshKeePassStatus() {
+  if (connectionStore.get().mode !== 'online') return null;
+  try {
+    const st = await fetchKeePassXCStatus();
+    if (st && typeof st === 'object') {
+      cachedKeePassStatus = st;
+      await setKeePassVaultMode(st.vault_mode === 'keepassxc');
+      if (st.vault_mode === 'keepassxc') {
+        if (!st.database_unlocked) {
+          await lockSocialVaultSession();
+        } else if (authStore.get().vaultLocked) {
+          authStore.set({ vaultLocked: false });
+        }
+      }
+      return st;
+    }
+  } catch {
+    // Ignore transient status fetch failure
+  }
+  return null;
+}
+
 /**
  * Describe KeePass integration state for the current runtime.
  */
 export function getPasswordManagerStatus() {
   const hostKind = getBrowserHostKind();
-  if (hostKind === 'gecko-desktop') {
-    const ready = Boolean(globalThis.sanctuaryBrowserHost?.isKeePassConnected?.());
-    return {
-      provider: 'KeePassXC-Browser',
-      extensionId: 'keepassxc-browser@keepassxc.org',
-      ready,
-      detail: ready ? 'Connected via KeePassXC Native Messaging' : 'Requires KeePassXC-Browser extension & desktop KeePassXC',
-    };
-  }
   if (hostKind === 'geckoview-android') {
     return {
       provider: 'Android Autofill (KeePassDX)',
@@ -46,11 +69,44 @@ export function getPasswordManagerStatus() {
       detail: 'Fills .kdbx credentials via Android Autofill Framework',
     };
   }
+  if (cachedKeePassStatus) {
+    const st = cachedKeePassStatus;
+    const initialized = Boolean(st.initialized);
+    const ready = Boolean(initialized && st.database_unlocked);
+    const locked = Boolean(initialized && !st.database_unlocked);
+    const vaultEscrowed = st.vault_mode === 'keepassxc';
+    const count = Number(st.entry_count || 0);
+    let detail = 'Encrypted .kdbx v4 vault — set a master password or import a .kdbx file';
+    if (ready) {
+      detail = `Unlocked (.kdbx v4) · ${count} ${count === 1 ? 'entry' : 'entries'}${vaultEscrowed ? ' · Social Vault Active' : ''}`;
+    } else if (locked) {
+      detail = 'Vault locked — unlock with your master password to autofill';
+    }
+    return {
+      provider: 'Sanctuary Vault (.kdbx)',
+      extensionId: 'sanctuary-kdbx-vault',
+      cached: true,
+      initialized,
+      ready,
+      locked,
+      installed: true,
+      running: true,
+      associated: initialized,
+      needsPairOrEscrow: !initialized || locked,
+      entryCount: count,
+      vaultMode: st.vault_mode || 'local',
+      detail,
+    };
+  }
   return {
-    provider: 'KeePassXC-Browser',
-    extensionId: 'keepassxc-browser@keepassxc.org',
+    provider: 'Sanctuary Vault (.kdbx)',
+    extensionId: 'sanctuary-kdbx-vault',
+    initialized: false,
     ready: false,
-    detail: 'Native Messaging activates inside the Sanctuary Browser desktop host (or KeePassDX on Android).',
+    locked: false,
+    installed: true,
+    running: true,
+    detail: 'Checking in-app .kdbx vault status…',
   };
 }
 
@@ -126,10 +182,80 @@ export async function openPrivateBrowserWindow({ url = '', searchConfig = null }
 }
 
 export async function connectKeePassXC() {
+  if (connectionStore.get().mode === 'online') {
+    try {
+      const st = cachedKeePassStatus?.associated && !cachedKeePassStatus?.database_unlocked
+        ? await unlockKeePassXC()
+        : await associateKeePassXC();
+      if (st && typeof st === 'object') {
+        cachedKeePassStatus = st;
+        await setKeePassVaultMode(st.vault_mode === 'keepassxc');
+        if (st.database_unlocked) {
+          await syncSocialAccountsWithServer().catch(() => {});
+          emitSanctuaryEvent('sanctuary:vault-changed', { unlocked: true });
+        }
+        return Boolean(st.associated && st.database_unlocked);
+      }
+    } catch (err) {
+      if (err?.status !== 404) {
+        throw err;
+      }
+    }
+  }
   if (typeof globalThis.sanctuaryBrowserHost?.installOrOpenKeePassXC === 'function') {
     return globalThis.sanctuaryBrowserHost.installOrOpenKeePassXC();
   }
   return false;
+}
+
+export async function lockKeePassXCVault() {
+  if (connectionStore.get().mode !== 'online') return null;
+  const st = await lockKeePassXC();
+  if (st && typeof st === 'object') {
+    cachedKeePassStatus = st;
+  }
+  return st;
+}
+
+export async function fillKeePassXCLoginForUrl(url) {
+  if (connectionStore.get().mode !== 'online' || !url) return [];
+  const res = await fetchKeePassXCLogins(url);
+  return Array.isArray(res?.entries) ? res.entries : [];
+}
+
+export async function autofillBrowserHostTab(tabId, { login = '', password = '' } = {}) {
+  if (!tabId) return null;
+  try {
+    if (typeof globalThis.sanctuaryBrowserHost?.autofillTab === 'function') {
+      return await globalThis.sanctuaryBrowserHost.autofillTab(tabId, { login, password });
+    }
+  } catch {
+    // Ignore host autofill failures
+  }
+  return null;
+}
+
+export async function captureBrowserTabPreview(tabId) {
+  if (!tabId) return null;
+  try {
+    if (typeof globalThis.sanctuaryBrowserHost?.captureTabPreview === 'function') {
+      return await globalThis.sanctuaryBrowserHost.captureTabPreview(tabId);
+    }
+  } catch {
+    // Ignore host tab preview failures
+  }
+  return null;
+}
+
+export async function clearBrowserHostHistory() {
+  try {
+    if (typeof globalThis.sanctuaryBrowserHost?.clearHistory === 'function') {
+      return await globalThis.sanctuaryBrowserHost.clearHistory();
+    }
+  } catch {
+    // Ignore host history clear errors
+  }
+  return { cleared: false };
 }
 
 export function subscribeBrowserHostEvents(listener) {

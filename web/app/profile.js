@@ -1114,7 +1114,16 @@ export function mountProfileScreen(containerEl, {
   postsList.setAttribute('role', 'tabpanel');
   postsList.setAttribute('aria-labelledby', `profile-tab-${activeSubTab}`);
 
-  root.append(header, heroHost, tabsRow, retryBannerEl, postsList);
+  const profileFooterWrap = doc.createElement('div');
+  profileFooterWrap.className = 'feed-infinite-footer';
+  const sentinelEl = doc.createElement('div');
+  sentinelEl.className = 'feed-scroll-sentinel';
+  sentinelEl.setAttribute('aria-hidden', 'true');
+  const footerStatusEl = doc.createElement('div');
+  footerStatusEl.className = 'feed-infinite-status';
+  profileFooterWrap.append(sentinelEl, footerStatusEl);
+
+  root.append(header, heroHost, tabsRow, retryBannerEl, postsList, profileFooterWrap);
   containerEl.appendChild(root);
 
   function renderRetryBanner() {
@@ -1246,7 +1255,55 @@ export function mountProfileScreen(containerEl, {
 
   let loadPostsEpoch = 0;
   const ownItemsByTab = new Map();
+  const tabCursors = new Map();
   const profileCardCache = new Map();
+  let loadingOlderPosts = false;
+  let appendPostError = '';
+  let sentinelIntersecting = false;
+  let lastAutoCursorSig = '';
+
+  const INFINITE_SCROLL_THRESHOLD_PX = 480;
+  const scrollRoot = containerEl.closest?.('.center-column-wrap') || null;
+  const scrollTarget = scrollRoot || containerEl;
+
+  function syncProfileInfiniteFooter() {
+    if (destroyed) return;
+    footerStatusEl.replaceChildren();
+    if (loadingOlderPosts) {
+      footerStatusEl.appendChild(createLoadingState('Loading older posts…', { doc, size: 'compact' }));
+      return;
+    }
+    if (appendPostError) {
+      const retryBtn = doc.createElement('button');
+      retryBtn.type = 'button';
+      retryBtn.className = 'btn-sleek-pill feed-retry-more-btn';
+      retryBtn.textContent = 'Retry loading older posts';
+      retryBtn.addEventListener('click', () => {
+        appendPostError = '';
+        syncProfileInfiniteFooter();
+        void loadMoreOwnPosts();
+      });
+      footerStatusEl.appendChild(retryBtn);
+    }
+  }
+
+  function canLoadOlderProfilePosts() {
+    return Boolean(
+      !destroyed
+      && !loadingPosts
+      && !loadingOlderPosts
+      && ownItems.length > 0
+      && tabCursors.get(activeSubTab)
+    );
+  }
+
+  function maybeAutoLoadOlderProfilePosts() {
+    if (!sentinelIntersecting || !canLoadOlderProfilePosts()) return;
+    const cursorSig = JSON.stringify(tabCursors.get(activeSubTab) || null);
+    if (!cursorSig || cursorSig === lastAutoCursorSig) return;
+    lastAutoCursorSig = cursorSig;
+    void loadMoreOwnPosts();
+  }
 
   function getCachedTabItems(tab = activeSubTab) {
     return ownItemsByTab.get(tab) || [];
@@ -1399,18 +1456,25 @@ export function mountProfileScreen(containerEl, {
     }
     ownItems = cached;
     loadingPosts = cached.length === 0;
+    loadingOlderPosts = false;
     postError = '';
+    appendPostError = '';
+    lastAutoCursorSig = '';
+    syncProfileInfiniteFooter();
     renderPosts();
     try {
-      const baseItems = await fetchOwnStatuses(targetId, {
+      const pageRes = await fetchOwnStatuses(targetId, {
         tab,
         protocol: isPrimaryBsky ? 'bluesky' : 'mastodon',
         acct: primary.acct || primary.handle || '',
         instanceUrl: isPrimaryBsky ? 'https://bsky.app' : (primary.instanceUrl || 'https://mastodon.social'),
         includeBridges: !isPrimaryBsky,
         skipMetricsEnrichment: true,
+        returnPageMeta: true,
       });
       if (destroyed) return;
+      const baseItems = Array.isArray(pageRes) ? pageRes : (pageRes?.items || []);
+      const nextCursor = Array.isArray(pageRes) ? null : (pageRes?.nextCursor || null);
       const cachedById = new Map(
         (Array.isArray(cached) ? cached : [])
           .filter((it) => it?.id)
@@ -1429,11 +1493,14 @@ export function mountProfileScreen(containerEl, {
         };
       });
       ownItemsByTab.set(tab, mergedBaseItems);
+      tabCursors.set(tab, nextCursor);
       if (primary.id) void persistProfileTabCache(primary.id, tab, mergedBaseItems);
       if (epoch !== loadPostsEpoch || activeSubTab !== tab) return;
       ownItems = mergedBaseItems;
       loadingPosts = false;
       renderPosts();
+      syncProfileInfiniteFooter();
+      maybeAutoLoadOlderProfilePosts();
       if (tab === 'posts') {
         void syncRecentUserPostsToSanctuary({ preloadedItems: ownItems }).catch(() => {});
       }
@@ -1458,6 +1525,75 @@ export function mountProfileScreen(containerEl, {
       }
       loadingPosts = false;
       renderPosts();
+      syncProfileInfiniteFooter();
+    }
+  }
+
+  async function loadMoreOwnPosts() {
+    if (!canLoadOlderProfilePosts()) return;
+    const primary = getPrimaryAccount();
+    const isPrimaryBsky = primary?.platform === 'bluesky';
+    const targetId = isPrimaryBsky
+      ? (primary.did || primary.handle || primary.acct || '')
+      : (primary?.userId || primary?.acct || primary?.handle || '');
+    const tab = activeSubTab;
+    const cursor = tabCursors.get(tab);
+    if (!primary || !targetId || !cursor) return;
+
+    const epoch = loadPostsEpoch;
+    loadingOlderPosts = true;
+    appendPostError = '';
+    syncProfileInfiniteFooter();
+    try {
+      const pageRes = await fetchOwnStatuses(targetId, {
+        tab,
+        protocol: isPrimaryBsky ? 'bluesky' : 'mastodon',
+        acct: primary.acct || primary.handle || '',
+        instanceUrl: isPrimaryBsky ? 'https://bsky.app' : (primary.instanceUrl || 'https://mastodon.social'),
+        includeBridges: !isPrimaryBsky,
+        skipMetricsEnrichment: true,
+        maxId: cursor.maxId || '',
+        bskyCursor: cursor.bskyCursor || '',
+        mastoDone: Boolean(cursor.mastoDone),
+        returnPageMeta: true,
+      });
+      if (destroyed || epoch !== loadPostsEpoch || activeSubTab !== tab) return;
+      const incoming = Array.isArray(pageRes) ? pageRes : (pageRes?.items || []);
+      const existingIds = new Set(ownItems.map((it) => String(it?.id || '')));
+      const addedItems = incoming.filter((it) => it?.id && !existingIds.has(String(it.id)));
+      const nextCursor = Array.isArray(pageRes) ? null : (pageRes?.nextCursor || null);
+      tabCursors.set(tab, addedItems.length === 0 && !nextCursor ? null : nextCursor);
+
+      const nextCombined = tab === 'posts'
+        ? [
+            ...ownItems.filter((it) => Boolean(it?._meta?.mastodon?.pinned)),
+            ...ownItems.filter((it) => !it?._meta?.mastodon?.pinned),
+            ...addedItems,
+          ]
+        : [...ownItems, ...addedItems];
+      ownItems = nextCombined;
+      ownItemsByTab.set(tab, nextCombined);
+      loadingOlderPosts = false;
+      renderPosts();
+      syncProfileInfiniteFooter();
+      maybeAutoLoadOlderProfilePosts();
+
+      if (addedItems.length > 0) {
+        void enrichUnifiedItemsMetrics(addedItems)
+          .then((enrichedAdded) => {
+            if (destroyed || !Array.isArray(enrichedAdded)) return;
+            if (activeSubTab === tab) {
+              applyEnrichedMetricsInPlace(enrichedAdded);
+              ownItemsByTab.set(tab, ownItems);
+            }
+          })
+          .catch(() => {});
+      }
+    } catch (err) {
+      if (destroyed || epoch !== loadPostsEpoch || activeSubTab !== tab) return;
+      loadingOlderPosts = false;
+      appendPostError = err?.message || 'Unable to load older posts.';
+      syncProfileInfiniteFooter();
     }
   }
 
@@ -1828,8 +1964,12 @@ export function mountProfileScreen(containerEl, {
       loadPostsEpoch += 1;
       ownItems = [];
       ownItemsByTab.clear();
+      tabCursors.clear();
       loadingPosts = false;
+      loadingOlderPosts = false;
       postError = '';
+      appendPostError = '';
+      syncProfileInfiniteFooter();
       renderPosts();
     }
     const nextRetrySig = (nextState?.retryQueue || []).map((r) => `${r.id}:${r.lastError || ''}`).join('|');
@@ -1862,6 +2002,52 @@ export function mountProfileScreen(containerEl, {
     }
   );
 
+  function isProfileNearBottom() {
+    const scrollH = Number(scrollTarget.scrollHeight || 0);
+    const clientH = Number(scrollTarget.clientHeight || 0);
+    const scrollT = Number(scrollTarget.scrollTop || 0);
+    if (scrollH > 0 && clientH > 0 && scrollH - scrollT - clientH <= INFINITE_SCROLL_THRESHOLD_PX) {
+      return true;
+    }
+    if (!scrollRoot) {
+      const rootEl = doc.documentElement;
+      const docH = Number(rootEl?.scrollHeight || 0);
+      const docClientH = Number(rootEl?.clientHeight || 0);
+      const docScrollT = Number(rootEl?.scrollTop || globalThis.scrollY || 0);
+      if (docH > 0 && docClientH > 0 && docH - docScrollT - docClientH <= INFINITE_SCROLL_THRESHOLD_PX) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  function handleProfileScroll() {
+    lastAutoCursorSig = '';
+    if (!canLoadOlderProfilePosts()) return;
+    if (isProfileNearBottom()) {
+      void loadMoreOwnPosts();
+    }
+  }
+  scrollTarget.addEventListener('scroll', handleProfileScroll, { passive: true });
+
+  let profileIntersectionObserver = null;
+  if (typeof globalThis.IntersectionObserver === 'function') {
+    profileIntersectionObserver = new globalThis.IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) {
+          if (entry.target === sentinelEl) {
+            sentinelIntersecting = Boolean(entry.isIntersecting);
+          }
+        }
+        if (sentinelIntersecting && canLoadOlderProfilePosts()) {
+          void loadMoreOwnPosts();
+        }
+      },
+      { root: scrollRoot, rootMargin: `0px 0px ${INFINITE_SCROLL_THRESHOLD_PX}px 0px` }
+    );
+    profileIntersectionObserver.observe(sentinelEl);
+  }
+
   renderHero();
   renderSubTabs();
   renderRetryBanner();
@@ -1880,6 +2066,8 @@ export function mountProfileScreen(containerEl, {
     },
     destroy() {
       destroyed = true;
+      scrollTarget.removeEventListener('scroll', handleProfileScroll);
+      profileIntersectionObserver?.disconnect();
       profileCardCache.clear();
       unsubAuth();
       unsubConn();

@@ -370,15 +370,20 @@ export async function loadVaultSecret(accountId) {
   if (!record || !record.iv || !record.ciphertext) {
     return null;
   }
-  const cryptoObj = getCryptoApi();
-  const key = await getOrCreateVaultKey();
-  const decryptedBuffer = await cryptoObj.subtle.decrypt(
-    { name: 'AES-GCM', iv: base64ToBytes(record.iv) },
-    key,
-    base64ToBytes(record.ciphertext)
-  );
-  const jsonText = new TextDecoder().decode(new Uint8Array(decryptedBuffer));
-  return JSON.parse(jsonText);
+  try {
+    const cryptoObj = getCryptoApi();
+    const key = await getOrCreateVaultKey();
+    const decryptedBuffer = await cryptoObj.subtle.decrypt(
+      { name: 'AES-GCM', iv: base64ToBytes(record.iv) },
+      key,
+      base64ToBytes(record.ciphertext)
+    );
+    const jsonText = new TextDecoder().decode(new Uint8Array(decryptedBuffer));
+    return JSON.parse(jsonText);
+  } catch {
+    await storeDelete('social_vault', String(accountId)).catch(() => {});
+    return null;
+  }
 }
 
 export async function deleteVaultSecret(accountId) {
@@ -389,6 +394,13 @@ export async function deleteVaultSecret(accountId) {
   }
 
   await storeDelete('social_vault', String(accountId));
+}
+
+export async function clearAllLocalVaultSecrets() {
+  if (getAndroidPlugin()) return;
+  vaultKeyPromise = null;
+  await storeClear('social_vault');
+  await storeDelete('kv', VAULT_KEY_KV_ID);
 }
 
 export async function listVaultIds() {
@@ -653,6 +665,11 @@ export async function cacheProgramHistory(programId, sessionId = 'default', payl
 
 export async function getCachedProgramHistory(programId, sessionId = 'default') {
   return storeGet('chat_history', historyCacheKey(programId, sessionId));
+}
+
+export async function clearAllCachedProgramHistory() {
+  await storeClear('chat_history').catch(() => {});
+  await storeClear('journals_quests').catch(() => {});
 }
 
 export async function purgeCachedProgramData(programId) {

@@ -19,7 +19,6 @@ $ObjDir = @(
 $required = @(
   (Join-Path $DesktopDir "mozconfig"),
   (Join-Path $DesktopDir "branding\lm-sanctuary\moz.build"),
-  (Join-Path $DesktopDir "keepassxc_nmh.py"),
   (Join-Path $RepoRoot "LICENSING.md"),
   (Join-Path $RepoRoot "web\assets\img\app_icon.ico")
 )

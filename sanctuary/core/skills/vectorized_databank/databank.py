@@ -31,27 +31,38 @@ class DataBankManager:
 
     def _init_db(self):
         if not os.path.exists(self.db_path):
-            self._save_data(self.db_path, {"documents": [], "chunks": []})
+            from utils.social_vault import VaultLockedError
+
+            try:
+                self._save_data(self.db_path, {"documents": [], "chunks": []})
+            except VaultLockedError:
+                pass
 
     def _load_data(self, path):
+        from utils.session_data import read_session_data
+        from utils.social_vault import VaultLockedError
+
         try:
             if os.path.exists(path):
-                with open(path, "r", encoding="utf-8") as f:
-                    return json.load(f)
+                return read_session_data(path)
+        except VaultLockedError:
+            raise
         except Exception as e:
             print(f"Error loading JSON file at {path}: {e}")
         return {"documents": [], "chunks": []}
 
     def _save_data(self, path, data):
+        from utils.session_data import write_session_data
+        from utils.social_vault import VaultLockedError
+
         try:
             parent_dir = os.path.dirname(os.path.abspath(path))
             prog_name = os.path.basename(parent_dir)
             if not os.path.isdir(parent_dir) or (prog_name != "sebile" and not os.path.isfile(os.path.join(parent_dir, f"{prog_name}.json"))):
                 return
-            temp_path = f"{path}.tmp"
-            with open(temp_path, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2, ensure_ascii=False)
-            os.replace(temp_path, path)
+            write_session_data(path, data)
+        except VaultLockedError:
+            raise
         except Exception as e:
             print(f"Error saving JSON file to {path}: {e}")
 

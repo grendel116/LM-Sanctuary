@@ -12,6 +12,8 @@ LM-Sanctuary is sovereign free software combining LM-Sanctuary's Fediverse/compa
   - Upstream SillyTavern's `AGPL-3.0` license shares the GNU AGPLv3 base license of LM-Sanctuary's server (`sanctuary/`). Per Section 4 of `AdditionRef-sval-app-store`, the App Store exception applies only to code released under that permission, and the standalone `web/` + `android/` App Store client bundle contains no third-party pure-AGPL or GPL code.
 - **Embedded ComfyUI Diffusion Engine (`GPL-3.0`)**:
   - The embedded diffusion workflow engine in `sanctuary/core/comfy_engine/` is derived from [ComfyUI](https://github.com/comfyanonymous/ComfyUI) and remains licensed under the **GNU General Public License v3.0** ([LICENSES/GPL-3.0.txt](./LICENSES/GPL-3.0.txt)), combined with LM-Sanctuary's AGPLv3 node under **GNU AGPLv3 Section 13, paragraph 2**.
+- **In-App KDBX 4.0 Vault & KeePassXC-Protocol Interoperability**:
+  - Built-in encrypted password, API-key, and `.kdbx` master-key escrow support (`sanctuary/utils/keepassxc_client.py`, `sanctuary/routes/keepassxc.py`) uses a clean-room KDBX 4.0 (Argon2id + ChaCha20/AES-256-CBC + HMAC-SHA256) and NaCl `crypto_box` implementation under LM-Sanctuary's `AGPL-3.0-only WITH AdditionRef-sval-app-store` license, keeping `.kdbx` vaults portable with KeePassXC and KeePassDX.
 - **Mozilla Gecko / GeckoView / `adblock-rust` Components (`MPL-2.0`)**:
   - Upstream Firefox ESR, Mozilla `GeckoView`, `adblock-rust`, and Mozilla-derived patches used in native browser builds remain licensed under the **Mozilla Public License 2.0** ([LICENSES/MPL-2.0.txt](./LICENSES/MPL-2.0.txt)), combined into an AGPLv3 Larger Work per MPL-2.0 Section 3.3.
 - **Bundled Client & Runtime Dependencies (`MIT` / `BSD-3-Clause` / `Apache-2.0`)**:

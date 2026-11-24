@@ -16,15 +16,27 @@ import {
   startThreadsOAuthFlow,
 } from '../../queries/socialClient.js';
 import { formatApiErrorMessage } from '../../queries/fetch/fetchWrapper.js';
+import {
+  associateKeePassXC,
+  disconnectKeePassXC,
+  fetchKeePassXCStatus,
+  lockKeePassXC,
+  unlockKeePassXC,
+} from '../../queries/sanctuary.js';
 import { cleanThreadsAuthCode } from '../../queries/threads.js';
 import {
   authStore,
+  lockSocialVaultSession,
   removeSocialAccount,
+  setKeePassVaultMode,
+  syncSocialAccountsWithServer,
   upsertSocialAccount,
 } from '../../state/authStore.js';
+import { connectionStore, emitSanctuaryEvent, onSanctuaryEvent } from '../../state/sanctuary/connection.js';
 import { kvSet } from '../../storage/nativeStore.js';
 import { openThreadsImportModal } from '../ThreadsImportModal.js';
 import { createClassicModalDialog } from './SanctuaryDialog.js';
+import { openKeyBoxModal, openSettingsModal, promptUnlockVault } from './SettingsModal.js';
 
 function extractFediverseInstance(rawInput) {
   let clean = String(rawInput || '').trim() || 'mastodon.social';
@@ -319,6 +331,8 @@ export function openUserModal({
 } = {}) {
   const doc = globalThis.document;
   let closed = false;
+  let kxcStatus = null;
+  let kxcBusy = false;
 
   const modal = createClassicModalDialog({
     id: 'user-accounts-dialog',
@@ -326,6 +340,7 @@ export function openUserModal({
     onClose: () => {
       closed = true;
       unsubAuth();
+      offVault();
       modal.dialog.remove();
     },
   });
@@ -418,6 +433,119 @@ export function openUserModal({
         connectedBox.appendChild(row);
       }
       wrap.appendChild(connectedBox);
+    }
+
+    if (connectionStore.get().mode === 'online') {
+      const kxcBox = doc.createElement('div');
+      kxcBox.className = 'form-card-container';
+      const kh4 = doc.createElement('div');
+      kh4.className = 'modal-section-header';
+      const kh4Title = doc.createElement('span');
+      kh4Title.textContent = 'Credential Vault (.kdbx)';
+      kh4.appendChild(kh4Title);
+      kxcBox.appendChild(kh4);
+
+      const kxcDesc = doc.createElement('p');
+      kxcDesc.className = 'classic-card-subtext';
+      const kxcActions = doc.createElement('div');
+      kxcActions.className = 'classic-card-actions';
+
+      const isInitialized = Boolean(kxcStatus?.initialized);
+      const isEscrowed = kxcStatus?.vault_mode === 'keepassxc' || s.vaultLocked;
+      const isUnlocked = Boolean(kxcStatus?.database_unlocked);
+
+      if (!kxcStatus) {
+        kxcDesc.textContent = 'Checking in-app .kdbx vault status…';
+      } else if (!isInitialized) {
+        kxcDesc.textContent = 'Create an encrypted .kdbx 4.0 vault to protect social credentials, logins, and API keys with a master password.';
+        const setupBtn = doc.createElement('button');
+        setupBtn.type = 'button';
+        setupBtn.className = 'btn-sleek-pill';
+        setupBtn.textContent = 'Set Up .kdbx Vault';
+        setupBtn.disabled = kxcBusy;
+        setupBtn.addEventListener('click', () => {
+          modal.close();
+          openSettingsModal({ initialTab: 'project' });
+        });
+        kxcActions.appendChild(setupBtn);
+      } else if (!isUnlocked) {
+        kxcDesc.textContent = isEscrowed
+          ? 'Social vault key is escrowed in your .kdbx vault and currently locked.'
+          : 'Your .kdbx vault is locked.';
+        const unlockBtn = doc.createElement('button');
+        unlockBtn.type = 'button';
+        unlockBtn.className = 'btn-sleek-pill';
+        unlockBtn.style.whiteSpace = 'nowrap';
+        unlockBtn.textContent = 'Unlock';
+        unlockBtn.disabled = kxcBusy;
+        unlockBtn.addEventListener('click', () => {
+          promptUnlockVault({
+            onUnlocked: async (st) => {
+              kxcStatus = st || (await fetchKeePassXCStatus().catch(() => null));
+              setStatus('');
+              renderBody();
+            },
+          });
+        });
+        kxcActions.appendChild(unlockBtn);
+      } else {
+        kxcDesc.textContent = `Active (.kdbx 4.0 · Argon2id) — social credentials and logins protected in ${kxcStatus?.vault_filename || 'sanctuary.kdbx'}.`;
+        const manageBtn = doc.createElement('button');
+        manageBtn.type = 'button';
+        manageBtn.className = 'edit-btn';
+        manageBtn.textContent = 'Manage Vault…';
+        manageBtn.addEventListener('click', () => {
+          openKeyBoxModal({
+            onChanged: async () => {
+              kxcStatus = await fetchKeePassXCStatus().catch(() => null);
+              renderBody();
+            },
+          });
+        });
+        const lockBtn = doc.createElement('button');
+        lockBtn.type = 'button';
+        lockBtn.className = 'edit-btn edit-cancel-btn';
+        lockBtn.textContent = 'Lock Vault';
+        lockBtn.disabled = kxcBusy;
+        lockBtn.addEventListener('click', async () => {
+          kxcBusy = true;
+          try {
+            kxcStatus = await lockKeePassXC();
+            await lockSocialVaultSession();
+            emitSanctuaryEvent('sanctuary:vault-changed', { unlocked: false });
+            setStatus('');
+          } catch (err) {
+            setStatus(err?.message || 'Failed to lock vault.');
+          } finally {
+            kxcBusy = false;
+            renderBody();
+          }
+        });
+        const discKxcBtn = doc.createElement('button');
+        discKxcBtn.type = 'button';
+        discKxcBtn.className = 'edit-btn edit-cancel-btn';
+        discKxcBtn.textContent = 'Switch to Local Key';
+        discKxcBtn.disabled = kxcBusy;
+        discKxcBtn.addEventListener('click', async () => {
+          kxcBusy = true;
+          try {
+            kxcStatus = await disconnectKeePassXC();
+            await setKeePassVaultMode(false);
+            emitSanctuaryEvent('sanctuary:vault-changed', { unlocked: false });
+            setStatus('Restored local protected vault key.');
+          } catch (err) {
+            setStatus(err?.message || 'Failed to restore local vault.');
+          } finally {
+            kxcBusy = false;
+            renderBody();
+          }
+        });
+        kxcActions.append(manageBtn, lockBtn, discKxcBtn);
+      }
+
+      kxcBox.append(kxcDesc);
+      if (kxcActions.childNodes.length > 0) kxcBox.appendChild(kxcActions);
+      wrap.appendChild(kxcBox);
     }
 
     if (retryQueue.length > 0) {
@@ -843,11 +971,31 @@ export function openUserModal({
     bodyHost.replaceChildren(desc, wrap);
   }
 
+  async function refreshModalVaultStatus() {
+    if (connectionStore.get().mode !== 'online') return;
+    try {
+      const st = await fetchKeePassXCStatus();
+      if (!closed) {
+        kxcStatus = st || { initialized: false };
+        renderBody();
+      }
+    } catch {
+      if (!closed) {
+        kxcStatus = { initialized: false };
+        renderBody();
+      }
+    }
+  }
+
   const unsubAuth = authStore.subscribe(() => {
     if (!closed) renderBody();
   });
+  const offVault = onSanctuaryEvent('sanctuary:vault-changed', () => {
+    void refreshModalVaultStatus();
+  });
 
   renderBody();
+  void refreshModalVaultStatus();
   void fetchSocialBridgeStatus().catch(() => {});
   modal.open();
   return modal;

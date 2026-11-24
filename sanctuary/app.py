@@ -38,6 +38,8 @@ from routes.social_accounts import social_accounts_bp
 from routes.social_bridge import social_bridge_bp
 from routes.social_drafts import social_drafts_bp
 from routes.social_linked_posts import social_linked_posts_bp
+from routes.keepassxc import keepassxc_bp
+from utils import social_vault
 from utils.session_data import migrate_session_files
 
 _TAILSCALE_CGNAT = ipaddress.ip_network("100.64.0.0/10")
@@ -89,6 +91,7 @@ app.register_blueprint(social_accounts_bp)
 app.register_blueprint(social_drafts_bp)
 app.register_blueprint(social_linked_posts_bp)
 app.register_blueprint(browser_vault_bp)
+app.register_blueprint(keepassxc_bp)
 
 migrated_sessions, session_migration_errors = migrate_session_files(
     os.path.join(st.base_dir, "core", "programs")
@@ -136,6 +139,7 @@ def check_program_change():
         "/api/events/",
         "/api/social/",
         "/api/browser/",
+        "/api/keepassxc/",
         "/assets/",
         "/app/",
         "/core/",
@@ -196,7 +200,13 @@ def apply_response_headers(response):
         response.headers["Pragma"] = "no-cache"
         response.headers["Expires"] = "0"
     origin = request.headers.get("Origin", "")
-    if origin and is_allowed_cors_origin(origin):
+    is_sensitive_vault = request.path.startswith(("/api/social/accounts", "/api/keepassxc"))
+    cors_allowed = (
+        social_vault.is_trusted_vault_cors_origin(origin, request.host or "", request.scheme or "http")
+        if is_sensitive_vault
+        else is_allowed_cors_origin(origin)
+    )
+    if origin and cors_allowed:
         response.headers["Access-Control-Allow-Origin"] = origin
         response.headers["Access-Control-Allow-Credentials"] = "true"
         response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
@@ -365,5 +375,9 @@ if __name__ == "__main__":
             "*.db-shm",
             "*.enc",
             "*.json",
+            "*tests*",
+            "*\\tests\\*",
+            "*__tests__*",
+            "*\\__tests__\\*",
         ],
     )

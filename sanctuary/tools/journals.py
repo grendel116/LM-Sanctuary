@@ -4,6 +4,8 @@ import uuid
 import time
 import re
 from runners.program import get_active_program
+from utils.session_data import read_session_data, write_session_data
+from utils.social_vault import VaultLockedError
 from variables.settings import PROGRAMS_DIR
 
 def _get_journals_path(program_id: str = None) -> str:
@@ -16,8 +18,9 @@ def get_journal_entries(program_id: str = None) -> list:
     if not os.path.exists(path):
         return []
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
+        return read_session_data(path)
+    except VaultLockedError:
+        raise
     except Exception as e:
         print(f"Error loading journals from {path}: {e}")
         return []
@@ -29,10 +32,9 @@ def save_journal_entries(entries: list, program_id: str = None):
         prog_name = os.path.basename(parent_dir)
         if not os.path.isdir(parent_dir) or (prog_name != "sebile" and not os.path.isfile(os.path.join(parent_dir, f"{prog_name}.json"))):
             return
-        temp_path = path + ".tmp"
-        with open(temp_path, "w", encoding="utf-8") as f:
-            json.dump(entries, f, indent=2, ensure_ascii=False)
-        os.replace(temp_path, path)
+        write_session_data(path, entries)
+    except VaultLockedError:
+        raise
     except Exception as e:
         print(f"Error saving journals to {path}: {e}")
 

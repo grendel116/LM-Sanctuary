@@ -138,6 +138,29 @@ function collectThreadsSeenSnapshot(items = []) {
   return snapshot;
 }
 
+function mergeThreadsSeenSnapshots(base = {}, incoming = {}) {
+  const next = { ...(base && typeof base === 'object' ? base : {}) };
+  for (const [tid, counts] of Object.entries(incoming || {})) {
+    if (!counts || typeof counts !== 'object') continue;
+    const prev = next[tid] || {};
+    next[tid] = {
+      likes: Math.max(Number(prev.likes || 0), Number(counts.likes || 0)),
+      reposts: Math.max(Number(prev.reposts || 0), Number(counts.reposts || 0)),
+    };
+  }
+  return next;
+}
+
+function computeNewestActivityTs(items = [], floorTs = 0) {
+  let newestMs = Number(floorTs || 0) || 0;
+  for (const it of items) {
+    if (isSyntheticThreadsInsightItem(it)) continue;
+    const ms = parseItemTimeMs(it);
+    if (ms > newestMs) newestMs = ms;
+  }
+  return newestMs > 0 ? newestMs : Date.now();
+}
+
 export function computeUnreadFromItems(items = [], lastSeenTs = 0, seenThreadsMetrics = {}) {
   if (!Array.isArray(items) || items.length === 0) return false;
   for (const it of items) {
@@ -596,34 +619,24 @@ export async function hydrateActivityStore() {
   });
 }
 
-export async function markActivitySeen() {
+export async function markActivitySeen({ advanceUnreadCutoff = false } = {}) {
   const cur = activityStore.get();
   const prevSeenTs = Number(cur.lastSeenTs || 0);
   const prevSeenThreads = cur.seenThreadsMetrics && typeof cur.seenThreadsMetrics === 'object'
     ? { ...cur.seenThreadsMetrics }
     : {};
-  let newestMs = Date.now();
-  for (const it of cur.items) {
-    if (isSyntheticThreadsInsightItem(it)) continue;
-    const ms = parseItemTimeMs(it);
-    if (ms > newestMs) newestMs = ms;
+  const newestMs = computeNewestActivityTs(cur.items, prevSeenTs);
+  const nextSeenThreads = mergeThreadsSeenSnapshots(cur.seenThreadsMetrics, collectThreadsSeenSnapshot(cur.items));
+  let cutoffPatch = {};
+  if (advanceUnreadCutoff) {
+    cutoffPatch = { sessionUnreadCutoffTs: newestMs, sessionUnreadThreadsMetrics: nextSeenThreads };
+  } else if (cur.hasUnread || (prevSeenTs > 0 && cur.sessionUnreadCutoffTs === 0)) {
+    cutoffPatch = { sessionUnreadCutoffTs: prevSeenTs, sessionUnreadThreadsMetrics: prevSeenThreads };
   }
-  const snapshot = collectThreadsSeenSnapshot(cur.items);
-  const nextSeenThreads = { ...(cur.seenThreadsMetrics || {}) };
-  for (const [tid, counts] of Object.entries(snapshot)) {
-    const prev = nextSeenThreads[tid] || {};
-    nextSeenThreads[tid] = {
-      likes: Math.max(Number(prev.likes || 0), Number(counts.likes || 0)),
-      reposts: Math.max(Number(prev.reposts || 0), Number(counts.reposts || 0)),
-    };
-  }
-  const preserveCutoff = (cur.hasUnread || (prevSeenTs > 0 && cur.sessionUnreadCutoffTs === 0))
-    ? { sessionUnreadCutoffTs: prevSeenTs, sessionUnreadThreadsMetrics: prevSeenThreads }
-    : {};
   activityStore.set({
     lastSeenTs: newestMs,
     seenThreadsMetrics: nextSeenThreads,
-    ...preserveCutoff,
+    ...cutoffPatch,
     hasUnread: false,
   });
   await Promise.allSettled([
@@ -633,7 +646,13 @@ export async function markActivitySeen() {
   ]);
 }
 
-export async function refreshActivityNotifications({ limit = 60, markSeen = false, background = false } = {}) {
+export async function refreshActivityNotifications({
+  limit = 60,
+  markSeen = false,
+  advanceUnreadCutoff = false,
+  forceRefresh = false,
+  background = false,
+} = {}) {
   const cur = activityStore.get();
   if (!cur.hydrated) {
     await hydrateActivityStore();
@@ -644,12 +663,34 @@ export async function refreshActivityNotifications({ limit = 60, markSeen = fals
     return { items: [], warnings: [] };
   }
 
-  if (!background) {
+  const curNow = activityStore.get();
+  if (advanceUnreadCutoff) {
+    const preRefreshCutoffTs = (curNow.items.length > 0 || Number(curNow.lastSeenTs || 0) > 0)
+      ? computeNewestActivityTs(curNow.items, curNow.lastSeenTs)
+      : 0;
+    const preRefreshSeenThreads = mergeThreadsSeenSnapshots(
+      curNow.seenThreadsMetrics,
+      collectThreadsSeenSnapshot(curNow.items)
+    );
+    activityStore.set({
+      ...(preRefreshCutoffTs > 0
+        ? { lastSeenTs: preRefreshCutoffTs, sessionUnreadCutoffTs: preRefreshCutoffTs }
+        : {}),
+      seenThreadsMetrics: preRefreshSeenThreads,
+      sessionUnreadThreadsMetrics: preRefreshSeenThreads,
+      hasUnread: false,
+      ...(!background ? { loading: true, error: null } : {}),
+    });
+    if (preRefreshCutoffTs > 0) {
+      void kvSet(LAST_SEEN_TS_KEY, preRefreshCutoffTs).catch(() => {});
+    }
+    void kvSet(SEEN_THREADS_METRICS_KEY, preRefreshSeenThreads).catch(() => {});
+  } else if (!background) {
     activityStore.set({ loading: true, error: null });
   }
   try {
     await Promise.allSettled([hydrateCachedModeration(), hydrateCachedFilters()]);
-    const { items: rawItems = [], warnings = [] } = await fetchUnifiedNotifications({ limit });
+    const { items: rawItems = [], warnings = [] } = await fetchUnifiedNotifications({ limit, forceRefresh });
     const feedState = feedStore.get();
     const filtered = applyKeywordFilters(
       rawItems,
@@ -665,7 +706,7 @@ export async function refreshActivityNotifications({ limit = 60, markSeen = fals
         error: null,
         lastFetchedAt: Date.now(),
       });
-      await markActivitySeen();
+      await markActivitySeen({ advanceUnreadCutoff: false });
     } else {
       activityStore.set({
         items: filtered,

@@ -11,6 +11,7 @@ Ground every engineering decision in Sanctuary's concrete modules and strict cod
 ## 1. Governing Directives
 - **Root Code Focus**: Read exact source definitions and data layouts before editing. Never guess imports, signatures, or DOM structures.
 - **Rejection of Churn**: Replace obsolete or duplicated code rather than wrapping it. Keep modules consolidated and dependency-free where possible.
+- **Vault-First Sensitive Data Rule**: All sensitive data (credentials, API keys, social tokens, chat sessions, `journals.json`, `quest_log.json`, `databank.json`, private bookmarks/drafts) MUST go through the encrypted vault (`keepassxc_client.py` / `social_vault.py` / `session_data.py`). Never cache plaintext chat/secrets in browser IndexedDB in `.kdbx` mode, and always fail closed (`VaultLockedError` -> `503`, empty chat view, disabled social post actions) while locked.
 - **Windows PowerShell Shell**: On Windows, separate commands with `;` (never `&&`) and run Python via `.\.venv\Scripts\python.exe`.
 
 ## 2. Key Subsystems

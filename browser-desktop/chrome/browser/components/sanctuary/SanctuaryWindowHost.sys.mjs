@@ -552,6 +552,55 @@ function cleanupTabRecord(rec) {
   detachBrowserDomListeners(rec);
 }
 
+async function captureRecordSnapshot(win, state, tabId, rec) {
+  if (!win || !rec?.browser || !tabId) {
+    return { ok: false };
+  }
+  if (rec.capturePromise) {
+    return rec.capturePromise;
+  }
+  const wgp = rec.browser.browsingContext?.currentWindowGlobal;
+  if (typeof wgp?.drawSnapshot !== "function" || typeof win.document?.createElementNS !== "function") {
+    return { ok: false };
+  }
+  rec.capturePromise = (async () => {
+    try {
+      const bitmap = await wgp.drawSnapshot(null, 1, "rgb(18, 18, 20)");
+      if (!bitmap || !bitmap.width || !bitmap.height) {
+        bitmap?.close?.();
+        return { ok: false };
+      }
+      const canvas = win.document.createElementNS("http://www.w3.org/1999/xhtml", "canvas");
+      canvas.width = bitmap.width;
+      canvas.height = bitmap.height;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) {
+        bitmap.close?.();
+        return { ok: false };
+      }
+      ctx.drawImage(bitmap, 0, 0);
+      bitmap.close?.();
+      const dataUrl = canvas.toDataURL("image/jpeg", 0.86);
+      if (!dataUrl || !dataUrl.startsWith("data:image/")) {
+        return { ok: false };
+      }
+      rec.previewDataUrl = dataUrl;
+      emitEvent(state, {
+        type: "tab-preview",
+        tabId,
+        url: String(rec.browser?.currentURI?.spec || rec.url || ""),
+        dataUrl,
+      });
+      return { ok: true, tabId, dataUrl };
+    } catch {
+      return { ok: false };
+    } finally {
+      rec.capturePromise = null;
+    }
+  })();
+  return rec.capturePromise;
+}
+
 function attachTabRecord(win, state, tabId, tab, initialUrl = "") {
   const browser = win.gBrowser?.getBrowserForTab?.(tab) || tab.linkedBrowser || null;
   const panel = resolvePanelForTab(win, tab, browser);
@@ -1116,6 +1165,7 @@ export const SanctuaryWindowHost = {
         if (stateFlags & flags.STATE_START) {
           emitEvent(state, { type: "loading-change", tabId, loading: true });
         } else if (stateFlags & flags.STATE_STOP) {
+          const [, stopRec] = entry;
           emitEvent(state, {
             type: "loading-change",
             tabId,
@@ -1123,6 +1173,13 @@ export const SanctuaryWindowHost = {
             canGoBack: Boolean(browser.canGoBack),
             canGoForward: Boolean(browser.canGoForward),
           });
+          if (typeof win.setTimeout === "function") {
+            win.setTimeout(() => {
+              if (state.tabs.get(tabId) === stopRec) {
+                void captureRecordSnapshot(win, state, tabId, stopRec);
+              }
+            }, 120);
+          }
         }
       },
 
@@ -1620,6 +1677,30 @@ export const SanctuaryWindowHost = {
     };
   },
 
+  async clearHistory(win) {
+    if (win) {
+      const state = getState(win);
+      for (const rec of state.tabs.values()) {
+        try {
+          rec?.browser?.browsingContext?.sessionHistory?.purgeHistory?.();
+        } catch {
+          // Ignore per-tab session history purge failures
+        }
+      }
+    }
+    try {
+      const { PlacesUtils } = ChromeUtils.importESModule(
+        "resource://gre/modules/PlacesUtils.sys.mjs"
+      );
+      if (typeof PlacesUtils?.history?.clear === "function") {
+        await PlacesUtils.history.clear();
+      }
+    } catch {
+      // PlacesUtils unavailable in minimal test harness
+    }
+    return { cleared: true };
+  },
+
   async extractTabContent(win, { tabId } = {}) {
     if (!win || !tabId) {
       return { ok: false };
@@ -1963,6 +2044,9 @@ export const SanctuaryWindowHost = {
       hideManagedTabStripEntry(win, rec.tab);
       const rect = activeMap.get(tabId);
       if (!rect) {
+        if (state.overlayOpen && rec.panel?.classList?.contains?.("sanctuary-active-tab-panel")) {
+          void captureRecordSnapshot(win, state, tabId, rec);
+        }
         hideManagedPanel(rec);
         continue;
       }
@@ -1992,6 +2076,41 @@ export const SanctuaryWindowHost = {
     }
   },
 
+  async captureTabPreview(win, { tabId = "" } = {}) {
+    if (!win || !tabId) {
+      return { ok: false };
+    }
+    const state = getState(win);
+    const rec = state.tabs.get(tabId);
+    if (!rec) {
+      return { ok: false };
+    }
+    return captureRecordSnapshot(win, state, tabId, rec);
+  },
+
+  async autofillTab(win, { tabId = "", login = "", password = "" } = {}) {
+    if (!win || !tabId) {
+      return { ok: false, filledCount: 0 };
+    }
+    const state = getState(win);
+    const rec = state.tabs.get(tabId);
+    const wgp = rec?.browser?.browsingContext?.currentWindowGlobal;
+    if (!wgp || typeof wgp.getActor !== "function") {
+      return { ok: false, filledCount: 0 };
+    }
+    try {
+      const shActor = wgp.getActor("SanctuaryHost");
+      return (
+        (await shActor.sendQuery("SanctuaryHost:FillCredentials", {
+          login: String(login || ""),
+          password: String(password || ""),
+        })) || { ok: false, filledCount: 0 }
+      );
+    } catch {
+      return { ok: false, filledCount: 0 };
+    }
+  },
+
   applyProgramTheme(win, tokens = {}) {
     const rootStyle = win?.document?.documentElement?.style;
     if (!rootStyle) {
@@ -2012,5 +2131,14 @@ export const SanctuaryWindowHost = {
     if (tokens.bg_canvas) {
       rootStyle.setProperty("--bg-color", String(tokens.bg_canvas));
     }
+  },
+
+  notifyShellEvent(win, payload) {
+    const state = win ? WINDOW_STATES.get(win) : null;
+    if (!state || !payload || typeof payload !== "object") {
+      return false;
+    }
+    emitEvent(state, payload);
+    return true;
   },
 };

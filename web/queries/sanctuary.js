@@ -1017,3 +1017,155 @@ export function submitBrowserCommandResult(cmdId, result, opts = {}) {
     ...opts,
   });
 }
+
+// In-app KDBX 4.0 credential vault & KeePassXC-protocol endpoints
+
+export function fetchKeePassXCStatus(opts = {}) {
+  return requestNode('/api/keepassxc/status', { background: true, timeoutMs: 4000, ...opts });
+}
+
+export function setupKeePassXCVault(password, opts = {}) {
+  return requestNode('/api/keepassxc/setup', {
+    method: 'POST',
+    json: { password },
+    timeoutMs: 30000,
+    ...opts,
+  });
+}
+
+export function associateKeePassXC(password = '', opts = {}) {
+  return requestNode('/api/keepassxc/associate', {
+    method: 'POST',
+    json: password ? { password } : {},
+    timeoutMs: 30000,
+    ...opts,
+  });
+}
+
+export function unlockKeePassXC(password = '', opts = {}) {
+  const { previousPassword = '', ...rest } = opts || {};
+  return requestNode('/api/keepassxc/unlock', {
+    method: 'POST',
+    json: {
+      ...(password ? { password } : {}),
+      ...(previousPassword ? { previousPassword } : {}),
+    },
+    timeoutMs: 30000,
+    ...rest,
+  });
+}
+
+export function lockKeePassXC(opts = {}) {
+  return requestNode('/api/keepassxc/lock', { method: 'POST', timeoutMs: 5000, ...opts });
+}
+
+export function disconnectKeePassXC(password = '', opts = {}) {
+  return requestNode('/api/keepassxc/disconnect', {
+    method: 'POST',
+    json: password ? { password } : {},
+    timeoutMs: 15000,
+    ...opts,
+  });
+}
+
+export function changeKeePassXCPassword(currentPassword, newPassword, opts = {}) {
+  return requestNode('/api/keepassxc/change-password', {
+    method: 'POST',
+    json: { currentPassword, newPassword },
+    timeoutMs: 30000,
+    ...opts,
+  });
+}
+
+export function fetchKeePassXCLogins(url, submitUrl = '', opts = {}) {
+  return requestNode('/api/keepassxc/logins', {
+    method: 'POST',
+    json: { url, ...(submitUrl ? { submitUrl } : {}) },
+    timeoutMs: 20000,
+    ...opts,
+  });
+}
+
+export function saveKeePassXCLogin({ url, login, password, name = '', uuid = '' }, opts = {}) {
+  return requestNode('/api/keepassxc/save-login', {
+    method: 'POST',
+    json: { url, login, password, ...(name ? { name } : {}), ...(uuid ? { uuid } : {}) },
+    timeoutMs: 10000,
+    ...opts,
+  });
+}
+
+export function fetchKeePassXCEntries(opts = {}) {
+  return requestNode('/api/keepassxc/entries', { background: true, timeoutMs: 10000, ...opts });
+}
+
+export function fetchKeePassXCEntry(uuid, opts = {}) {
+  return requestNode('/api/keepassxc/entry', {
+    method: 'POST',
+    json: { uuid },
+    timeoutMs: 10000,
+    ...opts,
+  });
+}
+
+export function saveKeePassXCEntry(payload, opts = {}) {
+  return requestNode('/api/keepassxc/save-entry', {
+    method: 'POST',
+    json: payload,
+    timeoutMs: 10000,
+    ...opts,
+  });
+}
+
+export function deleteKeePassXCEntry(uuid, opts = {}) {
+  return requestNode('/api/keepassxc/delete-entry', {
+    method: 'POST',
+    json: { uuid },
+    timeoutMs: 10000,
+    ...opts,
+  });
+}
+
+export function saveKeePassXCApiKey({ keyName, secret, title = '' }, opts = {}) {
+  return requestNode('/api/keepassxc/api-keys', {
+    method: 'POST',
+    json: { key_name: keyName, secret, ...(title ? { title } : {}) },
+    timeoutMs: 10000,
+    ...opts,
+  });
+}
+
+export function importKeePassXCVault({ kdbxBase64, password, masterPassword = '' }, opts = {}) {
+  return requestNode('/api/keepassxc/import', {
+    method: 'POST',
+    json: {
+      kdbxBase64,
+      password,
+      ...(masterPassword ? { masterPassword } : {}),
+    },
+    timeoutMs: 60000,
+    ...opts,
+  });
+}
+
+export function browseKeePassXCFile(opts = {}) {
+  return requestNode('/api/keepassxc/browse-file', {
+    method: 'POST',
+    json: {},
+    timeoutMs: 120000,
+    ...opts,
+  });
+}
+
+export function openKeePassXCFile({ path, password, previousPassword = '' }, opts = {}) {
+  return requestNode('/api/keepassxc/open-file', {
+    method: 'POST',
+    json: { path, password, ...(previousPassword ? { previousPassword } : {}) },
+    timeoutMs: 60000,
+    ...opts,
+  });
+}
+
+export function exportKeePassXCVaultUrl(opts = {}) {
+  return nodeUrlFor('/api/keepassxc/export', opts);
+}

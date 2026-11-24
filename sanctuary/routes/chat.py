@@ -23,8 +23,14 @@ from runners.program import (
     set_active_program,
     set_active_session,
 )
+from utils.social_vault import VaultLockedError
 
 chat_bp = Blueprint("chat_bp", __name__)
+
+
+@chat_bp.errorhandler(VaultLockedError)
+def _handle_chat_vault_locked(exc):
+    return jsonify({"error": str(exc), "locked": True, "vault": "keepassxc"}), 503
 
 
 def _sanitize_shared_post(raw) -> dict | None:
@@ -351,6 +357,8 @@ def history():
             'group_meta': group_meta,
             'generating': session_id in st.runner.generating_sessions
         })
+    except VaultLockedError as vle:
+        return jsonify({'error': str(vle), 'locked': True, 'vault': 'keepassxc'}), 503
     except Exception as e:
         print(f"Error getting history: {e}")
         return jsonify({'error': str(e)}), 500
@@ -423,6 +431,8 @@ def chat():
             'timestamp': time.time(),
             'duration': round(time.time() - start_time, 1)
         })
+    except VaultLockedError as vle:
+        return jsonify({'error': str(vle), 'locked': True, 'vault': 'keepassxc'}), 503
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -496,6 +506,8 @@ def edit():
             'timestamp': time.time(),
             'duration': round(time.time() - start_time, 1)
         })
+    except VaultLockedError as vle:
+        return jsonify({'error': str(vle), 'locked': True, 'vault': 'keepassxc'}), 503
     except Exception as e:
         print(f"Error occurred during edit: {e}")
         return jsonify({'error': str(e)}), 500
@@ -630,6 +642,8 @@ def delete_message():
             return jsonify({'status': 'success'})
         else:
             return jsonify({'error': 'Message not found'}), 404
+    except VaultLockedError as vle:
+        return jsonify({'error': str(vle), 'locked': True, 'vault': 'keepassxc'}), 503
     except Exception as e:
         print(f"Error deleting message {msg_id}: {e}")
         return jsonify({'error': str(e)}), 500
@@ -772,6 +786,8 @@ def continue_generation():
             'tool_calls': [],
             'duration': round(time.time() - start_time, 1)
         })
+    except VaultLockedError as vle:
+        return jsonify({'error': str(vle), 'locked': True, 'vault': 'keepassxc'}), 503
     except Exception as e:
         print(f"Error in continue_generation: {e}")
         return jsonify({'error': str(e)}), 500

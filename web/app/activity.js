@@ -1,5 +1,6 @@
 import { createOfflineNotice } from '../components/OfflineNotice.js';
 import { getPostActionCapabilities, PROTOCOL_LOGO_SVGS } from '../components/PostCard.js';
+import { attachPullToRefresh } from '../components/PullToRefresh.js';
 import { showAlert, showConfirm } from '../components/sanctuary/SanctuaryDialog.js';
 import { createLoadingState } from '../components/ui/index.js';
 import { DEFAULT_AVATAR_DATA_URI } from '../constants/avatars.js';
@@ -35,6 +36,7 @@ const BADGE_ICONS = {
 };
 
 const MORE_DOTS_SVG = `<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="5" cy="12" r="2"></circle><circle cx="12" cy="12" r="2"></circle><circle cx="19" cy="12" r="2"></circle></svg>`;
+const ACTIVITY_REFRESH_SVG = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-2.64-6.36L21 8"></path><path d="M21 3v5h-5"></path></svg>`;
 
 const VERB_LABELS = {
   reply: 'replied',
@@ -154,9 +156,19 @@ export function mountActivityScreen(containerEl, {
 
   const header = doc.createElement('div');
   header.className = 'stage-header';
+  const titleGroup = doc.createElement('div');
+  titleGroup.className = 'stage-title-group';
   const h1 = doc.createElement('h1');
   h1.className = 'stage-title';
   h1.textContent = 'Activity';
+
+  const refreshBtn = doc.createElement('button');
+  refreshBtn.type = 'button';
+  refreshBtn.className = 'feed-refresh-btn activity-refresh-btn';
+  refreshBtn.setAttribute('aria-label', 'Refresh notifications');
+  refreshBtn.title = 'Refresh notifications';
+  refreshBtn.innerHTML = ACTIVITY_REFRESH_SVG;
+  titleGroup.append(h1, refreshBtn);
 
   const headerActions = doc.createElement('div');
   headerActions.className = 'activity-header-actions';
@@ -167,13 +179,18 @@ export function mountActivityScreen(containerEl, {
   clearAllBtn.textContent = 'Clear all';
   clearAllBtn.hidden = true;
 
-  const refreshBtn = doc.createElement('button');
-  refreshBtn.type = 'button';
-  refreshBtn.className = 'edit-btn edit-cancel-btn activity-refresh-btn';
-  refreshBtn.textContent = 'Refresh';
+  headerActions.append(clearAllBtn);
+  header.append(titleGroup, headerActions);
 
-  headerActions.append(clearAllBtn, refreshBtn);
-  header.append(h1, headerActions);
+  let inFlightRefresh = false;
+  let showRefreshSpinner = false;
+  let refreshStartedAt = 0;
+  let requestEpoch = 0;
+  function syncRefreshButton() {
+    if (destroyed) return;
+    refreshBtn.disabled = inFlightRefresh;
+    refreshBtn.classList.toggle('is-spinning', inFlightRefresh && showRefreshSpinner);
+  }
 
   const totalsBarEl = doc.createElement('div');
   totalsBarEl.className = 'activity-totals-bar';
@@ -676,8 +693,9 @@ export function mountActivityScreen(containerEl, {
         }, true);
       }
     }
+    const notifCount = Array.isArray(group.items) ? group.items.length : 1;
     addPanelBtn(
-      group.notificationIds.length > 1 ? `Delete notifications (${group.notificationIds.length})` : 'Delete notification',
+      notifCount > 1 ? `Delete notifications (${notifCount})` : 'Delete notification',
       () => void dismissActivityGroup(group),
       true
     );
@@ -711,32 +729,70 @@ export function mountActivityScreen(containerEl, {
     return row;
   }
 
-  async function loadNotifications() {
+  const scrollTarget = containerEl.closest?.('.center-column-wrap') || containerEl;
+  const detachPull = attachPullToRefresh(scrollTarget, () =>
+    loadNotifications({ showSpinner: false, forceRefresh: true, advanceUnreadCutoff: true })
+  );
+
+  async function loadNotifications({ showSpinner = false, forceRefresh = false, advanceUnreadCutoff = false } = {}) {
     if (destroyed) return;
-    if (!activityStore.get().hydrated) {
-      await hydrateActivityStore().catch(() => {});
-      if (destroyed) return;
+    const epoch = ++requestEpoch;
+    inFlightRefresh = true;
+    showRefreshSpinner = showSpinner;
+    refreshStartedAt = showSpinner ? Date.now() : 0;
+    if (forceRefresh) {
+      if (scrollTarget) scrollTarget.scrollTop = 0;
+      listEl.scrollTop = 0;
     }
-    const [fedi, bsky, thr] = await Promise.all([
-      getAuthenticatedAccount('fediverse'),
-      getAuthenticatedAccount('bluesky'),
-      getAuthenticatedAccount('threads'),
-    ]);
-    if (destroyed) return;
-    if (!fedi && !bsky && !thr && (authStore.get().accounts || []).length === 0) {
-      renderFromStore();
-      return;
+    syncRefreshButton();
+
+    try {
+      if (!activityStore.get().hydrated) {
+        await hydrateActivityStore().catch(() => {});
+        if (destroyed || epoch !== requestEpoch) return;
+      }
+      const [fedi, bsky, thr] = await Promise.all([
+        getAuthenticatedAccount('fediverse'),
+        getAuthenticatedAccount('bluesky'),
+        getAuthenticatedAccount('threads'),
+      ]);
+      if (destroyed || epoch !== requestEpoch) return;
+      if (!fedi && !bsky && !thr && (authStore.get().accounts || []).length === 0) {
+        renderFromStore();
+        return;
+      }
+      await refreshActivityNotifications({
+        limit: 60,
+        markSeen: true,
+        advanceUnreadCutoff,
+        forceRefresh,
+        background: false,
+      }).catch(() => {});
+    } finally {
+      if (epoch === requestEpoch) {
+        if (showSpinner && refreshStartedAt > 0) {
+          const remaining = Math.max(0, 550 - (Date.now() - refreshStartedAt));
+          if (remaining > 0) {
+            await new Promise((resolve) => setTimeout(resolve, remaining));
+          }
+        }
+        if (epoch === requestEpoch) {
+          inFlightRefresh = false;
+          syncRefreshButton();
+        }
+      }
     }
-    await refreshActivityNotifications({ limit: 60, markSeen: true, background: false }).catch(() => {});
   }
 
-  refreshBtn.addEventListener('click', () => void loadNotifications());
+  refreshBtn.addEventListener('click', () => {
+    void loadNotifications({ showSpinner: true, forceRefresh: true, advanceUnreadCutoff: true });
+  });
   clearAllBtn.addEventListener('click', () => void clearAllActivity());
 
   const unsubActivity = activityStore.subscribe(() => renderFromStore());
 
   const buildAuthSig = (s) =>
-    `${Boolean(s?.hydrated)}:${s?.activeFediverseId || ''}:${s?.activeBlueskyId || ''}:${s?.activeThreadsId || ''}:${(s?.accounts || []).map((a) => a.id).join(',')}`;
+    `${Boolean(s?.hydrated)}:${Boolean(s?.vaultLocked)}:${s?.activeFediverseId || ''}:${s?.activeBlueskyId || ''}:${s?.activeThreadsId || ''}:${(s?.accounts || []).map((a) => a.id).join(',')}`;
   let prevAuthSig = buildAuthSig(authStore.get());
   const unsubAuth = authStore.subscribe((authState) => {
     if (destroyed) return;
@@ -749,12 +805,13 @@ export function mountActivityScreen(containerEl, {
   });
 
   renderFromStore();
-  void loadNotifications();
+  void loadNotifications({ advanceUnreadCutoff: !activityStore.get().hasUnread });
 
   return {
-    refresh: loadNotifications,
+    refresh: (opts) => loadNotifications(opts),
     destroy() {
       destroyed = true;
+      detachPull?.();
       closeFallbackMenus();
       doc.removeEventListener?.('click', handleDocClickOutside);
       unsubActivity();

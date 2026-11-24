@@ -14,6 +14,7 @@ import {
   normalizeSharedPostCard,
   parseInlineSharedPostFallback,
   reconcileChat,
+  syncSpeakButtonVisual,
 } from '../components/sanctuary/MessageRow.js';
 import { createMoodHeart } from '../components/sanctuary/MoodHeart.js';
 import {
@@ -23,6 +24,7 @@ import {
 } from '../components/sanctuary/PortraitGrid.js';
 import { openQuestModal } from '../components/sanctuary/QuestModal.js';
 import { showAlert } from '../components/sanctuary/SanctuaryDialog.js';
+import { promptUnlockVault } from '../components/sanctuary/SettingsModal.js';
 import { startTurnToolMonitor } from '../components/sanctuary/ToolApprovalCard.js';
 import { openVoiceCallOverlay } from '../components/sanctuary/VoiceCallOverlay.js';
 import {
@@ -45,7 +47,7 @@ import {
   getProgramAvatarVersion,
   onSanctuaryEvent,
 } from '../state/sanctuary/connection.js';
-import { enqueueTurn, flushOutbox, outboxStore } from '../state/sanctuary/outboxModel.js';
+import { enqueueTurn, flushOutbox, outboxStore, removeQueuedTurn } from '../state/sanctuary/outboxModel.js';
 import { loadProgramSession, sessionStore } from '../state/sanctuary/sessionModel.js';
 import { syncFeedTuningFromSanctuary } from '../state/feedStore.js';
 import { executeBrowserAgentCommand } from '../state/browserStore.js';
@@ -101,6 +103,10 @@ export function mountProgramThread(containerEl, {
   let turnCounter = 0;
   let activeAudio = null;
   let activeSpeakBtn = null;
+  let activeSpeakMsgId = '';
+  let speakState = 'idle';
+  let speakAbortController = null;
+  let speakRequestSeq = 0;
   let destroyed = false;
   let pinnedToBottom = true;
   let needsInitialScroll = true;
@@ -355,6 +361,10 @@ export function mountProgramThread(containerEl, {
   containerEl.appendChild(root);
 
   function syncPlaceholder() {
+    if (connectionStore.get().mode === 'online' && sessionStore.get().vaultLocked) {
+      textarea.placeholder = 'Unlock .kdbx vault to continue…';
+      return;
+    }
     textarea.placeholder = attachedSharedPost
       ? 'Add a message or press Enter to send...'
       : `Ask ${activeDisplayName}`;
@@ -381,6 +391,9 @@ export function mountProgramThread(containerEl, {
     attachedMediaPath = null;
     attachedMime = null;
     attachedFilename = '';
+    if (fileInput) {
+      fileInput.value = '';
+    }
   }
 
   function renderAttachmentPreview() {
@@ -448,10 +461,15 @@ export function mountProgramThread(containerEl, {
 
   function setBusy(val) {
     generating = Boolean(val);
+    const locked = connectionStore.get().mode === 'online' && Boolean(sessionStore.get().vaultLocked);
     moodHeart.setGeneratingPulse(generating);
     sendBtn.hidden = generating;
     stopBtn.hidden = !generating;
-    textarea.disabled = generating;
+    textarea.disabled = generating || locked;
+    sendBtn.disabled = locked;
+    attachBtn.disabled = locked;
+    portraitBtn.disabled = locked;
+    impersonateBtn.disabled = locked;
   }
 
   function stopReattachedMonitor() {
@@ -758,21 +776,86 @@ export function mountProgramThread(containerEl, {
     });
   }
 
+  function findSpeakBtnByMsgId(msgKey) {
+    if (!msgKey) return null;
+    const buttons = chatContainer.querySelectorAll('.speak-btn');
+    for (const el of buttons) {
+      if (el.dataset?.msgId === msgKey) return el;
+    }
+    return null;
+  }
+
+  function stopActiveSpeech() {
+    speakRequestSeq += 1;
+    if (speakAbortController) {
+      speakAbortController.abort();
+      speakAbortController = null;
+    }
+    if (activeAudio) {
+      activeAudio.onended = null;
+      activeAudio.onerror = null;
+      activeAudio.pause?.();
+      activeAudio = null;
+    }
+    if (activeSpeakBtn) {
+      syncSpeakButtonVisual(activeSpeakBtn, 'idle');
+    }
+    for (const el of chatContainer.querySelectorAll('.speak-btn.is-loading, .speak-btn.is-speaking')) {
+      syncSpeakButtonVisual(el, 'idle');
+    }
+    activeSpeakBtn = null;
+    activeSpeakMsgId = '';
+    speakState = 'idle';
+  }
+
   async function handleSpeak(msg, btn) {
-    if (activeSpeakBtn === btn && activeAudio) {
-      activeAudio.pause();
-      activeSpeakBtn = null;
+    const msgKey = String(msg?.id || btn?.dataset?.msgId || '');
+    if (speakState !== 'idle' && (activeSpeakBtn === btn || (msgKey && activeSpeakMsgId === msgKey))) {
+      stopActiveSpeech();
       return;
     }
-    activeAudio?.pause?.();
+    stopActiveSpeech();
+    const seq = ++speakRequestSeq;
+    const controller = typeof globalThis.AbortController === 'function'
+      ? new globalThis.AbortController()
+      : null;
+    speakAbortController = controller;
     activeSpeakBtn = btn;
-    const res = await synthesizeSpeech(msg.id, msg.text || '');
-    if (res?.audio_url) {
-      activeAudio = new globalThis.Audio(resolveSanctuaryMediaUrl(res.audio_url));
-      activeAudio.onended = () => {
-        activeSpeakBtn = null;
+    activeSpeakMsgId = msgKey;
+    speakState = 'loading';
+    syncSpeakButtonVisual(btn, 'loading');
+    try {
+      const res = await synthesizeSpeech(
+        msg.id,
+        msg.text || '',
+        controller ? { signal: controller.signal } : {}
+      );
+      if (destroyed || seq !== speakRequestSeq) return;
+      if (!res?.audio_url) {
+        stopActiveSpeech();
+        return;
+      }
+      const audio = new globalThis.Audio(resolveSanctuaryMediaUrl(res.audio_url));
+      const liveBtn = (msgKey && findSpeakBtnByMsgId(msgKey)) || btn;
+      activeAudio = audio;
+      speakAbortController = null;
+      activeSpeakBtn = liveBtn;
+      speakState = 'playing';
+      syncSpeakButtonVisual(liveBtn, 'playing');
+      audio.onended = () => {
+        if (seq === speakRequestSeq) stopActiveSpeech();
       };
-      await activeAudio.play?.();
+      audio.onerror = () => {
+        if (seq === speakRequestSeq) stopActiveSpeech();
+      };
+      await audio.play?.();
+      if (destroyed || seq !== speakRequestSeq) {
+        audio.pause?.();
+      }
+    } catch {
+      if (seq === speakRequestSeq) {
+        stopActiveSpeech();
+      }
     }
   }
 
@@ -902,9 +985,24 @@ export function mountProgramThread(containerEl, {
       },
       onEdit: (msg, row, bubble) => startInlineEdit(msg, row, bubble),
       onDelete: async (msg) => {
-        await deleteMessage({ session_id: currentSessionId, msg_id: msg.id });
+        if (!msg?.id) return;
+        if (generating) {
+          await stopActiveGeneration();
+        }
+        sessionStore.set((prev) => ({
+          messages: (Array.isArray(prev.messages) ? prev.messages : []).filter((m) => m?.id !== msg.id),
+        }));
+        await removeQueuedTurn(currentProgramId, currentSessionId, msg.id);
+        if (connectionStore.get().mode === 'online') {
+          try {
+            await deleteMessage({ session_id: currentSessionId, msg_id: msg.id });
+          } catch (err) {
+            if (err?.status !== 404) throw err;
+          }
+        }
         await refreshSession();
       },
+      getSpeakState: (id) => (id && String(id) === activeSpeakMsgId ? speakState : 'idle'),
       onSpeak: (msg, btn) => void handleSpeak(msg, btn),
       onProceedPlan: () => {
         if (generating) return;
@@ -963,8 +1061,28 @@ export function mountProgramThread(containerEl, {
       (it) => it.programId === currentProgramId && it.sessionId === currentSessionId
     );
 
+    const locked = conn.mode === 'online' && Boolean(state.vaultLocked);
+    textarea.disabled = generating || locked;
+    sendBtn.disabled = locked;
+    attachBtn.disabled = locked;
+    portraitBtn.disabled = locked;
+    impersonateBtn.disabled = locked;
+
     if (generating) {
       statusHost.replaceChildren();
+    } else if (locked) {
+      statusHost.replaceChildren(
+        createOfflineNotice({
+          variant: 'info',
+          message: 'Chat history is encrypted & locked • Unlock your .kdbx vault to restore your messages',
+          actionLabel: 'Unlock',
+          onAction: () => {
+            promptUnlockVault({
+              onUnlocked: () => refreshSession(),
+            });
+          },
+        })
+      );
     } else if (conn.mode === 'offline') {
       const suffix = outboxForSession.length > 0 ? ` • ${outboxForSession.length} queued` : '';
       statusHost.replaceChildren(
@@ -1115,8 +1233,7 @@ export function mountProgramThread(containerEl, {
     attachedSharedPost = null;
     renderAttachmentPreview();
     syncPlaceholder();
-    activeAudio?.pause?.();
-    activeSpeakBtn = null;
+    stopActiveSpeech();
     void onProgramChanged?.(currentProgramId, currentSessionId);
     void refreshSession();
   }
@@ -1381,6 +1498,15 @@ export function mountProgramThread(containerEl, {
       void refreshSession();
     }
   });
+  const offVaultChanged = onSanctuaryEvent('sanctuary:vault-changed', (e) => {
+    if (destroyed) return;
+    if (e?.detail?.unlocked === false) {
+      sessionStore.set({ messages: [], moodState: null, vaultLocked: true });
+    }
+    if (!generating) {
+      void refreshSession();
+    }
+  });
 
   void refreshModelsAndConfig();
   void refreshSession();
@@ -1409,7 +1535,7 @@ export function mountProgramThread(containerEl, {
       clearStagedAttachment();
       stopReattachedMonitor();
       abortController?.abort();
-      activeAudio?.pause?.();
+      stopActiveSpeech();
       chatResizeObserver?.disconnect?.();
       chatContainer.removeEventListener('scroll', onChatScroll);
       chatContainer.removeEventListener('load', onChatMediaLoad, true);
@@ -1417,6 +1543,7 @@ export function mountProgramThread(containerEl, {
       unsubConn();
       unsubOutbox();
       offOnline();
+      offVaultChanged();
     },
   };
 }

@@ -1,4 +1,4 @@
-export const CACHE_NAME = 'sanctuary-shell-v114';
+export const CACHE_NAME = 'sanctuary-shell-v117';
 
 export const APP_SHELL_ASSETS = [
   './',
@@ -71,6 +71,7 @@ export const APP_SHELL_ASSETS = [
   './components/sanctuary/UserModal.js',
   './components/sanctuary/ProgramModals.js',
   './components/sanctuary/SettingsModal.js',
+  './components/sanctuary/KeyBoxModal.js',
   './components/sanctuary/KnowledgeModal.js',
   './components/sanctuary/QuestModal.js',
   './components/sanctuary/PortraitGrid.js',

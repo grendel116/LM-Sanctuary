@@ -4,6 +4,8 @@ import { showConfirm } from '../components/sanctuary/SanctuaryDialog.js';
 import { createLoadingState } from '../components/ui/index.js';
 import { DEFAULT_AVATAR_DATA_URI } from '../constants/avatars.js';
 import { applyKeywordFilters } from '../core/schema/unifiedItem.js';
+import { normalizeBskyActorSummary, searchBskyActors } from '../queries/bluesky.js';
+import { searchFediverse } from '../queries/fediverse.js';
 import { fetchProgramJournals } from '../queries/sanctuary.js';
 import {
   likeUnified,
@@ -13,7 +15,7 @@ import {
   toggleFollowAuthor,
   toggleMuteAuthor,
 } from '../queries/socialClient.js';
-import { authStore } from '../state/authStore.js';
+import { authStore, getAuthenticatedAccount } from '../state/authStore.js';
 import { prefillReply } from '../state/composeStore.js';
 import { applyPostInterestFeedback, feedStore, removePostAcrossStreams } from '../state/feedStore.js';
 import { connectionStore } from '../state/sanctuary/connection.js';
@@ -67,39 +69,163 @@ export function mountSearchScreen(containerEl, {
   searchLandmark.appendChild(searchForm);
   stageHeader.appendChild(searchLandmark);
 
+  const stripLeadingAt = (raw) => {
+    let s = String(raw || '').trim();
+    while (s.startsWith('@')) s = s.slice(1);
+    return s;
+  };
+  const stripLeadingHash = (raw) => {
+    let s = String(raw || '').trim();
+    while (s.startsWith('#')) s = s.slice(1);
+    return s;
+  };
+
   const searchSuggest = attachSearchSuggestions(input, {
     anchorEl: searchForm,
-    debounceMs: 220,
-    minChars: 2,
-    fetchRemoteSuggestions: async (q) => {
-      const socialData = await searchAccountsAndPosts(q).catch(() => ({ accounts: [], hashtags: [] }));
-      const items = [];
-      for (const acc of (socialData.accounts || []).slice(0, 4)) {
-        const handle = String(acc?.handle || acc?.acct || '').replace(/^@/, '');
-        if (!handle) continue;
-        items.push({
+    debounceMs: 160,
+    minChars: 1,
+    getLocalSuggestions: (rawQ) => {
+      const q = String(rawQ || '').trim();
+      if (!q) return [];
+      const lowQ = stripLeadingAt(stripLeadingHash(q)).toLowerCase();
+      const localItems = [];
+      const seenHandles = new Set();
+
+      const pushAccount = (acc, protoHint = '') => {
+        if (localItems.length >= 3) return;
+        const handle = stripLeadingAt(acc?.acct || acc?.handle || acc?.username || '');
+        const name = String(acc?.displayName || acc?.name || acc?.username || handle || '').trim();
+        if (!handle && !name) return;
+        const hay = `${handle} ${name}`.toLowerCase();
+        if (lowQ && !hay.includes(lowQ)) return;
+        const dedupeKey = (handle || name).toLowerCase();
+        if (seenHandles.has(dedupeKey)) return;
+        seenHandles.add(dedupeKey);
+        const isBsky = protoHint === 'bluesky' || acc?.platform === 'bluesky' || acc?.protocol === 'bluesky' || acc?.network === 'bluesky';
+        localItems.push({
           kind: 'account',
-          label: acc.name || acc.displayName || handle,
-          sublabel: `@${handle}`,
-          value: `@${handle}`,
-          account: acc,
+          label: name || `@${handle}`,
+          sublabel: `@${handle || name} · ${isBsky ? 'Bluesky' : 'Mastodon'}`,
+          value: `@${handle || name}`,
+          account: { ...acc, protocol: isBsky ? 'bluesky' : 'mastodon' },
         });
+      };
+
+      for (const acc of authStore.get().accounts || []) {
+        pushAccount(acc, acc?.platform);
       }
-      for (const tag of (socialData.hashtags || []).slice(0, 3)) {
-        const name = String(tag?.name || tag || '').replace(/^#+/, '');
-        if (!name) continue;
-        items.push({
-          kind: 'hashtag',
-          label: `#${name}`,
-          sublabel: 'Hashtag',
-          value: `#${name}`,
-        });
+      const streams = feedStore.get().streams || {};
+      for (const sName of ['feed', 'following', 'photos', 'video']) {
+        for (const item of streams[sName]?.items || []) {
+          if (localItems.length >= 3) break;
+          if (item?.author) pushAccount(item.author, item.network);
+        }
+      }
+
+      if (!q.includes(' ')) {
+        const cleanTag = stripLeadingHash(q);
+        if (cleanTag.length >= 2) {
+          localItems.push({
+            kind: 'hashtag',
+            label: `#${cleanTag}`,
+            sublabel: 'Search #hashtag',
+            value: `#${cleanTag}`,
+          });
+        }
+      }
+
+      localItems.push({
+        kind: 'search',
+        label: `Search "${q}"`,
+        sublabel: 'Posts, @handles, #tags & journals',
+        value: q,
+      });
+      return localItems;
+    },
+    fetchRemoteSuggestions: async (rawQ) => {
+      const q = String(rawQ || '').trim();
+      if (q.length < 2) return [];
+      const cleanActor = stripLeadingAt(q);
+      const [bskyAuth, fediAuth] = await Promise.all([
+        getAuthenticatedAccount('bluesky').catch(() => null),
+        getAuthenticatedAccount('fediverse').catch(() => null),
+      ]);
+      const bskyOpts = bskyAuth?.meta?.serviceUrl && bskyAuth?.secrets?.accessJwt
+        ? {
+            serviceUrl: bskyAuth.meta.serviceUrl,
+            accessJwt: bskyAuth.secrets.accessJwt,
+            refreshJwt: bskyAuth.secrets.refreshJwt,
+          }
+        : {};
+      const [bskyRes, fediRes] = await Promise.allSettled([
+        cleanActor ? searchBskyActors({ ...bskyOpts, query: cleanActor, limit: 5 }) : Promise.resolve({ actors: [] }),
+        fediAuth?.secrets?.accessToken
+          ? searchFediverse({
+              instanceUrl: fediAuth.meta.instanceUrl || 'https://mastodon.social',
+              accessToken: fediAuth.secrets.accessToken,
+              query: q,
+              resolve: false,
+              limit: 5,
+              timeoutMs: 3500,
+            })
+          : Promise.resolve({ accounts: [], hashtags: [] }),
+      ]);
+
+      const items = [];
+      if (fediRes.status === 'fulfilled') {
+        for (const acc of (fediRes.value?.accounts || []).slice(0, 3)) {
+          const handle = stripLeadingAt(acc?.acct || acc?.handle || '');
+          if (!handle) continue;
+          items.push({
+            kind: 'account',
+            label: acc.displayName || acc.name || acc.username || handle,
+            sublabel: `@${handle} · Mastodon`,
+            value: `@${handle}`,
+            account: { ...acc, protocol: 'mastodon', network: 'fediverse' },
+          });
+        }
+        for (const tag of (fediRes.value?.hashtags || []).slice(0, 2)) {
+          const name = stripLeadingHash(tag?.name || tag || '');
+          if (!name) continue;
+          items.push({
+            kind: 'hashtag',
+            label: `#${name}`,
+            sublabel: 'Hashtag',
+            value: `#${name}`,
+          });
+        }
+      }
+      if (bskyRes.status === 'fulfilled') {
+        for (const rawActor of (bskyRes.value?.actors || []).slice(0, 4)) {
+          const acc = normalizeBskyActorSummary(rawActor);
+          const handle = stripLeadingAt(acc?.acct || acc?.handle || '');
+          if (!handle) continue;
+          items.push({
+            kind: 'account',
+            label: acc.displayName || acc.username || handle,
+            sublabel: `@${handle} · Bluesky`,
+            value: `@${handle}`,
+            account: { ...acc, protocol: 'bluesky', network: 'bluesky' },
+          });
+        }
       }
       return items;
     },
+    mergeSuggestions: (localItems, remoteItems) => [...remoteItems, ...localItems],
     onSelect: (item) => {
       if (item.kind === 'account' && item.account && onSelectAuthor) {
-        onSelectAuthor(item.account);
+        const acc = item.account;
+        const isBsky = acc.protocol === 'bluesky' || acc.network === 'bluesky';
+        onSelectAuthor({
+          id: acc.id || acc.did || '',
+          name: acc.displayName || acc.name || acc.username || acc.acct || acc.handle || '',
+          handle: acc.acct || acc.handle || acc.username || '',
+          avatar_url: acc.avatar || acc.avatar_url || '',
+          url: acc.url || '',
+          protocol: isBsky ? 'bluesky' : 'mastodon',
+          network: acc.network || (isBsky ? 'bluesky' : 'fediverse'),
+          viewer: acc.viewer || null,
+        });
         return;
       }
       input.value = item.value;

@@ -1,6 +1,11 @@
 import { DEFAULT_AVATAR_DATA_URI } from '../constants/avatars.js';
 import { detectPostLanguageInfo, resolveLanguageDisplayName } from '../core/postLanguage.js';
-import { getSensitiveMediaWarning, plainTextToHtml, toUnifiedItem } from '../core/schema/unifiedItem.js';
+import {
+  enrichUnlinkedMentionsInHtml,
+  getSensitiveMediaWarning,
+  plainTextToHtml,
+  toUnifiedItem,
+} from '../core/schema/unifiedItem.js';
 import { buildUrlDisplayFragment, renderSanitizedHtml, splitUrlDisplayParts } from '../queries/fediverse.js';
 import { translateUnifiedPost } from '../queries/socialClient.js';
 import { authStore } from '../state/authStore.js';
@@ -206,6 +211,22 @@ export function getPostActionCapabilities(rawPost, authState = authStore.get()) 
   const hasBluesky = Boolean(authState?.isBlueskyConnected || accounts.some((a) => a.platform === 'bluesky'));
   const hasThreads = Boolean(authState?.isThreadsConnected || accounts.some((a) => a.platform === 'threads'));
   const isSynthetic = Boolean(unified._meta?.notification?.synthetic);
+  const isVaultLocked = Boolean(authState?.vaultLocked);
+
+  if (isVaultLocked) {
+    if (unified.protocol === 'threads') {
+      return {
+        like: { enabled: false, reason: 'Likes are not supported by the Threads API' },
+        reply: { enabled: false, reason: 'Unlock vault to reply' },
+        repost: { enabled: false, reason: 'Boosts are not supported by the Threads API' },
+      };
+    }
+    return {
+      like: { enabled: false, reason: 'Unlock vault to like' },
+      reply: { enabled: false, reason: 'Unlock vault to reply' },
+      repost: { enabled: false, reason: 'Unlock vault to boost' },
+    };
+  }
 
   if (unified.protocol === 'threads') {
     const postId = String(unified._meta?.threads?.postId || String(unified.id || '').replace(/^threads:(?:notif:)?/, '')).trim();
@@ -405,7 +426,7 @@ function syncCrossPlatformResonanceStrip(actionsEl, unified, doc = globalThis.do
   const entries = protocols.map((proto) => {
     const vals = bd?.[proto] && typeof bd[proto] === 'object'
       ? bd[proto]
-      : (protocols.length === 1 && proto === unified.protocol ? (unified.metrics || {}) : {});
+      : (proto === unified.protocol ? (unified.metrics || {}) : {});
     const likes = Number(vals.likes || 0);
     const replies = Number(vals.replies || 0);
     const reposts = Number(vals.reposts || 0);
@@ -480,6 +501,16 @@ export function syncPostCardReactions(cardEl, rawPost) {
       disabledReason,
     });
   }
+  const sanctuaryBtn = cardEl.querySelector('.post-action-sanctuary');
+  if (sanctuaryBtn) {
+    const sanctuaryLocked = Boolean(authStore.get()?.vaultLocked);
+    applyActionButtonMeta(sanctuaryBtn, {
+      label: 'Share to Program',
+      count: null,
+      disabled: sanctuaryLocked,
+      disabledReason: sanctuaryLocked ? 'Unlock vault to share to Program' : '',
+    });
+  }
   syncCrossPlatformResonanceStrip(cardEl.querySelector('.post-card-actions'), unified, cardEl.ownerDocument || globalThis.document);
   const interestedItem = cardEl.querySelector('.post-context-menuitem[data-menu-action="interested"]');
   if (interestedItem) {
@@ -520,6 +551,146 @@ function appendQuoteTextWithTruncatedUrls(doc, pEl, rawText) {
   }
 }
 
+function isAsciiDigits(str) {
+  const s = String(str || '');
+  if (!s) return false;
+  for (let i = 0; i < s.length; i += 1) {
+    const code = s.charCodeAt(i);
+    if (code < 48 || code > 57) return false;
+  }
+  return true;
+}
+
+function stripLeadingAt(str) {
+  const s = String(str || '');
+  return s.startsWith('@') ? s.slice(1) : s;
+}
+
+export function parseSocialPostItemFromUrl(rawUrl, fallback = {}) {
+  const input = String(rawUrl || '').trim();
+  if (!input) return null;
+  let parsed;
+  try {
+    parsed = new URL(input, 'https://bsky.app');
+  } catch {
+    return null;
+  }
+  const host = parsed.hostname.toLowerCase();
+  const segs = parsed.pathname.split('/').filter(Boolean);
+
+  if ((host === 'bsky.app' || host === 'staging.bsky.app') && segs.length === 4 && segs[0] === 'profile' && segs[2] === 'post') {
+    let actor = segs[1];
+    let rkey = segs[3];
+    try {
+      actor = decodeURIComponent(actor);
+      rkey = decodeURIComponent(rkey);
+    } catch {
+      // keep raw path segment
+    }
+    if (!actor || !rkey) return null;
+    const cleanHandle = stripLeadingAt(fallback.authorHandle || (actor.startsWith('did:') ? '' : actor));
+    const uri = fallback.uri || `at://${actor}/app.bsky.feed.post/${rkey}`;
+    return toUnifiedItem({
+      id: fallback.id || `bluesky:${uri}`,
+      protocol: 'bluesky',
+      url: parsed.href,
+      content_text: fallback.text || '',
+      date_published: fallback.createdAt || '',
+      author: {
+        id: fallback.authorDid || fallback.authorId || (actor.startsWith('did:') ? actor : cleanHandle),
+        name: fallback.authorName || cleanHandle || actor,
+        handle: cleanHandle,
+        avatar_url: fallback.authorAvatar || '',
+        url: `https://bsky.app/profile/${actor}`,
+      },
+      attachments: [],
+      metrics: { replies: 0, reposts: 0, likes: 0 },
+      _meta: { bluesky: { uri, cid: fallback.cid || '' } },
+    });
+  }
+
+  let mastoUser = '';
+  let mastoStatusId = '';
+  if (segs.length === 2 && segs[0].startsWith('@') && segs[0].length > 1 && isAsciiDigits(segs[1])) {
+    mastoUser = segs[0].slice(1);
+    mastoStatusId = segs[1];
+  } else if (segs.length === 4 && segs[0] === 'users' && segs[2] === 'statuses' && isAsciiDigits(segs[3])) {
+    mastoUser = segs[1];
+    mastoStatusId = segs[3];
+  }
+  if (mastoUser && mastoStatusId) {
+    try {
+      mastoUser = decodeURIComponent(mastoUser);
+    } catch {
+      // keep raw segment
+    }
+    const cleanFallbackHandle = stripLeadingAt(fallback.authorHandle || '');
+    const handle = cleanFallbackHandle || (mastoUser.includes('@') ? mastoUser : `${mastoUser}@${host}`);
+    return toUnifiedItem({
+      id: fallback.id || `mastodon:${mastoStatusId}`,
+      protocol: 'mastodon',
+      url: parsed.href,
+      content_text: fallback.text || '',
+      date_published: fallback.createdAt || '',
+      author: {
+        id: fallback.authorId || handle,
+        name: fallback.authorName || mastoUser.split('@')[0],
+        handle,
+        avatar_url: fallback.authorAvatar || '',
+        url: `${parsed.origin}/@${mastoUser.split('@')[0]}`,
+      },
+      attachments: [],
+      metrics: { replies: 0, reposts: 0, likes: 0 },
+      _meta: { mastodon: { statusId: mastoStatusId, instanceUrl: parsed.origin } },
+    });
+  }
+
+  return null;
+}
+
+function buildEmbeddedPostTarget(item, protocolDefault = 'bluesky') {
+  if (!item || typeof item !== 'object') return null;
+  const proto = item.protocol || protocolDefault;
+  const cleanHandle = stripLeadingAt(item.authorHandle || '');
+  const hasDirectId = Boolean(item.uri || item.statusId || item.postId || item.id);
+  if (!hasDirectId) {
+    return item.url ? parseSocialPostItemFromUrl(item.url, item) : null;
+  }
+  let authorUrl = '';
+  if (proto === 'mastodon') {
+    try {
+      authorUrl = item.url ? `${new URL(item.url).origin}/@${cleanHandle.split('@')[0]}` : '';
+    } catch {
+      authorUrl = '';
+    }
+  } else if (proto === 'threads' && cleanHandle) {
+    authorUrl = `https://www.threads.net/@${cleanHandle}`;
+  } else if (cleanHandle) {
+    authorUrl = `https://bsky.app/profile/${cleanHandle}`;
+  }
+  return toUnifiedItem({
+    id: item.id || '',
+    protocol: proto,
+    url: item.url || '',
+    content_text: item.text || '',
+    date_published: item.createdAt || '',
+    author: {
+      id: item.authorDid || item.authorId || cleanHandle,
+      name: item.authorName || cleanHandle,
+      handle: cleanHandle,
+      avatar_url: item.authorAvatar || '',
+      url: authorUrl,
+    },
+    attachments: [],
+    metrics: { replies: 0, reposts: 0, likes: 0 },
+    _meta: proto === 'mastodon'
+      ? { mastodon: { statusId: item.statusId || '', instanceUrl: item.instanceUrl || 'https://mastodon.social' } }
+      : proto === 'threads'
+        ? { threads: { postId: item.postId || '' } }
+        : { bluesky: { uri: item.uri || '', cid: item.cid || '' } },
+  });
+}
+
 function createQuotePostCard(doc, quote, { onOpenThread } = {}) {
   if (!quote || typeof quote !== 'object') return null;
   if (quote.unavailable) {
@@ -529,7 +700,11 @@ function createQuotePostCard(doc, quote, { onOpenThread } = {}) {
     return box;
   }
 
-  const canOpenInternal = typeof onOpenThread === 'function' && (quote.uri || quote.statusId || quote.id);
+  const resolvedTarget = buildEmbeddedPostTarget(quote, 'bluesky');
+  const canOpenInternal = Boolean(resolvedTarget);
+  const openHandler = typeof onOpenThread === 'function'
+    ? onOpenThread
+    : (item) => doc.dispatchEvent(new CustomEvent('sanctuary:open-post', { detail: item }));
   const el = canOpenInternal ? doc.createElement('button') : doc.createElement('a');
   if (canOpenInternal) {
     el.type = 'button';
@@ -555,7 +730,7 @@ function createQuotePostCard(doc, quote, { onOpenThread } = {}) {
   nameEl.textContent = quote.authorName || quote.authorHandle || '';
   const handleEl = doc.createElement('span');
   handleEl.className = 'post-quote-author-handle';
-  const cleanHandle = String(quote.authorHandle || '').replace(/^@/, '');
+  const cleanHandle = stripLeadingAt(quote.authorHandle || '');
   handleEl.textContent = cleanHandle ? `@${cleanHandle}` : '';
   head.append(nameEl, handleEl);
   el.appendChild(head);
@@ -579,36 +754,7 @@ function createQuotePostCard(doc, quote, { onOpenThread } = {}) {
   el.addEventListener('click', (e) => {
     e.stopPropagation();
     if (!canOpenInternal) return;
-    let authorUrl = '';
-    if (quote.protocol === 'mastodon') {
-      try {
-        authorUrl = quote.url ? `${new URL(quote.url).origin}/@${cleanHandle.split('@')[0]}` : '';
-      } catch {
-        authorUrl = '';
-      }
-    } else if (cleanHandle) {
-      authorUrl = `https://bsky.app/profile/${cleanHandle}`;
-    }
-    const quotedUnified = toUnifiedItem({
-      id: quote.id || '',
-      protocol: quote.protocol || 'bluesky',
-      url: quote.url || '',
-      content_text: quote.text || '',
-      date_published: quote.createdAt || '',
-      author: {
-        id: quote.authorDid || cleanHandle,
-        name: quote.authorName || cleanHandle,
-        handle: cleanHandle,
-        avatar_url: quote.authorAvatar || '',
-        url: authorUrl,
-      },
-      attachments: [],
-      metrics: { replies: 0, reposts: 0, likes: 0 },
-      _meta: quote.protocol === 'mastodon'
-        ? { mastodon: { statusId: quote.statusId || '', instanceUrl: quote.instanceUrl || 'https://mastodon.social' } }
-        : { bluesky: { uri: quote.uri || '', cid: quote.cid || '' } },
-    });
-    onOpenThread(quotedUnified);
+    openHandler(resolvedTarget);
   });
 
   return el;
@@ -618,7 +764,11 @@ export function createReplyContextBlock(doc, replyCtx, { onOpenThread } = {}) {
   if (!replyCtx || typeof replyCtx !== 'object') return null;
   if (!replyCtx.text && !replyCtx.authorHandle && !replyCtx.authorName) return null;
 
-  const canOpenInternal = typeof onOpenThread === 'function' && (replyCtx.uri || replyCtx.statusId || replyCtx.postId || replyCtx.id);
+  const resolvedTarget = buildEmbeddedPostTarget(replyCtx, 'bluesky');
+  const canOpenInternal = Boolean(resolvedTarget);
+  const openHandler = typeof onOpenThread === 'function'
+    ? onOpenThread
+    : (item) => doc.dispatchEvent(new CustomEvent('sanctuary:open-post', { detail: item }));
   const block = canOpenInternal ? doc.createElement('button') : doc.createElement('a');
   if (canOpenInternal) {
     block.type = 'button';
@@ -649,7 +799,7 @@ export function createReplyContextBlock(doc, replyCtx, { onOpenThread } = {}) {
   const nameEl = doc.createElement('strong');
   nameEl.className = 'post-reply-context-name';
   nameEl.textContent = replyCtx.authorName || replyCtx.authorHandle || 'Original post';
-  const cleanHandle = String(replyCtx.authorHandle || '').replace(/^@/, '');
+  const cleanHandle = stripLeadingAt(replyCtx.authorHandle || '');
   head.appendChild(nameEl);
   if (cleanHandle) {
     const handleEl = doc.createElement('span');
@@ -687,40 +837,7 @@ export function createReplyContextBlock(doc, replyCtx, { onOpenThread } = {}) {
   block.addEventListener('click', (e) => {
     e.stopPropagation();
     if (!canOpenInternal) return;
-    let authorUrl = '';
-    if (replyCtx.protocol === 'mastodon') {
-      try {
-        authorUrl = replyCtx.url ? `${new URL(replyCtx.url).origin}/@${cleanHandle.split('@')[0]}` : '';
-      } catch {
-        authorUrl = '';
-      }
-    } else if (replyCtx.protocol === 'threads' && cleanHandle) {
-      authorUrl = `https://www.threads.net/@${cleanHandle}`;
-    } else if (cleanHandle) {
-      authorUrl = `https://bsky.app/profile/${cleanHandle}`;
-    }
-    const parentUnified = toUnifiedItem({
-      id: replyCtx.id || '',
-      protocol: replyCtx.protocol || 'bluesky',
-      url: replyCtx.url || '',
-      content_text: replyCtx.text || '',
-      date_published: replyCtx.createdAt || '',
-      author: {
-        id: replyCtx.authorId || cleanHandle,
-        name: replyCtx.authorName || cleanHandle,
-        handle: cleanHandle,
-        avatar_url: replyCtx.authorAvatar || '',
-        url: authorUrl,
-      },
-      attachments: [],
-      metrics: { replies: 0, reposts: 0, likes: 0 },
-      _meta: replyCtx.protocol === 'mastodon'
-        ? { mastodon: { statusId: replyCtx.statusId || '', instanceUrl: replyCtx.instanceUrl || 'https://mastodon.social' } }
-        : replyCtx.protocol === 'threads'
-          ? { threads: { postId: replyCtx.postId || '' } }
-          : { bluesky: { uri: replyCtx.uri || '', cid: replyCtx.cid || '' } },
-    });
-    onOpenThread(parentUnified);
+    openHandler(resolvedTarget);
   });
 
   return block;
@@ -752,11 +869,14 @@ function appendReactionButtons(actionsEl, unified, rawPost, handlers, {
     );
   }
   if (showSanctuaryAction && typeof onAskSanctuary === 'function') {
+    const sanctuaryLocked = Boolean(authStore.get()?.vaultLocked);
     actionsEl.appendChild(
       createActionButton({
         iconSvg: SANCTUARY_SVG,
         count: null,
         label: 'Share to Program',
+        disabled: sanctuaryLocked,
+        disabledReason: sanctuaryLocked ? 'Unlock vault to share to Program' : '',
         className: 'post-action-sanctuary',
         onClick: () => onAskSanctuary(rawPost),
       })
@@ -957,7 +1077,7 @@ function buildPostContextMenu(doc, rawPost, unified, isOwn, isPinned, {
     });
   }
 
-  const addMenuItem = (label, handler, danger = false) => {
+  const addMenuItem = (label, handler, danger = false, { requiresAuth = false } = {}) => {
     const itemBtn = doc.createElement('button');
     itemBtn.type = 'button';
     if (!hasNativeFocusGroup) {
@@ -965,8 +1085,13 @@ function buildPostContextMenu(doc, rawPost, unified, isOwn, isPinned, {
     }
     itemBtn.className = `post-context-menuitem${danger ? ' is-danger' : ''}`;
     itemBtn.textContent = label;
+    if (requiresAuth && authStore.get()?.vaultLocked) {
+      itemBtn.disabled = true;
+      itemBtn.title = 'Unlock vault first';
+    }
     itemBtn.addEventListener('click', (e) => {
       e.stopPropagation();
+      if (itemBtn.disabled) return;
       closeMenu();
       handler?.(rawPost, unified);
     });
@@ -975,11 +1100,11 @@ function buildPostContextMenu(doc, rawPost, unified, isOwn, isPinned, {
   };
 
   if (isOwn) {
-    if (onEditPost && (unified.protocol === 'mastodon' || unified.protocol === 'bluesky')) addMenuItem('Edit Post', onEditPost);
+    if (onEditPost && (unified.protocol === 'mastodon' || unified.protocol === 'bluesky')) addMenuItem('Edit Post', onEditPost, false, { requiresAuth: true });
     if (onTogglePin && unified.protocol === 'mastodon') {
-      addMenuItem(isPinned ? 'Unpin from Profile' : 'Pin to Profile', onTogglePin);
+      addMenuItem(isPinned ? 'Unpin from Profile' : 'Pin to Profile', onTogglePin, false, { requiresAuth: true });
     }
-    if (onDeletePost) addMenuItem('Delete Post', onDeletePost, true);
+    if (onDeletePost) addMenuItem('Delete Post', onDeletePost, true, { requiresAuth: true });
   } else {
     if (onInterested) {
       const interestedBtn = addMenuItem(
@@ -995,9 +1120,9 @@ function buildPostContextMenu(doc, rawPost, unified, isOwn, isPinned, {
         sep.className = 'post-context-sep';
         menuPanel.appendChild(sep);
       }
-      if (onHideReply) addMenuItem('Hide Comment', onHideReply, true);
-      if (onMuteAuthor) addMenuItem('Mute Account', onMuteAuthor);
-      if (onBlockAuthor) addMenuItem('Block Account', onBlockAuthor, true);
+      if (onHideReply) addMenuItem('Hide Comment', onHideReply, true, { requiresAuth: true });
+      if (onMuteAuthor) addMenuItem('Mute Account', onMuteAuthor, false, { requiresAuth: true });
+      if (onBlockAuthor) addMenuItem('Block Account', onBlockAuthor, true, { requiresAuth: true });
     }
   }
 
@@ -1076,6 +1201,7 @@ export function createPostCard(rawPost, {
   onRetryBridge,
   onTranslatePost,
   showSanctuaryAction = false,
+  disableCardOpenThread = false,
   layoutVariant = 'default',
   mediaPriority = 'lazy',
 } = {}) {
@@ -1256,7 +1382,10 @@ export function createPostCard(rawPost, {
     bodyEl.setAttribute('lang', langInfo.langTag);
   }
   if (unified.content_html) {
-    renderSanitizedHtml(bodyEl, unified.content_html, mMeta.emojis || rawPost?.emojis || []);
+    const htmlWithMentions = unified.content_html.includes('@')
+      ? enrichUnlinkedMentionsInHtml(unified.content_html)
+      : unified.content_html;
+    renderSanitizedHtml(bodyEl, htmlWithMentions, mMeta.emojis || rawPost?.emojis || []);
   } else if (unified.content_text) {
     renderSanitizedHtml(bodyEl, plainTextToHtml(unified.content_text), mMeta.emojis || rawPost?.emojis || []);
   } else {
@@ -1463,7 +1592,7 @@ export function createPostCard(rawPost, {
     card.classList.add('is-ig-photo-card');
     card.appendChild(mediaGridNode);
     card.appendChild(actions);
-    if (hasCaptionText || spoiler || quoteNode || altDisclosure) {
+    if (hasCaptionText || spoiler || quoteNode) {
       card.appendChild(mountContentBlock());
     }
   } else {
@@ -1471,7 +1600,7 @@ export function createPostCard(rawPost, {
     card.appendChild(actions);
   }
 
-  if (typeof onOpenThread === 'function') {
+  if (typeof onOpenThread === 'function' && !disableCardOpenThread) {
     card.addEventListener('click', (e) => {
       if (e.target?.closest?.('a, button, video, audio, iframe, input, .post-menu-wrap, .post-media-sensitive-wrap, .post-media-pair, .post-media-carousel, .post-embed-card, .post-quote-card, .post-translate-bar')) return;
       onOpenThread(rawPost);

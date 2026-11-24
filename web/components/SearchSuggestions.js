@@ -23,6 +23,7 @@ export function attachSearchSuggestions(
     fetchRemoteSuggestions = null,
     mergeSuggestions = null,
     onSelect = null,
+    onOpenChange = null,
     debounceMs = 180,
     minChars = 1,
     maxItems = 7,
@@ -49,15 +50,26 @@ export function attachSearchSuggestions(
   let timer = null;
   let epoch = 0;
   let destroyed = false;
+  let wasOpen = false;
+
+  function setOpenState(open) {
+    const next = Boolean(open);
+    dropdown.hidden = !next;
+    host.classList?.toggle?.('is-suggest-open', next);
+    inputEl.setAttribute('aria-expanded', next ? 'true' : 'false');
+    if (wasOpen !== next) {
+      wasOpen = next;
+      onOpenChange?.(next);
+    }
+  }
 
   function close() {
     clearTimeout(timer);
     timer = null;
     items = [];
     activeIdx = -1;
-    dropdown.hidden = true;
     dropdown.replaceChildren();
-    inputEl.setAttribute('aria-expanded', 'false');
+    setOpenState(false);
     inputEl.removeAttribute('aria-activedescendant');
   }
 
@@ -97,8 +109,7 @@ export function attachSearchSuggestions(
     dropdown.replaceChildren();
 
     if (items.length === 0) {
-      dropdown.hidden = true;
-      inputEl.setAttribute('aria-expanded', 'false');
+      setOpenState(false);
       return;
     }
 
@@ -138,8 +149,7 @@ export function attachSearchSuggestions(
       dropdown.appendChild(btn);
     });
 
-    dropdown.hidden = false;
-    inputEl.setAttribute('aria-expanded', 'true');
+    setOpenState(true);
   }
 
   function onInput() {

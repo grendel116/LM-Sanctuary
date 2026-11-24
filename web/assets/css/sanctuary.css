@@ -2565,7 +2565,9 @@ button.close-modal {
     transform: translateY(-4px);
 }
 
-.message:hover .message-actions {
+.message:hover .message-actions,
+.message.is-tts-active .message-actions,
+.message-actions:has(.speak-btn.is-loading, .speak-btn.is-speaking) {
     opacity: 1;
     pointer-events: auto;
     transform: translateY(0);
@@ -2600,6 +2602,17 @@ button.close-modal {
 }
 .animate-spin {
     animation: spin 1s linear infinite;
+}
+
+.action-icon-btn.speak-btn.is-loading,
+.action-icon-btn.speak-btn.is-speaking {
+    color: var(--primary-accent, #c4b5fd);
+    border-color: rgba(147, 112, 219, 0.7);
+    background: rgba(147, 112, 219, 0.2);
+}
+
+.action-icon-btn.speak-btn.is-speaking {
+    box-shadow: 0 0 0 2px rgba(147, 112, 219, 0.28), 0 4px 10px rgba(0, 0, 0, 0.3);
 }
 
 /* Edit inline textarea and buttons */

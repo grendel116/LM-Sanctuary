@@ -277,19 +277,19 @@ export function createPortraitCardElement(imgUrl, prompt, msgId, role = 'program
         }
       })
     );
-
-    actions.appendChild(
-      makeMiniBtn('Delete image', DELETE_SVG, 'portrait-delete-btn', async () => {
-        await deleteSanctuaryImage({
-          session_id: ctx.sessionId || 'default',
-          image_url: stripNodeBase(imgUrl),
-          program_id: speakerId || '',
-        });
-        container.remove();
-        await ctx.onRefreshHistory?.();
-      })
-    );
   }
+
+  actions.appendChild(
+    makeMiniBtn('Delete image', DELETE_SVG, 'portrait-delete-btn', async () => {
+      await deleteSanctuaryImage({
+        session_id: ctx.sessionId || 'default',
+        image_url: stripNodeBase(imgUrl),
+        program_id: role === 'program' ? (speakerId || '') : '',
+      });
+      container.remove();
+      await ctx.onRefreshHistory?.();
+    })
+  );
 
   container.appendChild(actions);
   return container;

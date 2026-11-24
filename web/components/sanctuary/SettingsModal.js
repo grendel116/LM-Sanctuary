@@ -1,18 +1,30 @@
+import { refreshKeePassStatus } from '../../adapters/browserBridge.js';
 import { DEFAULT_AVATAR_DATA_URI } from '../../constants/avatars.js';
 import { SEARCH_ENGINES, normalizeSearchEngineId } from '../../core/urlPrivacy.js';
 import { formatApiErrorMessage } from '../../queries/fetch/fetchWrapper.js';
 import {
+  browseKeePassXCFile,
   browseWorkspaceFolder,
   controlOpenHandsServer,
+  deleteKeePassXCEntry,
+  exportKeePassXCVaultUrl,
+  fetchKeePassXCEntries,
+  fetchKeePassXCLogins,
+  fetchKeePassXCStatus,
   fetchNativeModels,
   fetchOpenHandsServerStatus,
   fetchProjectSettings,
   loadNativeLlm,
+  lockKeePassXC,
+  openKeePassXCFile,
   openModelsFolder,
   saveGenerationParams,
+  saveKeePassXCLogin,
   saveProjectSettings,
   selectNativeCheckpoint,
   selectNativeWorkflow,
+  setupKeePassXCVault,
+  unlockKeePassXC,
 } from '../../queries/sanctuary.js';
 import {
   addKeywordFilter,
@@ -26,28 +38,117 @@ import {
   toggleBlockAuthor,
   toggleMuteAuthor,
 } from '../../queries/socialClient.js';
-import { authStore } from '../../state/authStore.js';
+import { authStore, lockSocialVaultSession, setKeePassVaultMode, syncSocialAccountsWithServer } from '../../state/authStore.js';
 import { feedStore } from '../../state/feedStore.js';
 import { browserStore, setSearchConfig } from '../../state/browserStore.js';
 import {
   checkSanctuaryHealth,
   connectionStore,
+  emitSanctuaryEvent,
+  getSanctuaryAuthHeaders,
   setSanctuaryBasicAuth,
   setSanctuaryNodeUrl,
 } from '../../state/sanctuary/connection.js';
 import { flushOutbox, outboxStore } from '../../state/sanctuary/outboxModel.js';
 import { openFeedTuningModal } from '../FeedTuningModal.js';
 import { createLoadingState } from '../ui/index.js';
-import { createClassicModalDialog, showAlert, showPrompt } from './SanctuaryDialog.js';
+import { openKeyBoxModal } from './KeyBoxModal.js';
+import { createClassicModalDialog, showAlert, showConfirm, showPrompt } from './SanctuaryDialog.js';
+
+export { openKeyBoxModal };
 
 const SETTINGS_SVG = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--primary-accent)" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="21" x2="4" y2="14"></line><line x1="4" y1="10" x2="4" y2="3"></line><line x1="12" y1="21" x2="12" y2="12"></line><line x1="12" y1="8" x2="12" y2="3"></line><line x1="20" y1="21" x2="20" y2="16"></line><line x1="20" y1="12" x2="20" y2="3"></line><line x1="1" y1="14" x2="7" y2="14"></line><line x1="9" y1="8" x2="15" y2="8"></line><line x1="17" y1="16" x2="23" y2="16"></line></svg>`;
 const FOLDER_SVG = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>`;
+const LOCK_SVG = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect><path d="M7 11V7a5 5 0 0 1 10 0v4"></path></svg>`;
 
 const TAB_DESCRIPTORS = {
   engine: 'Select local chat and image models.',
-  project: 'Workspace folders, execution policy, search, and node connection.',
+  project: 'Credential vault, workspace folders, execution policy, search, and node connection.',
   moderation: 'Keyword filters, public discovery, feed ranking, mutes, and blocks.',
 };
+
+function generateVaultPassword(length = 20) {
+  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#$%&*_-+=';
+  const bytes = new Uint8Array(length);
+  if (globalThis.crypto?.getRandomValues) {
+    globalThis.crypto.getRandomValues(bytes);
+  } else {
+    for (let i = 0; i < length; i += 1) {
+      bytes[i] = Math.floor(Math.random() * 256);
+    }
+  }
+  let out = '';
+  for (let i = 0; i < length; i += 1) {
+    out += alphabet[bytes[i] % alphabet.length];
+  }
+  return out;
+}
+
+function bufferToBase64(buf) {
+  const bytes = new Uint8Array(buf);
+  let binary = '';
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+  }
+  return globalThis.btoa(binary);
+}
+
+function isPreviousVaultPasswordNeeded(err) {
+  return Boolean(err?.data?.needs_previous_password || err?.body?.needs_previous_password)
+    || String(err?.message || '').includes('previous Sanctuary vault');
+}
+
+function promptPreviousVaultPassword(onPreviousPassword) {
+  return showPrompt(
+    'Migrate Previous Vault Key',
+    'Your previous Sanctuary vault used a different master password. Enter it once to migrate your encrypted chat history and accounts:',
+    '',
+    async (prevPw) => {
+      if (!prevPw) return;
+      await onPreviousPassword(prevPw);
+    },
+    null,
+    { inputType: 'password', placeholder: 'Previous vault password', confirmLabel: 'Migrate & Unlock' }
+  );
+}
+
+/**
+ * Lightweight 1-field master-password prompt for unlocking the .kdbx vault on demand.
+ */
+export function promptUnlockVault({
+  title = 'Unlock Vault',
+  message = 'Enter your master password to unlock Sanctuary Vault (.kdbx):',
+  onUnlocked = null,
+} = {}) {
+  const attemptUnlock = async (pw, previousPassword = '') => {
+    try {
+      const st = await unlockKeePassXC(pw, previousPassword ? { previousPassword } : {});
+      await setKeePassVaultMode(st?.vault_mode === 'keepassxc');
+      await syncSocialAccountsWithServer().catch(() => {});
+      await refreshKeePassStatus().catch(() => {});
+      emitSanctuaryEvent('sanctuary:vault-changed', { unlocked: true });
+      await onUnlocked?.(st);
+    } catch (err) {
+      if (!previousPassword && isPreviousVaultPasswordNeeded(err)) {
+        promptPreviousVaultPassword((prevPw) => attemptUnlock(pw, prevPw));
+        return;
+      }
+      showAlert('Unlock Failed', formatApiErrorMessage(err?.message, 'Invalid master password.'));
+    }
+  };
+  return showPrompt(
+    title,
+    message,
+    '',
+    async (pw) => {
+      if (!pw) return;
+      await attemptUnlock(pw);
+    },
+    null,
+    { inputType: 'password', placeholder: 'Master password', confirmLabel: 'Unlock' }
+  );
+}
 
 function normalizeSecurityPreset(raw) {
   if (raw === 'turbo' || raw === 'auto_approve' || raw === 'auto') return 'auto';
@@ -61,6 +162,8 @@ export function openSettingsModal({
   initialTab = 'engine',
   temperature = 0.95,
   onSettingsChanged,
+  initialVaultUrl = '',
+  onVaultAutofill = null,
 } = {}) {
   const doc = globalThis.document;
   const resolvedInitial = initialTab === 'node' ? 'project' : initialTab;
@@ -69,6 +172,11 @@ export function openSettingsModal({
   let currentTemp = Number.isFinite(Number(temperature)) ? Number(temperature) : 0.95;
   let nativeInfo = null;
   let openHandsServerInfo = null;
+  let vaultStatus = null;
+  let vaultEntries = { logins: [], api_keys: [] };
+  let vaultFeedback = '';
+  let vaultFeedbackIsError = false;
+  let vaultBusy = false;
   let projectSettings = {
     folders: [],
     security_preset: 'ask_always',
@@ -398,13 +506,393 @@ export function openSettingsModal({
     }
   }
 
+  async function refreshVaultState() {
+    if (connectionStore.get().mode !== 'online') return null;
+    try {
+      const st = await fetchKeePassXCStatus();
+      if (closed) return null;
+      vaultStatus = st;
+      if (st?.initialized && st?.database_unlocked) {
+        vaultEntries = await fetchKeePassXCEntries().catch(() => ({ logins: [], api_keys: [] }));
+      } else {
+        vaultEntries = { logins: [], api_keys: [] };
+      }
+      const proj = await fetchProjectSettings().catch(() => null);
+      if (proj && !proj.error && !closed) {
+        for (const [k, v] of Object.entries(proj)) {
+          if (!dirtyFields.has(k)) projectSettings[k] = v;
+        }
+      }
+      return st;
+    } catch {
+      return null;
+    }
+  }
+
   function renderProjectTab() {
     nodeStatusRefs = null;
     const card = doc.createElement('div');
     card.className = 'form-card-container';
 
+    // Credential Vault (.kdbx) at the top of Project Settings
+    const vaultBlock = doc.createElement('div');
+    const vaultHead = doc.createElement('div');
+    vaultHead.className = 'option-header';
+    const vh = doc.createElement('h4');
+    vh.className = 'modal-sub-header';
+    vh.style.marginBlockEnd = '0';
+    vh.textContent = 'Credential Vault (.kdbx)';
+    const vBadge = doc.createElement('span');
+    const vInitialized = Boolean(vaultStatus?.initialized);
+    const vUnlocked = Boolean(vInitialized && vaultStatus?.database_unlocked);
+    vBadge.className = `status-badge ${vUnlocked ? 'status-online' : 'status-offline'}`;
+    vBadge.textContent = !vaultStatus ? 'Checking…' : (vUnlocked ? 'Unlocked' : (vInitialized ? 'Locked' : 'Not Set Up'));
+    vaultHead.append(vh, vBadge);
+    vaultBlock.appendChild(vaultHead);
+
+    const handleOpenExistingKdbx = async () => {
+      let selectedPath = '';
+      try {
+        const res = await browseKeePassXCFile();
+        if (res?.cancelled) return;
+        selectedPath = String(res?.path || '').trim();
+      } catch {
+        // Fallback to manual path prompt when native file dialog is unavailable
+      }
+      if (!selectedPath) {
+        showPrompt(
+          'Open .kdbx Vault',
+          'Enter the full path to your synced .kdbx file:',
+          vaultStatus?.vault_path || '',
+          (entered) => {
+            const p = String(entered || '').trim();
+            if (p) promptPasswordAndOpenKdbx(p);
+          },
+          null,
+          { placeholder: 'C:\\Users\\...\\Passwords.kdbx', confirmLabel: 'Next' }
+        );
+        return;
+      }
+      promptPasswordAndOpenKdbx(selectedPath);
+    };
+
+    const promptPasswordAndOpenKdbx = (selectedPath) => {
+      const fileLabel = selectedPath.split(/[\\/]/).pop() || selectedPath;
+      const attemptOpen = async (pw, previousPassword = '') => {
+        vaultBusy = true;
+        vaultFeedback = `Opening ${fileLabel}…`;
+        vaultFeedbackIsError = false;
+        renderProjectTab();
+        try {
+          const res = await openKeePassXCFile({ path: selectedPath, password: pw, previousPassword });
+          vaultStatus = res;
+          await setKeePassVaultMode(res?.vault_mode === 'keepassxc');
+          await syncSocialAccountsWithServer().catch(() => {});
+          await refreshKeePassStatus().catch(() => {});
+          await refreshVaultState();
+          emitSanctuaryEvent('sanctuary:vault-changed', { unlocked: Boolean(res?.database_unlocked) });
+          vaultFeedback = '';
+          vaultFeedbackIsError = false;
+        } catch (err) {
+          if (!previousPassword && isPreviousVaultPasswordNeeded(err)) {
+            vaultBusy = false;
+            vaultFeedback = '';
+            if (!closed && activeTab === 'project') renderProjectTab();
+            promptPreviousVaultPassword((prevPw) => attemptOpen(pw, prevPw));
+            return;
+          }
+          vaultFeedback = formatApiErrorMessage(err?.message, 'Failed to open .kdbx file.');
+          vaultFeedbackIsError = true;
+        } finally {
+          vaultBusy = false;
+          if (!closed && activeTab === 'project') renderProjectTab();
+        }
+      };
+      showPrompt(
+        'Open .kdbx Vault',
+        `Enter master password for ${fileLabel}:`,
+        '',
+        async (pw) => {
+          if (!pw) return;
+          await attemptOpen(pw);
+        },
+        null,
+        { inputType: 'password', placeholder: 'Master password', confirmLabel: 'Open' }
+      );
+    };
+
+    const vDesc = doc.createElement('p');
+    vDesc.className = 'classic-card-subtext';
+
+    if (!vaultStatus) {
+      vDesc.textContent = 'Checking local .kdbx vault status…';
+      vaultBlock.appendChild(vDesc);
+    } else if (!vInitialized) {
+      vDesc.textContent = 'Protect website logins, social accounts, chat history, and your Cloud API Key in an encrypted .kdbx vault, or open your existing KeePassXC file directly.';
+      const setupForm = doc.createElement('form');
+      setupForm.className = 'classic-cards-stack';
+      const pwGrid = doc.createElement('div');
+      pwGrid.className = 'classic-two-col';
+
+      const g1 = doc.createElement('div');
+      g1.className = 'input-group';
+      const l1 = doc.createElement('label');
+      l1.setAttribute('for', 'vault-setup-pw1');
+      l1.textContent = 'Master Password';
+      const p1 = doc.createElement('input');
+      p1.type = 'password';
+      p1.id = 'vault-setup-pw1';
+      p1.className = 'onboarding-input';
+      p1.placeholder = 'Master password';
+      p1.autocomplete = 'new-password';
+      g1.append(l1, p1);
+
+      const g2 = doc.createElement('div');
+      g2.className = 'input-group';
+      const l2 = doc.createElement('label');
+      l2.setAttribute('for', 'vault-setup-pw2');
+      l2.textContent = 'Confirm Password';
+      const p2 = doc.createElement('input');
+      p2.type = 'password';
+      p2.id = 'vault-setup-pw2';
+      p2.className = 'onboarding-input';
+      p2.placeholder = 'Confirm password';
+      p2.autocomplete = 'new-password';
+      g2.append(l2, p2);
+
+      pwGrid.append(g1, g2);
+      const actRow = doc.createElement('div');
+      actRow.className = 'classic-card-actions';
+      const createBtn = doc.createElement('button');
+      createBtn.type = 'submit';
+      createBtn.className = 'btn-sleek-pill';
+      createBtn.textContent = vaultBusy ? 'Creating…' : 'Create Vault';
+      createBtn.disabled = vaultBusy;
+
+      const impBtn = doc.createElement('button');
+      impBtn.type = 'button';
+      impBtn.className = 'edit-btn open-kdbx-btn';
+      impBtn.textContent = 'Open .kdbx…';
+      impBtn.disabled = vaultBusy;
+      impBtn.addEventListener('click', () => { void handleOpenExistingKdbx(); });
+
+      actRow.append(createBtn, impBtn);
+      setupForm.append(pwGrid, actRow);
+      setupForm.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        if (!p1.value) {
+          vaultFeedback = 'Master password is required.';
+          vaultFeedbackIsError = true;
+          renderProjectTab();
+          return;
+        }
+        if (p1.value !== p2.value) {
+          vaultFeedback = 'Master passwords do not match.';
+          vaultFeedbackIsError = true;
+          renderProjectTab();
+          return;
+        }
+        vaultBusy = true;
+        vaultFeedback = 'Creating encrypted .kdbx vault…';
+        vaultFeedbackIsError = false;
+        renderProjectTab();
+        try {
+          vaultStatus = await setupKeePassXCVault(p1.value);
+          await setKeePassVaultMode(vaultStatus?.vault_mode === 'keepassxc');
+          await syncSocialAccountsWithServer().catch(() => {});
+          await refreshKeePassStatus().catch(() => {});
+          await refreshVaultState();
+          emitSanctuaryEvent('sanctuary:vault-changed', { unlocked: true });
+          vaultFeedback = '';
+          vaultFeedbackIsError = false;
+        } catch (err) {
+          vaultFeedback = formatApiErrorMessage(err?.message, 'Failed to create vault.');
+          vaultFeedbackIsError = true;
+        } finally {
+          vaultBusy = false;
+          if (!closed && activeTab === 'project') renderProjectTab();
+        }
+      });
+      vaultBlock.append(vDesc, setupForm);
+    } else if (!vUnlocked) {
+      vDesc.textContent = 'Vault is locked. Enter your master password to unlock saved logins, social accounts, and Cloud API Key.';
+      const unlockForm = doc.createElement('form');
+      unlockForm.className = 'classic-card-actions';
+      unlockForm.style.flexWrap = 'wrap';
+      const pwIn = doc.createElement('input');
+      pwIn.type = 'password';
+      pwIn.id = 'vault-unlock-pw';
+      pwIn.className = 'onboarding-input';
+      pwIn.style.flex = '1';
+      pwIn.style.minWidth = '180px';
+      pwIn.placeholder = 'Master password';
+      pwIn.autocomplete = 'current-password';
+
+      const unlockBtn = doc.createElement('button');
+      unlockBtn.type = 'submit';
+      unlockBtn.className = 'btn-sleek-pill';
+      unlockBtn.textContent = vaultBusy ? 'Unlocking…' : 'Unlock';
+      unlockBtn.disabled = vaultBusy;
+
+      const impBtn = doc.createElement('button');
+      impBtn.type = 'button';
+      impBtn.className = 'edit-btn open-kdbx-btn';
+      impBtn.textContent = 'Open .kdbx…';
+      impBtn.disabled = vaultBusy;
+      impBtn.addEventListener('click', () => { void handleOpenExistingKdbx(); });
+
+      unlockForm.append(pwIn, unlockBtn, impBtn);
+      const attemptInlineUnlock = async (pw, previousPassword = '') => {
+        vaultBusy = true;
+        vaultFeedback = '';
+        renderProjectTab();
+        try {
+          vaultStatus = await unlockKeePassXC(pw, previousPassword ? { previousPassword } : {});
+          await setKeePassVaultMode(vaultStatus?.vault_mode === 'keepassxc');
+          await syncSocialAccountsWithServer().catch(() => {});
+          await refreshKeePassStatus().catch(() => {});
+          await refreshVaultState();
+          emitSanctuaryEvent('sanctuary:vault-changed', { unlocked: true });
+          vaultFeedback = '';
+          vaultFeedbackIsError = false;
+        } catch (err) {
+          if (!previousPassword && isPreviousVaultPasswordNeeded(err)) {
+            vaultBusy = false;
+            vaultFeedback = '';
+            if (!closed && activeTab === 'project') renderProjectTab();
+            promptPreviousVaultPassword((prevPw) => attemptInlineUnlock(pw, prevPw));
+            return;
+          }
+          vaultFeedback = formatApiErrorMessage(err?.message, 'Invalid master password.');
+          vaultFeedbackIsError = true;
+        } finally {
+          vaultBusy = false;
+          if (!closed && activeTab === 'project') renderProjectTab();
+        }
+      };
+      unlockForm.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        if (!pwIn.value) {
+          vaultFeedback = 'Enter your master password.';
+          vaultFeedbackIsError = true;
+          renderProjectTab();
+          return;
+        }
+        await attemptInlineUnlock(pwIn.value);
+      });
+      vaultBlock.append(vDesc, unlockForm);
+    } else {
+      const entryList = Array.isArray(vaultEntries.entries) ? vaultEntries.entries : (vaultEntries.logins || []);
+      const entryCount = entryList.length;
+      const activeFile = vaultStatus?.vault_filename || '.kdbx';
+      vDesc.textContent = `Active (${activeFile}) · ${entryCount} saved ${entryCount === 1 ? 'entry' : 'entries'} · Social, Chat & Cloud API Key protected.`;
+      if (vaultStatus?.vault_path) vDesc.title = vaultStatus.vault_path;
+
+      const vActions = doc.createElement('div');
+      vActions.className = 'classic-card-actions';
+      vActions.style.flexWrap = 'wrap';
+      vActions.style.width = '100%';
+      vActions.style.alignItems = 'center';
+
+      const openKeyBoxBtn = doc.createElement('button');
+      openKeyBoxBtn.type = 'button';
+      openKeyBoxBtn.id = 'open-keybox-modal-btn';
+      openKeyBoxBtn.className = 'btn-sleek-pill';
+      openKeyBoxBtn.textContent = 'Open Key Box…';
+      openKeyBoxBtn.addEventListener('click', () => {
+        openKeyBoxModal({
+          initialUrl: initialVaultUrl || '',
+          onAutofill: typeof onVaultAutofill === 'function'
+            ? async (entry) => {
+                await onVaultAutofill(entry);
+                modal.close();
+              }
+            : null,
+          onChanged: async () => {
+            await refreshKeePassStatus().catch(() => {});
+            await refreshVaultState();
+            if (!closed && activeTab === 'project') renderProjectTab();
+          },
+        });
+      });
+
+      const impBtn = doc.createElement('button');
+      impBtn.type = 'button';
+      impBtn.className = 'edit-btn open-kdbx-btn';
+      impBtn.textContent = 'Open .kdbx…';
+      impBtn.disabled = vaultBusy;
+      impBtn.addEventListener('click', () => { void handleOpenExistingKdbx(); });
+
+      const expBtn = doc.createElement('button');
+      expBtn.type = 'button';
+      expBtn.className = 'edit-btn';
+      expBtn.textContent = 'Export .kdbx';
+      expBtn.addEventListener('click', async () => {
+        try {
+          const res = await globalThis.fetch(exportKeePassXCVaultUrl(), {
+            credentials: 'same-origin',
+            headers: getSanctuaryAuthHeaders(),
+          });
+          if (!res.ok) throw new Error('Export failed.');
+          const blob = await res.blob();
+          const blobUrl = globalThis.URL.createObjectURL(blob);
+          const a = doc.createElement('a');
+          a.href = blobUrl;
+          a.download = 'sanctuary-vault.kdbx';
+          doc.body.appendChild(a);
+          a.click();
+          a.remove();
+          setTimeout(() => globalThis.URL.revokeObjectURL(blobUrl), 2000);
+          vaultFeedback = 'Exported sanctuary-vault.kdbx.';
+          vaultFeedbackIsError = false;
+        } catch (err) {
+          vaultFeedback = err?.message || 'Failed to export .kdbx file.';
+          vaultFeedbackIsError = true;
+        }
+        if (!closed && activeTab === 'project') renderProjectTab();
+      });
+
+      const lockBtn = doc.createElement('button');
+      lockBtn.type = 'button';
+      lockBtn.id = 'lock-vault-btn';
+      lockBtn.className = 'action-icon-btn';
+      lockBtn.style.marginInlineStart = 'auto';
+      lockBtn.setAttribute('aria-label', 'Lock Vault');
+      lockBtn.title = 'Lock Vault';
+      lockBtn.innerHTML = LOCK_SVG;
+      lockBtn.disabled = vaultBusy;
+      lockBtn.addEventListener('click', async () => {
+        vaultBusy = true;
+        try {
+          vaultStatus = await lockKeePassXC();
+          await lockSocialVaultSession();
+          vaultEntries = { entries: [], logins: [], api_keys: [] };
+          await refreshKeePassStatus().catch(() => {});
+          await refreshVaultState();
+          emitSanctuaryEvent('sanctuary:vault-changed', { unlocked: false });
+          vaultFeedback = '';
+          vaultFeedbackIsError = false;
+        } finally {
+          vaultBusy = false;
+          if (!closed && activeTab === 'project') renderProjectTab();
+        }
+      });
+
+      vActions.append(openKeyBoxBtn, impBtn, expBtn, lockBtn);
+      vaultBlock.append(vDesc, vActions);
+    }
+
+    if (vaultFeedback) {
+      const fb = doc.createElement('p');
+      fb.className = `classic-modal-status${vaultFeedbackIsError ? ' is-error' : ''}`;
+      fb.textContent = vaultFeedback;
+      fb.style.marginTop = '6px';
+      vaultBlock.appendChild(fb);
+    }
+
     // Folders
     const foldersBlock = doc.createElement('div');
+    foldersBlock.className = 'classic-section-divider';
     const fh = doc.createElement('h4');
     fh.className = 'modal-sub-header';
     fh.textContent = 'Folders';
@@ -579,10 +1067,11 @@ export function openSettingsModal({
       return inp;
     };
 
+    const isKeyLockedInVault = Boolean(projectSettings.greenpt_api_key_in_vault && projectSettings.vault_locked);
     const greenptKeyIn = makeTextInput('project-greenpt-api-key', {
       type: 'password',
       value: projectSettings.greenpt_api_key || '',
-      placeholder: 'sk-...',
+      placeholder: isKeyLockedInVault ? 'Locked in .kdbx Vault' : 'sk-...',
     });
     let keyDebounceTimer = null;
     const commitGreenptKey = async () => {
@@ -605,11 +1094,34 @@ export function openSettingsModal({
       }, 350);
     });
     greenptKeyIn.addEventListener('change', commitGreenptKey);
+    const keyControlWrap = doc.createElement('div');
+    keyControlWrap.style.display = 'flex';
+    keyControlWrap.style.gap = '6px';
+    keyControlWrap.style.alignItems = 'center';
+    keyControlWrap.appendChild(greenptKeyIn);
+    if (isKeyLockedInVault) {
+      const unlockKeyBtn = doc.createElement('button');
+      unlockKeyBtn.type = 'button';
+      unlockKeyBtn.className = 'edit-btn';
+      unlockKeyBtn.style.whiteSpace = 'nowrap';
+      unlockKeyBtn.textContent = 'Unlock';
+      unlockKeyBtn.addEventListener('click', () => {
+        promptUnlockVault({
+          onUnlocked: async () => {
+            await refreshVaultState();
+            if (!closed && activeTab === 'project') {
+              renderProjectTab();
+            }
+          },
+        });
+      });
+      keyControlWrap.appendChild(unlockKeyBtn);
+    }
     const apiKeyRow = makeSettingRow(
       'project-greenpt-api-key',
       'Cloud API Key',
-      'Bearer API key for OpenHands coding, cloud upscale, and web tools.',
-      greenptKeyIn,
+      'Bearer API key for OpenHands coding, cloud upscale, and web tools (stored in .kdbx vault when active).',
+      keyControlWrap,
     );
 
     const endpointPresets = doc.createElement('datalist');
@@ -1078,7 +1590,7 @@ export function openSettingsModal({
     nodeActions.append(testBtn, discBtn, flushBtn);
     nodeBlock.append(nodeHead, statusLine, urlGrp, transportNote, authGrid, nodeActions);
 
-    card.append(foldersBlock, progBlock, searchBlock, nodeBlock);
+    card.append(vaultBlock, foldersBlock, progBlock, searchBlock, nodeBlock);
     nodeStatusRefs = { badge, statusLine, flushBtn };
     syncNodeSection();
     bodyHost.replaceChildren(card);
@@ -1558,13 +2070,20 @@ export function openSettingsModal({
   async function loadNodeData() {
     if (connectionStore.get().mode !== 'online') return;
     try {
-      const [nat, proj, ohSrv] = await Promise.all([
+      const [nat, proj, ohSrv, vStat] = await Promise.all([
         Promise.resolve().then(() => fetchNativeModels()).catch(() => null),
         Promise.resolve().then(() => fetchProjectSettings()).catch(() => null),
         Promise.resolve().then(() => fetchOpenHandsServerStatus()).catch(() => null),
+        Promise.resolve().then(() => fetchKeePassXCStatus()).catch(() => null),
       ]);
       if (closed) return;
       if (nat) nativeInfo = nat;
+      if (vStat && !vStat.error) {
+        vaultStatus = vStat;
+        if (vStat.initialized && vStat.database_unlocked) {
+          vaultEntries = await fetchKeePassXCEntries().catch(() => ({ logins: [], api_keys: [] }));
+        }
+      }
       if (proj && !proj.error) {
         for (const [k, v] of Object.entries(proj)) {
           if (!dirtyFields.has(k)) projectSettings[k] = v;

@@ -44,6 +44,153 @@ function escapeAttr(text) {
     .replace(/'/g, '&#39;');
 }
 
+function isAsciiAlpha(code) {
+  return (code >= 65 && code <= 90) || (code >= 97 && code <= 122);
+}
+
+function isAsciiDigit(code) {
+  return code >= 48 && code <= 57;
+}
+
+function isAsciiAlnum(code) {
+  return isAsciiAlpha(code) || isAsciiDigit(code);
+}
+
+function isMentionBodyChar(code) {
+  return isAsciiAlnum(code) || code === 46 || code === 45 || code === 95 || code === 64; // . - _ @
+}
+
+function isMentionBoundaryBefore(ch) {
+  if (!ch) return true;
+  if (ch === ' ' || ch === '\t' || ch === '\n' || ch === '\r') return true;
+  return ch === '(' || ch === '[' || ch === '{' || ch === '"' || ch === "'" || ch === '>' || ch === ';';
+}
+
+function isTrailingMentionPunct(ch) {
+  return ch === '.' || ch === ',' || ch === '!' || ch === '?' || ch === ';' || ch === ':' || ch === ')' || ch === ']' || ch === '}';
+}
+
+function isValidDomainHandle(raw) {
+  if (!raw || raw.length > 253) return false;
+  const labels = raw.split('.');
+  if (labels.length < 2) return false;
+  for (let li = 0; li < labels.length; li += 1) {
+    const lbl = labels[li];
+    if (!lbl || lbl.length > 63) return false;
+    if (!isAsciiAlnum(lbl.charCodeAt(0)) || !isAsciiAlnum(lbl.charCodeAt(lbl.length - 1))) return false;
+    for (let i = 0; i < lbl.length; i += 1) {
+      const c = lbl.charCodeAt(i);
+      if (!isAsciiAlnum(c) && c !== 45) return false; // -
+    }
+  }
+  const tld = labels[labels.length - 1];
+  if (tld.length < 2) return false;
+  let hasAlpha = false;
+  for (let i = 0; i < tld.length; i += 1) {
+    if (isAsciiAlpha(tld.charCodeAt(i))) {
+      hasAlpha = true;
+      break;
+    }
+  }
+  return hasAlpha;
+}
+
+function isValidFediverseMention(raw) {
+  const atIdx = raw.indexOf('@');
+  if (atIdx <= 0 || atIdx !== raw.lastIndexOf('@')) return false;
+  const user = raw.slice(0, atIdx);
+  const domain = raw.slice(atIdx + 1);
+  if (!user || !isValidDomainHandle(domain)) return false;
+  for (let i = 0; i < user.length; i += 1) {
+    const c = user.charCodeAt(i);
+    if (!isAsciiAlnum(c) && c !== 95 && c !== 46 && c !== 45) return false; // _ . -
+  }
+  return true;
+}
+
+export function linkifyMentionsInEscapedSegment(escapedSegment, handleMap = null) {
+  const input = String(escapedSegment || '');
+  if (!input || !input.includes('@')) return input;
+  const parts = [];
+  let cursor = 0;
+  let idx = input.indexOf('@');
+
+  while (idx !== -1) {
+    const prevCh = idx > 0 ? input[idx - 1] : '';
+    if (!isMentionBoundaryBefore(prevCh)) {
+      idx = input.indexOf('@', idx + 1);
+      continue;
+    }
+    let end = idx + 1;
+    while (end < input.length && isMentionBodyChar(input.charCodeAt(end))) {
+      end += 1;
+    }
+    while (end > idx + 1 && isTrailingMentionPunct(input[end - 1])) {
+      end -= 1;
+    }
+    const body = input.slice(idx + 1, end);
+    let anchorHtml = '';
+    if (isValidFediverseMention(body)) {
+      const atPos = body.indexOf('@');
+      const user = body.slice(0, atPos);
+      const domain = body.slice(atPos + 1);
+      const href = `https://${domain}/@${encodeURIComponent(user)}`;
+      anchorHtml = `<a href="${escapeAttr(href)}" class="mention" target="_blank" rel="noopener noreferrer">@${body}</a>`;
+    } else if (!body.includes('@') && isValidDomainHandle(body)) {
+      const targetActor = handleMap?.get?.(body.toLowerCase()) || body.toLowerCase();
+      const href = `https://bsky.app/profile/${encodeURIComponent(targetActor)}`;
+      anchorHtml = `<a href="${escapeAttr(href)}" class="mention" target="_blank" rel="noopener noreferrer">@${body}</a>`;
+    }
+    if (anchorHtml) {
+      if (idx > cursor) parts.push(input.slice(cursor, idx));
+      parts.push(anchorHtml);
+      cursor = end;
+    }
+    idx = input.indexOf('@', end);
+  }
+
+  if (cursor === 0) return input;
+  if (cursor < input.length) parts.push(input.slice(cursor));
+  return parts.join('');
+}
+
+export function enrichUnlinkedMentionsInHtml(html, handleMap = null) {
+  const source = String(html || '');
+  if (!source || !source.includes('@')) return source;
+  const out = [];
+  let pos = 0;
+  let anchorDepth = 0;
+
+  while (pos < source.length) {
+    const lt = source.indexOf('<', pos);
+    if (lt === -1) {
+      const tail = source.slice(pos);
+      out.push(anchorDepth === 0 ? linkifyMentionsInEscapedSegment(tail, handleMap) : tail);
+      break;
+    }
+    if (lt > pos) {
+      const textChunk = source.slice(pos, lt);
+      out.push(anchorDepth === 0 ? linkifyMentionsInEscapedSegment(textChunk, handleMap) : textChunk);
+    }
+    const gt = source.indexOf('>', lt);
+    if (gt === -1) {
+      out.push(source.slice(lt));
+      break;
+    }
+    const tag = source.slice(lt, gt + 1);
+    const tagLower = tag.slice(1, -1).trim().toLowerCase();
+    if (tagLower.startsWith('a') && (tagLower.length === 1 || tagLower[1] === ' ' || tagLower[1] === '\t' || tagLower[1] === '\n')) {
+      anchorDepth += 1;
+    } else if (tagLower.startsWith('/a') && (tagLower.length === 2 || tagLower[2] === ' ' || tagLower[2] === '\t')) {
+      anchorDepth = Math.max(0, anchorDepth - 1);
+    }
+    out.push(tag);
+    pos = gt + 1;
+  }
+
+  return out.join('');
+}
+
 function linkifyLineFragment(fragment) {
   const input = String(fragment || '');
   if (!input) return '';
@@ -78,7 +225,7 @@ function linkifyLineFragment(fragment) {
     if (!href) continue;
 
     if (tokenStart > cursor) {
-      parts.push(escapeHtml(input.slice(cursor, tokenStart)));
+      parts.push(linkifyMentionsInEscapedSegment(escapeHtml(input.slice(cursor, tokenStart))));
     }
     parts.push(`<a href="${escapeAttr(href)}" target="_blank" rel="noopener noreferrer">${formatTruncatedUrlInnerHtml(clean, href)}</a>`);
     const suffix = token.slice(clean.length);
@@ -87,7 +234,7 @@ function linkifyLineFragment(fragment) {
   }
 
   if (cursor < input.length) {
-    parts.push(escapeHtml(input.slice(cursor)));
+    parts.push(linkifyMentionsInEscapedSegment(escapeHtml(input.slice(cursor))));
   }
   return parts.join('');
 }
@@ -179,6 +326,78 @@ function normalizeLangTag(raw) {
 }
 
 /**
+ * Ensure post metrics respect viewer-interaction floors (if the viewer liked/reposted/replied,
+ * the corresponding count cannot be 0) and keep primary breakdown entry consistent.
+ */
+export function reconcileViewerMetricFloors(item) {
+  if (!item || typeof item !== 'object') return item;
+  const mMeta = item._meta?.mastodon || {};
+  const bMeta = item._meta?.bluesky || {};
+  const minLikes = Boolean(mMeta.favourited || bMeta.likeUri) ? 1 : 0;
+  const minReposts = Boolean(mMeta.reblogged || bMeta.repostUri) ? 1 : 0;
+  const minReplies = Boolean(item._meta?.viewerReplied || mMeta.replied || bMeta.replied) ? 1 : 0;
+  if (minLikes === 0 && minReposts === 0 && minReplies === 0) return item;
+
+  const curMetrics = item.metrics || { replies: 0, reposts: 0, likes: 0 };
+  let nextLikes = Math.max(Number(curMetrics.likes || 0), minLikes);
+  let nextReposts = Math.max(Number(curMetrics.reposts || 0), minReposts);
+  let nextReplies = Math.max(Number(curMetrics.replies || 0), minReplies);
+
+  let nextMeta = item._meta;
+  const bd = item._meta?.metricsBreakdown;
+  const proto = item.protocol || 'mastodon';
+  if (bd && typeof bd === 'object' && bd[proto] && typeof bd[proto] === 'object') {
+    const pVals = bd[proto];
+    const pLikes = Math.max(Number(pVals.likes || 0), minLikes);
+    const pReposts = Math.max(Number(pVals.reposts || 0), minReposts);
+    const pReplies = Math.max(Number(pVals.replies || 0), minReplies);
+    if (
+      pLikes !== Number(pVals.likes || 0)
+      || pReposts !== Number(pVals.reposts || 0)
+      || pReplies !== Number(pVals.replies || 0)
+    ) {
+      const nextBd = {
+        ...bd,
+        [proto]: { ...pVals, likes: pLikes, reposts: pReposts, replies: pReplies },
+      };
+      nextMeta = { ...item._meta, metricsBreakdown: nextBd };
+      let sumLikes = 0;
+      let sumReposts = 0;
+      let sumReplies = 0;
+      for (const vals of Object.values(nextBd)) {
+        if (!vals || typeof vals !== 'object') continue;
+        sumLikes += Number(vals.likes || 0);
+        sumReposts += Number(vals.reposts || 0);
+        sumReplies += Number(vals.replies || 0);
+      }
+      nextLikes = Math.max(nextLikes, sumLikes);
+      nextReposts = Math.max(nextReposts, sumReposts);
+      nextReplies = Math.max(nextReplies, sumReplies);
+    }
+  }
+
+  if (
+    nextMeta === item._meta
+    && nextLikes === Number(curMetrics.likes || 0)
+    && nextReposts === Number(curMetrics.reposts || 0)
+    && nextReplies === Number(curMetrics.replies || 0)
+  ) {
+    return item;
+  }
+
+  return {
+    ...item,
+    metrics: {
+      ...curMetrics,
+      likes: nextLikes,
+      reposts: nextReposts,
+      replies: nextReplies,
+    },
+    ...(nextMeta !== item._meta ? { _meta: nextMeta } : {}),
+  };
+}
+
+/**
  * Ensure any post object (legacy normalized post or UnifiedItem) conforms strictly to UnifiedItem.
  * @param {object} item
  * @returns {object}
@@ -204,9 +423,9 @@ export function toUnifiedItem(item) {
   if (ORIGIN_PROTOCOLS.includes(item.protocol) && typeof item.date_published === 'string' && item._meta) {
     if (item.language === undefined) {
       const inferred = normalizeLangTag(item._meta?.mastodon?.language || item._meta?.bluesky?.language || '');
-      if (inferred) return { ...item, language: inferred };
+      if (inferred) return reconcileViewerMetricFloors({ ...item, language: inferred });
     }
-    return item;
+    return reconcileViewerMetricFloors(item);
   }
 
   const protocol = ORIGIN_PROTOCOLS.includes(item.protocol)
@@ -343,7 +562,7 @@ export function toUnifiedItem(item) {
     meta.feedFeedback = String(item._meta.feedFeedback);
   }
 
-  return {
+  return reconcileViewerMetricFloors({
     id: `${protocol}:${nativeId}`,
     protocol,
     url: item.url || '',
@@ -369,7 +588,7 @@ export function toUnifiedItem(item) {
       likes: Number(item.counts?.likes ?? item.metrics?.likes ?? 0),
     },
     _meta: meta,
-  };
+  });
 }
 
 /**
@@ -974,7 +1193,11 @@ function mergeAbsorbedMeta(target, absorbed, { mergeCrossProtocolMeta = false } 
     ...(absorbedBoosters.length > 0 ? { boosters: absorbedBoosters } : {}),
     ...(absorbedVouches.length > 0 ? { peerVouchActors: absorbedVouches } : {}),
   });
-  let nextMetrics = target.metrics;
+  let nextMetrics = {
+    likes: Math.max(Number(target.metrics?.likes || 0), Number(absorbed.metrics?.likes || 0)),
+    replies: Math.max(Number(target.metrics?.replies || 0), Number(absorbed.metrics?.replies || 0)),
+    reposts: Math.max(Number(target.metrics?.reposts || 0), Number(absorbed.metrics?.reposts || 0)),
+  };
 
   if (mergeCrossProtocolMeta) {
     for (const k of ['mastodon', 'bluesky', 'threads', 'linkCard']) {
@@ -1005,12 +1228,12 @@ function mergeAbsorbedMeta(target, absorbed, { mergeCrossProtocolMeta = false } 
       ? absorbed.attachments
       : target.attachments;
 
-  return {
+  return reconcileViewerMetricFloors({
     ...target,
     ...(nextAttachments !== target.attachments ? { attachments: nextAttachments } : {}),
     metrics: nextMetrics,
     _meta: nextMeta,
-  };
+  });
 }
 
 function cloneFeatureSetWithAbsorbed(feat, mergedItem) {
@@ -1045,12 +1268,17 @@ export function deduplicateUnifiedItems(items = [], windowMs = 120_000, options 
     if (!prev) {
       byId.set(item.id, item);
     } else {
-      byId.set(item.id, {
+      byId.set(item.id, reconcileViewerMetricFloors({
         ...prev,
         ...item,
+        metrics: {
+          likes: Math.max(Number(prev.metrics?.likes || 0), Number(item.metrics?.likes || 0)),
+          replies: Math.max(Number(prev.metrics?.replies || 0), Number(item.metrics?.replies || 0)),
+          reposts: Math.max(Number(prev.metrics?.reposts || 0), Number(item.metrics?.reposts || 0)),
+        },
         attachments: item.attachments?.length > 0 ? item.attachments : prev.attachments,
         _meta: mergeFeedProvenance(prev._meta, item._meta),
-      });
+      }));
     }
   }
 

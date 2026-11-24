@@ -108,19 +108,27 @@ export async function resolveMentionFacets(facets, { serviceUrl = PUBLIC_BSKY_AP
       resolved.push(facet);
       continue;
     }
+    const query = `com.atproto.identity.resolveHandle?handle=${encodeURIComponent(facet._handle)}`;
+    let did = '';
     try {
-      const data = await fetchWrapper(
-        `${origin}/xrpc/com.atproto.identity.resolveHandle?handle=${encodeURIComponent(facet._handle)}`,
-        { fetchImpl }
-      );
-      if (data?.did) {
-        resolved.push({
-          index: facet.index,
-          features: [{ $type: 'app.bsky.richtext.facet#mention', did: data.did }],
-        });
-      }
+      const data = await fetchWrapper(`${origin}/xrpc/${query}`, { fetchImpl });
+      did = data?.did ? String(data.did) : '';
     } catch {
-      // Drop unresolved mention facets so createRecord stays valid.
+      did = '';
+    }
+    if (!did && origin !== PUBLIC_BSKY_API) {
+      try {
+        const pubData = await fetchWrapper(`${PUBLIC_BSKY_API}/xrpc/${query}`, { fetchImpl });
+        did = pubData?.did ? String(pubData.did) : '';
+      } catch {
+        did = '';
+      }
+    }
+    if (did) {
+      resolved.push({
+        index: facet.index,
+        features: [{ $type: 'app.bsky.richtext.facet#mention', did }],
+      });
     }
   }
   return resolved;
@@ -1409,11 +1417,42 @@ export async function getBskySavedFeedUris(opts = {}) {
 
 export async function getBskyPostThread(opts) {
   const { uri, depth = 6, parentHeight = 20, ...auth } = opts;
-  const data = await bskyPublicReadRequest({
-    ...auth,
-    endpoint: 'app.bsky.feed.getPostThread',
-    params: { uri, depth, parentHeight },
-  });
+  let data;
+  try {
+    data = await bskyPublicReadRequest({
+      ...auth,
+      endpoint: 'app.bsky.feed.getPostThread',
+      params: { uri, depth, parentHeight },
+    });
+  } catch (err) {
+    const rawUri = String(uri || '');
+    if (rawUri.startsWith('at://')) {
+      const rest = rawUri.slice(5);
+      const slashIdx = rest.indexOf('/');
+      const authority = slashIdx >= 0 ? rest.slice(0, slashIdx) : '';
+      const tail = slashIdx >= 0 ? rest.slice(slashIdx) : '';
+      if (authority && !authority.startsWith('did:') && tail) {
+        const prof = await bskyPublicReadRequest({
+          ...auth,
+          endpoint: 'app.bsky.actor.getProfile',
+          params: { actor: authority },
+        }).catch(() => null);
+        if (prof?.did) {
+          data = await bskyPublicReadRequest({
+            ...auth,
+            endpoint: 'app.bsky.feed.getPostThread',
+            params: { uri: `at://${prof.did}${tail}`, depth, parentHeight },
+          });
+        } else {
+          throw err;
+        }
+      } else {
+        throw err;
+      }
+    } else {
+      throw err;
+    }
+  }
   const thread = data?.thread || {};
 
   const seenAncestors = new Set();
@@ -1780,7 +1819,7 @@ export async function createBskyPost({
     };
   }
 
-  return bskyRequest({
+  const res = await bskyRequest({
     serviceUrl,
     endpoint: 'com.atproto.repo.createRecord',
     method: 'POST',
@@ -1794,6 +1833,7 @@ export async function createBskyPost({
     onSessionRefreshed,
     fetchImpl,
   });
+  return facets.length && res && typeof res === 'object' ? { ...res, facets } : res;
 }
 
 export async function likeBskyPost({ serviceUrl = DEFAULT_BSKY_SERVICE, repo, uri, cid, likeUri, accessJwt, refreshJwt, onSessionRefreshed, fetchImpl }) {
@@ -1931,7 +1971,7 @@ export async function deleteBskyPost({ serviceUrl = DEFAULT_BSKY_SERVICE, repo, 
   return true;
 }
 
-export async function listBskyNotifications({ serviceUrl = DEFAULT_BSKY_SERVICE, limit = 30, cursor = '', accessJwt, refreshJwt, onSessionRefreshed, fetchImpl }) {
+export async function listBskyNotifications({ serviceUrl = DEFAULT_BSKY_SERVICE, limit = 30, cursor = '', accessJwt, refreshJwt, onSessionRefreshed, cache, fetchImpl }) {
   return bskyRequest({
     serviceUrl,
     endpoint: 'app.bsky.notification.listNotifications',
@@ -1939,6 +1979,7 @@ export async function listBskyNotifications({ serviceUrl = DEFAULT_BSKY_SERVICE,
     accessJwt,
     refreshJwt,
     onSessionRefreshed,
+    cache,
     fetchImpl,
   });
 }

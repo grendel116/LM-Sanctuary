@@ -3,18 +3,36 @@ import assert from 'node:assert/strict';
 
 import { installMockDom } from '../__mocks__/mockDom.js';
 import { mockMobileHealthOnline } from '../__mocks__/mockProgram.js';
+import { BlueskyAdapter } from '../web/adapters/bluesky/index.js';
 import { createAppShell } from '../web/app/_layout.js';
+import { mountActivityScreen } from '../web/app/activity.js';
+import { mountBrowserScreen } from '../web/app/browser.js';
 import { mountComposeModal, publishOrganicPost } from '../web/app/composeModal.js';
 import { mountFeedScreen } from '../web/app/feed.js';
 import { mountMessagesScreen } from '../web/app/messages.js';
-import { createPostCard } from '../web/components/PostCard.js';
+import { renderPostThreadView } from '../web/app/postThread.js';
+import { mountProfileScreen } from '../web/app/profile.js';
+import { mountProgramThread } from '../web/app/programThread.js';
+import { createPostCard, parseSocialPostItemFromUrl } from '../web/components/PostCard.js';
+import { attachSearchSuggestions } from '../web/components/SearchSuggestions.js';
 import { openKnowledgeModal } from '../web/components/sanctuary/KnowledgeModal.js';
 import { buildMessageRow, createSharedPostEmbedCard } from '../web/components/sanctuary/MessageRow.js';
 import { createMoodHeart } from '../web/components/sanctuary/MoodHeart.js';
 import { showConfirm } from '../web/components/sanctuary/SanctuaryDialog.js';
 import { openSettingsModal } from '../web/components/sanctuary/SettingsModal.js';
 import { openUserModal } from '../web/components/sanctuary/UserModal.js';
-import { feedStore, resetFeedStoreForTests, setActiveStream } from '../web/state/feedStore.js';
+import { deduplicateUnifiedItems, toUnifiedItem } from '../web/core/schema/unifiedItem.js';
+import { resolveMentionFacets } from '../web/queries/bluesky.js';
+import { likeUnified, publishUnified } from '../web/queries/socialClient.js';
+import { activityStore, hydrateActivityStore, resetActivityStoreForTests } from '../web/state/activityStore.js';
+import { browserStore, navigateBrowserTab, resetBrowserStoreForTests } from '../web/state/browserStore.js';
+import {
+  applyViewerInteractionsToItem,
+  feedStore,
+  resetFeedStoreForTests,
+  setActiveStream,
+  setStreamItems,
+} from '../web/state/feedStore.js';
 import { authStore, resetAuthStoreForTests, updateAccountTokens, upsertSocialAccount } from '../web/state/authStore.js';
 import {
   addMediaAttachment,
@@ -26,7 +44,8 @@ import {
   resetCompose,
 } from '../web/state/composeStore.js';
 import { connectionStore, resetConnectionStoreForTests } from '../web/state/sanctuary/connection.js';
-import { resetMemoryStorageForTests } from '../web/storage/kvStorage.js';
+import { resetSessionStoreForTests } from '../web/state/sanctuary/sessionModel.js';
+import { kvSet, resetMemoryStorageForTests } from '../web/storage/kvStorage.js';
 
 test('composeModal removes per-post toggle clutter and publishes organically across connected accounts', async () => {
   const dom = installMockDom();
@@ -547,6 +566,7 @@ test('Feed & Following render two clean tabs and avoid unauthenticated home time
     resetMemoryStorageForTests();
     resetAuthStoreForTests();
     resetConnectionStoreForTests();
+    resetSessionStoreForTests();
     resetFeedStoreForTests();
     feedStore.set({
       tuning: {
@@ -1122,6 +1142,7 @@ test('feed infinite scroll, DOM stability across health/token updates, and singl
     resetMemoryStorageForTests();
     resetAuthStoreForTests();
     resetConnectionStoreForTests();
+    resetSessionStoreForTests();
     resetFeedStoreForTests();
     await upsertSocialAccount(
       {
@@ -1682,6 +1703,1132 @@ test('ComposeModal renders original parent message when replying and clears stal
   } finally {
     resetCompose();
     globalThis.fetch = prevFetch;
+    dom.restore();
+  }
+});
+
+test('Activity refresh icon button dismisses prior New badges and highlights newly arrived notifications', async () => {
+  const dom = installMockDom();
+  const prevFetch = globalThis.fetch;
+  let round = 1;
+  try {
+    resetMemoryStorageForTests();
+    resetAuthStoreForTests();
+    resetConnectionStoreForTests();
+    resetSessionStoreForTests();
+    resetFeedStoreForTests();
+    resetActivityStoreForTests();
+
+    await upsertSocialAccount(
+      {
+        id: 'fedi_act_1',
+        platform: 'fediverse',
+        instanceUrl: 'https://mastodon.social',
+        acct: 'davy@mastodon.social',
+        displayName: 'Davy',
+      },
+      { accessToken: 'masto_tok' }
+    );
+
+    await kvSet('activity_last_seen_ts_v1', Date.parse('2026-11-23T10:00:00.000Z'));
+    const notif1 = {
+      id: 'n1',
+      type: 'mention',
+      created_at: '2026-11-23T10:05:00.000Z',
+      account: { id: 'a1', acct: 'alice@mastodon.social', display_name: 'Alice', avatar: '' },
+      status: {
+        id: 'st_1',
+        content: '<p>First mention</p>',
+        created_at: '2026-11-23T10:05:00.000Z',
+        account: { id: 'a1', acct: 'alice@mastodon.social', display_name: 'Alice', avatar: '' },
+      },
+    };
+    const notif2 = {
+      id: 'n2',
+      type: 'mention',
+      created_at: '2026-11-23T10:15:00.000Z',
+      account: { id: 'a2', acct: 'bob@mastodon.social', display_name: 'Bob', avatar: '' },
+      status: {
+        id: 'st_2',
+        content: '<p>Newer mention</p>',
+        created_at: '2026-11-23T10:15:00.000Z',
+        account: { id: 'a2', acct: 'bob@mastodon.social', display_name: 'Bob', avatar: '' },
+      },
+    };
+
+    globalThis.fetch = async (url) => {
+      if (String(url).includes('/api/v1/notifications')) {
+        return new Response(JSON.stringify(round === 1 ? [notif1] : [notif2, notif1]), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      return new Response('[]', { status: 200, headers: { 'content-type': 'application/json' } });
+    };
+
+    await hydrateActivityStore();
+    const host = dom.document.createElement('div');
+    dom.document.body.appendChild(host);
+    const actCtrl = mountActivityScreen(host);
+    await new Promise((r) => setTimeout(r, 40));
+
+    const refreshBtn = host.querySelector('.stage-title-group .feed-refresh-btn.activity-refresh-btn');
+    assert.ok(refreshBtn, 'Activity header must render the circular icon refresh button');
+    assert.equal(host.querySelectorAll('.activity-row.is-unread').length, 1);
+    assert.equal(host.querySelectorAll('.activity-new-badge').length, 1);
+
+    // Clicking Refresh with no newer notifications dismisses "New"
+    refreshBtn.click();
+    await new Promise((r) => setTimeout(r, 40));
+    assert.equal(host.querySelectorAll('.activity-row.is-unread').length, 0);
+    assert.equal(host.querySelectorAll('.activity-new-badge').length, 0);
+
+    // Wait for 550ms minimum spin to finish, then refresh with a newer notification arriving
+    await new Promise((r) => setTimeout(r, 560));
+    round = 2;
+    refreshBtn.click();
+    await new Promise((r) => setTimeout(r, 40));
+    const unreadRows = host.querySelectorAll('.activity-row.is-unread');
+    assert.equal(unreadRows.length, 1);
+    assert.ok(unreadRows[0].textContent.includes('Bob'));
+
+    const actionLabels = Array.from(unreadRows[0].querySelectorAll('.activity-action-item')).map((b) => b.textContent);
+    assert.ok(actionLabels.includes('Delete notification'), 'Single notification uses singular Delete notification label');
+    assert.equal(actionLabels.some((t) => t.includes('Delete notifications (2)')), false);
+
+    actCtrl.destroy();
+  } finally {
+    resetActivityStoreForTests();
+    resetAuthStoreForTests();
+    resetConnectionStoreForTests();
+    resetSessionStoreForTests();
+    resetFeedStoreForTests();
+    resetMemoryStorageForTests();
+    globalThis.fetch = prevFetch;
+    dom.restore();
+  }
+});
+
+test('Composer uses compact bridge note, offers @mention typeahead, and linkifies @handle.tld across Bluesky & Mastodon', async () => {
+  const dom = installMockDom();
+  const prevFetch = globalThis.fetch;
+  try {
+    resetMemoryStorageForTests();
+    resetAuthStoreForTests();
+    resetConnectionStoreForTests();
+    resetSessionStoreForTests();
+    resetFeedStoreForTests();
+    resetCompose();
+
+    await upsertSocialAccount(
+      {
+        id: 'fedi_act_1',
+        platform: 'fediverse',
+        instanceUrl: 'https://mastodon.social',
+        acct: 'davy@mastodon.social',
+        displayName: 'Davy',
+      },
+      { accessToken: 'masto_tok' }
+    );
+    await upsertSocialAccount(
+      {
+        id: 'bsky_comp_1',
+        platform: 'bluesky',
+        serviceUrl: 'https://pds.example.social',
+        did: 'did:plc:me123',
+        handle: 'davy.bsky.social',
+      },
+      { accessJwt: 'jwt_1', refreshJwt: 'ref_1' }
+    );
+
+    globalThis.fetch = async (url) => {
+      const u = String(url);
+      if (u.includes('app.bsky.actor.searchActors')) {
+        return new Response(
+          JSON.stringify({
+            actors: [
+              { did: 'did:plc:socnyc', handle: 'socialists.nyc', displayName: 'NYC Socialists', avatar: '' },
+            ],
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } }
+        );
+      }
+      if (u.includes('/api/v2/search')) {
+        return new Response(JSON.stringify({ accounts: [] }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      if (u.includes('com.atproto.identity.resolveHandle')) {
+        if (u.startsWith('https://pds.example.social')) {
+          return new Response(JSON.stringify({ error: 'InvalidRequest' }), {
+            status: 400,
+            headers: { 'content-type': 'application/json' },
+          });
+        }
+        return new Response(JSON.stringify({ did: 'did:plc:socnyc' }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      if (u.includes('com.atproto.repo.createRecord')) {
+        return new Response(JSON.stringify({ uri: 'at://did:plc:me123/app.bsky.feed.post/p1', cid: 'cid_p1' }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      if (u.includes('/api/v1/statuses')) {
+        return new Response(
+          JSON.stringify({
+            id: 'masto_1',
+            content: '<p>Hello @socialists.nyc today</p>',
+            created_at: '2026-11-23T12:00:00.000Z',
+            account: { id: 'a1', acct: 'davy@mastodon.social', display_name: 'Davy' },
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } }
+        );
+      }
+      return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
+    };
+
+    const host = dom.document.createElement('div');
+    dom.document.body.appendChild(host);
+    const ctrl = mountComposeModal(host);
+    openCompose({ text: 'x'.repeat(315) });
+
+    const statusLine = host.querySelector('.compose-status-msg');
+    assert.equal(statusLine?.textContent, 'Auto-splits on bridges');
+    assert.equal(statusLine?.classList.contains('is-info'), true);
+
+    // Typeahead triggers on @soc
+    const textarea = host.querySelector('#compose-main-textarea');
+    textarea.value = 'Hello @soc';
+    textarea.selectionStart = 10;
+    textarea.selectionEnd = 10;
+    textarea.dispatchEvent(new Event('input'));
+    await new Promise((r) => setTimeout(r, 230));
+
+    const opt = host.querySelector('.compose-mention-option');
+    assert.ok(opt, 'Mention autocomplete option must render');
+    assert.ok(opt.textContent.includes('@socialists.nyc'));
+
+    // resolveMentionFacets falls back to public.api.bsky.app when PDS fails
+    const resolved = await resolveMentionFacets(
+      [{ index: { byteStart: 6, byteEnd: 21 }, features: [{ $type: 'app.bsky.richtext.facet#mention', did: '' }], _handle: 'socialists.nyc' }],
+      { serviceUrl: 'https://pds.example.social' }
+    );
+    assert.equal(resolved.length, 1);
+    assert.equal(resolved[0].features[0].did, 'did:plc:socnyc');
+
+    // BlueskyAdapter.publish passes resolved facets into content_html
+    const bskyAdapter = new BlueskyAdapter({
+      serviceUrl: 'https://pds.example.social',
+      did: 'did:plc:me123',
+      handle: 'davy.bsky.social',
+      accessJwt: 'jwt_1',
+      refreshJwt: 'ref_1',
+    });
+    const bskyPub = await bskyAdapter.publish('Hello @socialists.nyc');
+    assert.ok(bskyPub.content_html.includes('href="https://bsky.app/profile/did%3Aplc%3Asocnyc"'));
+
+    // publishUnified enriches unlinked Mastodon HTML with resolved Bluesky DID mention link
+    const uni = await publishUnified({ text: 'Hello @socialists.nyc today' });
+    const card = createPostCard(uni.results[0]);
+    const mentionLink = card.querySelector('.post-body-html a.mention');
+    assert.ok(mentionLink, 'Canonical Mastodon post card must render clickable @socialists.nyc mention link');
+    assert.equal(mentionLink.getAttribute('href'), 'https://bsky.app/profile/did%3Aplc%3Asocnyc');
+    assert.equal(mentionLink.textContent, '@socialists.nyc');
+
+    ctrl.destroy();
+  } finally {
+    resetCompose();
+    resetAuthStoreForTests();
+    resetConnectionStoreForTests();
+    resetSessionStoreForTests();
+    resetFeedStoreForTests();
+    resetMemoryStorageForTests();
+    globalThis.fetch = prevFetch;
+    dom.restore();
+  }
+});
+
+test('SearchSuggestions dropdown uses solid opaque background and proper browser controls stacking', async () => {
+  const { readFileSync } = await import('node:fs');
+  const shellCss = readFileSync(new URL('../web/assets/css/shell.css', import.meta.url), 'utf8');
+  assert.match(shellCss, /\.search-suggest-dropdown\s*\{[^}]*background-color:\s*#18171f/s);
+  assert.match(shellCss, /\.browser-controls-row\s*\{[^}]*position:\s*relative;[^}]*z-index:\s*30;/s);
+
+  const dom = installMockDom();
+  try {
+    const doc = dom.document;
+    const form = doc.createElement('form');
+    const input = doc.createElement('input');
+    form.appendChild(input);
+    doc.body.appendChild(form);
+
+    const openEvents = [];
+    const ctrl = attachSearchSuggestions(input, {
+      anchorEl: form,
+      getLocalSuggestions: (q) => (q ? [{ kind: 'search', label: `Result for ${q}`, value: q }] : []),
+      onOpenChange: (open) => openEvents.push(open),
+    });
+
+    input.value = 'o';
+    input.dispatchEvent(new Event('input'));
+    assert.equal(form.classList.contains('is-suggest-open'), true);
+    assert.deepEqual(openEvents, [true]);
+
+    ctrl.close();
+    assert.equal(form.classList.contains('is-suggest-open'), false);
+    assert.deepEqual(openEvents, [true, false]);
+    ctrl.destroy();
+  } finally {
+    dom.restore();
+  }
+});
+
+test('Privacy Shield popover groups sections cleanly, omits "zero", and clears browser history', async () => {
+  const dom = installMockDom();
+  const prevHost = globalThis.sanctuaryBrowserHost;
+  let hostClearCalls = 0;
+  globalThis.sanctuaryBrowserHost = {
+    loadTab: () => {},
+    closeTab: () => {},
+    syncLayout: () => {},
+    onEvent: () => () => {},
+    clearHistory: async () => {
+      hostClearCalls += 1;
+      return { cleared: true };
+    },
+  };
+  try {
+    resetMemoryStorageForTests();
+    resetConnectionStoreForTests();
+    resetBrowserStoreForTests();
+
+    const doc = dom.document;
+    const host = doc.createElement('div');
+    doc.body.appendChild(host);
+    const ctrl = mountBrowserScreen(host);
+
+    const tabId = browserStore.get().activeTabId;
+    navigateBrowserTab(tabId, 'https://example.org/a');
+    navigateBrowserTab(tabId, 'https://example.org/b');
+    assert.equal(browserStore.get().tabs.find((t) => t.id === tabId).history.length, 3);
+
+    const shieldBtn = host.querySelector('.browser-shield-btn');
+    assert.ok(shieldBtn);
+    shieldBtn.click();
+
+    const popover = host.querySelector('#browser-shield-popover');
+    assert.ok(popover);
+    assert.equal(popover.querySelectorAll('.browser-popover-section').length, 3);
+    assert.equal(popover.textContent.toLowerCase().includes('zero'), false);
+
+    const clearBtn = popover.querySelector('.browser-clear-history-btn');
+    assert.ok(clearBtn);
+    assert.equal(clearBtn.textContent, 'Clear History');
+    clearBtn.click();
+    await new Promise((r) => setTimeout(r, 20));
+
+    const updatedTab = browserStore.get().tabs.find((t) => t.id === tabId);
+    assert.deepEqual(updatedTab.history, ['https://example.org/b']);
+    assert.equal(updatedTab.historyIndex, 0);
+    assert.equal(hostClearCalls, 1);
+    assert.equal(popover.querySelector('.browser-history-status')?.textContent, 'History cleared');
+
+    ctrl.destroy();
+  } finally {
+    resetBrowserStoreForTests();
+    globalThis.sanctuaryBrowserHost = prevHost;
+    dom.restore();
+  }
+});
+
+test('Profile screen paginates older posts on scroll while preserving existing card DOM and enriching cross-post metrics', async () => {
+  const dom = installMockDom();
+  const prevFetch = globalThis.fetch;
+  const maxIdsSeen = [];
+
+  const makeMastoStatus = (idx) => ({
+    id: `m_${1000 - idx}`,
+    created_at: new Date(Date.parse('2026-11-23T12:00:00.000Z') - idx * 3600000).toISOString(),
+    content: `<p>Profile post #${idx}</p>`,
+    url: `https://mastodon.social/@davy/${1000 - idx}`,
+    favourites_count: idx,
+    reblogs_count: 1,
+    replies_count: 0,
+    account: {
+      id: 'u_prof_1',
+      acct: 'davy@mastodon.social',
+      username: 'davy',
+      display_name: 'Davy',
+      avatar: '',
+    },
+  });
+
+  try {
+    resetMemoryStorageForTests();
+    resetAuthStoreForTests();
+    resetConnectionStoreForTests();
+    resetSessionStoreForTests();
+    resetFeedStoreForTests();
+
+    const jsonRes = (data, status = 200) =>
+      new Response(JSON.stringify(data), { status, headers: { 'content-type': 'application/json' } });
+
+    globalThis.fetch = async (url, init = {}) => {
+      const u = String(url);
+      if (u.includes('/api/v1/accounts/verify_credentials')) {
+        return jsonRes({ id: 'u_prof_1', username: 'davy', acct: 'davy@mastodon.social', display_name: 'Davy' });
+      }
+      if (u.includes('/api/v1/accounts/u_prof_1/statuses')) {
+        const parsed = new URL(u);
+        if (parsed.searchParams.get('pinned') === 'true') {
+          return jsonRes([]);
+        }
+        const maxId = parsed.searchParams.get('max_id') || '';
+        maxIdsSeen.push(maxId);
+        if (!maxId) {
+          const page1 = Array.from({ length: 20 }, (_, i) => makeMastoStatus(i));
+          return jsonRes(page1);
+        }
+        if (maxId === 'm_981') {
+          return jsonRes([makeMastoStatus(20), makeMastoStatus(21)]);
+        }
+        return jsonRes([]);
+      }
+      if (u.includes('app.bsky.feed.getAuthorFeed')) {
+        return jsonRes({ feed: [], cursor: '' });
+      }
+      if (u.includes('app.bsky.actor.getProfile')) {
+        return jsonRes({ did: 'did:plc:prof1', handle: 'davy.bsky.social' });
+      }
+      if (u.includes('/api/social/linked-posts')) {
+        if ((init.method || 'GET').toUpperCase() === 'GET') {
+          return jsonRes({
+            links: [
+              {
+                canonicalId: 'mastodon:m_980',
+                mastodonStatusId: 'm_980',
+                blueskyUri: 'at://did:plc:prof1/app.bsky.feed.post/older980',
+              },
+            ],
+          });
+        }
+        return jsonRes({ ok: true });
+      }
+      if (u.includes('app.bsky.feed.getPosts')) {
+        return jsonRes({
+          posts: [
+            {
+              uri: 'at://did:plc:prof1/app.bsky.feed.post/older980',
+              likeCount: 9,
+              repostCount: 2,
+              replyCount: 1,
+              record: { text: 'Profile post #20' },
+              author: { did: 'did:plc:prof1', handle: 'davy.bsky.social' },
+            },
+          ],
+        });
+      }
+      return jsonRes({});
+    };
+
+    await upsertSocialAccount(
+      {
+        id: 'fedi_prof_1',
+        platform: 'fediverse',
+        instanceUrl: 'https://mastodon.social',
+        acct: 'davy@mastodon.social',
+        handle: 'davy',
+        displayName: 'Davy',
+        userId: 'u_prof_1',
+      },
+      { accessToken: 'masto_tok' }
+    );
+    await upsertSocialAccount(
+      {
+        id: 'bsky_prof_1',
+        platform: 'bluesky',
+        serviceUrl: 'https://bsky.social',
+        did: 'did:plc:prof1',
+        handle: 'davy.bsky.social',
+        acct: 'davy.bsky.social',
+      },
+      { accessJwt: 'bsky_jwt' }
+    );
+    connectionStore.set({ mode: 'online', nodeUrl: 'http://127.0.0.1:5000' });
+
+    const scrollWrap = dom.document.createElement('div');
+    scrollWrap.className = 'center-column-wrap';
+    const host = dom.document.createElement('div');
+    scrollWrap.appendChild(host);
+    dom.document.body.appendChild(scrollWrap);
+
+    const profCtrl = mountProfileScreen(host);
+    await new Promise((r) => setTimeout(r, 40));
+
+    const firstCards = Array.from(host.querySelectorAll('.profile-posts-list article'));
+    assert.equal(firstCards.length, 20);
+    const card0Ref = firstCards[0];
+
+    scrollWrap.scrollHeight = 2000;
+    scrollWrap.clientHeight = 700;
+    scrollWrap.scrollTop = 1200;
+    scrollWrap.dispatchEvent(new Event('scroll'));
+    await new Promise((r) => setTimeout(r, 50));
+
+    assert.ok(maxIdsSeen.includes('m_981'), 'Scroll near bottom requests page 2 with max_id=m_981');
+    const allCards = Array.from(host.querySelectorAll('.profile-posts-list article'));
+    assert.equal(allCards.length, 22);
+    assert.equal(allCards[0], card0Ref, 'Existing profile post DOM node preserved on append');
+    assert.ok(allCards[20].textContent.includes('Profile post #20'));
+
+    profCtrl.destroy();
+  } finally {
+    resetAuthStoreForTests();
+    resetConnectionStoreForTests();
+    resetSessionStoreForTests();
+    resetFeedStoreForTests();
+    resetMemoryStorageForTests();
+    globalThis.fetch = prevFetch;
+    dom.restore();
+  }
+});
+
+test('Liked posts never read as 0 likes across async Mastodon counter lag, deduplication, viewer overlay, and resonance chips', async () => {
+  const dom = installMockDom();
+  const prevFetch = globalThis.fetch;
+  try {
+    resetMemoryStorageForTests();
+    resetAuthStoreForTests();
+    resetConnectionStoreForTests();
+    resetSessionStoreForTests();
+    resetFeedStoreForTests();
+
+    await upsertSocialAccount(
+      {
+        id: 'fedi_like_1',
+        platform: 'fediverse',
+        instanceUrl: 'https://mastodon.social',
+        acct: 'davy@mastodon.social',
+        handle: 'davy',
+        userId: 'u_like_1',
+      },
+      { accessToken: 'masto_tok' }
+    );
+
+    const remotePost = toUnifiedItem({
+      id: 'mastodon:st_remote_1',
+      protocol: 'mastodon',
+      url: 'https://goose.directory/@FrogAndToadBot/1',
+      content_text: 'Toad went back to bed.',
+      date_published: '2026-11-23T10:00:00.000Z',
+      author: { id: 'a_frog', name: 'Frog & Toad Bot', handle: 'FrogAndToadBot@goose.directory' },
+      metrics: { likes: 0, replies: 1, reposts: 36 },
+      _meta: { mastodon: { statusId: 'st_remote_1', instanceUrl: 'https://goose.directory' } },
+    });
+    setStreamItems('feed', [remotePost]);
+
+    // Mastodon /favourite often returns favourites_count: 0 before async Sidekiq counter updates
+    globalThis.fetch = async (url) => {
+      const u = String(url);
+      if (u.includes('/api/v2/search')) {
+        return new Response(JSON.stringify({ statuses: [{ id: 'st_local_resolved' }] }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      if (u.includes('/api/v1/statuses/st_local_resolved/favourite')) {
+        return new Response(
+          JSON.stringify({
+            id: 'st_local_resolved',
+            url: 'https://goose.directory/@FrogAndToadBot/1',
+            created_at: '2026-11-23T10:00:00.000Z',
+            content: '<p>Toad went back to bed.</p>',
+            favourited: true,
+            favourites_count: 0,
+            replies_count: 1,
+            reblogs_count: 36,
+            account: { id: 'a_frog', acct: 'FrogAndToadBot@goose.directory', display_name: 'Frog & Toad Bot' },
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } }
+        );
+      }
+      return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
+    };
+
+    const updated = await likeUnified(remotePost);
+    assert.equal(updated._meta.mastodon.favourited, true);
+    assert.equal(updated.metrics.likes, 1);
+    assert.equal(feedStore.get().streams.feed.items[0].metrics.likes, 1);
+
+    // toUnifiedItem & applyViewerInteractionsToItem enforce likes >= 1 whenever liked
+    const zeroFloor = toUnifiedItem({
+      id: 'mastodon:st_zero',
+      protocol: 'mastodon',
+      date_published: '2026-11-23T10:00:00.000Z',
+      metrics: { likes: 0, replies: 0, reposts: 0 },
+      _meta: { mastodon: { statusId: 'st_zero', favourited: true } },
+    });
+    assert.equal(zeroFloor.metrics.likes, 1);
+
+    const overlaid = applyViewerInteractionsToItem({
+      id: 'mastodon:st_remote_1',
+      protocol: 'mastodon',
+      date_published: '2026-11-23T10:00:00.000Z',
+      metrics: { likes: 0, replies: 1, reposts: 36 },
+      _meta: { mastodon: { statusId: 'st_remote_1' } },
+    });
+    assert.equal(overlaid._meta.mastodon.favourited, true);
+    assert.equal(overlaid.metrics.likes, 1);
+
+    // deduplicateUnifiedItems keeps max metric across duplicate copies
+    const deduped = deduplicateUnifiedItems([
+      {
+        id: 'mastodon:dup1',
+        protocol: 'mastodon',
+        date_published: '2026-11-23T10:00:00.000Z',
+        content_text: 'Same post across sources',
+        metrics: { likes: 0, replies: 0, reposts: 0 },
+        _meta: { mastodon: { statusId: 'dup1' } },
+      },
+      {
+        id: 'mastodon:dup1',
+        protocol: 'mastodon',
+        date_published: '2026-11-23T10:00:00.000Z',
+        content_text: 'Same post across sources',
+        metrics: { likes: 4, replies: 1, reposts: 2 },
+        _meta: { mastodon: { statusId: 'dup1', favourited: true } },
+      },
+    ]);
+    assert.equal(deduped[0].metrics.likes, 4);
+
+    // Multi-network PostCard shows primary protocol total immediately before background enrichment
+    const linkedCard = createPostCard({
+      id: 'mastodon:m_cross_1',
+      protocol: 'mastodon',
+      date_published: '2026-11-23T10:00:00.000Z',
+      content_text: 'Cross-posted item',
+      author: { id: 'u1', name: 'Davy', handle: 'davy@mastodon.social' },
+      metrics: { likes: 1, replies: 1, reposts: 36 },
+      _meta: {
+        mastodon: { statusId: 'm_cross_1', favourited: true },
+        linkedIds: { mastodonStatusId: 'm_cross_1', blueskyUri: 'at://did:plc:x/app.bsky.feed.post/1' },
+      },
+    });
+    assert.equal(linkedCard.querySelector('.post-resonance-chip--mastodon')?.dataset.networkTotal, '38');
+  } finally {
+    resetAuthStoreForTests();
+    resetConnectionStoreForTests();
+    resetSessionStoreForTests();
+    resetFeedStoreForTests();
+    resetMemoryStorageForTests();
+    globalThis.fetch = prevFetch;
+    dom.restore();
+  }
+});
+
+test('quoted post cards on focal posts and social post URLs open in-app instead of browser', async () => {
+  const dom = installMockDom();
+  const prevFetch = globalThis.fetch;
+  try {
+    resetAuthStoreForTests();
+    resetConnectionStoreForTests();
+    resetSessionStoreForTests();
+    resetFeedStoreForTests();
+    resetMemoryStorageForTests();
+
+    const parsedBsky = parseSocialPostItemFromUrl('https://bsky.app/profile/junlper.beer/post/3labc123', {
+      authorName: 'union person',
+      text: 'the economy is fake',
+    });
+    assert.equal(parsedBsky.protocol, 'bluesky');
+    assert.equal(parsedBsky._meta.bluesky.uri, 'at://junlper.beer/app.bsky.feed.post/3labc123');
+
+    const parsedMasto = parseSocialPostItemFromUrl('https://mastodon.social/@alice/114000123');
+    assert.equal(parsedMasto.protocol, 'mastodon');
+    assert.equal(parsedMasto._meta.mastodon.statusId, '114000123');
+    assert.equal(parsedMasto._meta.mastodon.instanceUrl, 'https://mastodon.social');
+
+    const requestedUris = [];
+    globalThis.fetch = async (url) => {
+      const s = String(url);
+      if (s.includes('app.bsky.feed.getPostThread')) {
+        const u = new URL(s);
+        const reqUri = u.searchParams.get('uri') || '';
+        requestedUris.push(reqUri);
+        const isQuoted = reqUri.includes('quotedrkey');
+        return new Response(JSON.stringify({
+          thread: {
+            post: {
+              uri: reqUri,
+              cid: isQuoted ? 'cid_quoted' : 'cid_outer',
+              author: {
+                did: isQuoted ? 'did:plc:quoted' : 'did:plc:outer',
+                handle: isQuoted ? 'junlper.beer' : 'madmarxfury.bsky.social',
+                displayName: isQuoted ? 'union person' : 'Mad Marx',
+              },
+              record: {
+                text: isQuoted ? 'the economy is fake' : 'Fake economy',
+                createdAt: '2026-11-23T12:00:00.000Z',
+              },
+              ...(isQuoted ? {} : {
+                embed: {
+                  $type: 'app.bsky.embed.record#view',
+                  record: {
+                    $type: 'app.bsky.embed.record#viewRecord',
+                    uri: 'at://did:plc:quoted/app.bsky.feed.post/quotedrkey',
+                    cid: 'cid_quoted',
+                    author: {
+                      did: 'did:plc:quoted',
+                      handle: 'junlper.beer',
+                      displayName: 'union person',
+                    },
+                    value: {
+                      text: 'the economy is fake',
+                      createdAt: '2026-11-23T11:55:00.000Z',
+                    },
+                  },
+                },
+              }),
+            },
+          },
+        }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      return new Response(JSON.stringify({}), { status: 200, headers: { 'content-type': 'application/json' } });
+    };
+
+    const focalPost = toUnifiedItem({
+      id: 'bluesky:at://did:plc:outer/app.bsky.feed.post/outerrkey',
+      protocol: 'bluesky',
+      url: 'https://bsky.app/profile/madmarxfury.bsky.social/post/outerrkey',
+      content_text: 'Fake economy',
+      date_published: '2026-11-23T12:00:00.000Z',
+      author: { id: 'did:plc:outer', name: 'Mad Marx', handle: 'madmarxfury.bsky.social' },
+      _meta: {
+        bluesky: { uri: 'at://did:plc:outer/app.bsky.feed.post/outerrkey', cid: 'cid_outer' },
+        quotePost: {
+          id: 'bluesky:at://did:plc:quoted/app.bsky.feed.post/quotedrkey',
+          protocol: 'bluesky',
+          uri: 'at://did:plc:quoted/app.bsky.feed.post/quotedrkey',
+          cid: 'cid_quoted',
+          authorDid: 'did:plc:quoted',
+          authorName: 'union person',
+          authorHandle: 'junlper.beer',
+          text: 'the economy is fake',
+          url: 'https://bsky.app/profile/junlper.beer/post/quotedrkey',
+        },
+      },
+    });
+
+    const host = dom.document.createElement('div');
+    dom.document.body.appendChild(host);
+    renderPostThreadView(host, { post: focalPost });
+    await new Promise((r) => setTimeout(r, 20));
+
+    const quoteEl = host.querySelector('.thread-focal .post-quote-card');
+    assert.ok(quoteEl);
+    assert.equal(quoteEl.tagName, 'BUTTON');
+
+    quoteEl.click();
+    await new Promise((r) => setTimeout(r, 20));
+
+    assert.ok(requestedUris.includes('at://did:plc:quoted/app.bsky.feed.post/quotedrkey'));
+    assert.match(host.querySelector('.thread-focal')?.textContent || '', /union person/);
+
+    // Back button returns to the outer focal post
+    host.querySelector('.thread-stage-header .edit-cancel-btn')?.click();
+    await new Promise((r) => setTimeout(r, 10));
+    assert.match(host.querySelector('.thread-focal')?.textContent || '', /Mad Marx/);
+  } finally {
+    resetAuthStoreForTests();
+    resetConnectionStoreForTests();
+    resetSessionStoreForTests();
+    resetFeedStoreForTests();
+    resetMemoryStorageForTests();
+    globalThis.fetch = prevFetch;
+    dom.restore();
+  }
+});
+
+test('programThread speak button shows loading/playing indicator and prevents overlapping audio on double press', async () => {
+  const dom = installMockDom();
+  const prevFetch = globalThis.fetch;
+  const prevAudio = globalThis.Audio;
+  try {
+    resetAuthStoreForTests();
+    resetConnectionStoreForTests();
+    resetSessionStoreForTests();
+    resetFeedStoreForTests();
+    resetMemoryStorageForTests();
+
+    connectionStore.set({
+      mode: 'online',
+      nodeUrl: 'http://127.0.0.1:5000',
+      activeProgram: 'nova',
+      programs: [{ id: 'nova', name: 'Nova' }],
+    });
+
+    let resolveTts = null;
+    let ttsCalls = 0;
+    const audioInstances = [];
+    globalThis.Audio = class MockAudio {
+      constructor(src) {
+        this.src = src;
+        this.paused = false;
+        this.playCount = 0;
+        this.onended = null;
+        this.onerror = null;
+        audioInstances.push(this);
+      }
+      pause() {
+        this.paused = true;
+      }
+      async play() {
+        this.playCount += 1;
+      }
+    };
+
+    globalThis.fetch = async (url) => {
+      const s = String(url);
+      if (s.includes('/history')) {
+        return new Response(JSON.stringify({
+          active_program: 'nova',
+          character_name: 'Nova',
+          history: [
+            { id: 'm_prog_1', role: 'program', sender_id: 'nova', text: 'Hello from Nova', timestamp: 1700000000 },
+          ],
+        }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      if (s.includes('/api/tts')) {
+        ttsCalls += 1;
+        return await new Promise((resolve) => {
+          resolveTts = () => resolve(new Response(JSON.stringify({
+            audio_url: '/speech_cache/nova_1.wav',
+          }), { status: 200, headers: { 'content-type': 'application/json' } }));
+        });
+      }
+      return new Response(JSON.stringify({ models: [], programs: [{ id: 'nova', name: 'Nova' }] }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    };
+
+    const host = dom.document.createElement('div');
+    dom.document.body.appendChild(host);
+    const handle = mountProgramThread(host, { programId: 'nova', sessionId: 'default' });
+    await new Promise((r) => setTimeout(r, 25));
+
+    const speakBtn = host.querySelector('.speak-btn');
+    const bubble = speakBtn.closest('.message');
+    assert.ok(speakBtn);
+
+    // 1. First click while TTS is synthesizing -> immediate loading state
+    speakBtn.click();
+    assert.equal(ttsCalls, 1);
+    assert.equal(speakBtn.classList.contains('is-loading'), true);
+    assert.equal(speakBtn.getAttribute('aria-busy'), 'true');
+    assert.equal(bubble.classList.contains('is-tts-active'), true);
+
+    // 2. Second click during in-flight synthesis -> cancels cleanly without firing a 2nd request or playing late audio
+    speakBtn.click();
+    assert.equal(ttsCalls, 1);
+    assert.equal(speakBtn.classList.contains('is-loading'), false);
+    assert.equal(speakBtn.classList.contains('is-speaking'), false);
+    assert.equal(bubble.classList.contains('is-tts-active'), false);
+    resolveTts?.();
+    await new Promise((r) => setTimeout(r, 10));
+    assert.equal(audioInstances.length, 0);
+
+    // 3. Single click -> resolves to playing state; clicking again pauses audio and resets UI
+    speakBtn.click();
+    assert.equal(ttsCalls, 2);
+    assert.equal(speakBtn.classList.contains('is-loading'), true);
+    resolveTts?.();
+    await new Promise((r) => setTimeout(r, 15));
+
+    assert.equal(audioInstances.length, 1);
+    assert.equal(audioInstances[0].playCount, 1);
+    assert.equal(speakBtn.classList.contains('is-loading'), false);
+    assert.equal(speakBtn.classList.contains('is-speaking'), true);
+    assert.equal(speakBtn.getAttribute('aria-pressed'), 'true');
+
+    speakBtn.click();
+    assert.equal(audioInstances[0].paused, true);
+    assert.equal(speakBtn.classList.contains('is-speaking'), false);
+    assert.equal(bubble.classList.contains('is-tts-active'), false);
+
+    handle.destroy();
+  } finally {
+    resetAuthStoreForTests();
+    resetConnectionStoreForTests();
+    resetSessionStoreForTests();
+    resetFeedStoreForTests();
+    resetMemoryStorageForTests();
+    globalThis.fetch = prevFetch;
+    globalThis.Audio = prevAudio;
+    dom.restore();
+  }
+});
+
+test('Project Settings places Credential Vault at the top, creates/unlocks .kdbx vault, and locks cleanly', async () => {
+  const dom = installMockDom();
+  const prevFetch = globalThis.fetch;
+  try {
+    resetAuthStoreForTests();
+    resetConnectionStoreForTests();
+    resetSessionStoreForTests();
+    resetFeedStoreForTests();
+    resetMemoryStorageForTests();
+
+    connectionStore.set({
+      mode: 'online',
+      nodeUrl: 'http://127.0.0.1:5000',
+    });
+
+    let vaultInitialized = false;
+    let vaultUnlocked = false;
+    const logins = [];
+    const apiKeys = [];
+    globalThis.fetch = async (url, init = {}) => {
+      const s = String(url);
+      if (s.includes('/api/keepassxc/status')) {
+        return new Response(JSON.stringify({
+          provider: 'sanctuary-kdbx',
+          installed: true,
+          running: true,
+          initialized: vaultInitialized,
+          associated: vaultInitialized,
+          database_unlocked: vaultUnlocked,
+          version: 'KDBX 4.0',
+          entry_count: logins.length,
+          vault_mode: vaultInitialized ? 'keepassxc' : 'local',
+        }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      if (s.includes('/api/keepassxc/setup')) {
+        vaultInitialized = true;
+        vaultUnlocked = true;
+        return new Response(JSON.stringify({
+          provider: 'sanctuary-kdbx',
+          installed: true,
+          running: true,
+          initialized: true,
+          associated: true,
+          database_unlocked: true,
+          version: 'KDBX 4.0',
+          entry_count: 0,
+          vault_mode: 'keepassxc',
+        }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      if (s.includes('/api/keepassxc/entries')) {
+        return new Response(JSON.stringify({
+          entries: logins.map((l) => ({
+            uuid: l.uuid,
+            title: l.title || l.name,
+            name: l.title || l.name,
+            login: l.login,
+            url: l.url,
+            group: l.group || 'Browser Logins',
+            notes_preview: l.notes || '',
+            kind: 'login',
+          })),
+          groups: ['Browser Logins', 'API Keys'],
+          logins,
+          api_keys: apiKeys,
+        }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      if (s.includes('/api/keepassxc/entry')) {
+        const body = JSON.parse(init.body || '{}');
+        const found = logins.find((l) => l.uuid === body.uuid) || logins[0];
+        return new Response(JSON.stringify({ entry: found }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      if (s.includes('/api/keepassxc/save-entry')) {
+        const body = JSON.parse(init.body || '{}');
+        const existing = body.uuid ? logins.find((l) => l.uuid === body.uuid) : null;
+        if (existing) {
+          Object.assign(existing, body, { name: body.title || body.login });
+          return new Response(JSON.stringify({ saved: true, entry: existing }), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          });
+        }
+        const created = {
+          uuid: `u_${logins.length + 1}`,
+          title: body.title || 'bsky.app',
+          name: body.title || 'bsky.app',
+          login: body.login,
+          password: body.password || '',
+          url: body.url || '',
+          group: body.group || 'Browser Logins',
+          notes: body.notes || '',
+          kind: body.kind || 'login',
+        };
+        logins.push(created);
+        return new Response(JSON.stringify({ saved: true, entry: created }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      if (s.includes('/api/keepassxc/save-login')) {
+        const body = JSON.parse(init.body || '{}');
+        logins.push({ uuid: 'u1', name: 'bsky.app', login: body.login, url: body.url });
+        return new Response(JSON.stringify({ saved: true, uuid: 'u1' }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      if (s.includes('/api/keepassxc/lock')) {
+        vaultUnlocked = false;
+        return new Response(JSON.stringify({
+          provider: 'sanctuary-kdbx',
+          installed: true,
+          running: true,
+          initialized: true,
+          associated: true,
+          database_unlocked: false,
+          version: 'KDBX 4.0',
+          entry_count: 0,
+          vault_mode: 'keepassxc',
+        }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      if (s.includes('/api/project_settings')) {
+        return new Response(JSON.stringify({ folders: ['C:/LLM/LM-Sanctuary'] }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      return new Response(JSON.stringify({}), { status: 200, headers: { 'content-type': 'application/json' } });
+    };
+
+    const modal = openSettingsModal({ initialTab: 'project', initialVaultUrl: 'https://bsky.app/login' });
+    await new Promise((r) => setTimeout(r, 25));
+
+    const firstHeading = modal.card.querySelector('.form-card-container .modal-sub-header');
+    assert.equal(firstHeading?.textContent, 'Credential Vault (.kdbx)');
+
+    const p1 = modal.card.querySelector('#vault-setup-pw1');
+    const p2 = modal.card.querySelector('#vault-setup-pw2');
+    assert.ok(p1 && p2);
+    p1.value = 'master-123';
+    p2.value = 'master-123';
+    p1.closest('form').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await new Promise((r) => setTimeout(r, 25));
+
+    assert.equal(vaultInitialized, true);
+    assert.equal(vaultUnlocked, true);
+
+    const openKeyBoxBtn = modal.card.querySelector('#open-keybox-modal-btn');
+    assert.ok(openKeyBoxBtn, 'Settings -> Project renders Open Key Box button when unlocked');
+    openKeyBoxBtn.click();
+    await new Promise((r) => setTimeout(r, 25));
+
+    const keyBoxDialog = dom.document.querySelector('#keybox-vault-dialog');
+    assert.ok(keyBoxDialog, 'Key Box modal opens');
+
+    // Create a new entry via Key Box modal
+    keyBoxDialog.querySelector('#keybox-new-entry-btn').click();
+    keyBoxDialog.querySelector('#keybox-field-title').value = 'Bluesky';
+    keyBoxDialog.querySelector('#keybox-field-login').value = 'alice.bsky.social';
+    keyBoxDialog.querySelector('#keybox-field-password').value = 'secret-pass-1';
+    keyBoxDialog.querySelector('#keybox-field-url').value = 'https://bsky.app/login';
+    keyBoxDialog.querySelector('#keybox-field-notes').value = 'Main account';
+    keyBoxDialog.querySelector('#keybox-entry-form').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await new Promise((r) => setTimeout(r, 25));
+
+    assert.equal(logins.length, 1);
+    const searchInput = keyBoxDialog.querySelector('#keybox-search-input');
+    searchInput.value = 'alice';
+    searchInput.dispatchEvent(new Event('input', { bubbles: true }));
+    assert.equal(keyBoxDialog.querySelectorAll('#keybox-entries-list .list-entry-row').length, 1);
+
+    searchInput.value = 'nonexistent-query';
+    searchInput.dispatchEvent(new Event('input', { bubbles: true }));
+    assert.equal(keyBoxDialog.querySelectorAll('#keybox-entries-list .list-entry-row').length, 0);
+
+    searchInput.value = '';
+    searchInput.dispatchEvent(new Event('input', { bubbles: true }));
+    keyBoxDialog.querySelector('.keybox-edit-btn').click();
+    await new Promise((r) => setTimeout(r, 25));
+
+    keyBoxDialog.querySelector('#keybox-field-title').value = 'Bluesky Personal';
+    keyBoxDialog.querySelector('#keybox-field-notes').value = 'Edited note';
+    keyBoxDialog.querySelector('#keybox-entry-form').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    await new Promise((r) => setTimeout(r, 25));
+    assert.equal(logins[0].title, 'Bluesky Personal');
+    assert.equal(logins[0].notes, 'Edited note');
+
+    keyBoxDialog.close();
+
+    const lockBtn = modal.card.querySelector('#lock-vault-btn');
+    assert.ok(lockBtn);
+    assert.equal(lockBtn.getAttribute('aria-label'), 'Lock Vault');
+    lockBtn.click();
+    await new Promise((r) => setTimeout(r, 25));
+    assert.equal(vaultUnlocked, false);
+    assert.ok(modal.card.querySelector('#vault-unlock-pw'));
+
+    modal.close();
+  } finally {
+    resetAuthStoreForTests();
+    resetConnectionStoreForTests();
+    resetSessionStoreForTests();
+    resetFeedStoreForTests();
+    resetMemoryStorageForTests();
+    globalThis.fetch = prevFetch;
+    dom.restore();
+  }
+});
+
+test('PostCard grays out and disables reaction and share buttons when authStore vaultLocked is true', async () => {
+  const dom = installMockDom();
+  try {
+    resetAuthStoreForTests();
+    authStore.set({
+      accounts: [{ id: 'masto_1', platform: 'fediverse', acct: 'alice@mastodon.social' }],
+      isMastodonConnected: true,
+      vaultLocked: true,
+    });
+
+    const { createPostCard, syncPostCardReactions } = await import('../web/components/PostCard.js');
+    const post = {
+      id: 'mastodon:123',
+      protocol: 'mastodon',
+      url: 'https://mastodon.social/@bob/123',
+      content_text: 'Hello world',
+      author: { id: 'bob', name: 'Bob', handle: '@bob@mastodon.social' },
+      metrics: { likes: 2, replies: 1, reposts: 0 },
+      _meta: { mastodon: { statusId: '123', visibility: 'public' } },
+    };
+
+    const card = createPostCard(post, {
+      onToggleLike: () => {},
+      onReply: () => {},
+      onToggleRepost: () => {},
+      onAskSanctuary: () => {},
+      showSanctuaryAction: true,
+    });
+
+    assert.equal(card.querySelector('.post-action-like').disabled, true);
+    assert.equal(card.querySelector('.post-action-reply').disabled, true);
+    assert.equal(card.querySelector('.post-action-repost').disabled, true);
+    assert.equal(card.querySelector('.post-action-sanctuary').disabled, true);
+
+    authStore.set({ vaultLocked: false });
+    syncPostCardReactions(card, post);
+    assert.equal(card.querySelector('.post-action-like').disabled, false);
+    assert.equal(card.querySelector('.post-action-reply').disabled, false);
+    assert.equal(card.querySelector('.post-action-repost').disabled, false);
+    assert.equal(card.querySelector('.post-action-sanctuary').disabled, false);
+  } finally {
+    resetAuthStoreForTests();
     dom.restore();
   }
 });

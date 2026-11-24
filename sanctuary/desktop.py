@@ -132,21 +132,6 @@ def start_server_process(port: int, use_ssl: bool) -> subprocess.Popen:
     return lifecycle.track(proc)
 
 
-def _register_keepassxc_nmh() -> dict:
-    nmh_path = os.path.join(REPO_ROOT, "browser-desktop", "keepassxc_nmh.py")
-    if not os.path.isfile(nmh_path):
-        return {"registered": False, "reason": "keepassxc_nmh.py missing"}
-    try:
-        spec = importlib.util.spec_from_file_location("keepassxc_nmh", nmh_path)
-        if spec and spec.loader:
-            mod = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(mod)
-            return mod.ensure_keepassxc_native_messaging()
-    except Exception as e:
-        return {"registered": False, "reason": str(e)}
-    return {"registered": False, "reason": "loader unavailable"}
-
-
 def find_gecko_binary(repo_root: str = REPO_ROOT) -> str | None:
     """Locate a compiled or packaged Sanctuary Browser Gecko binary when available."""
     override = str(os.getenv("SANCTUARY_GECKO_BIN") or "").strip()
@@ -220,7 +205,6 @@ def run_gecko_window(
     use_ssl: bool | None = None,
 ) -> int:
     """Launch compiled LM-Sanctuary Gecko host alongside the Flask AI node."""
-    _register_keepassxc_nmh()
     parsed = urlparse(server_url)
     resolved_port = port if port is not None else (parsed.port or 5000)
     resolved_ssl = use_ssl if use_ssl is not None else (parsed.scheme == "https")

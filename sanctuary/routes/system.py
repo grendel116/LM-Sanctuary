@@ -109,6 +109,10 @@ def _sync_openhands_env(settings: dict) -> None:
     """Propagate OpenHands + GreenPT settings into process environment."""
     for field_key, env_key, default_val in _OPENHANDS_ENV_FIELDS:
         val = str(settings.get(field_key) or "").strip() or default_val
+        if field_key == "greenpt_api_key" and not val:
+            vault_key, _init, unlocked = _read_vault_greenpt_key()
+            if unlocked and vault_key:
+                val = vault_key
         if val:
             os.environ[env_key] = val
         else:
@@ -119,6 +123,88 @@ def _sync_openhands_env(settings: dict) -> None:
     os.environ["OPENHANDS_AUTO_START_SERVER"] = (
         "true" if settings.get("openhands_auto_start_server") else "false"
     )
+
+
+def _read_vault_greenpt_key() -> tuple[str, bool, bool]:
+    try:
+        from utils.keepassxc_client import get_keepassxc_bridge
+
+        bridge = get_keepassxc_bridge()
+        initialized = bridge.is_initialized()
+        unlocked = bridge.is_unlocked()
+        if unlocked:
+            return bridge.get_secret("greenpt_api_key"), initialized, True
+        return "", initialized, False
+    except Exception:
+        return "", False, False
+
+
+def _write_vault_greenpt_key(secret: str) -> bool:
+    try:
+        from utils.keepassxc_client import get_keepassxc_bridge
+
+        bridge = get_keepassxc_bridge()
+        if not bridge.is_unlocked():
+            return False
+        bridge.set_secret("greenpt_api_key", secret, title="Cloud API Key")
+        return True
+    except Exception:
+        return False
+
+
+def sync_vault_api_keys_to_env() -> None:
+    val, _init, unlocked = _read_vault_greenpt_key()
+    if unlocked and val:
+        os.environ["GREENPT_API_KEY"] = val
+
+
+def clear_vault_api_keys_from_env() -> None:
+    settings_path = os.path.join(vs.VARIABLES_DIR, "project_settings.json")
+    try:
+        if os.path.exists(settings_path):
+            with open(settings_path, "r", encoding="utf-8") as f:
+                settings = json.load(f)
+            if settings.get("greenpt_api_key_in_vault"):
+                os.environ.pop("GREENPT_API_KEY", None)
+    except Exception:
+        pass
+
+
+def mark_greenpt_key_in_vault(in_vault: bool, secret: str = "") -> None:
+    if secret:
+        os.environ["GREENPT_API_KEY"] = secret
+    else:
+        os.environ.pop("GREENPT_API_KEY", None)
+    settings_path = os.path.join(vs.VARIABLES_DIR, "project_settings.json")
+    if not os.path.exists(settings_path):
+        return
+    try:
+        with open(settings_path, "r", encoding="utf-8") as f:
+            settings = json.load(f)
+        settings["greenpt_api_key"] = ""
+        settings["greenpt_api_key_in_vault"] = bool(in_vault)
+        with open(settings_path, "w", encoding="utf-8") as f:
+            json.dump(settings, f, indent=2, ensure_ascii=False)
+    except Exception:
+        pass
+
+
+def migrate_plaintext_api_keys_to_vault() -> None:
+    settings_path = os.path.join(vs.VARIABLES_DIR, "project_settings.json")
+    if not os.path.exists(settings_path):
+        return
+    try:
+        with open(settings_path, "r", encoding="utf-8") as f:
+            settings = json.load(f)
+        plain = str(settings.get("greenpt_api_key") or "").strip()
+        if plain and _write_vault_greenpt_key(plain):
+            settings["greenpt_api_key"] = ""
+            settings["greenpt_api_key_in_vault"] = True
+            with open(settings_path, "w", encoding="utf-8") as f:
+                json.dump(settings, f, indent=2, ensure_ascii=False)
+            os.environ["GREENPT_API_KEY"] = plain
+    except Exception:
+        pass
 
 
 @system_bp.route('/api/project_settings', methods=['GET', 'POST'])
@@ -222,10 +308,31 @@ def project_settings():
 
                 _sync_openhands_env(settings)
 
+                vault_key, vault_init, vault_unlocked = _read_vault_greenpt_key()
+                if vault_unlocked and str(settings.get("greenpt_api_key") or "").strip():
+                    if _write_vault_greenpt_key(str(settings["greenpt_api_key"]).strip()):
+                        vault_key = str(settings["greenpt_api_key"]).strip()
+                        settings["greenpt_api_key"] = ""
+                        settings["greenpt_api_key_in_vault"] = True
+                        dirty = True
+
                 if dirty:
                     with open(settings_path, "w", encoding="utf-8") as f:
                         json.dump(settings, f, indent=2)
-                return jsonify(settings)
+
+                resp_settings = dict(settings)
+                if vault_init and vault_unlocked and vault_key:
+                    resp_settings["greenpt_api_key"] = vault_key
+                    resp_settings["greenpt_api_key_in_vault"] = True
+                    resp_settings["vault_locked"] = False
+                elif vault_init and not vault_unlocked and settings.get("greenpt_api_key_in_vault"):
+                    resp_settings["greenpt_api_key"] = ""
+                    resp_settings["greenpt_api_key_in_vault"] = True
+                    resp_settings["vault_locked"] = True
+                else:
+                    resp_settings["greenpt_api_key_in_vault"] = bool(settings.get("greenpt_api_key_in_vault"))
+                    resp_settings["vault_locked"] = bool(vault_init and not vault_unlocked)
+                return jsonify(resp_settings)
             except Exception as e:
                 print(f"Error reading project settings: {e}")
                 return jsonify(default_settings)
@@ -343,9 +450,24 @@ def project_settings():
                 "tts_voice": tts_voice,
             })
 
+            vault_key_before, vault_init, vault_unlocked = _read_vault_greenpt_key()
+            if "greenpt_api_key" in data and vault_init:
+                submitted_key = str(oh_updates.get("greenpt_api_key") or "").strip()
+                if vault_unlocked:
+                    _write_vault_greenpt_key(submitted_key)
+                    settings["greenpt_api_key"] = ""
+                    settings["greenpt_api_key_in_vault"] = bool(submitted_key)
+                    vault_key_before = submitted_key
+                elif not submitted_key and settings.get("greenpt_api_key_in_vault"):
+                    settings["greenpt_api_key"] = ""
+            elif vault_unlocked and not str(settings.get("greenpt_api_key") or "").strip() and vault_key_before:
+                settings["greenpt_api_key_in_vault"] = True
+
             # Keep environment variables and cached settings in sync
             os.environ["TTS_VOICE"] = tts_voice
             _sync_openhands_env(settings)
+            if vault_unlocked and vault_key_before:
+                os.environ["GREENPT_API_KEY"] = vault_key_before
             try:
                 from runners import openhands_server
 
@@ -372,7 +494,15 @@ def project_settings():
                 rp._settings_mtime = 0.0
             except Exception:
                 pass
-            return jsonify({"status": "success", "settings": settings})
+            resp_settings = dict(settings)
+            if vault_init and vault_unlocked and vault_key_before:
+                resp_settings["greenpt_api_key"] = vault_key_before
+                resp_settings["greenpt_api_key_in_vault"] = True
+                resp_settings["vault_locked"] = False
+            else:
+                resp_settings["greenpt_api_key_in_vault"] = bool(settings.get("greenpt_api_key_in_vault"))
+                resp_settings["vault_locked"] = bool(vault_init and not vault_unlocked)
+            return jsonify({"status": "success", "settings": resp_settings})
         except Exception as e:
             print(f"Error saving project settings: {e}")
             return jsonify({"error": str(e)}), 500

@@ -80,10 +80,14 @@ def compute_next_due(recurrence: str, after: datetime) -> datetime | None:
 def evaluate_due_automations(now: datetime | None = None, execute_callback=None) -> list[str]:
     """Check active program quests and run any due `auto_prompt` automations."""
     from runners.program import get_active_program, get_active_session
+    from utils.social_vault import VaultLockedError
 
     current_time = now or datetime.now().astimezone()
     program_id = get_active_program()
-    quests = quest_manager.load_quests(program_id)
+    try:
+        quests = quest_manager.load_quests(program_id)
+    except VaultLockedError:
+        return []
     triggered: list[str] = []
 
     for quest in quests:

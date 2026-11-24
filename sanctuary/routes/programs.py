@@ -24,6 +24,7 @@ from runners.program import (
     set_active_session,
 )
 from utils.session_data import read_session_data, write_session_data
+from utils.social_vault import VaultLockedError
 
 programs_bp = Blueprint("programs_bp", __name__)
 
@@ -69,6 +70,7 @@ def _derive_session_entry(
                 gm = getattr(st.runner, 'sessions_group_meta', {}).get(session_id)
                 group_meta = dict(gm) if isinstance(gm, dict) else None
 
+    vault_locked = False
     if not loaded_from_mem and os.path.exists(fpath):
         try:
             raw = read_session_data(fpath)
@@ -79,12 +81,27 @@ def _derive_session_entry(
                 group_meta = gm if isinstance(gm, dict) else None
             elif isinstance(raw, list):
                 messages = raw
+        except VaultLockedError:
+            vault_locked = True
         except Exception:
             pass
 
     custom_title = str(memory_state.get('title') or '').strip()
     is_group = bool(isinstance(group_meta, dict) and group_meta.get('is_group'))
     guest_ids = list(group_meta.get('guest_ids') or []) if is_group else []
+
+    if vault_locked:
+        title = 'Primary Chat' if session_id == 'default' else 'Encrypted Chat'
+        last_preview = 'Encrypted session (unlock vault)'
+        return {
+            'id': session_id,
+            'title': title,
+            'custom_title': custom_title,
+            'snippet': last_preview,
+            'message_count': 0,
+            'updated_at': mtime,
+            'vault_locked': True,
+        }
 
     if custom_title:
         title = custom_title

@@ -10,6 +10,7 @@ import {
   deduplicateUnifiedItems,
   mergeViewerActivityMeta,
   normalizeNativeUri,
+  reconcileViewerMetricFloors,
   toUnifiedItem,
 } from '../core/schema/unifiedItem.js';
 import { fetchSanctuaryFeedProfile, saveSanctuaryFeedProfile } from '../queries/sanctuary.js';
@@ -24,7 +25,7 @@ const FEED_TASTE_MEMORY_KV_KEY = 'feed_taste_memory_v1';
 const FEED_DISMISSED_POSTS_KV_KEY = 'feed_dismissed_posts';
 const FEED_VIEWER_INTERACTIONS_KV_KEY = 'feed_viewer_interactions_v1';
 const RANKING_MANIFEST_KV_KEY = 'sanctuary_ranking_manifest_v1';
-export const HARVESTER_CACHE_VERSION = 13;
+export const HARVESTER_CACHE_VERSION = 14;
 const STREAM_CACHE_TTL_MS = 24 * 3600_000;
 const ROLLING_DISCOVERY_STREAMS = new Set(['feed', 'photos', 'video', 'visual']);
 let sanctuarySyncBound = false;
@@ -174,7 +175,24 @@ export function applyViewerInteractionsToItem(rawItem, ledger = feedStore.get().
     changed = true;
   }
 
-  return changed ? { ...u, _meta: nextMeta } : u;
+  const base = changed ? { ...u, _meta: nextMeta } : u;
+  const isNowLiked = Boolean(base._meta?.mastodon?.favourited || base._meta?.bluesky?.likeUri);
+  const isNowReposted = Boolean(base._meta?.mastodon?.reblogged || base._meta?.bluesky?.repostUri);
+  const floorLikes = isNowLiked ? Math.max(1, Number(entry.minLikes || 1)) : 0;
+  const floorReposts = isNowReposted ? Math.max(1, Number(entry.minReposts || 1)) : 0;
+  const curLikes = Number(base.metrics?.likes || 0);
+  const curReposts = Number(base.metrics?.reposts || 0);
+  if (floorLikes > curLikes || floorReposts > curReposts) {
+    return reconcileViewerMetricFloors({
+      ...base,
+      metrics: {
+        ...(base.metrics || { replies: 0, reposts: 0, likes: 0 }),
+        likes: Math.max(curLikes, floorLikes),
+        reposts: Math.max(curReposts, floorReposts),
+      },
+    });
+  }
+  return reconcileViewerMetricFloors(base);
 }
 
 export function recordViewerInteraction(rawItem) {
@@ -202,6 +220,14 @@ export function recordViewerInteraction(rawItem) {
   }
   if (u._meta?.feedFeedback) {
     entry.feedFeedback = u._meta.feedFeedback;
+  }
+  const hasLiked = Boolean(entry.favourited || entry.likeUri);
+  const hasReposted = Boolean(entry.reblogged || entry.repostUri);
+  if (hasLiked) {
+    entry.minLikes = Math.max(1, Number(u.metrics?.likes || 0));
+  }
+  if (hasReposted) {
+    entry.minReposts = Math.max(1, Number(u.metrics?.reposts || 0));
   }
 
   const prev = feedStore.get().viewerInteractions || {};
@@ -258,6 +284,16 @@ export function mergeDiscoveredViewerInteractions(entries = []) {
       }
       if (raw.repostUri && !cur.repostUri) {
         merged.repostUri = raw.repostUri;
+        entryChanged = true;
+      }
+      const nextMinLikes = Math.max(Number(cur.minLikes || 0), Number(raw.minLikes || 0));
+      if (nextMinLikes > Number(cur.minLikes || 0)) {
+        merged.minLikes = nextMinLikes;
+        entryChanged = true;
+      }
+      const nextMinReposts = Math.max(Number(cur.minReposts || 0), Number(raw.minReposts || 0));
+      if (nextMinReposts > Number(cur.minReposts || 0)) {
+        merged.minReposts = nextMinReposts;
         entryChanged = true;
       }
       if (entryChanged) {

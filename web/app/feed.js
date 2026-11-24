@@ -9,7 +9,6 @@ import {
 } from '../components/PostCard.js';
 import { attachPullToRefresh } from '../components/PullToRefresh.js';
 import { attachSearchSuggestions } from '../components/SearchSuggestions.js';
-import { openMediaLightbox } from '../components/sanctuary/PortraitGrid.js';
 import { createClassicModalDialog, showAlert, showConfirm } from '../components/sanctuary/SanctuaryDialog.js';
 import { createLoadingState } from '../components/ui/index.js';
 import { normalizeInstanceUrl } from '../constants/endpoints.js';
@@ -18,7 +17,6 @@ import { hasVisualMediaAttachment, isAutomatedSyndicationOrBotItem, rankFeedItem
 import {
   applyKeywordFilters,
   buildOwnAccountKeySet,
-  getSensitiveMediaWarning,
   isOwnOrSelfBoostedUnifiedItem,
   isUnifiedItemModerated,
   resolveContextualStreamItems,
@@ -75,7 +73,7 @@ import {
   setStreamLoading,
   setUserLists,
 } from '../state/feedStore.js';
-import { connectionStore } from '../state/sanctuary/connection.js';
+import { connectionStore, onSanctuaryEvent } from '../state/sanctuary/connection.js';
 import { publishOrganicPost } from './composeModal.js';
 import { openEditPostDialog } from './profile.js';
 
@@ -104,7 +102,7 @@ function getSocialIdsSig(authState) {
 }
 
 function getAccountsUiSig(authState) {
-  return (authState?.accounts || [])
+  return `${Boolean(authState?.vaultLocked)}:` + (authState?.accounts || [])
     .map((a) => `${a.id}:${a.avatar || ''}`)
     .join('|');
 }
@@ -166,6 +164,7 @@ function computePostReactionSig(post) {
     linked.mastodonStatusId || m.statusId || '',
     linked.blueskyUri || b.uri || '',
     linked.threadsPostId || post?._meta?.threads?.postId || '',
+    Boolean(authStore.get()?.vaultLocked),
     JSON.stringify(post?._meta?.metricsBreakdown || null),
   ].join('\u001f');
 }
@@ -333,6 +332,7 @@ export function mountFeedScreen(containerEl, {
 
   const cardCache = new Map();
   const streamOrders = new Map();
+  const warmHydratedStreams = new Set();
   const pendingReactions = new Set();
   let loopsMuted = true;
   let activeLoopsSlide = null;
@@ -343,6 +343,14 @@ export function mountFeedScreen(containerEl, {
     if (!cardEl) return;
     loopsSnapObserver?.unobserve?.(cardEl);
     loopsPreloadObserver?.unobserve?.(cardEl);
+  }
+
+  function clearCardCache() {
+    for (const entry of cardCache.values()) {
+      unobserveCardLoops(entry.card);
+      entry.card?.remove?.();
+    }
+    cardCache.clear();
   }
   const prefsHydrationPromise = Promise.allSettled([
     hydrateFeedTuning(),
@@ -388,7 +396,7 @@ export function mountFeedScreen(containerEl, {
       setActiveStream(key);
       if (key !== prevStream) {
         const bucket = feedStore.get().streams[key];
-        if (!bucket || (bucket.items?.length || 0) === 0) {
+        if (!bucket || (bucket.items?.length || 0) === 0 || warmHydratedStreams.has(key)) {
           void loadStream(false);
         }
       }
@@ -427,38 +435,6 @@ export function mountFeedScreen(containerEl, {
   manageListsBtn.textContent = 'Manage Lists';
   listFilterBar.append(listSelect, manageListsBtn);
 
-  let photosViewMode = 'stream';
-  const photosViewBar = doc.createElement('div');
-  photosViewBar.className = 'photos-view-bar';
-  photosViewBar.hidden = true;
-  const photosToggleGroup = doc.createElement('div');
-  photosToggleGroup.className = 'photos-view-toggle';
-  photosToggleGroup.setAttribute('role', 'group');
-  photosToggleGroup.setAttribute('aria-label', 'Photos layout');
-  const photosViewButtons = new Map();
-  for (const [modeId, modeLabel] of [['stream', 'Stream'], ['mosaic', 'Gallery']]) {
-    const vBtn = doc.createElement('button');
-    vBtn.type = 'button';
-    vBtn.className = `photos-view-btn${modeId === photosViewMode ? ' active' : ''}`;
-    vBtn.dataset.photosView = modeId;
-    vBtn.setAttribute('aria-pressed', modeId === photosViewMode ? 'true' : 'false');
-    vBtn.textContent = modeLabel;
-    vBtn.addEventListener('click', () => {
-      if (photosViewMode === modeId) return;
-      photosViewMode = modeId;
-      for (const [k, b] of photosViewButtons.entries()) {
-        const isSel = k === photosViewMode;
-        b.classList.toggle('active', isSel);
-        b.setAttribute('aria-pressed', isSel ? 'true' : 'false');
-      }
-      cardCache.clear();
-      render();
-    });
-    photosViewButtons.set(modeId, vBtn);
-    photosToggleGroup.appendChild(vBtn);
-  }
-  photosViewBar.append(photosToggleGroup);
-
   const hashtagBar = doc.createElement('div');
   hashtagBar.className = 'feed-hashtag-bar';
   hashtagBar.hidden = true;
@@ -478,7 +454,7 @@ export function mountFeedScreen(containerEl, {
   });
   hashtagBar.append(hashtagLabel, hashtagClearBtn);
 
-  stageHeader.append(tabsRow, listFilterBar, photosViewBar, hashtagBar);
+  stageHeader.append(tabsRow, listFilterBar, hashtagBar);
 
   // Inline quick-compose bar ("What's new?")
   const inlineComposeForm = doc.createElement('form');
@@ -650,7 +626,32 @@ export function mountFeedScreen(containerEl, {
         syncInfiniteFooter();
         void loadStream(true);
       });
-      footerStatusEl.appendChild(retryBtn);
+      const errNote = doc.createElement('span');
+      errNote.className = 'feed-infinite-error';
+      errNote.textContent = formatApiErrorMessage(appendError, 'Unable to load older posts.');
+      footerStatusEl.append(retryBtn, errNote);
+      return;
+    }
+    const st = feedStore.get();
+    const sName = ALLOWED_STREAMS.has(st.activeStream) ? st.activeStream : 'feed';
+    const b = st.streams[sName];
+    if (
+      sName !== 'video'
+      && !inFlightRefresh
+      && !activeHashtag
+      && b?.nextCursor
+      && (b.items?.length || 0) > 0
+      && (sName !== 'following' || hasAnySocialAccount(authStore.get()))
+    ) {
+      const moreBtn = doc.createElement('button');
+      moreBtn.type = 'button';
+      moreBtn.className = 'btn-sleek-pill feed-load-more-btn';
+      moreBtn.textContent = 'Load more posts';
+      moreBtn.addEventListener('click', () => {
+        lastAutoCursorSig = '';
+        void loadStream(true);
+      });
+      footerStatusEl.appendChild(moreBtn);
     }
   }
 
@@ -1080,7 +1081,7 @@ export function mountFeedScreen(containerEl, {
         if (destroyed || epoch !== requestEpoch) return;
       }
 
-      if (!append && (fediAuth || bskyAuth)) {
+      if (!append && streamName === 'following' && (fediAuth || bskyAuth)) {
         void syncOwnViewerActivity({ fediAuth, bskyAuth })
           .then((entries) => {
             if (!destroyed && Array.isArray(entries) && entries.length > 0) {
@@ -1133,7 +1134,7 @@ export function mountFeedScreen(containerEl, {
               serviceUrl: bskyAuth.meta.serviceUrl,
               accessJwt: bskyAuth.secrets.accessJwt,
               refreshJwt: bskyAuth.secrets.refreshJwt,
-              onSessionRefreshed: (tok) => updateAccountTokens(bskyAuth.meta.id, tok),
+              onSessionRefreshed: (tok) => updateAccountTokens(bskyAuth.meta.id, tok).catch(() => {}),
               cursor: append ? (curCursor.bsky || '') : '',
               limit: 50,
               ...(forceRefresh && !append ? { cache: 'no-store' } : {}),
@@ -1190,8 +1191,11 @@ export function mountFeedScreen(containerEl, {
           ? combinedItems
           : mergeChronologicalPosts([], combinedItems);
         if (append) appendStreamItems('following', nextItems, nextCursor);
-        else setStreamItems('following', nextItems, nextCursor);
-        await persistStreamCache('following');
+        else {
+          warmHydratedStreams.delete('following');
+          setStreamItems('following', nextItems, nextCursor);
+        }
+        await persistStreamCache('following').catch(() => {});
         scheduleMetricsEnrichment(nextItems, () => destroyed || epoch !== requestEpoch);
         return;
       }
@@ -1202,7 +1206,8 @@ export function mountFeedScreen(containerEl, {
       const discoveryMode = streamName === 'photos' || streamName === 'video' || streamName === 'visual'
         ? streamName
         : 'default';
-      const harvested = await harvestSanctuaryFeed({
+      const prevCount = append ? (feedStore.get().streams[streamName]?.items?.length || 0) : 0;
+      const harvestOpts = {
         fediAuth,
         bskyAuth,
         threadsAuth,
@@ -1213,15 +1218,36 @@ export function mountFeedScreen(containerEl, {
         tasteMemory: latestState.tasteMemory,
         moderatedActors: latestState.moderatedActors,
         filterRules: latestState.filters,
-        cursor: append ? curCursor : null,
-        append,
-        forceRefresh: Boolean(forceRefresh && !append),
-      });
+      };
+      let harvested;
+      try {
+        harvested = await harvestSanctuaryFeed({
+          ...harvestOpts,
+          cursor: append ? curCursor : null,
+          append,
+          forceRefresh: Boolean(forceRefresh && !append),
+        });
+      } catch (harvestErr) {
+        if (append && curCursor && Object.keys(curCursor).length > 1) {
+          harvested = await harvestSanctuaryFeed({
+            ...harvestOpts,
+            cursor: { page: Math.max(1, Number(curCursor?.page || 1)) },
+            append: true,
+            forceRefresh: false,
+          });
+        } else {
+          throw harvestErr;
+        }
+      }
       if (destroyed || epoch !== requestEpoch) return;
 
-      const harvestedItems = Array.isArray(harvested?.items) ? harvested.items : [];
-      const nextCursor = harvested?.nextCursor || null;
-      const nextItems = append
+      if (Array.isArray(harvested?.viewerEntries) && harvested.viewerEntries.length > 0) {
+        mergeDiscoveredViewerInteractions(harvested.viewerEntries);
+      }
+
+      let harvestedItems = Array.isArray(harvested?.items) ? harvested.items : [];
+      let nextCursor = harvested?.nextCursor || null;
+      let nextItems = append
         ? harvestedItems
         : mergeChronologicalPosts([], harvestedItems);
 
@@ -1242,19 +1268,42 @@ export function mountFeedScreen(containerEl, {
 
       if (append) {
         appendStreamItems(streamName, nextItems, nextCursor);
+        const afterCount = feedStore.get().streams[streamName]?.items?.length || 0;
+        if (afterCount === prevCount && nextCursor) {
+          harvested = await harvestSanctuaryFeed({
+            ...harvestOpts,
+            cursor: nextCursor,
+            append: true,
+            forceRefresh: false,
+          });
+          if (destroyed || epoch !== requestEpoch) return;
+          if (Array.isArray(harvested?.viewerEntries) && harvested.viewerEntries.length > 0) {
+            mergeDiscoveredViewerInteractions(harvested.viewerEntries);
+          }
+          harvestedItems = Array.isArray(harvested?.items) ? harvested.items : [];
+          nextCursor = harvested?.nextCursor || null;
+          nextItems = harvestedItems;
+          if (needPreScore && nextItems.length > 0) {
+            await scoreItemsWithNode(nextItems);
+            if (destroyed || epoch !== requestEpoch) return;
+          }
+          appendStreamItems(streamName, nextItems, nextCursor);
+        }
       } else {
+        warmHydratedStreams.delete(streamName);
         setStreamItems(streamName, nextItems, nextCursor, {
           shuffleSeed: `${Date.now()}:${Math.random().toString(36).slice(2)}`,
           deprioritizeIds: priorSeenIds,
         });
       }
-      await persistStreamCache(streamName);
+      await persistStreamCache(streamName).catch(() => {});
       if (!needPreScore && nextItems.length > 0) {
         void scoreItemsWithNode(nextItems);
       }
       scheduleMetricsEnrichment(nextItems, () => destroyed || epoch !== requestEpoch);
     } catch (err) {
       if (destroyed || epoch !== requestEpoch) return;
+      console.warn('[feed] loadStream error:', err?.message || err);
       if (append) {
         appendError = err?.message || 'Unable to load older posts.';
       } else {
@@ -1302,7 +1351,7 @@ export function mountFeedScreen(containerEl, {
               void loadStream(true);
             }
           }
-        }, 0);
+        }, append ? 120 : 0);
       }
     }
   }
@@ -1442,10 +1491,6 @@ export function mountFeedScreen(containerEl, {
       });
     }
 
-    if (streamVariant === 'photo_mosaic') {
-      return createPhotoMosaicTile(initialPost, commonHandlers, slideIdx);
-    }
-
     return createPostCard(initialPost, {
       ...commonHandlers,
       onTogglePin: hasMasto && postProto === 'mastodon' ? async () => {
@@ -1461,125 +1506,6 @@ export function mountFeedScreen(containerEl, {
       layoutVariant: streamVariant,
       mediaPriority: slideIdx === 0 ? 'high' : (slideIdx < 3 ? 'eager' : 'lazy'),
     });
-  }
-
-  function createPhotoMosaicTile(rawPost, handlers, idx = 0) {
-    const tile = doc.createElement('article');
-    tile.className = 'photo-mosaic-tile';
-    tile.dataset.postId = rawPost?.id || '';
-    tile.dataset.postKey = rawPost?.key || rawPost?.id || '';
-    tile.dataset.protocol = rawPost?.protocol || 'mastodon';
-
-    const atts = Array.isArray(rawPost?.attachments) ? rawPost.attachments : [];
-    const firstAtt = atts[0] || {};
-    const sensitiveWarning = getSensitiveMediaWarning(rawPost, feedStore.get().rankingManifest);
-
-    const thumbBtn = doc.createElement('button');
-    thumbBtn.type = 'button';
-    thumbBtn.className = `photo-mosaic-thumb-btn${sensitiveWarning ? ' is-blurred' : ''}`;
-    const altDesc = String(firstAtt.alt_text || firstAtt.description || '').trim();
-    thumbBtn.setAttribute(
-      'aria-label',
-      altDesc ? `Open photo: ${altDesc}` : `Open photo by @${String(rawPost?.author?.handle || 'creator').replace(/^@/, '')}`
-    );
-
-    const img = doc.createElement('img');
-    img.className = 'photo-mosaic-img';
-    img.alt = altDesc || 'Photo attachment';
-    img.decoding = 'async';
-    img.referrerPolicy = 'no-referrer';
-    img.setAttribute('referrerpolicy', 'no-referrer');
-    if (idx === 0) {
-      img.fetchPriority = 'high';
-      img.setAttribute('fetchpriority', 'high');
-    } else if (idx >= 6) {
-      img.loading = 'lazy';
-      img.setAttribute('loading', 'lazy');
-    }
-    const w = Number.parseInt(firstAtt.width, 10);
-    const h = Number.parseInt(firstAtt.height, 10);
-    if (Number.isFinite(w) && w > 0 && Number.isFinite(h) && h > 0) {
-      img.width = w;
-      img.height = h;
-      img.setAttribute('width', String(w));
-      img.setAttribute('height', String(h));
-    }
-    const primaryUrl = firstAtt.url || firstAtt.previewUrl || '';
-    const fallbackUrl = firstAtt.previewUrl || '';
-    if (fallbackUrl && fallbackUrl !== primaryUrl) {
-      img.addEventListener('error', () => {
-        if (img.src !== fallbackUrl) img.src = fallbackUrl;
-      }, { once: true });
-    }
-    img.src = primaryUrl;
-    thumbBtn.appendChild(img);
-
-    let revealed = !sensitiveWarning;
-    let cwOverlay = null;
-    if (sensitiveWarning) {
-      cwOverlay = doc.createElement('span');
-      cwOverlay.className = 'photo-mosaic-cw-badge';
-      cwOverlay.textContent = `Show · ${sensitiveWarning}`;
-      thumbBtn.appendChild(cwOverlay);
-    }
-
-    thumbBtn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      if (!revealed) {
-        revealed = true;
-        thumbBtn.classList.remove('is-blurred');
-        cwOverlay?.remove?.();
-        return;
-      }
-      openMediaLightbox(firstAtt.url || firstAtt.previewUrl, {
-        source: 'social',
-        initialIndex: 0,
-        prompt: altDesc,
-        type: String(firstAtt.type || firstAtt.mime_type || firstAtt.mimeType || 'image'),
-        mimeType: String(firstAtt.mime_type || firstAtt.mimeType || ''),
-        galleryItems: atts.map((m) => ({
-          url: m.url || m.previewUrl || '',
-          prompt: m.alt_text || m.description || '',
-          type: String(m.type || m.mime_type || m.mimeType || 'image'),
-          mimeType: String(m.mime_type || m.mimeType || ''),
-        })),
-      });
-    });
-    tile.appendChild(thumbBtn);
-
-    if (atts.length > 1) {
-      const badges = doc.createElement('div');
-      badges.className = 'photo-mosaic-badges';
-      const countBadge = doc.createElement('span');
-      countBadge.className = 'photo-mosaic-badge';
-      countBadge.textContent = `1/${atts.length}`;
-      badges.appendChild(countBadge);
-      tile.appendChild(badges);
-    }
-
-    const metaBar = doc.createElement('div');
-    metaBar.className = 'photo-mosaic-meta';
-    const handleBtn = doc.createElement('button');
-    handleBtn.type = 'button';
-    handleBtn.className = 'photo-mosaic-author';
-    const cleanH = String(rawPost?.author?.handle || rawPost?.author?.name || 'creator').replace(/^@/, '');
-    handleBtn.textContent = `@${cleanH}`;
-    handleBtn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      handlers.onSelectAuthor?.(rawPost?.author, rawPost);
-    });
-    const openBtn = doc.createElement('button');
-    openBtn.type = 'button';
-    openBtn.className = 'photo-mosaic-open-btn';
-    openBtn.textContent = `♥ ${Number(rawPost?.metrics?.likes || 0)}`;
-    openBtn.setAttribute('aria-label', `Open post by @${cleanH}`);
-    openBtn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      handlers.onOpenThread?.(rawPost);
-    });
-    metaBar.append(handleBtn, openBtn);
-    tile.appendChild(metaBar);
-    return tile;
   }
 
   function resolveStableOrderedItems(streamName, bucket, state) {
@@ -1699,10 +1625,7 @@ export function mountFeedScreen(containerEl, {
 
   function reconcilePostList(visibleItems, { streamName = 'feed', showSanctuary, hasMasto, hasBsky, hasThreads = false, retrySig = '', manifestSig = '', isLoading, errorMsg }) {
     if (visibleItems.length === 0) {
-      for (const entry of cardCache.values()) {
-        unobserveCardLoops(entry.card);
-      }
-      cardCache.clear();
+      clearCardCache();
       if (errorMsg) {
         listEl.replaceChildren(createOfflineNotice({ variant: 'error', message: errorMsg }));
       } else if (isLoading) {
@@ -1714,12 +1637,6 @@ export function mountFeedScreen(containerEl, {
         listEl.replaceChildren(empty);
       }
       return;
-    }
-
-    for (const child of [...listEl.children]) {
-      if (child.tagName !== 'ARTICLE') {
-        child.remove();
-      }
     }
 
     const activeKeys = new Set();
@@ -1737,14 +1654,24 @@ export function mountFeedScreen(containerEl, {
       }
     }
 
+    const liveCachedNodes = new Set();
+    for (const entry of cardCache.values()) {
+      if (entry?.card) liveCachedNodes.add(entry.card);
+    }
+    for (const child of [...listEl.children]) {
+      if (!liveCachedNodes.has(child)) {
+        unobserveCardLoops(child);
+        child.remove();
+      }
+    }
+
     const canMoveBefore =
       Object.hasOwn(globalThis.Element?.prototype || {}, 'moveBefore') &&
       typeof listEl.moveBefore === 'function';
 
     const streamVariant = streamName === 'video'
       ? 'loops'
-      : (streamName === 'photos' ? (photosViewMode === 'mosaic' ? 'photo_mosaic' : 'ig_photo') : 'default');
-    listEl.classList.toggle('is-photos-mosaic', streamVariant === 'photo_mosaic');
+      : (streamName === 'photos' ? 'ig_photo' : 'default');
     const prevActiveKey = activeLoopsSlide?.dataset?.postKey || activeLoopsSlide?.dataset?.postId || '';
     for (let idx = 0; idx < keyedEntries.length; idx += 1) {
       const { post, key } = keyedEntries[idx];
@@ -1767,11 +1694,15 @@ export function mountFeedScreen(containerEl, {
           existing.reactSig = reactSig;
         }
       }
-      cardEl.classList.toggle('is-below-fold', streamVariant !== 'loops' && streamVariant !== 'photo_mosaic' && idx >= 5);
+      cardEl.classList.toggle('is-below-fold', streamVariant !== 'loops' && idx >= 5);
       const currentAtIdx = listEl.children[idx] || null;
       if (currentAtIdx !== cardEl) {
         if (canMoveBefore && cardEl.parentNode === listEl) {
-          listEl.moveBefore(cardEl, currentAtIdx);
+          try {
+            listEl.moveBefore(cardEl, currentAtIdx);
+          } catch {
+            listEl.insertBefore(cardEl, currentAtIdx);
+          }
         } else {
           listEl.insertBefore(cardEl, currentAtIdx);
         }
@@ -1782,6 +1713,12 @@ export function mountFeedScreen(containerEl, {
       } else {
         unobserveCardLoops(cardEl);
       }
+    }
+    while (listEl.children.length > keyedEntries.length) {
+      const extra = listEl.lastElementChild;
+      if (!extra) break;
+      unobserveCardLoops(extra);
+      extra.remove();
     }
     if (streamVariant === 'loops') {
       if (!activeLoopsSlide || activeLoopsSlide.parentNode !== listEl) {
@@ -1807,7 +1744,6 @@ export function mountFeedScreen(containerEl, {
 
     root.dataset.stream = streamName;
     root.classList.toggle('is-loops-mode', isLoops);
-    photosViewBar.hidden = streamName !== 'photos';
     inlineComposeForm.hidden = streamName === 'photos' || isLoops;
     if (inlineComposeForm.hidden) {
       inlineStatusEl.hidden = true;
@@ -1898,7 +1834,7 @@ export function mountFeedScreen(containerEl, {
 
     const hasSocial = hasAnySocialAccount(authState);
     if (streamName === 'following' && !hasSocial) {
-      cardCache.clear();
+      clearCardCache();
       const box = doc.createElement('div');
       box.className = 'empty-state';
       const p = doc.createElement('p');
@@ -1951,20 +1887,23 @@ export function mountFeedScreen(containerEl, {
   }
 
   function isNearBottom() {
+    const rect = sentinelEl.getBoundingClientRect?.();
+    const vh = Number(globalThis.innerHeight || doc.documentElement?.clientHeight || 0);
+    if (rect && (rect.width > 0 || rect.height > 0) && vh > 0 && rect.top - vh <= INFINITE_SCROLL_THRESHOLD_PX) {
+      return true;
+    }
     const scrollH = Number(scrollTarget.scrollHeight || 0);
     const clientH = Number(scrollTarget.clientHeight || 0);
     const scrollT = Number(scrollTarget.scrollTop || 0);
     if (scrollH > 0 && clientH > 0 && scrollH - scrollT - clientH <= INFINITE_SCROLL_THRESHOLD_PX) {
       return true;
     }
-    if (!scrollRoot) {
-      const rootEl = doc.documentElement;
-      const docH = Number(rootEl?.scrollHeight || 0);
-      const docClientH = Number(rootEl?.clientHeight || 0);
-      const docScrollT = Number(rootEl?.scrollTop || globalThis.scrollY || 0);
-      if (docH > 0 && docClientH > 0 && docH - docScrollT - docClientH <= INFINITE_SCROLL_THRESHOLD_PX) {
-        return true;
-      }
+    const rootEl = doc.documentElement;
+    const docH = Number(rootEl?.scrollHeight || 0);
+    const docClientH = Number(rootEl?.clientHeight || 0);
+    const docScrollT = Number(rootEl?.scrollTop || globalThis.scrollY || 0);
+    if (docH > 0 && docClientH > 0 && docH - docScrollT - docClientH <= INFINITE_SCROLL_THRESHOLD_PX) {
+      return true;
     }
     return false;
   }
@@ -1977,6 +1916,7 @@ export function mountFeedScreen(containerEl, {
     }
   }
   scrollTarget.addEventListener('scroll', handleScroll, { passive: true });
+  globalThis.addEventListener?.('scroll', handleScroll, { passive: true });
 
   function onLoopsListScroll() {
     if (destroyed || (feedStore.get().activeStream || 'feed') !== 'video') return;
@@ -2081,7 +2021,7 @@ export function mountFeedScreen(containerEl, {
           void loadStream(true);
         }
       },
-      { root: scrollRoot, rootMargin: `0px 0px ${INFINITE_SCROLL_THRESHOLD_PX}px 0px` }
+      { root: null, rootMargin: `0px 0px ${INFINITE_SCROLL_THRESHOLD_PX}px 0px` }
     );
     intersectionObserver.observe(sentinelEl);
   }
@@ -2135,7 +2075,11 @@ export function mountFeedScreen(containerEl, {
       const activeName = ALLOWED_STREAMS.has(feedStore.get().activeStream) ? feedStore.get().activeStream : 'feed';
       const curItems = feedStore.get().streams[activeName]?.items || [];
       render();
-      if (activeName === 'following' && curItems.length === 0 && hasAnySocialAccount(nextAuth)) {
+      if (
+        !inFlightRefresh &&
+        hasAnySocialAccount(nextAuth) &&
+        ((activeName === 'following' && curItems.length === 0) || DISCOVERY_STREAMS.has(activeName))
+      ) {
         void loadStream(false);
       }
       return;
@@ -2154,7 +2098,7 @@ export function mountFeedScreen(containerEl, {
   const onManifestUpdated = () => {
     if (destroyed) return;
     streamOrders.clear();
-    cardCache.clear();
+    clearCardCache();
     render();
   };
   const onTasteReset = () => {
@@ -2191,6 +2135,10 @@ export function mountFeedScreen(containerEl, {
     const tag = e?.detail?.tag;
     if (tag) void openHashtagFeed(tag);
   };
+  const offVaultFeed = onSanctuaryEvent('sanctuary:vault-changed', (e) => {
+    if (destroyed || !e?.detail?.unlocked || inFlightRefresh) return;
+    void loadStream(false);
+  });
   doc.addEventListener?.('sanctuary:open-hashtag', onOpenHashtag);
   globalThis.addEventListener?.('sanctuary:feed-reset', onFeedReset);
   globalThis.addEventListener?.('sanctuary:manifest-updated', onManifestUpdated);
@@ -2205,10 +2153,10 @@ export function mountFeedScreen(containerEl, {
       if (destroyed) return;
       const curStreams = feedStore.get().streams || {};
       if ((curStreams.photos?.items?.length || 0) === 0) {
-        void hydrateCachedStream('photos').catch(() => {});
+        void hydrateCachedStream('photos').then((ok) => { if (ok && !destroyed) warmHydratedStreams.add('photos'); }).catch(() => {});
       }
       if ((curStreams.video?.items?.length || 0) === 0) {
-        void hydrateCachedStream('video').catch(() => {});
+        void hydrateCachedStream('video').then((ok) => { if (ok && !destroyed) warmHydratedStreams.add('video'); }).catch(() => {});
       }
     }, 600);
   };
@@ -2236,6 +2184,7 @@ export function mountFeedScreen(containerEl, {
       clearTimeout(tasteRescoreTimer);
       detachPull();
       scrollTarget.removeEventListener('scroll', handleScroll);
+      globalThis.removeEventListener?.('scroll', handleScroll);
       listEl.removeEventListener('scroll', onLoopsListScroll);
       listEl.removeEventListener('keydown', onLoopsKeyDown);
       if (onLoopsSnapChange) listEl.removeEventListener('scrollsnapchange', onLoopsSnapChange);
@@ -2249,6 +2198,7 @@ export function mountFeedScreen(containerEl, {
       unsubFeed();
       unsubConn();
       unsubAuth();
+      offVaultFeed();
     },
   };
 }

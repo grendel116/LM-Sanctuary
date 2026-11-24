@@ -196,18 +196,19 @@ export function renderPostThreadView(containerEl, {
         applyUpdatedItem(updated);
         mutatePostAcrossStreams(p.id || p.key, () => updated);
       },
-      onOpenThread: isFocal
-        ? null
-        : (p) => {
-            historyStack.push(currentFocal);
-            currentFocal = toUnifiedItem(p);
-            ancestors = [];
-            descendants = [];
-            replyStatus.hidden = true;
-            replyStatus.textContent = '';
-            renderSections();
-            void loadThreadContext();
-          },
+      disableCardOpenThread: isFocal,
+      onOpenThread: (p) => {
+        const next = toUnifiedItem(p);
+        if (!next?.id || next.id === currentFocal.id) return;
+        historyStack.push(currentFocal);
+        currentFocal = next;
+        ancestors = [];
+        descendants = [];
+        replyStatus.hidden = true;
+        replyStatus.textContent = '';
+        renderSections();
+        void loadThreadContext();
+      },
       onSelectAuthor,
       onAskSanctuary: onAskSanctuary
         ? (p) => {

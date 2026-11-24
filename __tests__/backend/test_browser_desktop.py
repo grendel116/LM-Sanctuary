@@ -18,7 +18,6 @@ for p in (str(DESKTOP_DIR), str(SANCTUARY_DIR)):
         sys.path.insert(0, p)
 
 import bootstrap_gecko  # noqa: E402
-import keepassxc_nmh  # noqa: E402
 import desktop as sanctuary_desktop  # noqa: E402
 
 
@@ -172,36 +171,12 @@ def run_tests() -> None:
         primary_bin.write_text("stub", encoding="utf-8")
         assert sanctuary_desktop.find_gecko_binary(str(fake_repo)) == str(primary_bin)
 
-        # 3. Verify KeePassXC Native Messaging registration on Windows & Linux simulations
-        fake_proxy = tmp_root / "keepassxc-proxy.exe"
-        fake_proxy.write_text("stub", encoding="utf-8")
-        win_writes: list[tuple[str, str, str]] = []
-        win_res = keepassxc_nmh.ensure_keepassxc_native_messaging(
-            platform_name="win32",
-            env={},
-            appdata_dir=tmp_root / "win_appdata",
-            extra_binary_paths=[fake_proxy],
-            winreg_reader=lambda *_args: None,
-            winreg_writer=lambda hive, key, val: win_writes.append((hive, key, val)),
-        )
-        assert win_res["registered"] is True
-        win_manifest = json.loads(Path(win_res["manifest_path"]).read_text(encoding="utf-8"))
-        assert win_manifest["allowed_extensions"] == ["keepassxc-browser@keepassxc.org"]
-        assert win_writes and win_writes[0][0] == "HKCU"
-        assert "LMSanctuary" in win_writes[0][1]
-
-        lin_proxy = tmp_root / "keepassxc-proxy"
-        lin_proxy.write_text("stub", encoding="utf-8")
-        lin_res = keepassxc_nmh.ensure_keepassxc_native_messaging(
-            platform_name="linux",
-            env={},
-            home_dir=tmp_root / "linux_home",
-            extra_binary_paths=[lin_proxy],
-        )
-        assert lin_res["registered"] is True
-        assert ".lm-sanctuary" in lin_res["manifest_path"]
-        lin_manifest = json.loads(Path(lin_res["manifest_path"]).read_text(encoding="utf-8"))
-        assert lin_manifest["path"] == str(lin_proxy)
+        # 3. Verify Gecko desktop host delegates vault unlock & open prompts cleanly to shell
+        parent_src = (DESKTOP_DIR / "chrome" / "browser" / "components" / "sanctuary" / "SanctuaryHostParent.sys.mjs").read_text(encoding="utf-8")
+        assert "vault-unlock-requested" in parent_src
+        assert "vault-open-requested" in parent_src
+        window_host_src = (DESKTOP_DIR / "chrome" / "browser" / "components" / "sanctuary" / "SanctuaryWindowHost.sys.mjs").read_text(encoding="utf-8")
+        assert "notifyShellEvent(" in window_host_src
 
         # 4. Verify sanctuary/desktop.py launcher helpers & absence of webbrowser.open
         desktop_src = (SANCTUARY_DIR / "desktop.py").read_text(encoding="utf-8")

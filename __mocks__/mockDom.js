@@ -747,6 +747,7 @@ export function installMockDom() {
     Element: globalThis.Element,
     HTMLDialogElement: globalThis.HTMLDialogElement,
     window: globalThis.window,
+    fetch: globalThis.fetch,
     __SANCTUARY_NO_AUTOBOOT: globalThis.__SANCTUARY_NO_AUTOBOOT,
   };
 
@@ -757,6 +758,9 @@ export function installMockDom() {
   globalThis.Node = { ELEMENT_NODE: 1, TEXT_NODE: 3, DOCUMENT_FRAGMENT_NODE: 11 };
   globalThis.Element = MockElement;
   globalThis.HTMLDialogElement = MockDialogElement;
+  globalThis.fetch = async (url) => {
+    throw new TypeError(`Unmocked fetch in test: ${String(url)}`);
+  };
 
   return {
     document: doc,
@@ -766,6 +770,7 @@ export function installMockDom() {
       globalThis.Element = prev.Element;
       globalThis.HTMLDialogElement = prev.HTMLDialogElement;
       globalThis.window = prev.window;
+      globalThis.fetch = prev.fetch;
       globalThis.__SANCTUARY_NO_AUTOBOOT = prev.__SANCTUARY_NO_AUTOBOOT;
     },
   };

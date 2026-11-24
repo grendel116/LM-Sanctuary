@@ -1,8 +1,10 @@
 import { fetchHistory, selectProgram } from '../../queries/sanctuary.js';
 import {
   cacheProgramHistory,
+  clearAllCachedProgramHistory,
   getCachedProgramHistory,
 } from '../../storage/kvStorage.js';
+import { isKeePassVaultMode } from '../authStore.js';
 import { createStore } from '../store.js';
 import { connectionStore } from './connection.js';
 import { getOutboxForSession } from './outboxModel.js';
@@ -20,6 +22,7 @@ function createInitialSessionState() {
     welcomeMessage: '',
     groupMeta: null,
     generating: false,
+    vaultLocked: false,
     pendingToolCall: null,
     fromCache: false,
     loading: false,
@@ -95,7 +98,9 @@ export async function loadProgramSession(programId, sessionId = 'default', optio
         connectionStore.set({ activeProgram: targetProgram });
       }
       const data = await transport.fetchHistory(targetSession);
-      await cacheProgramHistory(targetProgram, targetSession, data);
+      if (!isKeePassVaultMode()) {
+        await cacheProgramHistory(targetProgram, targetSession, data);
+      }
 
       const mergedMessages = mergeQueuedOutbox(data?.history, queued);
       sessionStore.set({
@@ -110,14 +115,43 @@ export async function loadProgramSession(programId, sessionId = 'default', optio
         welcomeMessage: data?.welcome_message || '',
         groupMeta: data?.group_meta || null,
         generating: Boolean(data?.generating),
+        vaultLocked: false,
         fromCache: false,
         loading: false,
         error: null,
       });
       return sessionStore.get();
     } catch (err) {
+      const errMsg = String(err?.message || '');
+      const isVaultLocked =
+        err?.status === 503 &&
+        (err?.body?.locked === true ||
+          errMsg.toLowerCase().includes('locked') ||
+          errMsg.toLowerCase().includes('keepassxc'));
+      if (isVaultLocked) {
+        await clearAllCachedProgramHistory();
+        sessionStore.set({
+          activeProgramId: targetProgram,
+          activeSessionId: targetSession,
+          characterName: targetProgram,
+          messages: [],
+          moodState: null,
+          inversionActive: '',
+          inversionState: null,
+          theme: null,
+          welcomeMessage: '',
+          groupMeta: null,
+          generating: false,
+          vaultLocked: true,
+          fromCache: false,
+          loading: false,
+          error: err?.message || 'Vault is locked',
+        });
+        return sessionStore.get();
+      }
       const cached = await getCachedProgramHistory(targetProgram, targetSession);
-      const mergedMessages = mergeQueuedOutbox(cached?.history, queued);
+      const cachedHist = Array.isArray(cached?.history) ? cached.history : [];
+      const mergedMessages = mergeQueuedOutbox(cachedHist, queued);
       sessionStore.set({
         activeProgramId: cached?.active_program || targetProgram,
         activeSessionId: targetSession,
@@ -130,6 +164,7 @@ export async function loadProgramSession(programId, sessionId = 'default', optio
         welcomeMessage: cached?.welcome_message || '',
         groupMeta: cached?.group_meta || null,
         generating: false,
+        vaultLocked: isVaultLocked,
         fromCache: true,
         loading: false,
         error: err?.message || 'Unable to refresh session history',
@@ -138,7 +173,7 @@ export async function loadProgramSession(programId, sessionId = 'default', optio
     }
   }
 
-  const cached = await getCachedProgramHistory(targetProgram, targetSession);
+  const cached = isKeePassVaultMode() ? null : await getCachedProgramHistory(targetProgram, targetSession);
   const mergedMessages = mergeQueuedOutbox(cached?.history, queued);
   sessionStore.set({
     activeProgramId: cached?.active_program || targetProgram,
@@ -152,6 +187,7 @@ export async function loadProgramSession(programId, sessionId = 'default', optio
     welcomeMessage: cached?.welcome_message || '',
     groupMeta: cached?.group_meta || null,
     generating: false,
+    vaultLocked: false,
     fromCache: true,
     loading: false,
     error: null,

@@ -18,6 +18,11 @@ from utils.url_privacy import strip_tracking_params
 
 browser_vault_bp = Blueprint("browser_vault", __name__, url_prefix="/api/browser")
 
+
+@browser_vault_bp.errorhandler(social_vault.VaultLockedError)
+def _handle_vault_locked(exc):
+    return jsonify({"error": str(exc), "locked": True, "vault": "keepassxc"}), 503
+
 _MAX_READER_BYTES = 512 * 1024
 _MAX_PROBE_BYTES = 16 * 1024
 _MAX_STATUS_ERR_BYTES = 64 * 1024

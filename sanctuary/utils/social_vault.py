@@ -3,18 +3,31 @@
 from __future__ import annotations
 
 import ctypes
+import ipaddress
 import json
 import os
 import sqlite3
+import threading
 import time
 from contextlib import closing
 from pathlib import Path
+from urllib.parse import urlparse
 
 from cryptography.fernet import Fernet
 
 DATA_DIR = Path(__file__).resolve().parents[2] / "social" / "data"
 _DPAPI_PREFIX = b"DPAPI1:"
 _RAW_KEY_PREFIX = b"RAW1:"
+_KXC_PREFIX = b"KXC1:"
+VAULT_MASTER_KEY_URL = "https://lm-sanctuary.local/vault-master-key"
+VAULT_MASTER_KEY_LOGIN = "lm-sanctuary-vault"
+
+_KXC_KEY_LOCK = threading.RLock()
+_kxc_cached_key: tuple[str, bytes] | None = None
+
+
+class VaultLockedError(RuntimeError):
+    """Raised when KeePassXC escrow is enabled and the database is locked."""
 
 
 class InvalidSocialAccount(ValueError):
@@ -131,11 +144,82 @@ def _write_key_file(key_path: Path, key: bytes, exclusive: bool = False) -> None
         key_path.chmod(0o600)
 
 
+def clear_cached_vault_key() -> None:
+    global _kxc_cached_key
+    with _KXC_KEY_LOCK:
+        _kxc_cached_key = None
+
+
+def is_keepassxc_vault_enabled() -> bool:
+    key_path = DATA_DIR / "social_vault.key"
+    try:
+        return key_path.read_bytes().startswith(_KXC_PREFIX)
+    except OSError:
+        return False
+
+
+def get_vault_mode() -> str:
+    return "keepassxc" if is_keepassxc_vault_enabled() else "local"
+
+
+def _resolve_keepassxc_fernet_key(expected_hash: str) -> bytes:
+    global _kxc_cached_key
+    from utils.keepassxc_client import (
+        KeePassXCAssociationError,
+        KeePassXCLockedError,
+        KeePassXCUnavailableError,
+        get_keepassxc_bridge,
+    )
+
+    bridge = get_keepassxc_bridge()
+    with _KXC_KEY_LOCK:
+        try:
+            db_hash, _ver = bridge.get_database_hash(trigger_unlock=False, timeout=1.5)
+        except (KeePassXCLockedError, KeePassXCUnavailableError) as exc:
+            clear_cached_vault_key()
+            raise VaultLockedError(
+                "KeePassXC database is locked or unavailable. Unlock KeePassXC to access social credentials."
+            ) from exc
+
+        if expected_hash and db_hash != expected_hash:
+            clear_cached_vault_key()
+            raise VaultLockedError(
+                "Active KeePassXC database does not match the paired vault database."
+            )
+
+        if _kxc_cached_key is not None and _kxc_cached_key[0] == db_hash:
+            return _kxc_cached_key[1]
+
+        try:
+            entries = bridge.get_logins(VAULT_MASTER_KEY_URL, trigger_unlock=False, timeout=2.5)
+        except (KeePassXCLockedError, KeePassXCAssociationError, KeePassXCUnavailableError) as exc:
+            clear_cached_vault_key()
+            raise VaultLockedError(f"KeePassXC vault access unavailable: {exc}") from exc
+
+        chosen = None
+        for ent in entries:
+            if ent.get("login") == VAULT_MASTER_KEY_LOGIN and ent.get("password"):
+                chosen = ent["password"]
+                break
+        if not chosen and entries and entries[0].get("password"):
+            chosen = entries[0]["password"]
+        if not chosen:
+            raise VaultLockedError(
+                "Vault master key entry not found in the unlocked KeePassXC database."
+            )
+        key_bytes = chosen.encode("ascii")
+        _kxc_cached_key = (db_hash, key_bytes)
+        return key_bytes
+
+
 def _fernet() -> Fernet:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     key_path = DATA_DIR / "social_vault.key"
     try:
         stored_key = key_path.read_bytes()
+        if stored_key.startswith(_KXC_PREFIX):
+            expected_hash = stored_key[len(_KXC_PREFIX) :].decode("utf-8", errors="ignore").strip()
+            return Fernet(_resolve_keepassxc_fernet_key(expected_hash))
         key = _decode_key_file(stored_key)
         if not stored_key.startswith(_DPAPI_PREFIX) and (
             not stored_key.startswith(_RAW_KEY_PREFIX) or os.name == "nt"
@@ -149,8 +233,182 @@ def _fernet() -> Fernet:
             _write_key_file(key_path, generated, exclusive=True)
             key = generated
         except FileExistsError:
-            key = _decode_key_file(key_path.read_bytes())
+            stored_again = key_path.read_bytes()
+            if stored_again.startswith(_KXC_PREFIX):
+                expected_hash = stored_again[len(_KXC_PREFIX) :].decode("utf-8", errors="ignore").strip()
+                return Fernet(_resolve_keepassxc_fernet_key(expected_hash))
+            key = _decode_key_file(stored_again)
     return Fernet(key)
+
+
+def _mirror_account_to_keepassxc(account_id: str, meta: dict, secrets: dict) -> None:
+    try:
+        from utils.keepassxc_client import get_keepassxc_bridge
+
+        bridge = get_keepassxc_bridge()
+        login_name = str(meta.get("acct") or meta.get("handle") or account_id).strip()
+        bridge.set_login(
+            f"https://lm-sanctuary.local/social/{account_id}",
+            login_name,
+            json.dumps(secrets, ensure_ascii=False),
+            group="LM-Sanctuary",
+        )
+    except Exception:
+        # Mirroring individual accounts into KeePassXC is best-effort once master key is escrowed.
+        pass
+
+
+def enable_keepassxc_vault(db_hash: str) -> dict:
+    """Escrow the vault master key inside KeePassXC and remove the local key from disk."""
+    global _kxc_cached_key
+    clean_hash = str(db_hash or "").strip()
+    if not clean_hash:
+        raise ValueError("KeePassXC database hash is required")
+
+    from utils.keepassxc_client import get_keepassxc_bridge
+
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    key_path = DATA_DIR / "social_vault.key"
+    bridge = get_keepassxc_bridge()
+
+    existing_entries = bridge.get_logins(VAULT_MASTER_KEY_URL, trigger_unlock=False, timeout=2.5)
+    existing_secret = ""
+    for ent in existing_entries:
+        if ent.get("login") == VAULT_MASTER_KEY_LOGIN and ent.get("password"):
+            existing_secret = ent["password"]
+            break
+    if not existing_secret and existing_entries and existing_entries[0].get("password"):
+        existing_secret = existing_entries[0]["password"]
+
+    # Read existing accounts before replacing social_vault.key, then mirror them to KeePassXC.
+    existing_accounts: list[dict] = []
+    if key_path.is_file():
+        try:
+            existing_accounts = list_social_accounts()
+        except Exception:
+            existing_accounts = []
+
+    had_local_key = False
+    if existing_secret:
+        key = existing_secret.encode("ascii")
+        if key_path.is_file() and not key_path.read_bytes().startswith(_KXC_PREFIX):
+            had_local_key = True
+    elif key_path.is_file():
+        stored = key_path.read_bytes()
+        if stored.startswith(_KXC_PREFIX):
+            with _KXC_KEY_LOCK:
+                key = _kxc_cached_key[1] if _kxc_cached_key is not None else Fernet.generate_key()
+        else:
+            key = _decode_key_file(stored)
+    else:
+        key = Fernet.generate_key()
+
+    # Validate key syntax before escrowing.
+    Fernet(key)
+    key_str = key.decode("ascii")
+    if existing_secret != key_str:
+        bridge.set_login(
+            VAULT_MASTER_KEY_URL,
+            VAULT_MASTER_KEY_LOGIN,
+            key_str,
+            group="LM-Sanctuary",
+        )
+        verified = bridge.get_logins(VAULT_MASTER_KEY_URL, trigger_unlock=False, timeout=2.5)
+        if not any(ent.get("password") == key_str for ent in verified):
+            raise RuntimeError("KeePassXC did not return the escrowed vault key on verification readback.")
+
+    marker = _KXC_PREFIX + clean_hash.encode("utf-8")
+    tmp_path = DATA_DIR / "social_vault.key.tmp"
+    with tmp_path.open("wb") as f:
+        f.write(marker)
+    if os.name != "nt":
+        tmp_path.chmod(0o600)
+    os.replace(tmp_path, key_path)
+    if os.name != "nt":
+        key_path.chmod(0o600)
+
+    with _KXC_KEY_LOCK:
+        _kxc_cached_key = (clean_hash, key)
+
+    for acc in existing_accounts:
+        acc_meta = acc.get("meta") if isinstance(acc, dict) else None
+        acc_secrets = acc.get("secrets") if isinstance(acc, dict) else None
+        if isinstance(acc_meta, dict) and isinstance(acc_secrets, dict) and acc_meta.get("id"):
+            if had_local_key:
+                upsert_social_account(str(acc_meta["id"]), acc_meta, acc_secrets)
+            else:
+                _mirror_account_to_keepassxc(str(acc_meta["id"]), acc_meta, acc_secrets)
+
+    return {"vault_mode": "keepassxc", "database_hash": clean_hash}
+
+
+def disable_keepassxc_vault() -> dict:
+    """Restore the active Fernet key from KeePassXC back to local protected storage."""
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    key_path = DATA_DIR / "social_vault.key"
+    if not key_path.is_file():
+        return {"vault_mode": "local"}
+    stored = key_path.read_bytes()
+    if not stored.startswith(_KXC_PREFIX):
+        return {"vault_mode": "local"}
+    expected_hash = stored[len(_KXC_PREFIX) :].decode("utf-8", errors="ignore").strip()
+    key = _resolve_keepassxc_fernet_key(expected_hash)
+    tmp_path = DATA_DIR / "social_vault.key.tmp"
+    _write_key_file(tmp_path, key)
+    os.replace(tmp_path, key_path)
+    if os.name != "nt":
+        key_path.chmod(0o600)
+    clear_cached_vault_key()
+    return {"vault_mode": "local"}
+
+
+def is_loopback_addr(remote_addr: str | None) -> bool:
+    try:
+        addr = ipaddress.ip_address(str(remote_addr or "").strip())
+    except ValueError:
+        return False
+    if addr.version == 6 and addr.ipv4_mapped:
+        addr = addr.ipv4_mapped
+    return bool(addr.is_loopback)
+
+
+def is_trusted_vault_cors_origin(origin: str, host_header: str = "", scheme: str = "http") -> bool:
+    clean = str(origin or "").strip()
+    if not clean:
+        return False
+    if clean in ("capacitor://localhost", "ionic://localhost"):
+        return True
+    extra = [item.strip() for item in os.getenv("SANCTUARY_ALLOWED_ORIGINS", "").split(",") if item.strip()]
+    if clean in extra:
+        return True
+    if host_header:
+        try:
+            parsed = urlparse(clean)
+            if parsed.scheme in ("http", "https") and parsed.netloc and parsed.netloc.lower() == host_header.lower():
+                return True
+        except Exception:
+            return False
+    return False
+
+
+def verify_trusted_vault_request(req) -> tuple[bool, int, str]:
+    """Enforce strict same-origin / allowlisted-origin and remote Basic Auth on credential routes."""
+    origin = str(req.headers.get("Origin") or "").strip()
+    if origin and not is_trusted_vault_cors_origin(origin, req.host or "", req.scheme or "http"):
+        return False, 403, "Cross-origin access to credential vault is forbidden."
+
+    fetch_site = str(req.headers.get("Sec-Fetch-Site") or "").strip().lower()
+    if fetch_site == "cross-site" and not is_trusted_vault_cors_origin(origin, req.host or "", req.scheme or "http"):
+        return False, 403, "Cross-site access to credential vault is forbidden."
+
+    if not is_loopback_addr(req.remote_addr):
+        auth_user = os.getenv("AUTH_USER")
+        auth_pass = os.getenv("AUTH_PASS")
+        if auth_user and auth_pass:
+            auth = req.authorization
+            if not auth or auth.username != auth_user or auth.password != auth_pass:
+                return False, 401, "Authentication required for remote credential vault access."
+    return True, 200, ""
 
 
 def encrypt_data(data: bytes) -> bytes:
@@ -298,13 +556,29 @@ def save_social_account(account_id: str, meta: dict, secrets: dict) -> dict:
                     updated_at,
                 ),
             )
+    if is_keepassxc_vault_enabled():
+        _mirror_account_to_keepassxc(account_id, saved_meta, secrets)
     return {"meta": saved_meta, "secrets": secrets}
 
 
 def delete_social_account(account_id: str) -> None:
+    clean_id = str(account_id)
     with closing(_connect()) as conn:
         with conn:
-            conn.execute("DELETE FROM social_accounts WHERE account_id = ?", (str(account_id),))
+            conn.execute("DELETE FROM social_accounts WHERE account_id = ?", (clean_id,))
+    if is_keepassxc_vault_enabled():
+        try:
+            from utils.keepassxc_client import get_keepassxc_bridge
+
+            bridge = get_keepassxc_bridge()
+            if bridge.is_unlocked():
+                target_url = f"https://lm-sanctuary.local/social/{clean_id}"
+                summary = bridge.list_entries_summary()
+                for ent in summary.get("entries", []):
+                    if ent.get("url") == target_url and ent.get("uuid"):
+                        bridge.delete_entry(ent["uuid"])
+        except Exception:
+            pass
 
 
 def list_social_drafts() -> dict:

@@ -25,8 +25,14 @@ from runners.program import (
 )
 from core.skills.vectorized_databank.databank import DataBankManager
 from utils.session_data import read_session_data
+from utils.social_vault import VaultLockedError
 
 knowledge_bp = Blueprint("knowledge_bp", __name__)
+
+
+@knowledge_bp.errorhandler(VaultLockedError)
+def _handle_knowledge_vault_locked(exc):
+    return jsonify({"error": str(exc), "locked": True, "vault": "keepassxc"}), 503
 
 
 @knowledge_bp.route('/api/databank/files', methods=['GET'])
@@ -36,6 +42,8 @@ def databank_list_files():
         manager = DataBankManager()
         files = manager.list_documents()
         return jsonify({"files": files})
+    except VaultLockedError:
+        raise
     except Exception as e:
         print(f"Error listing databank files: {e}")
         return jsonify({"error": str(e)}), 500
@@ -66,6 +74,8 @@ def databank_upload():
         manager = DataBankManager()
         doc_id = manager.ingest_file(temp_path, uploaded_file.filename)
         return jsonify({"status": "success", "id": doc_id})
+    except VaultLockedError:
+        raise
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -95,6 +105,8 @@ def databank_text():
         manager = DataBankManager()
         doc_id = manager.ingest_text(text, title, "file")
         return jsonify({"status": "success", "id": doc_id})
+    except VaultLockedError:
+        raise
     except Exception as e:
         print(f"Error ingesting text into databank: {e}")
         return jsonify({"error": str(e)}), 500
@@ -120,6 +132,8 @@ def databank_scrape():
         manager = DataBankManager()
         doc_id = manager.ingest_url(url)
         return jsonify({"status": "success", "id": doc_id})
+    except VaultLockedError:
+        raise
     except Exception as e:
         print(f"Error scraping url: {e}")
         return jsonify({"error": str(e)}), 500
@@ -139,6 +153,8 @@ def databank_delete():
             return jsonify({"status": "success"})
         else:
             return jsonify({"error": "Document not found"}), 404
+    except VaultLockedError:
+        raise
     except Exception as e:
         print(f"Error deleting document {doc_id}: {e}")
         return jsonify({"error": str(e)}), 500
@@ -151,6 +167,8 @@ def databank_purge():
         manager = DataBankManager()
         manager.purge_all()
         return jsonify({"status": "success"})
+    except VaultLockedError:
+        raise
     except Exception as e:
         print(f"Error purging databank: {e}")
         return jsonify({"error": str(e)}), 500
@@ -168,6 +186,8 @@ def list_lorebooks_route():
         for b in books:
             b['program_id'] = program_id
         return jsonify({'lorebooks': books, 'program_id': program_id})
+    except VaultLockedError:
+        raise
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -188,6 +208,8 @@ def import_lorebook_route():
         book_data = json.loads(f.read().decode('utf-8'))
         dest = import_lorebook(program_id, book_data, f.filename, vs.PROGRAMS_DIR)
         return jsonify({'success': True, 'path': dest})
+    except VaultLockedError:
+        raise
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -208,6 +230,8 @@ def export_lorebook_route(filename):
         resp.headers['Content-Type'] = 'application/json'
         resp.headers['Content-Disposition'] = f'attachment; filename="{filename}"'
         return resp
+    except VaultLockedError:
+        raise
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -222,6 +246,8 @@ def delete_lorebook_route(filename):
         program_id = get_active_program()
         deleted = delete_lorebook(program_id, filename, vs.PROGRAMS_DIR)
         return jsonify({'success': deleted})
+    except VaultLockedError:
+        raise
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -244,6 +270,8 @@ def get_card_lorebook_entries():
         if isinstance(entries, dict):
             entries = list(entries.values())
         return jsonify({'name': cb.get('name', program_id), 'entries': entries})
+    except VaultLockedError:
+        raise
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -271,6 +299,8 @@ def save_card_lorebook_entries():
         with open(card_path, 'w', encoding='utf-8') as f:
             json.dump(card, f, indent=2, ensure_ascii=False)
         return jsonify({'success': True})
+    except VaultLockedError:
+        raise
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -293,6 +323,8 @@ def get_lorebook_entries(filename):
         if isinstance(entries, dict):
             entries = list(entries.values())
         return jsonify({'name': book.get('name', filename), 'entries': entries})
+    except VaultLockedError:
+        raise
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -319,6 +351,8 @@ def save_lorebook_entries(filename):
         with open(fpath, 'w', encoding='utf-8') as lf:
             json.dump(book, lf, indent=2, ensure_ascii=False)
         return jsonify({'success': True})
+    except VaultLockedError:
+        raise
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -329,6 +363,8 @@ def list_quests():
     try:
         from core import quest_manager
         return jsonify({"quests": quest_manager.load_quests()})
+    except VaultLockedError:
+        raise
     except Exception as e:
         print(f"Error loading quests: {e}")
         return jsonify({"error": str(e)}), 500
@@ -341,6 +377,8 @@ def delete_quest(quest_id):
         from core import quest_manager
         quest_manager.remove_quest(quest_id)
         return jsonify({"status": "success"})
+    except VaultLockedError:
+        raise
     except Exception as e:
         print(f"Error deleting quest {quest_id}: {e}")
         return jsonify({"error": str(e)}), 500
@@ -372,6 +410,8 @@ def complete_quest(quest_id):
             "title": title,
             "objectives": objectives
         })
+    except VaultLockedError:
+        raise
     except Exception as e:
         print(f"Error completing quest {quest_id}: {e}")
         return jsonify({"error": str(e)}), 500
@@ -432,6 +472,8 @@ END:VCALENDAR"""
             mimetype="text/calendar",
             headers={"Content-Disposition": f"attachment; filename=\"{quest_id}.ics\""}
         )
+    except VaultLockedError:
+        raise
     except Exception as e:
         print(f"Error downloading quest {quest_id}: {e}")
         return jsonify({"error": str(e)}), 500
@@ -457,6 +499,8 @@ def get_program_journals():
             try:
                 sdata = read_session_data(session_path)
                 memory_meta = sdata.get("memory_state")
+            except VaultLockedError:
+                raise
             except Exception as se:
                 print(f"Error loading session file {session_path}: {se}")
 
@@ -474,6 +518,8 @@ def get_program_journals():
             'recent_chapters': recent_chapters,
             'epic_chronicle': memory_meta.get('epic_chronicle', '')
         })
+    except VaultLockedError:
+        raise
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -497,6 +543,8 @@ def delete_program_journals():
             return jsonify({'status': 'success'})
         else:
             return jsonify({'error': 'Failed to delete or entry not found'}), 404
+    except VaultLockedError:
+        raise
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -511,6 +559,8 @@ def save_program_summary():
 
         st.run_async(st.runner.update_epic_chronicle(session_id, summary))
         return jsonify({'status': 'success', 'epic_chronicle': summary})
+    except VaultLockedError:
+        raise
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -534,6 +584,8 @@ def save_program_recent_chapter():
             return jsonify({'status': 'success', 'content': content})
         else:
             return jsonify({'error': 'Chapter index out of range or not found'}), 404
+    except VaultLockedError:
+        raise
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 

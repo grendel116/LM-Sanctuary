@@ -141,6 +141,30 @@ export async function enqueueTurn({
   return record;
 }
 
+/**
+ * Remove a queued outbox turn by msgId from IndexedDB, cached history, and outboxStore.
+ * @param {string} programId
+ * @param {string} [sessionId]
+ * @param {string} msgId
+ */
+export async function removeQueuedTurn(programId, sessionId = 'default', msgId) {
+  if (!msgId) return false;
+  await storeDelete('outbox_queue', msgId);
+  if (programId) {
+    const targetSession = sessionId || 'default';
+    const cached = await getCachedProgramHistory(programId, targetSession);
+    if (cached && Array.isArray(cached.history)) {
+      const nextHistory = cached.history.filter((m) => m?.id !== msgId);
+      if (nextHistory.length !== cached.history.length) {
+        await cacheProgramHistory(programId, targetSession, { ...cached, history: nextHistory });
+      }
+    }
+  }
+  const items = await readSortedQueue();
+  outboxStore.set({ items });
+  return true;
+}
+
 function isRetryableOfflineError(err) {
   if (err instanceof FetchError) {
     return err.status === 0 || err.isTimeout || err.isAborted || err.status === 502 || err.status === 503 || err.status === 504;
@@ -172,6 +196,10 @@ export async function flushOutbox(options = {}) {
     let selectedProgramId = connectionStore.get().activeProgram || null;
 
     for (const item of queue) {
+      const latestQueue = await readSortedQueue();
+      if (!latestQueue.some((q) => q.msgId === item.msgId)) {
+        continue;
+      }
       try {
         if (item.programId && item.programId !== selectedProgramId) {
           await transport.selectProgram(item.programId);

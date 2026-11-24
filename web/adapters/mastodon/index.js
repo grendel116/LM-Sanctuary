@@ -137,6 +137,8 @@ export class MastodonAdapter extends SocialAdapter {
 
   async like(targetItem, undo = false) {
     const item = toUnifiedItem(targetItem);
+    const prevLikes = Number(item.metrics?.likes || 0);
+    const wasLiked = Boolean(item._meta?.mastodon?.favourited);
     const statusId = await this._resolveLocalStatusId(item);
     const updated = await toggleFavourite({
       instanceUrl: this.instanceUrl,
@@ -145,11 +147,21 @@ export class MastodonAdapter extends SocialAdapter {
       favourited: undo,
       fetchImpl: this.fetchImpl,
     });
-    return this._preservePostIdentity(item, updated, statusId);
+    const preserved = this._preservePostIdentity(item, updated, statusId);
+    const serverLikes = Number(preserved.metrics?.likes || 0);
+    const nextLikes = undo
+      ? (wasLiked && serverLikes >= prevLikes ? Math.max(0, prevLikes - 1) : serverLikes)
+      : Math.max(1, wasLiked ? prevLikes : prevLikes + 1, serverLikes);
+    return {
+      ...preserved,
+      metrics: { ...preserved.metrics, likes: nextLikes },
+    };
   }
 
   async repost(targetItem, undo = false) {
     const item = toUnifiedItem(targetItem);
+    const prevReposts = Number(item.metrics?.reposts || 0);
+    const wasReposted = Boolean(item._meta?.mastodon?.reblogged);
     const statusId = await this._resolveLocalStatusId(item);
     const updated = await toggleReblog({
       instanceUrl: this.instanceUrl,
@@ -158,7 +170,15 @@ export class MastodonAdapter extends SocialAdapter {
       reblogged: undo,
       fetchImpl: this.fetchImpl,
     });
-    return this._preservePostIdentity(item, updated, statusId);
+    const preserved = this._preservePostIdentity(item, updated, statusId);
+    const serverReposts = Number(preserved.metrics?.reposts || 0);
+    const nextReposts = undo
+      ? (wasReposted && serverReposts >= prevReposts ? Math.max(0, prevReposts - 1) : serverReposts)
+      : Math.max(1, wasReposted ? prevReposts : prevReposts + 1, serverReposts);
+    return {
+      ...preserved,
+      metrics: { ...preserved.metrics, reposts: nextReposts },
+    };
   }
 
   async edit(statusId, draft, spoilerText = '') {
@@ -200,12 +220,13 @@ export class MastodonAdapter extends SocialAdapter {
     };
   }
 
-  async fetchNotifications(cursor = '', limit = 30) {
+  async fetchNotifications(cursor = '', limit = 30, { cache } = {}) {
     const rows = await getNotifications({
       instanceUrl: this.instanceUrl,
       accessToken: this.accessToken,
       maxId: cursor,
       limit,
+      cache,
       fetchImpl: this.fetchImpl,
     });
     const followAccountIds = [

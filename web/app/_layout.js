@@ -1,11 +1,12 @@
 import { openAuthorSheetModal } from '../components/AuthorSheetModal.js';
+import { parseSocialPostItemFromUrl } from '../components/PostCard.js';
 import { showAlert } from '../components/sanctuary/SanctuaryDialog.js';
 import { openSettingsModal } from '../components/sanctuary/SettingsModal.js';
 import { openUserModal } from '../components/sanctuary/UserModal.js';
 import { createUserIconSvg } from '../constants/avatars.js';
 import { toUnifiedItem } from '../core/schema/unifiedItem.js';
 import { NEWTAB_URL, stripTrackingParams } from '../core/urlPrivacy.js';
-import { subscribeBrowserHostEvents } from '../adapters/browserBridge.js';
+import { refreshKeePassStatus, subscribeBrowserHostEvents } from '../adapters/browserBridge.js';
 import { exchangeOAuthCode, verifyCredentials } from '../queries/fediverse.js';
 import {
   completeThreadsOAuthFlow,
@@ -931,11 +932,26 @@ export function createAppShell(
   let activityPollTimer = null;
   let unsubAuthActivity = () => {};
   let onVisibilityActivityCheck = null;
+  let initialBootVaultSyncDone = false;
+  const syncComposeVaultLock = (s = authStore.get()) => {
+    const locked = Boolean(s?.vaultLocked);
+    railComposeFab.disabled = locked;
+    railComposeFab.style.opacity = locked ? '0.4' : '';
+    railComposeFab.title = locked ? 'New Post — Unlock vault first' : 'New Post';
+    mobileComposeBtn.disabled = locked;
+    mobileComposeBtn.style.opacity = locked ? '0.4' : '';
+    mobileComposeBtn.title = locked ? 'New Post — Unlock vault first' : 'New Post';
+  };
+  syncComposeVaultLock();
+  const unsubComposeVaultLock = authStore.subscribe((next) => syncComposeVaultLock(next));
+
   const offRecentPostsSync = onSanctuaryEvent('sanctuary:online', () => {
     void syncRecentUserPostsToSanctuary().catch(() => {});
   });
   const offSocialVaultSync = onSanctuaryEvent('sanctuary:online', () => {
-    void syncSocialAccountsWithServer()
+    if (!initialBootVaultSyncDone) return;
+    void refreshKeePassStatus()
+      .then(() => syncSocialAccountsWithServer())
       .then(() => {
         if (authStore.get().accounts.length > 0) {
           return refreshActivityNotifications().catch(() => {});
@@ -945,6 +961,20 @@ export function createAppShell(
       .catch((err) => {
         console.error('[social vault] Could not sync accounts with Sanctuary:', err);
       });
+  });
+  const offVaultChangedSync = onSanctuaryEvent('sanctuary:vault-changed', (e) => {
+    if (!e?.detail?.unlocked) return;
+    void syncSocialAccountsWithServer()
+      .then(() => {
+        if (authStore.get().accounts.length > 0) {
+          return refreshActivityNotifications().catch(() => {});
+        }
+        return undefined;
+      })
+      .catch(() => {});
+    void syncComposeDraftsWithServer().catch(() => {});
+    void syncBrowserBookmarksWithServer().catch(() => {});
+    void syncLinkedPostsWithSanctuary().catch(() => {});
   });
   const offDraftsSync = onSanctuaryEvent('sanctuary:online', () => {
     void syncComposeDraftsWithServer().catch(() => {});
@@ -997,11 +1027,13 @@ export function createAppShell(
         void fetchSocialBridgeStatus().catch(() => {});
         detachOutbox = attachOutboxAutoFlush();
         await initSanctuaryConnection();
+        await refreshKeePassStatus().catch(() => {});
         try {
           await syncSocialAccountsWithServer();
         } catch (err) {
           console.error('[social vault] Could not sync accounts with Sanctuary:', err);
         } finally {
+          initialBootVaultSyncDone = true;
           resolveStartupReady?.();
         }
         void fetchKeywordFilters().catch(() => {});
@@ -1124,6 +1156,67 @@ export function createAppShell(
     return clean;
   }
 
+  function extractMentionActorFromAnchor(anchor, parsed) {
+    const clsTokens = String(anchor.className || '').split(' ').filter(Boolean);
+    const isMentionEl = clsTokens.includes('mention') || clsTokens.includes('u-url');
+    const host = parsed.hostname.toLowerCase();
+    const segs = parsed.pathname.split('/').filter(Boolean);
+
+    if (host === 'bsky.app' && segs.length === 2 && segs[0] === 'profile') {
+      let target = segs[1];
+      try {
+        target = decodeURIComponent(segs[1]);
+      } catch {
+        target = segs[1];
+      }
+      const textHandle = String(anchor.textContent || '').trim().replace(/^@/, '');
+      if (target.startsWith('did:')) {
+        return {
+          id: target,
+          handle: textHandle && textHandle.includes('.') ? textHandle : '',
+          protocol: 'bluesky',
+          url: parsed.href,
+        };
+      }
+      return {
+        handle: target,
+        protocol: 'bluesky',
+        url: parsed.href,
+      };
+    }
+
+    if ((host === 'threads.net' || host === 'www.threads.net') && segs.length === 1 && segs[0].startsWith('@')) {
+      let handle = segs[0].slice(1);
+      try {
+        handle = decodeURIComponent(handle);
+      } catch {
+        // Keep raw handle
+      }
+      return {
+        handle,
+        protocol: 'threads',
+        url: parsed.href,
+      };
+    }
+
+    if (isMentionEl && segs.length === 1 && segs[0].startsWith('@')) {
+      let user = segs[0].slice(1);
+      try {
+        user = decodeURIComponent(user);
+      } catch {
+        // Keep raw user
+      }
+      const handle = user.includes('@') ? user : `${user}@${host}`;
+      return {
+        handle,
+        protocol: 'mastodon',
+        url: parsed.href,
+      };
+    }
+
+    return null;
+  }
+
   function handleExternalLinkClick(event) {
     const targetEl = event.target?.nodeType === 1 ? event.target : event.target?.parentElement;
     const anchor = targetEl?.closest?.('a[href]');
@@ -1149,15 +1242,35 @@ export function createAppShell(
       return;
     }
 
-    event.preventDefault();
     const activate = !(event.ctrlKey || event.metaKey || event.button === 1);
+    const mentionActor = extractMentionActorFromAnchor(anchor, parsed);
+    if (mentionActor && activate) {
+      event.preventDefault();
+      handleSelectAuthor(mentionActor, null);
+      return;
+    }
+
+    if (activate && !anchor.dataset?.openExternal && !String(anchor.className || '').includes('ext-link')) {
+      const socialPost = parseSocialPostItemFromUrl(parsed.href);
+      if (socialPost) {
+        event.preventDefault();
+        openPostThread(socialPost);
+        return;
+      }
+    }
+
+    event.preventDefault();
     openExternalInBrowser(parsed.href, { activate });
   }
   doc.addEventListener('click', handleExternalLinkClick, true);
   const handleOpenDmEvent = (e) => {
     if (e?.detail) openDirectMessageToAuthor(e.detail);
   };
+  const handleOpenPostEvent = (e) => {
+    if (e?.detail) openPostThread(e.detail);
+  };
   doc.addEventListener('sanctuary:open-dm', handleOpenDmEvent);
+  doc.addEventListener('sanctuary:open-post', handleOpenPostEvent);
   const hostOpenInBrowser = (url, opts) => openExternalInBrowser(url, { activate: true, ...opts });
   globalThis.__sanctuaryOpenInBrowser = hostOpenInBrowser;
   const unsubBrowserHostNav = subscribeBrowserHostEvents((evt) => {
@@ -1242,10 +1355,12 @@ export function createAppShell(
       unsubBrowserHostNav();
       doc.removeEventListener('click', handleExternalLinkClick, true);
       doc.removeEventListener('sanctuary:open-dm', handleOpenDmEvent);
+      doc.removeEventListener('sanctuary:open-post', handleOpenPostEvent);
       if (onVisibilityActivityCheck) doc.removeEventListener?.('visibilitychange', onVisibilityActivityCheck);
       if (activityPollTimer) clearInterval(activityPollTimer);
       unsubAuthActivity();
       unsubActivityBadge();
+      unsubComposeVaultLock();
       closePostThread({ restoreScroll: false });
       feedScreenHandle?.destroy?.();
       browserScreenHandle?.destroy?.();
@@ -1256,6 +1371,7 @@ export function createAppShell(
       detachOutbox();
       offRecentPostsSync();
       offSocialVaultSync();
+      offVaultChangedSync();
       offDraftsSync();
       offLinkedPostSync();
       offBookmarkSync();

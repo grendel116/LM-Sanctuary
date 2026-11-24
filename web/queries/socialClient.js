@@ -6,6 +6,7 @@ import {
   buildSynthesizedReplyContext,
   canonicalizeActorHandle,
   deduplicateUnifiedItems,
+  enrichUnlinkedMentionsInHtml,
   hasRenderablePostContent,
   isRepostUnifiedItem,
   isUnifiedItemModerated,
@@ -85,7 +86,16 @@ import {
   updateCredentials,
 } from './fediverse.js';
 import { authStore, getAuthenticatedAccount, updateAccountTokens, upsertSocialAccount } from '../state/authStore.js';
-import { feedStore, hydrateCachedModeration, persistCachedFilters, purgeModeratedAuthorAffinity, setFilterRules, setModeratedActors } from '../state/feedStore.js';
+import {
+  feedStore,
+  hydrateCachedModeration,
+  mutatePostAcrossStreams,
+  persistCachedFilters,
+  purgeModeratedAuthorAffinity,
+  recordViewerInteraction,
+  setFilterRules,
+  setModeratedActors,
+} from '../state/feedStore.js';
 import { connectionStore } from '../state/sanctuary/connection.js';
 import {
   deleteSanctuaryLinkedPost,
@@ -537,18 +547,26 @@ function resolveLinkedRecordFromItem(item, stored) {
 export async function enrichUnifiedItemsMetrics(items = []) {
   if (!Array.isArray(items) || items.length === 0) return Array.isArray(items) ? items : [];
 
+  const allStored = await listLocalLinkedPosts(1000).catch(() => []);
+  const storedIndex = new Map();
+  for (const rec of Array.isArray(allStored) ? allStored : []) {
+    if (!rec || typeof rec !== 'object') continue;
+    const cid = String(rec.canonicalId || rec.canonical_id || '').trim();
+    if (cid) storedIndex.set(cid, rec);
+    if (rec.mastodonStatusId) storedIndex.set(`mastodon:${String(rec.mastodonStatusId)}`, rec);
+    if (rec.blueskyUri) storedIndex.set(`bluesky:${String(rec.blueskyUri)}`, rec);
+    if (rec.threadsPostId) storedIndex.set(`threads:${String(rec.threadsPostId)}`, rec);
+  }
+
   const storedByKey = new Map();
-  await Promise.all(
-    items.map(async (item) => {
-      const key = getItemLinkKey(item);
-      if (!key) return;
-      let stored = await findLocalLinkedPost(key);
-      if (!stored && item?._meta?.mastodon?.statusId && key !== `mastodon:${item._meta.mastodon.statusId}`) {
-        stored = await findLocalLinkedPost(`mastodon:${item._meta.mastodon.statusId}`);
-      }
-      if (stored) storedByKey.set(key, stored);
-    })
-  );
+  for (const item of items) {
+    const key = getItemLinkKey(item);
+    if (!key) continue;
+    const stored = storedIndex.get(key)
+      || (item?._meta?.mastodon?.statusId ? storedIndex.get(`mastodon:${item._meta.mastodon.statusId}`) : null)
+      || null;
+    if (stored) storedByKey.set(key, stored);
+  }
 
   const bskyUris = new Set();
   const threadsIds = new Set();
@@ -1103,8 +1121,29 @@ export async function publishUnified({
     }
   }
 
+  const handleToDid = new Map();
+  const utf8Dec = new TextDecoder();
+  const utf8Enc = new TextEncoder();
+  for (const bItem of bskyItems) {
+    const bFacets = bItem?._meta?.bluesky?.facets;
+    const bText = String(bItem?.content_text || '');
+    if (!Array.isArray(bFacets) || !bText) continue;
+    const textBytes = utf8Enc.encode(bText);
+    for (const f of bFacets) {
+      const mentionFeat = (f?.features || []).find((ft) => ft?.$type === 'app.bsky.richtext.facet#mention' && ft?.did);
+      if (!mentionFeat) continue;
+      const slice = utf8Dec.decode(textBytes.subarray(f.index.byteStart, f.index.byteEnd)).trim();
+      if (slice.startsWith('@') && slice.length > 1) {
+        handleToDid.set(slice.slice(1).toLowerCase(), String(mentionFeat.did));
+      }
+    }
+  }
+
   for (let i = 0; i < mastoResults.length; i += 1) {
     const m = mastoResults[i];
+    if (m.content_html && m.content_html.includes('@')) {
+      m.content_html = enrichUnlinkedMentionsInHtml(m.content_html, handleToDid);
+    }
     const bRef = bskyRefs[i] || {};
     const tId = threadsIds[i] || '';
     const linkedIds = {
@@ -1608,12 +1647,19 @@ export async function likeUnified(targetItem, unlike = undefined) {
   const undo = unlike !== undefined ? Boolean(unlike) : currentlyLiked;
 
   const { masto, bsky } = await getClientAdapters();
+  let updated = null;
   if (item.protocol === 'bluesky') {
     if (!bsky) throw new Error('Connect Bluesky bridge to like Bluesky posts.');
-    return bsky.like(item, undo);
+    updated = await bsky.like(item, undo);
+  } else {
+    if (!masto) throw new Error('Connect Mastodon to favourite posts.');
+    updated = await masto.like(item, undo);
   }
-  if (!masto) throw new Error('Connect Mastodon to favourite posts.');
-  return masto.like(item, undo);
+  if (updated) {
+    mutatePostAcrossStreams(updated.id || item.id, () => updated);
+    recordViewerInteraction(updated);
+  }
+  return updated;
 }
 
 export async function repostUnified(targetItem, unrepost = undefined) {
@@ -1625,12 +1671,19 @@ export async function repostUnified(targetItem, unrepost = undefined) {
   const undo = unrepost !== undefined ? Boolean(unrepost) : currentlyReposted;
 
   const { masto, bsky } = await getClientAdapters();
+  let updated = null;
   if (item.protocol === 'bluesky') {
     if (!bsky) throw new Error('Connect Bluesky bridge to repost Bluesky posts.');
-    return bsky.repost(item, undo);
+    updated = await bsky.repost(item, undo);
+  } else {
+    if (!masto) throw new Error('Connect Mastodon to boost posts.');
+    updated = await masto.repost(item, undo);
   }
-  if (!masto) throw new Error('Connect Mastodon to boost posts.');
-  return masto.repost(item, undo);
+  if (updated) {
+    mutatePostAcrossStreams(updated.id || item.id, () => updated);
+    recordViewerInteraction(updated);
+  }
+  return updated;
 }
 
 const ACTIVITY_DISMISSED_KV_KEY = 'activity_dismissed_v1';
@@ -1836,7 +1889,7 @@ function cleanLinkedIdsObject(row) {
   };
 }
 
-export async function fetchUnifiedNotifications({ limit = 60 } = {}) {
+export async function fetchUnifiedNotifications({ limit = 60, forceRefresh = false } = {}) {
   const { masto, bsky, threads, threadsAuth } = await getClientAdapters();
   const linkedRows = await listLocalLinkedPosts(80).catch(() => []);
   const byCanonical = new Map();
@@ -1851,9 +1904,10 @@ export async function fetchUnifiedNotifications({ limit = 60 } = {}) {
   }
   const trackedPostIds = linkedRows.map((r) => r?.threadsPostId).filter(Boolean);
 
+  const notifFetchOpts = forceRefresh ? { cache: 'no-store' } : {};
   const tasks = [];
-  if (masto) tasks.push(masto.fetchNotifications('', Math.min(limit, 80)));
-  if (bsky) tasks.push(bsky.fetchNotifications('', Math.min(limit, 100)));
+  if (masto) tasks.push(masto.fetchNotifications('', Math.min(limit, 80), notifFetchOpts));
+  if (bsky) tasks.push(bsky.fetchNotifications('', Math.min(limit, 100), notifFetchOpts));
   if (threads) tasks.push(threads.fetchNotifications('', Math.min(limit, 30), { trackedPostIds }));
 
   const settled = await Promise.allSettled(tasks);
@@ -1877,7 +1931,7 @@ export async function fetchUnifiedNotifications({ limit = 60 } = {}) {
   const threadsToken = threadsAuth?.secrets?.accessToken || '';
   if (threadsToken && trackedPostIds.length > 0) {
     const tids = [...new Set(trackedPostIds)].slice(0, 25);
-    const batchRes = await getThreadsPostsInsightsBatch({ postIds: tids, accessToken: threadsToken }).catch(() => ({}));
+    const batchRes = await getThreadsPostsInsightsBatch({ postIds: tids, accessToken: threadsToken, forceRefresh }).catch(() => ({}));
     if (batchRes && typeof batchRes === 'object') {
       Object.assign(threadsInsights, batchRes);
     }
@@ -2460,9 +2514,9 @@ async function hydrateReplyContexts(
   });
 }
 
-async function fetchBridgeBlueskyTabItems(bskyAuth, tab) {
+async function fetchBridgeBlueskyTabItems(bskyAuth, tab, cursor = '') {
   const actor = bskyAuth?.meta?.did || bskyAuth?.meta?.handle || bskyAuth?.meta?.acct || '';
-  if (!actor) return [];
+  if (!actor) return { items: [], nextCursor: '' };
   const filter = tab === 'media'
     ? 'posts_with_media'
     : (tab === 'boosts' || tab === 'replies' ? 'posts_with_replies' : 'posts_no_replies');
@@ -2471,24 +2525,27 @@ async function fetchBridgeBlueskyTabItems(bskyAuth, tab) {
     actor,
     limit,
     filter,
+    ...(cursor ? { cursor } : {}),
     ...getBskyReadOpts(bskyAuth),
-  }).catch(() => ({ items: [] }));
+  }).catch(() => ({ items: [], nextCursor: '' }));
+  const nextCursor = String(res?.nextCursor || '');
   const unified = (res.items || []).map((r) => toUnifiedItem(r));
+  let filtered = [];
   if (tab === 'boosts') {
     const ownDid = bskyAuth?.meta?.did || '';
-    return unified.filter(isBoostUnifiedItem).map((it) => hydrateOwnBskyRepostUri(it, ownDid));
-  }
-  if (tab === 'replies') {
+    filtered = unified.filter(isBoostUnifiedItem).map((it) => hydrateOwnBskyRepostUri(it, ownDid));
+  } else if (tab === 'replies') {
     const repliesOnly = unified.filter((it) => !isBoostUnifiedItem(it) && isReplyUnifiedItem(it));
-    return hydrateReplyContexts(repliesOnly, { candidatePool: unified, bskyAuth });
+    filtered = await hydrateReplyContexts(repliesOnly, { candidatePool: unified, bskyAuth });
+  } else if (tab === 'media') {
+    filtered = unified.filter((it) => !isBoostUnifiedItem(it) && !isReplyUnifiedItem(it) && (it.attachments?.length || 0) > 0);
+  } else if (tab === 'posts') {
+    filtered = unified.filter((it) => !isBoostUnifiedItem(it) && !isReplyUnifiedItem(it));
   }
-  if (tab === 'media') {
-    return unified.filter((it) => !isBoostUnifiedItem(it) && !isReplyUnifiedItem(it) && (it.attachments?.length || 0) > 0);
-  }
-  if (tab === 'posts') {
-    return unified.filter((it) => !isBoostUnifiedItem(it) && !isReplyUnifiedItem(it));
-  }
-  return [];
+  return {
+    items: filtered,
+    nextCursor: nextCursor && nextCursor !== cursor ? nextCursor : '',
+  };
 }
 
 async function fetchBridgeThreadsTabItems(tab) {
@@ -2600,13 +2657,19 @@ export async function fetchOwnStatuses(
     tab = 'posts',
     instanceUrl = 'https://mastodon.social',
     maxId = '',
+    bskyCursor = '',
+    mastoDone = false,
     protocol = 'mastodon',
     acct = '',
     federatedMastodonId = '',
     includeBridges = false,
     skipMetricsEnrichment = false,
+    returnPageMeta = false,
   } = {}
 ) {
+  const wrapPageResult = (finalItems, nextCursor = null) => (
+    returnPageMeta ? { items: finalItems, nextCursor: nextCursor || null } : finalItems
+  );
   const isThreads = protocol === 'threads' || String(accountId || '').startsWith('threads:') || String(instanceUrl || '').includes('threads.net');
   const isBsky = !isThreads && (protocol === 'bluesky' || String(accountId || '').startsWith('did:'));
 
@@ -2633,7 +2696,7 @@ export async function fetchOwnStatuses(
     );
     if (isOwnThreads) {
       const own = await threads.fetchOwnPosts(20);
-      return enrichUnifiedItemsMetrics(own);
+      return wrapPageResult(await enrichUnifiedItemsMetrics(own), null);
     }
     if (federatedMastodonId) {
       const { targetId, targetOrigin, token } = await resolveMastoClientTarget(
@@ -2652,6 +2715,10 @@ export async function fetchOwnStatuses(
         limit: tab === 'boosts' || tab === 'replies' ? 40 : 20,
         maxId,
       });
+      const rawNextMaxId = rows.length > 0 ? String(rows[rows.length - 1]?.id || '') : '';
+      const nextCursor = rawNextMaxId && rawNextMaxId !== maxId
+        ? { maxId: rawNextMaxId, bskyCursor: '', mastoDone: false }
+        : null;
       let unifiedRows = rows.map((r) => toUnifiedItem(r));
       if (tab === 'boosts') unifiedRows = unifiedRows.filter(isBoostUnifiedItem);
       else if (tab === 'replies') {
@@ -2661,9 +2728,9 @@ export async function fetchOwnStatuses(
         );
       }
       else if (tab === 'posts' || tab === 'media') unifiedRows = unifiedRows.filter((it) => !isBoostUnifiedItem(it));
-      return enrichUnifiedItemsMetrics(unifiedRows);
+      return wrapPageResult(await enrichUnifiedItemsMetrics(unifiedRows), nextCursor);
     }
-    return [];
+    return wrapPageResult([], null);
   }
 
   if (isBsky) {
@@ -2679,40 +2746,55 @@ export async function fetchOwnStatuses(
       filter,
       ...getBskyReadOpts(bskyAuth),
     });
+    const rawNextBsky = String(res?.nextCursor || '');
+    const nextCursor = rawNextBsky && rawNextBsky !== maxId
+      ? { maxId: rawNextBsky, bskyCursor: '', mastoDone: true }
+      : null;
     const unified = (res.items || []).map((r) => toUnifiedItem(r));
     if (tab === 'boosts') {
-      return sortTabStatuses(
-        unified.filter(isBoostUnifiedItem).map((it) => hydrateOwnBskyRepostUri(it, ownDid)),
-        'boosts'
+      return wrapPageResult(
+        sortTabStatuses(
+          unified.filter(isBoostUnifiedItem).map((it) => hydrateOwnBskyRepostUri(it, ownDid)),
+          'boosts'
+        ),
+        nextCursor
       );
     }
     if (tab === 'replies') {
-      return hydrateReplyContexts(
-        unified.filter((it) => !isBoostUnifiedItem(it) && isReplyUnifiedItem(it)),
-        { candidatePool: unified, bskyAuth }
+      return wrapPageResult(
+        await hydrateReplyContexts(
+          unified.filter((it) => !isBoostUnifiedItem(it) && isReplyUnifiedItem(it)),
+          { candidatePool: unified, bskyAuth }
+        ),
+        nextCursor
       );
     }
-    return unified.filter((it) => !isBoostUnifiedItem(it));
+    return wrapPageResult(unified.filter((it) => !isBoostUnifiedItem(it)), nextCursor);
   }
 
+  const shouldFetchBskyBridge = includeBridges
+    && (!maxId || Boolean(bskyCursor))
+    && (tab === 'posts' || tab === 'media' || tab === 'boosts' || tab === 'replies');
   const [{ targetId, targetOrigin, token }, bskyAuth] = await Promise.all([
     resolveMastoClientTarget(accountId, instanceUrl, acct),
-    includeBridges && !maxId && (tab === 'posts' || tab === 'media' || tab === 'boosts' || tab === 'replies')
+    shouldFetchBskyBridge
       ? getAuthenticatedAccount('bluesky')
       : Promise.resolve(null),
   ]);
-  const [rows, pinnedRows, bskyItems, threadsItems, storedLinks] = await Promise.all([
-    getAccountStatuses({
-      instanceUrl: targetOrigin,
-      accessToken: token,
-      accountId: targetId,
-      excludeReplies: tab === 'posts',
-      excludeReblogs: tab === 'posts' || tab === 'replies' || tab === 'media',
-      onlyMedia: tab === 'media',
-      pinned: tab === 'pinned',
-      limit: tab === 'boosts' || tab === 'replies' ? 40 : 20,
-      maxId,
-    }),
+  const fetchMastoPage = async (cursorMaxId) => getAccountStatuses({
+    instanceUrl: targetOrigin,
+    accessToken: token,
+    accountId: targetId,
+    excludeReplies: tab === 'posts',
+    excludeReblogs: tab === 'posts' || tab === 'replies' || tab === 'media',
+    onlyMedia: tab === 'media',
+    pinned: tab === 'pinned',
+    limit: tab === 'boosts' || tab === 'replies' ? 40 : 20,
+    maxId: cursorMaxId,
+  });
+
+  const [initialRows, pinnedRows, bskyRes, threadsItems, storedLinks] = await Promise.all([
+    mastoDone ? Promise.resolve([]) : fetchMastoPage(maxId),
     tab === 'posts' && !maxId
       ? getAccountStatuses({
           instanceUrl: targetOrigin,
@@ -2722,14 +2804,44 @@ export async function fetchOwnStatuses(
           limit: 20,
         }).catch(() => [])
       : Promise.resolve([]),
-    bskyAuth ? fetchBridgeBlueskyTabItems(bskyAuth, tab) : Promise.resolve([]),
+    bskyAuth ? fetchBridgeBlueskyTabItems(bskyAuth, tab, bskyCursor) : Promise.resolve({ items: [], nextCursor: '' }),
     includeBridges && !maxId && (tab === 'posts' || tab === 'media')
       ? fetchBridgeThreadsTabItems(tab)
       : Promise.resolve([]),
-    includeBridges && !maxId && (tab === 'posts' || tab === 'media')
-      ? listLocalLinkedPosts(100).catch(() => [])
+    includeBridges && (tab === 'posts' || tab === 'media')
+      ? listLocalLinkedPosts(300).catch(() => [])
       : Promise.resolve([]),
   ]);
+
+  let rows = Array.isArray(initialRows) ? initialRows : [];
+  let activeMastoCursor = maxId;
+  if (returnPageMeta && !mastoDone && (tab === 'replies' || tab === 'boosts')) {
+    const hasMatch = (list) => list.some((r) => {
+      const u = toUnifiedItem(r);
+      return tab === 'boosts' ? isBoostUnifiedItem(u) : (!isBoostUnifiedItem(u) && isReplyUnifiedItem(u));
+    });
+    for (let extra = 0; extra < 2 && rows.length > 0 && !hasMatch(rows); extra += 1) {
+      const candMax = String(rows[rows.length - 1]?.id || '');
+      if (!candMax || candMax === activeMastoCursor) break;
+      activeMastoCursor = candMax;
+      const moreRows = await fetchMastoPage(activeMastoCursor).catch(() => []);
+      if (!Array.isArray(moreRows) || moreRows.length === 0) {
+        rows = [];
+        break;
+      }
+      rows = moreRows;
+    }
+  }
+
+  const bskyItems = Array.isArray(bskyRes?.items) ? bskyRes.items : [];
+  const rawNextBsky = String(bskyRes?.nextCursor || '');
+  const nextBskyCursor = rawNextBsky && rawNextBsky !== bskyCursor ? rawNextBsky : '';
+  const rawNextMaxId = rows.length > 0 ? String(rows[rows.length - 1]?.id || '') : '';
+  const nextMaxId = rawNextMaxId && rawNextMaxId !== activeMastoCursor ? rawNextMaxId : '';
+  const nextMastoDone = Boolean(mastoDone || !nextMaxId);
+  const nextCursor = (!nextMastoDone || nextBskyCursor)
+    ? { maxId: nextMaxId, bskyCursor: nextBskyCursor, mastoDone: nextMastoDone }
+    : null;
 
   let items = rows.map((r) => toUnifiedItem(r));
   if (tab === 'posts') {
@@ -2767,7 +2879,8 @@ export async function fetchOwnStatuses(
     items = sortTabStatuses(items, 'boosts');
   }
 
-  return skipMetricsEnrichment ? items : enrichUnifiedItemsMetrics(items);
+  const finalItems = skipMetricsEnrichment ? items : await enrichUnifiedItemsMetrics(items);
+  return wrapPageResult(finalItems, nextCursor);
 }
 
 export async function fetchLists() {

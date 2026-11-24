@@ -3251,22 +3251,14 @@ test('Consideration & use-value sublation: Feed/Photos/Loops UX, Profile 0ms SWR
     assert.ok(provCard.querySelector('.post-provenance-banner')?.textContent.includes('Liked by'));
     assert.ok(provCard.querySelector('.post-provenance-banner')?.textContent.includes('@comrade@hachyderm.io'));
 
-    // Photos: ALT image description disclosure & mosaic badge are disabled, Stream/Gallery Mosaic toggle works
+    // Photos: ALT image description disclosure and Gallery toggle are disabled
     feedHost.querySelector('.stage-tab-btn[data-stream="photos"]').click();
     await new Promise((r) => setTimeout(r, 20));
     const firstIg = feedHost.querySelector('.post-card.is-ig-photo-card');
     assert.ok(firstIg);
     assert.equal(feedHost.querySelector('details.post-alt-disclosure'), null);
-
-    const galleryBtn = feedHost.querySelector('.photos-view-btn[data-photos-view="mosaic"]');
-    assert.ok(galleryBtn);
-    galleryBtn.click();
-    await new Promise((r) => setTimeout(r, 20));
-    const tiles = Array.from(feedHost.querySelectorAll('.photo-mosaic-tile'));
-    assert.equal(tiles.length, 8);
-    assert.equal(tiles[0].querySelector('img')?.getAttribute('fetchpriority'), 'high');
-    assert.equal(tiles[6].querySelector('img')?.getAttribute('loading'), 'lazy');
-    assert.equal(feedHost.querySelector('.photo-mosaic-alt-badge'), null);
+    assert.equal(feedHost.querySelector('.photos-view-btn'), null);
+    assert.equal(feedHost.querySelector('.photo-mosaic-tile'), null);
 
     // Video (Loops): scrubber + duration + reduced-motion gating + keyboard nav
     feedHost.querySelector('.stage-tab-btn[data-stream="video"]').click();

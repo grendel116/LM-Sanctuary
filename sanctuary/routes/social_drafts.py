@@ -9,6 +9,11 @@ from utils import social_vault
 social_drafts_bp = Blueprint("social_drafts", __name__, url_prefix="/api/social/drafts")
 
 
+@social_drafts_bp.errorhandler(social_vault.VaultLockedError)
+def _handle_vault_locked(exc):
+    return jsonify({"error": str(exc), "locked": True, "vault": "keepassxc"}), 503
+
+
 @social_drafts_bp.route("", methods=["GET"])
 def list_drafts():
     return jsonify(social_vault.list_social_drafts())

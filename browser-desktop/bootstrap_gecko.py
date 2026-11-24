@@ -1028,7 +1028,6 @@ def verify_desktop_templates(repo_root: Path = REPO_ROOT) -> None:
         DESKTOP_DIR / "mozconfig",
         DESKTOP_DIR / "mozconfig.artifact",
         DESKTOP_DIR / "mozconfig.gecko",
-        DESKTOP_DIR / "keepassxc_nmh.py",
         DESKTOP_DIR / "README.md",
         DESKTOP_DIR / "patches" / "sanctuary-app-vendor.patch",
         DESKTOP_DIR / "patches" / "sanctuary-actor-registration.patch",

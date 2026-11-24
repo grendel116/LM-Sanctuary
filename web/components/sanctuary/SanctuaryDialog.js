@@ -255,7 +255,7 @@ export function showConfirm(title, message, onConfirm, onCancel = null) {
 /**
  * Classic text Prompt dialog replacing window.prompt().
  */
-export function showPrompt(title, message, defaultValue = '', onConfirm, onCancel = null) {
+export function showPrompt(title, message, defaultValue = '', onConfirm, onCancel = null, opts = {}) {
   const doc = globalThis.document;
   let submitted = false;
   const modal = createClassicModalDialog({
@@ -277,8 +277,11 @@ export function showPrompt(title, message, defaultValue = '', onConfirm, onCance
   msgP.textContent = String(message || '');
 
   const input = doc.createElement('input');
-  input.type = 'text';
+  input.type = opts?.inputType ? String(opts.inputType) : 'text';
   input.className = 'onboarding-input';
+  if (opts?.placeholder) {
+    input.placeholder = String(opts.placeholder);
+  }
   input.value = String(defaultValue || '');
   input.style.fontSize = '0.9rem';
   input.style.marginBottom = '14px';
@@ -302,7 +305,7 @@ export function showPrompt(title, message, defaultValue = '', onConfirm, onCance
   submitBtn.type = 'button';
   submitBtn.className = 'edit-btn edit-save-btn';
   submitBtn.style.minWidth = '100px';
-  submitBtn.textContent = 'Confirm';
+  submitBtn.textContent = opts?.confirmLabel ? String(opts.confirmLabel) : 'Confirm';
 
   const finish = () => {
     submitted = true;

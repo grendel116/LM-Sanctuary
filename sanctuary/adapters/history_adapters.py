@@ -188,6 +188,34 @@ class OsHistoryAdapter:
     ) -> list[dict]:
         from core.program_config import is_story_mode, replace_placeholders
         from runners.program import get_active_program
+        from runners.runner import _get_safe_local_path, prune_orphan_turn_artifacts
+
+        _IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp")
+        _MEDIA_SKIP_DOC_EXTS = _IMAGE_EXTS + (".mp4", ".webm")
+
+        def _resolve_existing_media_source(raw_url: str | None, sender_id: str | None = None) -> str | None:
+            if not raw_url or not isinstance(raw_url, str):
+                return None
+            if raw_url.startswith("data:"):
+                return raw_url
+            local_p = _get_safe_local_path(raw_url, program_id=sender_id)
+            if local_p and os.path.isfile(local_p):
+                return local_p
+            if os.path.isfile(raw_url):
+                return raw_url
+            return None
+
+        def _safe_image_scan(src: str | None) -> str:
+            if not src:
+                return ""
+            is_img = src.startswith("data:image/") or src.lower().endswith(_IMAGE_EXTS)
+            if not is_img:
+                return ""
+            from utils.utils import scan_and_tag_image
+            info = scan_and_tag_image(src)
+            if not info or info.startswith(("[Image Scan: Could not locate", "[Image Scan: No image", "[Image Scan: Error")):
+                return ""
+            return info
 
         history = self.runner_obj.sessions_history.get(self.session_id, [])
         filtered_history = [
@@ -196,6 +224,9 @@ class OsHistoryAdapter:
             and not msg.get("compacted")
             and (msg.get("text") or "").strip() not in ("*(Generation cancelled)*", "*(Generation stopped)*", "(Generation cancelled)", "(Generation stopped)")
         ]
+
+        is_gen = self.session_id in getattr(self.runner_obj, "generating_sessions", set())
+        prune_orphan_turn_artifacts(filtered_history, is_generating=is_gen)
 
         if not filtered_history:
             return [{"role": "system", "content": sys_inst}]
@@ -316,14 +347,31 @@ class OsHistoryAdapter:
                 content_text = f"{content_text[:int(loop_tool_cap * 0.6)]}\n... [Earlier tool output compacted ({len(content_text)} chars); re-read if needed]"
 
             if idx == latest_user_idx:
+                msg_media_local = _resolve_existing_media_source(
+                    msg.get("image_url"),
+                    msg.get("sender_id") if msg.get("role") == "program" else None,
+                )
                 img_src = (
                     f"data:{self.image_mime};base64,{self.image_data}"
                     if self.image_data and self.image_mime
-                    else self.file_path_resolved or msg.get("image_url")
+                    else (
+                        self.file_path_resolved
+                        if (self.file_path_resolved and os.path.isfile(self.file_path_resolved))
+                        else msg_media_local
+                    )
                 )
-                from utils.utils import scan_and_tag_image, extract_uploaded_file_content
-                scan_info = scan_and_tag_image(img_src) if (has_new_image or msg.get("image_url")) else ""
-                doc_info = extract_uploaded_file_content(self.file_path_resolved) if self.file_path_resolved else ""
+                from utils.utils import extract_uploaded_file_content
+                scan_info = _safe_image_scan(img_src)
+                doc_path = (
+                    self.file_path_resolved
+                    if (self.file_path_resolved and os.path.isfile(self.file_path_resolved))
+                    else (
+                        msg_media_local
+                        if (msg_media_local and not msg_media_local.startswith("data:") and not msg_media_local.lower().endswith(_MEDIA_SKIP_DOC_EXTS))
+                        else None
+                    )
+                )
+                doc_info = extract_uploaded_file_content(doc_path) if doc_path else ""
 
                 extra_parts = [p for p in (doc_info, scan_info) if p]
                 if extra_parts:
@@ -333,9 +381,13 @@ class OsHistoryAdapter:
                 continue
 
             if msg.get("image_url"):
-                from utils.utils import scan_and_tag_image
-                scan_info = scan_and_tag_image(msg.get("image_url"))
-                content_text = f"{content_text}\n\n{scan_info}".strip()
+                hist_media_local = _resolve_existing_media_source(
+                    msg.get("image_url"),
+                    msg.get("sender_id") if msg.get("role") == "program" else None,
+                )
+                scan_info = _safe_image_scan(hist_media_local)
+                if scan_info:
+                    content_text = f"{content_text}\n\n{scan_info}".strip()
             raw_messages.append({"role": role, "content": content_text})
 
         group_meta = getattr(self.runner_obj, "sessions_group_meta", {}).get(self.session_id)

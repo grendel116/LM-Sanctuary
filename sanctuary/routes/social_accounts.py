@@ -16,6 +16,21 @@ social_accounts_bp = Blueprint("social_accounts", __name__, url_prefix="/api/soc
 _FILTER_LOCK = threading.RLock()
 
 
+@social_accounts_bp.before_request
+def _guard_social_vault():
+    if request.method == "OPTIONS":
+        return None
+    ok, status, msg = social_vault.verify_trusted_vault_request(request)
+    if not ok:
+        return jsonify({"error": msg}), status
+    return None
+
+
+@social_accounts_bp.errorhandler(social_vault.VaultLockedError)
+def _handle_vault_locked(exc):
+    return jsonify({"error": str(exc), "locked": True, "vault": "keepassxc"}), 503
+
+
 def _keyword_filters_path() -> str:
     return os.path.join(vs.VARIABLES_DIR, "keyword_filters.json")
 

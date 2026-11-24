@@ -6,7 +6,8 @@ import { createClassicModalDialog, showAlert } from '../components/sanctuary/San
 import { DEFAULT_AVATAR_DATA_URI } from '../constants/avatars.js';
 import { BLUESKY_MAX_GRAPHEMES, MASTODON_MAX_CHARS } from '../constants/endpoints.js';
 import { buildSynthesizedReplyContext, toUnifiedItem } from '../core/schema/unifiedItem.js';
-import { createBskyPost, uploadBskyBlob } from '../queries/bluesky.js';
+import { createBskyPost, searchBskyActors, uploadBskyBlob } from '../queries/bluesky.js';
+import { searchFediverse } from '../queries/fediverse.js';
 import { extractFirstHttpsUrl, fetchLinkPreview } from '../queries/linkPreview.js';
 import { resolveSanctuaryMediaUrl } from '../queries/sanctuary.js';
 import { publishUnified, replyUnified, syncRecentUserPostsToSanctuary } from '../queries/socialClient.js';
@@ -35,6 +36,31 @@ import {
 } from '../state/composeStore.js';
 
 const MEDIA_ICON_SVG = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="3" ry="3"></rect><circle cx="8.5" cy="8.5" r="1.5"></circle><path d="m21 15-5-5L5 21"></path></svg>`;
+const BRIDGE_AUTOSPLIT_NOTE = 'Auto-splits on bridges';
+
+function isMentionCaretChar(code) {
+  const isAlnum =
+    (code >= 65 && code <= 90)
+    || (code >= 97 && code <= 122)
+    || (code >= 48 && code <= 57);
+  return isAlnum || code === 46 || code === 45 || code === 95 || code === 64; // . - _ @
+}
+
+export function extractMentionTokenAtCaret(text, caretPos) {
+  const src = String(text || '');
+  const pos = Number.isInteger(caretPos) ? Math.max(0, Math.min(caretPos, src.length)) : src.length;
+  let start = pos;
+  while (start > 0 && isMentionCaretChar(src.charCodeAt(start - 1))) {
+    start -= 1;
+  }
+  const token = src.slice(start, pos);
+  if (!token.startsWith('@') || token.length < 3) return null;
+  const prevCh = start > 0 ? src[start - 1] : '';
+  if (prevCh && prevCh !== ' ' && prevCh !== '\n' && prevCh !== '\r' && prevCh !== '\t' && prevCh !== '(') {
+    return null;
+  }
+  return { query: token.slice(1), start, end: pos };
+}
 
 function supportsNativeFieldSizing() {
   return typeof globalThis.CSS?.supports === 'function' && globalThis.CSS.supports('field-sizing', 'content');
@@ -336,6 +362,7 @@ export function mountComposeModal(hostEl, { onPublished } = {}) {
 
   const dismissCompose = () => {
     clearPendingLinkPreview();
+    closeMentionMenu?.();
     if (composeStore.get().activeDraftId) {
       resetCompose();
       return;
@@ -434,9 +461,214 @@ export function mountComposeModal(hostEl, { onPublished } = {}) {
     setComposeText(textarea.value);
     syncAutoHeight(textarea);
     captureCaret('main', null, textarea);
+    scheduleMentionLookup('main', null, textarea);
   });
+  textarea.addEventListener('keydown', (e) => handleMentionKeydown(e));
   for (const evt of ['focus', 'keyup', 'mouseup', 'blur']) {
     textarea.addEventListener(evt, () => captureCaret('main', null, textarea));
+  }
+
+  const mentionMenuEl = doc.createElement('div');
+  mentionMenuEl.className = 'compose-mention-menu';
+  mentionMenuEl.setAttribute('role', 'listbox');
+  mentionMenuEl.setAttribute('aria-label', 'Mention suggestions');
+  mentionMenuEl.hidden = true;
+
+  let mentionTimer = null;
+  let mentionEpoch = 0;
+  let mentionSuggestions = [];
+  let mentionActiveIdx = 0;
+  let mentionMatch = null;
+  let mentionTargetInput = null;
+  let mentionTargetKind = 'main';
+  let mentionTargetItemId = null;
+
+  function closeMentionMenu() {
+    clearTimeout(mentionTimer);
+    mentionTimer = null;
+    mentionEpoch += 1;
+    mentionSuggestions = [];
+    mentionActiveIdx = 0;
+    mentionMatch = null;
+    mentionMenuEl.hidden = true;
+    mentionMenuEl.replaceChildren();
+  }
+
+  function applyMentionSelection(idx) {
+    const item = mentionSuggestions[idx];
+    const targetInput = mentionTargetInput;
+    if (!item || !mentionMatch || !targetInput) return;
+    const current = String(targetInput.value || '');
+    const before = current.slice(0, mentionMatch.start);
+    const after = current.slice(mentionMatch.end);
+    const spacer = after.startsWith(' ') ? '' : ' ';
+    const inserted = `@${item.insertHandle}${spacer}`;
+    const nextText = `${before}${inserted}${after}`;
+    const nextPos = before.length + inserted.length;
+
+    if (mentionTargetKind === 'thread' && mentionTargetItemId) {
+      updateThreadItem(mentionTargetItemId, { text: nextText });
+    } else {
+      setComposeText(nextText);
+    }
+    targetInput.value = nextText;
+    syncAutoHeight(targetInput, mentionTargetKind === 'thread' ? 52 : 68, mentionTargetKind === 'thread' ? 260 : 340);
+    targetInput.focus?.();
+    targetInput.setSelectionRange?.(nextPos, nextPos);
+    activeTextTarget.kind = mentionTargetKind;
+    activeTextTarget.itemId = mentionTargetItemId;
+    activeTextTarget.start = nextPos;
+    activeTextTarget.end = nextPos;
+    closeMentionMenu();
+  }
+
+  function renderMentionMenu() {
+    mentionMenuEl.replaceChildren();
+    if (mentionSuggestions.length === 0) {
+      mentionMenuEl.hidden = true;
+      return;
+    }
+    mentionMenuEl.hidden = false;
+    mentionSuggestions.forEach((s, idx) => {
+      const opt = doc.createElement('button');
+      opt.type = 'button';
+      opt.className = `compose-mention-option${idx === mentionActiveIdx ? ' is-selected' : ''}`;
+      opt.setAttribute('role', 'option');
+      opt.setAttribute('aria-selected', idx === mentionActiveIdx ? 'true' : 'false');
+
+      const av = doc.createElement('img');
+      av.className = 'compose-mention-avatar';
+      av.src = s.avatar || DEFAULT_AVATAR_DATA_URI;
+      av.alt = '';
+
+      const meta = doc.createElement('span');
+      meta.className = 'compose-mention-meta';
+      const nameEl = doc.createElement('span');
+      nameEl.className = 'compose-mention-name';
+      nameEl.textContent = s.displayName || s.insertHandle;
+      const handleEl = doc.createElement('span');
+      handleEl.className = 'compose-mention-handle';
+      handleEl.textContent = `@${s.insertHandle}`;
+      meta.append(nameEl, handleEl);
+
+      const protoEl = doc.createElement('span');
+      protoEl.className = `post-protocol-badge post-protocol-badge--${s.protocol}`;
+      protoEl.textContent = s.protocol === 'bluesky' ? 'Bluesky' : 'Fediverse';
+
+      opt.append(av, meta, protoEl);
+      opt.addEventListener('mousedown', (e) => {
+        e.preventDefault();
+        applyMentionSelection(idx);
+      });
+      mentionMenuEl.appendChild(opt);
+    });
+  }
+
+  function handleMentionKeydown(e) {
+    if (mentionMenuEl.hidden || mentionSuggestions.length === 0) return;
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      mentionActiveIdx = (mentionActiveIdx + 1) % mentionSuggestions.length;
+      renderMentionMenu();
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      mentionActiveIdx = (mentionActiveIdx - 1 + mentionSuggestions.length) % mentionSuggestions.length;
+      renderMentionMenu();
+    } else if (e.key === 'Enter' || e.key === 'Tab') {
+      e.preventDefault();
+      applyMentionSelection(mentionActiveIdx);
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      closeMentionMenu();
+    }
+  }
+
+  function scheduleMentionLookup(kind, itemId, targetInput) {
+    const caret = typeof targetInput?.selectionStart === 'number'
+      ? targetInput.selectionStart
+      : String(targetInput?.value || '').length;
+    const match = extractMentionTokenAtCaret(targetInput?.value || '', caret);
+    if (!match) {
+      closeMentionMenu();
+      return;
+    }
+    mentionMatch = match;
+    mentionTargetInput = targetInput;
+    mentionTargetKind = kind;
+    mentionTargetItemId = itemId;
+    clearTimeout(mentionTimer);
+    const epoch = ++mentionEpoch;
+    mentionTimer = setTimeout(() => {
+      void (async () => {
+        const accts = authStore.get().accounts || [];
+        const bskyAcc = accts.find((a) => a.platform === 'bluesky');
+        const fediAcc = accts.find((a) => a.platform === 'fediverse');
+        const lookups = [];
+        if (bskyAcc) {
+          lookups.push(
+            searchBskyActors({
+              query: match.query,
+              limit: 4,
+              serviceUrl: bskyAcc.serviceUrl || bskyAcc.meta?.serviceUrl,
+            })
+              .then((res) =>
+                (Array.isArray(res?.actors) ? res.actors : [])
+                  .filter((a) => a?.handle)
+                  .map((a) => ({
+                    protocol: 'bluesky',
+                    insertHandle: String(a.handle).replace(/^@/, ''),
+                    displayName: a.displayName || a.handle,
+                    avatar: a.avatar || '',
+                  }))
+              )
+              .catch(() => [])
+          );
+        }
+        if (fediAcc && fediAcc.instanceUrl) {
+          lookups.push(
+            searchFediverse({
+              instanceUrl: fediAcc.instanceUrl,
+              query: match.query,
+              type: 'accounts',
+              resolve: false,
+              limit: 4,
+            })
+              .then((res) =>
+                (Array.isArray(res?.accounts) ? res.accounts : [])
+                  .filter((a) => a?.acct)
+                  .map((a) => ({
+                    protocol: 'mastodon',
+                    insertHandle: String(a.acct).replace(/^@/, ''),
+                    displayName: a.displayName || a.acct,
+                    avatar: a.avatar || '',
+                  }))
+              )
+              .catch(() => [])
+          );
+        }
+        if (lookups.length === 0) {
+          if (epoch === mentionEpoch) closeMentionMenu();
+          return;
+        }
+        const lists = await Promise.all(lookups);
+        if (epoch !== mentionEpoch) return;
+        const merged = [];
+        const seen = new Set();
+        for (const list of lists) {
+          for (const entry of list) {
+            const key = `${entry.protocol}:${entry.insertHandle.toLowerCase()}`;
+            if (seen.has(key)) continue;
+            seen.add(key);
+            merged.push(entry);
+            if (merged.length >= 6) break;
+          }
+          if (merged.length >= 6) break;
+        }
+        mentionSuggestions = merged;
+        mentionActiveIdx = 0;
+        renderMentionMenu();
+      })();
+    }, 180);
   }
 
   const mediaHostEl = doc.createElement('div');
@@ -511,7 +743,7 @@ export function mountComposeModal(hostEl, { onPublished } = {}) {
   });
 
   inlineTools.append(attachBtn, emojiPicker.triggerBtn, emojiPicker.panel, fileInput);
-  editorCol.append(authorLine, mainLbl, textarea, mediaHostEl, linkPreviewHostEl, inlineTools);
+  editorCol.append(authorLine, mainLbl, textarea, mentionMenuEl, mediaHostEl, linkPreviewHostEl, inlineTools);
   mainUnit.append(avatarCol, editorCol);
 
   const threadExtraList = doc.createElement('div');
@@ -744,7 +976,9 @@ export function mountComposeModal(hostEl, { onPublished } = {}) {
       updateThreadItem(item.id, { text: extraTextarea.value });
       syncAutoHeight(extraTextarea, 52, 220);
       captureCaret('thread', item.id, extraTextarea);
+      scheduleMentionLookup('thread', item.id, extraTextarea);
     });
+    extraTextarea.addEventListener('keydown', (e) => handleMentionKeydown(e));
     for (const evt of ['focus', 'keyup', 'mouseup', 'blur']) {
       extraTextarea.addEventListener(evt, () => captureCaret('thread', item.id, extraTextarea));
     }
@@ -1036,9 +1270,11 @@ export function mountComposeModal(hostEl, { onPublished } = {}) {
     const overMastodonLimit = hasFedi
       ? ([...(s.text || '')].length > MASTODON_MAX_CHARS || extraItems.some((it) => [...(it.text || '')].length > MASTODON_MAX_CHARS))
       : !allWithinLimit;
-    if (mainRemaining < 0 && hasFedi && (hasBsky || hasThreads) && !overMastodonLimit && !s.submitting) {
-      statusLine.textContent = 'Bridge limit exceeded — long text will auto-split cleanly on connected bridges.';
-    } else if (!s.submitting && !s.error && statusLine.textContent.startsWith('Bridge limit exceeded')) {
+    const showAutoSplitNote = mainRemaining < 0 && hasFedi && (hasBsky || hasThreads) && !overMastodonLimit && !s.submitting && !s.error;
+    statusLine.classList.toggle('is-info', showAutoSplitNote);
+    if (showAutoSplitNote) {
+      statusLine.textContent = BRIDGE_AUTOSPLIT_NOTE;
+    } else if (!s.submitting && !s.error && statusLine.textContent === BRIDGE_AUTOSPLIT_NOTE) {
       statusLine.textContent = '';
     }
 
@@ -1082,8 +1318,9 @@ export function mountComposeModal(hostEl, { onPublished } = {}) {
     }
 
     if (s.error) {
+      statusLine.classList.remove('is-info');
       statusLine.textContent = s.error;
-    } else if (!s.submitting && !statusLine.textContent.startsWith('Bridge limit exceeded')) {
+    } else if (!s.submitting && statusLine.textContent !== BRIDGE_AUTOSPLIT_NOTE) {
       statusLine.textContent = '';
     }
 

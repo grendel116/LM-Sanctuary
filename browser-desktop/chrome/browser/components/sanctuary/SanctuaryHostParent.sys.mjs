@@ -68,38 +68,19 @@ export class SanctuaryHostParent extends JSWindowActorParent {
   }
 
   async #isKeePassInstalled() {
-    try {
-      const { AddonManager } = ChromeUtils.importESModule(
-        "resource://gre/modules/AddonManager.sys.mjs"
-      );
-      const addon = await AddonManager.getAddonByID(KEEPASSXC_EXTENSION_ID);
-      return Boolean(addon && addon.isActive);
-    } catch {
-      return false;
-    }
+    return true;
   }
 
   async #connectKeePassXC() {
-    Services.prefs.setStringPref("browser.sval.passwordManager", "keepassxc");
-    try {
-      const { SvalPasswordManager } = ChromeUtils.importESModule(
-        "moz-src:///browser/components/sval/SvalPasswordManager.sys.mjs"
-      );
-      if (typeof SvalPasswordManager?.select === "function") {
-        await SvalPasswordManager.select("keepassxc");
-      } else if (typeof SvalPasswordManager?.ensure === "function") {
-        await SvalPasswordManager.ensure();
-      }
-    } catch {
-      // SvalPasswordManager unavailable in minimal test harness
-    }
-    const connected = await this.#isKeePassInstalled();
-    try {
-      this.sendAsyncMessage("SanctuaryHost:KeePassState", { connected });
-    } catch {
-      // Ignore if actor destroyed
-    }
-    return connected;
+    const win = this.#topChromeWindow();
+    const rawSpec = String(
+      this.browsingContext?.top?.currentWindowGlobal?.documentURI?.spec || ""
+    ).trim();
+    SanctuaryWindowHost.notifyShellEvent(win, {
+      type: "vault-open-requested",
+      url: rawSpec,
+    });
+    return true;
   }
 
   #saveSearchConfig(searchConfig) {
@@ -153,6 +134,104 @@ export class SanctuaryHostParent extends JSWindowActorParent {
     }
   }
 
+  #getShellApiOrigin() {
+    try {
+      const configured = Services.prefs.getStringPref(
+        "browser.sanctuary.shellUrl",
+        "http://127.0.0.1:5000"
+      );
+      return new URL(configured).origin;
+    } catch {
+      return "http://127.0.0.1:5000";
+    }
+  }
+
+  async #requestPageLogins() {
+    const rawSpec = String(
+      this.browsingContext?.top?.currentWindowGlobal?.documentURI?.spec ||
+        this.browsingContext?.currentWindowGlobal?.documentURI?.spec ||
+        ""
+    ).trim();
+    let parsedUrl = null;
+    try {
+      parsedUrl = new URL(rawSpec);
+    } catch {
+      return { ok: false, entries: [], error: "Unsupported page URL." };
+    }
+    const proto = parsedUrl.protocol.toLowerCase();
+    const host = parsedUrl.hostname.toLowerCase();
+    const isLocalHttp = proto === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(host);
+    if (
+      !host ||
+      host === "lm-sanctuary.local" ||
+      host.endsWith(".lm-sanctuary.local") ||
+      (proto !== "https:" && !isLocalHttp)
+    ) {
+      return { ok: false, entries: [], error: "KeePassXC autofill requires an HTTPS site." };
+    }
+
+    const origin = this.#getShellApiOrigin();
+    const queryLogins = async () => {
+      const resp = await fetch(`${origin}/api/keepassxc/logins`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url: rawSpec }),
+      });
+      let data = {};
+      try {
+        data = await resp.json();
+      } catch {
+        data = {};
+      }
+      return { resp, data };
+    };
+
+    try {
+      const { resp, data } = await queryLogins();
+      if (resp.status === 503 || resp.status === 409) {
+        const win = this.#topChromeWindow();
+        SanctuaryWindowHost.notifyShellEvent(win, {
+          type: "vault-unlock-requested",
+          url: rawSpec,
+        });
+        return {
+          ok: false,
+          entries: [],
+          locked: Boolean(data?.locked),
+          openedModal: true,
+          error: String(data?.error || ""),
+        };
+      }
+      return {
+        ok: resp.ok,
+        entries: Array.isArray(data?.entries) ? data.entries : [],
+        locked: Boolean(data?.locked),
+        error: String(data?.error || ""),
+      };
+    } catch (err) {
+      return {
+        ok: false,
+        entries: [],
+        locked: false,
+        error: String(err?.message || "Unable to reach Sanctuary Vault service."),
+      };
+    }
+  }
+
+  #openVaultForPage() {
+    const win = this.#topChromeWindow();
+    const rawSpec = String(
+      this.browsingContext?.top?.currentWindowGlobal?.documentURI?.spec ||
+        this.browsingContext?.currentWindowGlobal?.documentURI?.spec ||
+        ""
+    ).trim();
+    SanctuaryWindowHost.notifyShellEvent(win, {
+      type: "vault-open-requested",
+      url: rawSpec,
+    });
+    return { ok: true };
+  }
+
   async receiveMessage(message) {
     const data = message?.data || {};
     const win = this.#topChromeWindow();
@@ -172,10 +251,20 @@ export class SanctuaryHostParent extends JSWindowActorParent {
         return null;
       case "SanctuaryHost:ExtractTabContent":
         return SanctuaryWindowHost.extractTabContent(win, data);
+      case "SanctuaryHost:CaptureTabPreview":
+        return SanctuaryWindowHost.captureTabPreview(win, data);
+      case "SanctuaryHost:AutofillTab":
+        return SanctuaryWindowHost.autofillTab(win, data);
+      case "SanctuaryHost:RequestPageLogins":
+        return this.#requestPageLogins();
+      case "SanctuaryHost:OpenVaultForPage":
+        return this.#openVaultForPage();
       case "SanctuaryHost:ActOnTab":
         return SanctuaryWindowHost.actOnTab(win, data);
       case "SanctuaryHost:StepHistory":
         return SanctuaryWindowHost.stepHistory(win, data);
+      case "SanctuaryHost:ClearHistory":
+        return SanctuaryWindowHost.clearHistory(win);
       case "SanctuaryHost:SetPrivacy":
         this.#applyPrivacyPrefs(data.privacy || {});
         return null;

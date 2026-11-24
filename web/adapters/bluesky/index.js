@@ -86,11 +86,12 @@ export class BlueskyAdapter extends SocialAdapter {
     const uri = created?.uri || '';
     const cid = created?.cid || '';
     const rkey = uri.split('/').pop() || '';
+    const resolvedFacets = Array.isArray(created?.facets) ? created.facets : [];
     return {
       id: `bluesky:${uri || cid}`,
       protocol: 'bluesky',
       url: this.handle && rkey ? `https://bsky.app/profile/${this.handle}/post/${rkey}` : '',
-      content_html: renderBskyRichTextToHtml(draft),
+      content_html: renderBskyRichTextToHtml(draft, resolvedFacets),
       content_text: String(draft || ''),
       date_published: new Date().toISOString(),
       author: {
@@ -106,6 +107,7 @@ export class BlueskyAdapter extends SocialAdapter {
         bluesky: {
           uri,
           cid,
+          ...(resolvedFacets.length > 0 ? { facets: resolvedFacets } : {}),
           ...(options.reply ? { reply: options.reply } : {}),
         },
         ...(externalEmbed ? { linkCard: options.externalEmbed } : {}),
@@ -186,8 +188,8 @@ export class BlueskyAdapter extends SocialAdapter {
     };
   }
 
-  async fetchNotifications(cursor = '', limit = 30) {
-    const data = await listBskyNotifications({ ...this._authArgs(), cursor, limit });
+  async fetchNotifications(cursor = '', limit = 30, { cache } = {}) {
+    const data = await listBskyNotifications({ ...this._authArgs(), cursor, limit, cache });
     const rows = Array.isArray(data?.notifications) ? data.notifications : [];
     const allowReasons = new Set(['reply', 'mention', 'quote', 'like', 'repost', 'follow']);
     const items = rows

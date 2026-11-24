@@ -11,6 +11,7 @@ import uuid
 from datetime import datetime
 
 from runners.program import get_active_program
+from utils.session_data import read_session_data, write_session_data
 from variables.settings import PROGRAMS_DIR
 
 _lock = threading.Lock()
@@ -23,8 +24,7 @@ def _quest_log_path(program: str | None = None) -> str:
 def _read(path: str) -> list[dict]:
     if not os.path.exists(path):
         return []
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
+    return read_session_data(path)
 
 
 def _write(path: str, quests: list[dict]):
@@ -32,10 +32,7 @@ def _write(path: str, quests: list[dict]):
     prog_name = os.path.basename(parent_dir)
     if not os.path.isdir(parent_dir) or (prog_name != "sebile" and not os.path.isfile(os.path.join(parent_dir, f"{prog_name}.json"))):
         return
-    temp_path = f"{path}.{uuid.uuid4().hex}.tmp"
-    with open(temp_path, "w", encoding="utf-8") as f:
-        json.dump(quests, f, indent=2, ensure_ascii=False)
-    os.replace(temp_path, path)
+    write_session_data(path, quests)
 
 
 def parse_due(value: str) -> datetime:

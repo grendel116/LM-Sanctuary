@@ -657,12 +657,11 @@ export function openAuthorSheetModal({
               if (onReply) onReply(target);
               else prefillReply(target);
             },
-            onOpenThread: onOpenPostThread
-              ? (target) => {
-                  modal.close();
-                  onOpenPostThread(target);
-                }
-              : null,
+            onOpenThread: (target) => {
+              modal.close();
+              if (onOpenPostThread) onOpenPostThread(target);
+              else doc.dispatchEvent(new CustomEvent('sanctuary:open-post', { detail: target }));
+            },
             onToggleLike: async (target) => {
               const updated = await likeUnified(target);
               if (updated) {

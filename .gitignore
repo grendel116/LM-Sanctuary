@@ -19,7 +19,11 @@ android/capacitor-cordova-android-plugins/
 
 # Local Config (contains credentials and settings)
 .env
+.env.*
+!.env.example
 sanctuary/.env
+sanctuary/.env.*
+!sanctuary/.env.example
 sanctuary/variables/project_settings.json
 
 # Temporary files
@@ -29,12 +33,29 @@ sanctuary/data/
 social/data/
 webview_data/
 reports/
+certs/
 sanctuary/certs/
 *.db
 *.db-wal
 *.db-shm
 *.sqlite
+*.sqlite-wal
+*.sqlite-shm
 *.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+*.kdbx
+*.kdbx.*
+*.key
+*.keyx
+*.pem
+*.crt
+*.p12
+*.pfx
+*.enc
+active_program.txt
+active_session.txt
+active_user.txt
 *.tmp
 .DS_Store
 Thumbs.db

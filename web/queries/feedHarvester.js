@@ -24,6 +24,7 @@ import {
   isUnifiedItemModerated,
   mergeViewerActivityMeta,
   normalizeNativeUri,
+  reconcileViewerMetricFloors,
   resolveContextualStreamItems,
   toUnifiedItem,
 } from '../core/schema/unifiedItem.js';
@@ -127,7 +128,7 @@ function getBskyReadOpts(bskyAuth, fetchImpl) {
         accessJwt: bskyAuth.secrets.accessJwt,
         refreshJwt: bskyAuth.secrets.refreshJwt,
         ...(bskyAuth.meta?.id
-          ? { onSessionRefreshed: (tok) => updateAccountTokens(bskyAuth.meta.id, tok) }
+          ? { onSessionRefreshed: (tok) => updateAccountTokens(bskyAuth.meta.id, tok).catch(() => {}) }
           : {}),
       }
     : {};
@@ -507,6 +508,7 @@ export async function fetchDiscoveryInstanceTimeline({
   limit = 40,
   accessToken = '',
   stream = 'federated',
+  onlyMedia = false,
   cache,
   timeoutMs,
   fetchImpl,
@@ -556,6 +558,7 @@ export async function fetchDiscoveryInstanceTimeline({
       instanceUrl,
       accessToken,
       stream,
+      onlyMedia,
       maxId,
       limit,
       ...(cache !== undefined ? { cache } : {}),
@@ -574,17 +577,24 @@ export async function fetchDiscoveryInstanceTimeline({
       });
     }
     if (err?.status === 401 || err?.status === 403 || err?.status === 422) {
+      const numOffset = Number(maxId);
+      if (maxId && (!Number.isFinite(numOffset) || numOffset < 0 || numOffset > 40)) {
+        return { items: [], nextCursor: null };
+      }
+      const safeOffset = maxId ? numOffset : 0;
       const res = await getTrendingStatuses({
         instanceUrl,
+        ...(accessToken ? { accessToken } : {}),
         limit,
-        offset: Number(maxId) || 0,
+        offset: safeOffset,
         ...(cache !== undefined ? { cache } : {}),
         ...(timeoutMs ? { timeoutMs } : {}),
         fetchImpl,
       });
+      const nextOff = Number(res.nextOffset || 0);
       return {
         items: res.items,
-        nextCursor: res.nextOffset ? String(res.nextOffset) : null,
+        nextCursor: nextOff > 0 && nextOff <= 40 ? String(nextOff) : null,
       };
     }
     throw err;
@@ -637,6 +647,8 @@ function buildItemLookupKeys(raw) {
 export async function syncOwnViewerActivity({
   fediAuth = null,
   bskyAuth = null,
+  prefetchedFediFavs = null,
+  prefetchedBskyLikes = null,
   timeoutMs = 5500,
   fetchImpl,
 } = {}) {
@@ -663,13 +675,17 @@ export async function syncOwnViewerActivity({
       }
 
       const [favs, ownStatuses] = await Promise.all([
-        getFavouritedStatuses({
-          instanceUrl: fediOrigin,
-          accessToken: fediToken,
-          limit: 30,
-          ...(timeoutMs ? { timeoutMs } : {}),
-          fetchImpl,
-        }).catch(() => []),
+        Array.isArray(prefetchedFediFavs)
+          ? Promise.resolve(prefetchedFediFavs)
+          : (prefetchedFediFavs && typeof prefetchedFediFavs.then === 'function'
+              ? prefetchedFediFavs
+              : getFavouritedStatuses({
+                  instanceUrl: fediOrigin,
+                  accessToken: fediToken,
+                  limit: 30,
+                  ...(timeoutMs ? { timeoutMs } : {}),
+                  fetchImpl,
+                }).catch(() => [])),
         accountId
           ? getAccountStatuses({
               instanceUrl: fediOrigin,
@@ -685,8 +701,14 @@ export async function syncOwnViewerActivity({
       ]);
 
       for (const fav of Array.isArray(favs) ? favs : []) {
-        const { keys } = buildItemLookupKeys(fav);
-        if (keys.length > 0) entries.push({ keys, favourited: true });
+        const { u, keys } = buildItemLookupKeys(fav);
+        if (keys.length > 0) {
+          entries.push({
+            keys,
+            favourited: true,
+            minLikes: Math.max(1, Number(u.metrics?.likes || 0)),
+          });
+        }
       }
 
       const missingParentIds = [];
@@ -745,13 +767,21 @@ export async function syncOwnViewerActivity({
     };
     tasks.push((async () => {
       const [likesRes, feedRes] = await Promise.all([
-        getBskyActorLikes({ actor: bskyActor, limit: 30, ...bskyOpts }).catch(() => ({ items: [] })),
+        Array.isArray(prefetchedBskyLikes?.items)
+          ? Promise.resolve(prefetchedBskyLikes)
+          : (prefetchedBskyLikes && typeof prefetchedBskyLikes.then === 'function'
+              ? prefetchedBskyLikes
+              : getBskyActorLikes({ actor: bskyActor, limit: 30, ...bskyOpts }).catch(() => ({ items: [] }))),
         getBskyAuthorFeed({ actor: bskyActor, filter: 'posts_with_replies', limit: 40, ...bskyOpts }).catch(() => ({ items: [] })),
       ]);
       for (const item of Array.isArray(likesRes?.items) ? likesRes.items : []) {
         const { u, keys } = buildItemLookupKeys(item);
         if (keys.length > 0) {
-          entries.push({ keys, likeUri: u._meta?.bluesky?.likeUri || 'liked' });
+          entries.push({
+            keys,
+            likeUri: u._meta?.bluesky?.likeUri || 'liked',
+            minLikes: Math.max(1, Number(u.metrics?.likes || 0)),
+          });
         }
       }
       for (const item of Array.isArray(feedRes?.items) ? feedRes.items : []) {
@@ -883,7 +913,7 @@ export async function harvestSanctuaryFeed({
   const effectiveTags = [...tagList];
   const seenEffTags = new Set(effectiveTags);
   const modeDefaultTags = discoveryMode === 'photos'
-    ? ['pixelfed', 'fediphoto']
+    ? ['pixelfed', 'fediphoto', 'photography', 'illustration']
     : (discoveryMode === 'video' ? ['loops'] : []);
   for (const t of [...modeDefaultTags, ...syncedFollowedTags, ...learnedTopics.map((q) => conceptToHashtag(q))]) {
     if (!t || seenEffTags.has(t)) continue;
@@ -894,7 +924,8 @@ export async function harvestSanctuaryFeed({
 
   const effectiveSearchQueries = [];
   const seenQueries = new Set();
-  for (const q of [...learnedTopics, ...searchQueries]) {
+  const modeDefaultQueries = discoveryMode === 'photos' ? ['photography', 'digital art', 'illustration'] : [];
+  for (const q of [...learnedTopics, ...searchQueries, ...modeDefaultQueries]) {
     const clean = String(q || '').trim();
     const low = clean.toLowerCase();
     if (!clean || seenQueries.has(low)) continue;
@@ -912,8 +943,12 @@ export async function harvestSanctuaryFeed({
 
   const hasTagSource = hasFediToken || activeInstances.length > 0 || hasCustomChannels || effectiveTags.length > 0;
   const tagBatch = hasTagSource ? buildKeyedBatch(effectiveTags, cursorState.tagCursors, page, 4) : [];
-  const instanceBatch = activeInstances.length > 0
-    ? buildKeyedBatch(activeInstances, cursorState.instanceCursors, page, 4)
+  const defaultPublicMastoHost = normalizeHostName(DEFAULT_PUBLIC_MASTO_HOST);
+  const effectiveInstances = isMediaMode
+    ? [...new Set([...activeInstances, defaultPublicMastoHost])]
+    : activeInstances;
+  const instanceBatch = effectiveInstances.length > 0
+    ? buildKeyedBatch(effectiveInstances, cursorState.instanceCursors, page, 4)
     : [];
   const bskyFeedBatch = bskyFeedUris.length > 0
     ? buildKeyedBatch(bskyFeedUris, cursorState.bskyFeedCursors, page, 4)
@@ -1020,8 +1055,9 @@ export async function harvestSanctuaryFeed({
       fetchDiscoveryInstanceTimeline({
         host,
         maxId,
-        limit: 30,
-        stream: 'trends',
+        limit: isMediaMode ? 40 : 30,
+        stream: isMediaMode ? 'federated' : 'trends',
+        onlyMedia: isMediaMode,
         accessToken: host === fediHost ? tagToken : '',
         ...(reqCache ? { cache: reqCache } : {}),
         ...(legTimeoutMs ? { timeoutMs: legTimeoutMs } : {}),
@@ -1063,7 +1099,8 @@ export async function harvestSanctuaryFeed({
         accessToken: hasFediToken ? tagToken : '',
         tag,
         maxId,
-        limit: 25,
+        limit: isMediaMode ? 40 : 25,
+        onlyMedia: isMediaMode,
         ...(reqCache ? { cache: reqCache } : {}),
         ...(legTimeoutMs ? { timeoutMs: legTimeoutMs } : {}),
         fetchImpl,
@@ -1074,7 +1111,31 @@ export async function harvestSanctuaryFeed({
           items: tagFeedSource(res.items || [], 'discovery'),
           nextCursor: res.nextCursor || null,
         }))
-        .catch(() => ({ kind: 'tag', key: tag, items: [], nextCursor: null }))
+        .catch(async () => {
+          if (normalizeHostName(tagHomeOrigin) !== defaultPublicMastoHost) {
+            try {
+              const fb = await getTagTimeline({
+                instanceUrl: DEFAULT_PUBLIC_MASTO_HOST,
+                accessToken: '',
+                tag,
+                maxId,
+                limit: isMediaMode ? 40 : 25,
+                onlyMedia: isMediaMode,
+                ...(legTimeoutMs ? { timeoutMs: legTimeoutMs } : {}),
+                fetchImpl,
+              });
+              return {
+                kind: 'tag',
+                key: tag,
+                items: tagFeedSource(fb.items || [], 'discovery'),
+                nextCursor: fb.nextCursor || null,
+              };
+            } catch {
+              // Fall through to empty tag result
+            }
+          }
+          return { kind: 'tag', key: tag, items: [], nextCursor: null };
+        })
     );
   }
 
@@ -1082,9 +1143,9 @@ export async function harvestSanctuaryFeed({
     tasks.push(
       searchBskyPosts({
         query,
-        sort: 'top',
+        sort: isMediaMode ? 'latest' : 'top',
         cursor: searchCursor,
-        limit: 25,
+        limit: isMediaMode ? 30 : 25,
         ...bskyReadOpts,
       })
         .then((res) => ({
@@ -1097,7 +1158,23 @@ export async function harvestSanctuaryFeed({
     );
   }
 
-  // 5. 2-Hop Peer Likes & Co-Likers ("Taste Twins")
+  // 5. 2-Hop Peer Likes & Co-Likers ("Taste Twins") + shared viewer activity fetch
+  const ownBskyActor = bskyAuth?.meta?.did || bskyAuth?.meta?.handle || '';
+  const sharedBskyLikesPromise =
+    page === 0 && hasBskyToken && ownBskyActor
+      ? getBskyActorLikes({ actor: ownBskyActor, limit: 30, ...bskyReadOpts }).catch(() => ({ items: [] }))
+      : null;
+  const sharedFediFavsPromise =
+    page === 0 && hasFediToken
+      ? getFavouritedStatuses({
+          instanceUrl: tagHomeOrigin,
+          accessToken: tagToken,
+          limit: 30,
+          ...(legTimeoutMs ? { timeoutMs: legTimeoutMs } : {}),
+          fetchImpl,
+        }).catch(() => [])
+      : null;
+
   if (page === 0 && discoveryMode === 'default') {
     for (const actor of topAffinityActors(interactedAuthors, 'bluesky', 3, ownAccountKeys)) {
       tasks.push(
@@ -1112,11 +1189,10 @@ export async function harvestSanctuaryFeed({
       );
     }
 
-    const ownBskyActor = bskyAuth?.meta?.did || bskyAuth?.meta?.handle || '';
-    if (hasBskyToken && ownBskyActor) {
+    if (sharedBskyLikesPromise) {
       tasks.push(
         (async () => {
-          const ownLikes = await getBskyActorLikes({ actor: ownBskyActor, limit: 10, ...bskyReadOpts }).catch(() => ({ items: [] }));
+          const ownLikes = await sharedBskyLikesPromise;
           const likedUris = (ownLikes.items || []).map((it) => it?.uri).filter(Boolean).slice(0, 4);
           if (likedUris.length === 0) return { kind: 'coLikersBsky', key: 'twins', items: [], nextCursor: null };
 
@@ -1184,15 +1260,10 @@ export async function harvestSanctuaryFeed({
         );
       }
 
-      tasks.push(
-        (async () => {
-          const favs = await getFavouritedStatuses({
-            instanceUrl: tagHomeOrigin,
-            accessToken: tagToken,
-            limit: 8,
-            ...(legTimeoutMs ? { timeoutMs: legTimeoutMs } : {}),
-            fetchImpl,
-          }).catch(() => []);
+      if (sharedFediFavsPromise) {
+        tasks.push(
+          (async () => {
+            const favs = (await sharedFediFavsPromise).slice(0, 8);
           const topIds = favs.map((s) => s?.id).filter(Boolean).slice(0, 3);
           if (topIds.length === 0) return { kind: 'coLikersMasto', key: 'twins', items: [], nextCursor: null };
 
@@ -1242,6 +1313,7 @@ export async function harvestSanctuaryFeed({
           return { kind: 'coLikersMasto', key: 'twins', items: twinFeeds.flat(), ownFavItems: favs || [], nextCursor: null };
         })()
       );
+      }
     }
   }
 
@@ -1252,8 +1324,9 @@ export async function harvestSanctuaryFeed({
   const recordMatcher = buildJetstreamRecordMatcher([...searchQueries, ...learnedTopics]);
   tasks.push(
     harvestBlueskyJetstreamBurst({
-      targetCount: 10,
-      maxDurationMs: 1800,
+      targetCount: isMediaMode ? 28 : 10,
+      maxDurationMs: isMediaMode ? 2200 : 1800,
+      cursorRewindMs: 45_000 + page * 180_000,
       mediaOnly: isMediaMode,
       mediaFilter: jetstreamMediaFilter,
       blockedSelfLabels: manifest.sensitiveContentTriggers.jetstreamBlockedSelfLabels,
@@ -1302,6 +1375,8 @@ export async function harvestSanctuaryFeed({
       syncOwnViewerActivity({
         fediAuth,
         bskyAuth,
+        prefetchedFediFavs: sharedFediFavsPromise,
+        prefetchedBskyLikes: sharedBskyLikesPromise,
         timeoutMs: legTimeoutMs || 5500,
         fetchImpl,
       })
@@ -1337,6 +1412,7 @@ export async function harvestSanctuaryFeed({
     'viewerActivity',
   ]);
   let hadPoolResponse = false;
+  let hadJetstreamItems = false;
   const discoveredViewerEntries = [];
   for (const entry of settled) {
     if (entry.status !== 'fulfilled') {
@@ -1344,7 +1420,10 @@ export async function harvestSanctuaryFeed({
       continue;
     }
     const { kind, key, items, nextCursor, ownLikedItems, ownFavItems, viewerEntries } = entry.value;
-    if (kind === 'jetstream') hadPoolResponse = true;
+    if (kind === 'jetstream') {
+      hadPoolResponse = true;
+      if (Array.isArray(items) && items.length > 0) hadJetstreamItems = true;
+    }
     if (!optionalKinds.has(kind) || items.length > 0) {
       anySucceeded = true;
     }
@@ -1366,14 +1445,20 @@ export async function harvestSanctuaryFeed({
 
   if ((ownInteractedItems.length > 0 || discoveredViewerEntries.length > 0) && rawCollected.length > 0) {
     const interactedByKey = new Map();
-    const recordPatch = (key, patch) => {
+    const minCountsByKey = new Map();
+    const recordPatch = (key, patch, minLikes = 0, minReposts = 0) => {
       if (!key) return;
       const cur = interactedByKey.get(key) || {};
       interactedByKey.set(key, mergeViewerActivityMeta(cur, patch));
+      const prevMin = minCountsByKey.get(key) || { likes: 0, reposts: 0 };
+      minCountsByKey.set(key, {
+        likes: Math.max(prevMin.likes, Number(minLikes || 0)),
+        reposts: Math.max(prevMin.reposts, Number(minReposts || 0)),
+      });
     };
     for (const raw of ownInteractedItems) {
       const { u, keys } = buildItemLookupKeys(raw);
-      for (const k of keys) recordPatch(k, u._meta);
+      for (const k of keys) recordPatch(k, u._meta, u.metrics?.likes, u.metrics?.reposts);
     }
     for (const ent of discoveredViewerEntries) {
       const patch = {
@@ -1399,21 +1484,33 @@ export async function harvestSanctuaryFeed({
           : {}),
       };
       for (const k of Array.isArray(ent.keys) ? ent.keys : []) {
-        recordPatch(k, patch);
+        recordPatch(k, patch, ent.minLikes, ent.minReposts);
       }
     }
     for (let i = 0; i < rawCollected.length; i += 1) {
       const { u, keys } = buildItemLookupKeys(rawCollected[i]);
       let matchedMeta = null;
+      let floorLikes = 0;
+      let floorReposts = 0;
       for (const k of keys) {
         const hit = interactedByKey.get(k);
         if (hit) matchedMeta = matchedMeta ? mergeViewerActivityMeta(matchedMeta, hit) : hit;
+        const mc = minCountsByKey.get(k);
+        if (mc) {
+          floorLikes = Math.max(floorLikes, mc.likes);
+          floorReposts = Math.max(floorReposts, mc.reposts);
+        }
       }
       if (matchedMeta) {
-        rawCollected[i] = {
+        rawCollected[i] = reconcileViewerMetricFloors({
           ...u,
+          metrics: {
+            ...(u.metrics || { replies: 0, reposts: 0, likes: 0 }),
+            likes: Math.max(Number(u.metrics?.likes || 0), floorLikes),
+            reposts: Math.max(Number(u.metrics?.reposts || 0), floorReposts),
+          },
           _meta: mergeViewerActivityMeta(u._meta, matchedMeta),
-        };
+        });
       }
     }
   }
@@ -1431,15 +1528,16 @@ export async function harvestSanctuaryFeed({
     nextPage < 6
     && (
       (hasTagSource && nextPage * 4 < effectiveTags.length)
-      || (activeInstances.length > 0 && nextPage * 4 < activeInstances.length)
+      || (effectiveInstances.length > 0 && nextPage * 4 < effectiveInstances.length)
       || (bskyFeedUris.length > 0 && nextPage * 4 < bskyFeedUris.length)
       || (bskySearchBatch.length > 0 && nextPage * 3 < effectiveSearchQueries.length)
     );
   const hasUpstreamCursors =
-    nextPage < 8
+    nextPage < 12
     && (
       Boolean(nextFediHomeCursor)
       || Boolean(nextBskyHomeCursor)
+      || (isMediaMode && hadJetstreamItems)
       || Object.keys(nextTagCursors).length > 0
       || Object.keys(nextInstanceCursors).length > 0
       || Object.keys(nextBskyFeedCursors).length > 0
@@ -1461,5 +1559,5 @@ export async function harvestSanctuaryFeed({
       }
     : null;
 
-  return { items, nextCursor };
+  return { items, nextCursor, viewerEntries: discoveredViewerEntries };
 }

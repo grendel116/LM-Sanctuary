@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: AGPL-3.0-only WITH AdditionRef-sval-app-store */
 
 import { createClassicModalDialog, showAlert } from '../components/sanctuary/SanctuaryDialog.js';
+import { openKeyBoxModal, openSettingsModal, promptUnlockVault } from '../components/sanctuary/SettingsModal.js';
 import { attachSearchSuggestions } from '../components/SearchSuggestions.js';
 import {
   NEWTAB_URL,
@@ -15,18 +16,24 @@ import {
 import { sanitizeFediverseHtmlToString } from '../queries/fediverse.js';
 import { fetchProjectSettings, fetchSanctuaryBrowserSuggest, ingestDatabankText } from '../queries/sanctuary.js';
 import {
+  autofillBrowserHostTab,
+  captureBrowserTabPreview,
   connectKeePassXC,
   extractBrowserTabContent,
+  fillKeePassXCLoginForUrl,
   getBrowserHostKind,
   getPasswordManagerStatus,
   loadBrowserTabPage,
+  lockKeePassXCVault,
   openPrivateBrowserWindow,
+  refreshKeePassStatus,
   stepBrowserHostHistory,
   subscribeBrowserHostEvents,
   syncBrowserHostLayout,
 } from '../adapters/browserBridge.js';
 import {
   browserStore,
+  clearBrowserHistory,
   closeBrowserTab,
   focusBrowserPane,
   goBackBrowserTab,
@@ -384,6 +391,7 @@ export function mountBrowserScreen(
     getLocalSuggestions: (q) => buildBrowserLocalSuggestions(q),
     fetchRemoteSuggestions: (q) => fetchBrowserRemoteSuggestions(q, Boolean(getFocusedTab()?.isPrivate)),
     onSelect: (item) => handleBrowserSuggestionSelect(item, addressInput, null),
+    onOpenChange: () => pushNativeViewportLayout(),
   });
 
   const actionGroup = doc.createElement('div');
@@ -510,8 +518,11 @@ export function mountBrowserScreen(
     const hasOpenPopover = Boolean(
       shieldPopover.classList.contains('is-fallback-open') || shieldPopover.matches?.(':popover-open')
     );
+    const hasOpenSuggest = Boolean(
+      !addressForm.querySelector('.search-suggest-dropdown')?.hidden && addressForm.classList.contains('is-suggest-open')
+    );
     const hasOpenDialog = Boolean(doc.querySelector?.('dialog[open]'));
-    const overlayOpen = hasOpenPopover || hasOpenDialog;
+    const overlayOpen = hasOpenPopover || hasOpenDialog || hasOpenSuggest;
     const panes = Array.from(panesGrid.querySelectorAll('.browser-pane-viewport')).map((el) => {
       const rect = typeof el.getBoundingClientRect === 'function'
         ? el.getBoundingClientRect()
@@ -543,6 +554,48 @@ export function mountBrowserScreen(
     return state.tabs.find((t) => t.id === targetId) || state.tabs[0] || null;
   }
 
+  let lastKpRefreshAt = 0;
+  let kpActionBusy = false;
+  const tabPreviewMap = new Map();
+  let lastPreviewWarmAt = 0;
+
+  function applyViewportPreview(tabId, dataUrl) {
+    if (!tabId || !dataUrl) return;
+    tabPreviewMap.set(tabId, dataUrl);
+    for (const vp of panesGrid.querySelectorAll(`.browser-pane-viewport[data-native-tab-id="${tabId}"]`)) {
+      let img = vp.querySelector('.browser-pane-snapshot');
+      if (!img) {
+        img = doc.createElement('img');
+        img.className = 'browser-pane-snapshot';
+        img.alt = '';
+        img.setAttribute('aria-hidden', 'true');
+        vp.appendChild(img);
+      }
+      if (img.src !== dataUrl) {
+        img.src = dataUrl;
+      }
+    }
+  }
+
+  function warmVisibleTabPreviews() {
+    if (destroyed || getBrowserHostKind() !== 'gecko-desktop') return;
+    const now = Date.now();
+    if (now - lastPreviewWarmAt < 1200) return;
+    lastPreviewWarmAt = now;
+    for (const vp of panesGrid.querySelectorAll('.browser-pane-viewport')) {
+      const tabId = vp.dataset.nativeTabId;
+      if (!tabId) continue;
+      void captureBrowserTabPreview(tabId).then((res) => {
+        if (!destroyed && res?.ok && res.dataUrl) {
+          applyViewportPreview(tabId, res.dataUrl);
+        }
+      });
+    }
+  }
+
+  controlsRow.addEventListener('pointerenter', warmVisibleTabPreviews);
+  stageHeader.addEventListener('pointerenter', warmVisibleTabPreviews);
+
   function renderShieldPopover() {
     shieldPopover.replaceChildren();
     const state = browserStore.get();
@@ -553,6 +606,10 @@ export function mountBrowserScreen(
     const heading = doc.createElement('h3');
     heading.className = 'browser-popover-title';
     heading.textContent = host ? `Shield · ${host}` : 'Privacy Shield';
+
+    // Section 1: Tracker & Script Blocking
+    const shieldSection = doc.createElement('div');
+    shieldSection.className = 'browser-popover-section';
 
     const levelLabel = doc.createElement('div');
     levelLabel.className = 'browser-popover-label';
@@ -618,12 +675,22 @@ export function mountBrowserScreen(
       announce(`JavaScript ${jsInput.checked ? 'enabled' : 'disabled'}`);
     });
 
+    shieldSection.append(levelLabel, levelRow, statsRow, jsLabel);
+
+    // Section 2: Search & History
+    const browsingSection = doc.createElement('div');
+    browsingSection.className = 'browser-popover-section';
+
+    const browsingLabel = doc.createElement('div');
+    browsingLabel.className = 'browser-popover-label';
+    browsingLabel.textContent = 'Search & History';
+
     const searchRow = doc.createElement('div');
     searchRow.className = 'browser-popover-row';
     const searchStatus = doc.createElement('span');
     searchStatus.className = 'browser-popover-note';
     const engineLabel = getSearchEngineLabel(state.searchConfig);
-    searchStatus.textContent = engineLabel ? `Search: ${engineLabel}` : 'Search: Not configured (ask on search)';
+    searchStatus.textContent = engineLabel ? `Search: ${engineLabel}` : 'Search: Not configured';
     const searchCfgBtn = doc.createElement('button');
     searchCfgBtn.type = 'button';
     searchCfgBtn.className = 'edit-btn browser-configure-search-btn';
@@ -634,17 +701,12 @@ export function mountBrowserScreen(
     });
     searchRow.append(searchStatus, searchCfgBtn);
 
-    const kpInfo = getPasswordManagerStatus();
-    const kpRow = doc.createElement('p');
-    kpRow.className = 'browser-popover-note browser-keepass-status';
-    kpRow.textContent = `${kpInfo.provider}: ${kpInfo.detail}`;
-
     const privateRow = doc.createElement('div');
     privateRow.className = 'browser-popover-row';
     const privateNote = doc.createElement('span');
     privateNote.className = 'browser-popover-note';
     privateNote.textContent = getBrowserHostKind() === 'gecko-desktop'
-      ? 'Zero history & isolated cookies'
+      ? 'Isolated browsing & cookies'
       : 'Ephemeral session tab';
     const popoverPrivateBtn = doc.createElement('button');
     popoverPrivateBtn.type = 'button';
@@ -658,18 +720,156 @@ export function mountBrowserScreen(
     });
     privateRow.append(privateNote, popoverPrivateBtn);
 
-    shieldPopover.append(heading, levelLabel, levelRow, statsRow, jsLabel, searchRow, privateRow, kpRow);
-    if (getBrowserHostKind() === 'gecko-desktop' && !kpInfo.ready) {
+    const historyRow = doc.createElement('div');
+    historyRow.className = 'browser-popover-row';
+    const historyNote = doc.createElement('span');
+    historyNote.className = 'browser-popover-note browser-history-status';
+    historyNote.textContent = 'Browsing & tab history';
+    const clearHistoryBtn = doc.createElement('button');
+    clearHistoryBtn.type = 'button';
+    clearHistoryBtn.className = 'edit-btn browser-clear-history-btn';
+    clearHistoryBtn.textContent = 'Clear History';
+    clearHistoryBtn.addEventListener('click', async () => {
+      clearHistoryBtn.disabled = true;
+      await clearBrowserHistory();
+      historyNote.textContent = 'History cleared';
+      clearHistoryBtn.disabled = false;
+      announce('Browsing history cleared');
+    });
+    historyRow.append(historyNote, clearHistoryBtn);
+
+    browsingSection.append(browsingLabel, searchRow, privateRow, historyRow);
+
+    // Section 3: Password Manager (KeePassXC)
+    const kpSection = doc.createElement('div');
+    kpSection.className = 'browser-popover-section';
+
+    const kpLabel = doc.createElement('div');
+    kpLabel.className = 'browser-popover-label';
+    kpLabel.textContent = 'Password Manager';
+
+    const kpInfo = getPasswordManagerStatus();
+    const kpMainRow = doc.createElement('div');
+    kpMainRow.className = 'browser-popover-row';
+    const kpRow = doc.createElement('span');
+    kpRow.className = 'browser-popover-note browser-keepass-status';
+    kpRow.textContent = kpInfo.detail;
+
+    const kxcActions = doc.createElement('div');
+    kxcActions.className = 'browser-popover-actions';
+    const tabUrlStr = String(activeTab?.url || '');
+    const isHttpTab = tabUrlStr.startsWith('https://') || tabUrlStr.startsWith('http://');
+    if (!kpInfo.ready) {
       const kpBtn = doc.createElement('button');
       kpBtn.type = 'button';
       kpBtn.className = 'edit-btn browser-keepass-connect-btn';
-      kpBtn.textContent = 'Connect KeePassXC-Browser';
-      kpBtn.addEventListener('click', async () => {
-        await connectKeePassXC();
-        renderShieldPopover();
-        announce('Requested KeePassXC-Browser connection');
+      kpBtn.textContent = kpInfo.locked ? 'Unlock' : 'Set Up Vault';
+      kpBtn.addEventListener('click', () => {
+        closeShieldPopover();
+        if (kpInfo.locked) {
+          promptUnlockVault({
+            onUnlocked: () => {
+              renderShieldPopover();
+            },
+          });
+        } else {
+          openSettingsModal({
+            initialTab: 'project',
+            initialVaultUrl: isHttpTab ? activeTab.url : '',
+          });
+        }
       });
-      shieldPopover.appendChild(kpBtn);
+      kxcActions.appendChild(kpBtn);
+    } else {
+      if (isHttpTab) {
+        const fillBtn = doc.createElement('button');
+        fillBtn.type = 'button';
+        fillBtn.className = 'edit-btn browser-keepass-fill-btn';
+        fillBtn.textContent = getBrowserHostKind() === 'gecko-desktop' ? 'Autofill' : 'Copy Login';
+        fillBtn.addEventListener('click', async () => {
+          try {
+            const entries = await fillKeePassXCLoginForUrl(activeTab.url);
+            if (!entries.length) {
+              closeShieldPopover();
+              openKeyBoxModal({
+                initialUrl: activeTab.url,
+                startCreating: true,
+                onAutofill: async (entry) => {
+                  if (getBrowserHostKind() === 'gecko-desktop') {
+                    await autofillBrowserHostTab(activeTab.id, entry);
+                  } else {
+                    await globalThis.navigator?.clipboard?.writeText?.(entry.password || '');
+                  }
+                },
+              });
+              return;
+            }
+            const first = entries[0];
+            if (getBrowserHostKind() === 'gecko-desktop') {
+              const filled = await autofillBrowserHostTab(activeTab.id, first);
+              if (filled?.ok && filled.filledCount > 0) {
+                closeShieldPopover();
+                announce(`Autofilled ${first.login || first.name}`);
+                return;
+              }
+            }
+            await globalThis.navigator?.clipboard?.writeText?.(first.password || '');
+            kpRow.textContent = `Copied password for ${first.login || first.name}`;
+            announce(`Copied password for ${first.login || first.name}`);
+          } catch (err) {
+            kpRow.textContent = err?.message || 'Unable to query vault logins';
+          }
+        });
+        kxcActions.appendChild(fillBtn);
+      }
+      const manageBtn = doc.createElement('button');
+      manageBtn.type = 'button';
+      manageBtn.className = 'edit-btn';
+      manageBtn.textContent = 'Vault…';
+      manageBtn.addEventListener('click', () => {
+        closeShieldPopover();
+        openKeyBoxModal({
+          initialUrl: isHttpTab ? activeTab.url : '',
+          onAutofill: isHttpTab ? async (entry) => {
+            if (getBrowserHostKind() === 'gecko-desktop') {
+              await autofillBrowserHostTab(activeTab.id, entry);
+            } else {
+              await globalThis.navigator?.clipboard?.writeText?.(entry.password || '');
+            }
+          } : null,
+        });
+      });
+      const lockBtn = doc.createElement('button');
+      lockBtn.type = 'button';
+      lockBtn.className = 'edit-btn';
+      lockBtn.textContent = 'Lock';
+      lockBtn.addEventListener('click', async () => {
+        kpActionBusy = true;
+        try {
+          await lockKeePassXCVault().catch(() => {});
+          await refreshKeePassStatus();
+          renderShieldPopover();
+        } finally {
+          kpActionBusy = false;
+        }
+      });
+      kxcActions.append(manageBtn, lockBtn);
+    }
+
+    kpMainRow.append(kpRow);
+    if (kxcActions.childNodes.length > 0) {
+      kpMainRow.appendChild(kxcActions);
+    }
+    kpSection.append(kpLabel, kpMainRow);
+
+    shieldPopover.append(heading, shieldSection, browsingSection, kpSection);
+    if (!kpActionBusy && connectionStore.get().mode === 'online' && Date.now() - lastKpRefreshAt > 1500) {
+      lastKpRefreshAt = Date.now();
+      void refreshKeePassStatus().then((st) => {
+        if (st && !destroyed && !kpActionBusy) {
+          renderShieldPopover();
+        }
+      });
     }
   }
 
@@ -1483,6 +1683,10 @@ export function mountBrowserScreen(
     ) {
       existingPane.className = `browser-pane${isFocused ? ' is-focused' : ''}`;
       existingPane.setAttribute('aria-label', tab.title || 'Browser pane');
+      const existingPreview = tabPreviewMap.get(tab.id);
+      if (existingPreview) {
+        applyViewportPreview(tab.id, existingPreview);
+      }
       return existingPane;
     }
 
@@ -1534,6 +1738,15 @@ export function mountBrowserScreen(
       viewport.className = 'browser-pane-viewport';
       viewport.dataset.nativeTabId = tab.id;
       viewport.dataset.pane = paneKey;
+      const previewUrl = tabPreviewMap.get(tab.id);
+      if (previewUrl) {
+        const img = doc.createElement('img');
+        img.className = 'browser-pane-snapshot';
+        img.alt = '';
+        img.setAttribute('aria-hidden', 'true');
+        img.src = previewUrl;
+        viewport.appendChild(img);
+      }
       pane.appendChild(viewport);
       return pane;
     }
@@ -1877,6 +2090,10 @@ export function mountBrowserScreen(
       updateBrowserTabResult(evt.tabId, { blockedCount: Number(evt.blockedCount || 0) });
       return;
     }
+    if (evt.type === 'tab-preview' && evt.tabId && evt.dataUrl) {
+      applyViewportPreview(evt.tabId, evt.dataUrl);
+      return;
+    }
     if (evt.type === 'open-tab' && (evt.url || evt.nativeReady)) {
       const rawUrl = String(evt.url || '').trim();
       const clean = rawUrl ? stripTrackingParams(rawUrl) : NEWTAB_URL;
@@ -1902,7 +2119,37 @@ export function mountBrowserScreen(
     }
     if (evt.type === 'close-tab' && evt.tabId) {
       tabAbortMap.get(evt.tabId)?.abort();
+      tabPreviewMap.delete(evt.tabId);
       closeBrowserTab(evt.tabId);
+      return;
+    }
+    if (evt.type === 'vault-unlock-requested' || evt.type === 'vault-open-requested') {
+      const focused = getFocusedTab(browserStore.get());
+      const targetUrl = String(evt.url || focused?.url || '');
+      const targetTabId = String(evt.tabId || focused?.id || '');
+      const kpStatus = getPasswordManagerStatus();
+      const runAutofillAfterUnlock = async () => {
+        await refreshKeePassStatus();
+        if (targetUrl && targetTabId) {
+          const entries = await fillKeePassXCLoginForUrl(targetUrl).catch(() => []);
+          if (entries.length > 0) {
+            await autofillBrowserHostTab(targetTabId, entries[0]);
+          }
+        }
+      };
+      if (evt.type === 'vault-unlock-requested' && kpStatus.initialized) {
+        promptUnlockVault({ onUnlocked: runAutofillAfterUnlock });
+      } else {
+        openSettingsModal({
+          initialTab: 'project',
+          initialVaultUrl: targetUrl,
+          onVaultAutofill: targetTabId
+            ? async (entry) => {
+                await autofillBrowserHostTab(targetTabId, entry);
+              }
+            : null,
+        });
+      }
     }
   });
 

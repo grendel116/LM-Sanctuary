@@ -283,6 +283,54 @@ def _extract_user_utterance(new_message_text: str, shared_post: dict | None = No
     return text
 
 
+def _is_hidden_turn_artifact(msg: dict) -> bool:
+    if not isinstance(msg, dict):
+        return False
+    msg_id = str(msg.get("id") or "")
+    text = str(msg.get("text") or "")
+    return msg_id.startswith(("itm_", "tool_")) or text.startswith("[Tool Response from")
+
+
+def prune_orphan_turn_artifacts(history: list, is_generating: bool = False) -> bool:
+    """Remove contiguous itm_*/tool_* runs that lost their owning user or completing program message."""
+    if not isinstance(history, list) or not history:
+        return False
+
+    drop_indices: set[int] = set()
+    n = len(history)
+    i = 0
+    while i < n:
+        if not _is_hidden_turn_artifact(history[i]):
+            i += 1
+            continue
+        start = i
+        while i < n and _is_hidden_turn_artifact(history[i]):
+            i += 1
+        end = i
+
+        has_owner_user = (
+            start > 0
+            and isinstance(history[start - 1], dict)
+            and history[start - 1].get("role") == "user"
+            and not _is_hidden_turn_artifact(history[start - 1])
+        )
+        has_completing_program = (
+            end < n
+            and isinstance(history[end], dict)
+            and history[end].get("role") == "program"
+            and not _is_hidden_turn_artifact(history[end])
+        )
+
+        if not has_owner_user or (not is_generating and not has_completing_program):
+            drop_indices.update(range(start, end))
+
+    if not drop_indices:
+        return False
+
+    history[:] = [m for idx, m in enumerate(history) if idx not in drop_indices]
+    return True
+
+
 def _has_prior_turn_tool_error(history: list) -> bool:
     if not history:
         return False
@@ -378,7 +426,34 @@ class BaseProgramRunner:
         self.generating_sessions: set[str] = set()
         self._generating_counts: dict[str, int] = {}
         self._memory_pipeline_sessions: set[str] = set()
+        self._loaded_sessions: set[str] = set()
         self._sys_prompt_cache: dict[tuple, str] = {}
+
+    def clear_cached_sessions(self):
+        with self._lock:
+            active_gen = set(getattr(self, "generating_sessions", set()))
+            for store_name in (
+                "sessions_history",
+                "sessions_program",
+                "sessions_inversion_state",
+                "sessions_memory_state",
+                "sessions_group_meta",
+            ):
+                store = getattr(self, store_name, None)
+                if isinstance(store, dict):
+                    for sid in list(store.keys()):
+                        if sid not in active_gen:
+                            store.pop(sid, None)
+            loaded = getattr(self, "_loaded_sessions", None)
+            if isinstance(loaded, set):
+                loaded.intersection_update(active_gen)
+
+    def flush_loaded_sessions(self):
+        with self._lock:
+            loaded = list(getattr(self, "_loaded_sessions", set()))
+            for sid in loaded:
+                if sid in self.sessions_history:
+                    self._save_session_to_disk(sid)
 
     def mark_generating(self, session_id: str):
         with self._lock:
@@ -1367,6 +1442,9 @@ class BaseProgramRunner:
                 or getattr(self, "program_id", None)
                 or get_active_program()
             )
+            loaded_set = getattr(self, "_loaded_sessions", None)
+            if isinstance(loaded_set, set):
+                loaded_set.add(dest_id)
             self._save_session_to_disk(dest_id)
             return True
 
@@ -1681,6 +1759,7 @@ class OpenSourceRunner(BaseProgramRunner):
         def switch_program(self, program_id: str):
             with self._lock:
                 self.program_id = program_id
+                loaded_set = getattr(self, "_loaded_sessions", None)
                 for sid in list(self.sessions_history.keys()):
                     if (
                         sid not in self.generating_sessions
@@ -1692,6 +1771,8 @@ class OpenSourceRunner(BaseProgramRunner):
                         self.sessions_memory_state.pop(sid, None)
                         self.sessions_group_meta.pop(sid, None)
                         self.sessions_program.pop(sid, None)
+                        if isinstance(loaded_set, set):
+                            loaded_set.discard(sid)
 
         def _ensure_session_loaded(self, session_id: str):
             with self._lock:
@@ -1702,6 +1783,11 @@ class OpenSourceRunner(BaseProgramRunner):
                     session_id in self.sessions_history
                     and (is_group_id or cached_prog == active_prog or session_id in self.generating_sessions)
                 ):
+                    if session_id not in self.generating_sessions and prune_orphan_turn_artifacts(
+                        self.sessions_history[session_id], is_generating=False
+                    ):
+                        self._count_unsummarized_turns(session_id)
+                        self._save_session_to_disk(session_id)
                     return
                 if not is_group_id and cached_prog and cached_prog != active_prog:
                     self.sessions_history.pop(session_id, None)
@@ -1709,6 +1795,9 @@ class OpenSourceRunner(BaseProgramRunner):
                     self.sessions_memory_state.pop(session_id, None)
                     self.sessions_group_meta.pop(session_id, None)
                     self.sessions_program.pop(session_id, None)
+                    loaded_set = getattr(self, "_loaded_sessions", None)
+                    if isinstance(loaded_set, set):
+                        loaded_set.discard(session_id)
                 self._load_session_from_disk(session_id, program_id=None if is_group_id else active_prog)
 
         async def generate_impersonation(
@@ -1759,6 +1848,11 @@ class OpenSourceRunner(BaseProgramRunner):
                     if not os.path.isdir(prog_dir) or not os.path.isfile(os.path.join(prog_dir, f"{prog_folder_name}.json")):
                         return
 
+                    loaded_set = getattr(self, "_loaded_sessions", None)
+                    if os.path.exists(target_path) and os.path.getsize(target_path) > 0:
+                        if isinstance(loaded_set, set) and session_id not in loaded_set:
+                            return
+
                     memory_meta = self._get_memory_meta(session_id)
                     memory_meta.pop("unsummarized_buffer", None)
 
@@ -1803,7 +1897,14 @@ class OpenSourceRunner(BaseProgramRunner):
                     print(f"Error saving OS session {session_id} to disk: {e}")
 
         def _load_session_from_disk(self, session_id: str, program_id: str = None):
+            from cryptography.fernet import InvalidToken
+            from utils.social_vault import VaultLockedError
+
             with self._lock:
+                loaded_set = getattr(self, "_loaded_sessions", None)
+                if loaded_set is None:
+                    loaded_set = set()
+                    self._loaded_sessions = loaded_set
                 prog = (
                     program_id
                     or getattr(self, "sessions_program", {}).get(session_id)
@@ -1821,6 +1922,7 @@ class OpenSourceRunner(BaseProgramRunner):
                             "epic_chronicle": "",
                             "last_summarized_turn": 0,
                         }
+                    loaded_set.add(session_id)
                     return
 
                 try:
@@ -1855,9 +1957,11 @@ class OpenSourceRunner(BaseProgramRunner):
                                 to_drop.update(range(idxs[0], idxs[-1]))
                         messages = [m for idx, m in enumerate(messages) if idx not in to_drop]
 
+                    pruned_orphans = prune_orphan_turn_artifacts(messages, is_generating=False)
                     self.sessions_history[session_id] = messages
                     self.sessions_program[session_id] = prog
                     self.sessions_inversion_state[session_id] = inv_state
+                    loaded_set.add(session_id)
 
                     if session_id not in self._memory_pipeline_sessions:
                         if not isinstance(memory_state, dict):
@@ -1870,11 +1974,29 @@ class OpenSourceRunner(BaseProgramRunner):
                             memory_state["recent_chapters"] = memory_state["recent_chapters"][-2:]
                         self.sessions_memory_state[session_id] = memory_state
                         self._count_unsummarized_turns(session_id)
+                    if pruned_orphans:
+                        self._save_session_to_disk(session_id)
+                except VaultLockedError:
+                    loaded_set.discard(session_id)
+                    raise
+                except InvalidToken as exc:
+                    loaded_set.discard(session_id)
+                    raise VaultLockedError(
+                        "Encrypted chat session could not be decrypted with the active vault key."
+                    ) from exc
                 except Exception as e:
+                    loaded_set.discard(session_id)
                     print(f"Error loading session {session_id} from disk: {e}")
 
         def _ensure_first_message(self, session_id: str):
             self._ensure_session_loaded(session_id)
+            if session_id not in self.sessions_history:
+                disk_path = self._get_session_path(session_id)
+                if os.path.exists(disk_path) and os.path.getsize(disk_path) > 0:
+                    return
+                loaded_set = getattr(self, "_loaded_sessions", None)
+                if isinstance(loaded_set, set):
+                    loaded_set.add(session_id)
             history = self.sessions_history.setdefault(session_id, [])
 
             if not history:
@@ -2396,6 +2518,9 @@ class OpenSourceRunner(BaseProgramRunner):
                 self.sessions_inversion_state.pop(session_id, None)
                 self._generating_counts.pop(session_id, None)
                 self.generating_sessions.discard(session_id)
+                loaded_set = getattr(self, "_loaded_sessions", None)
+                if isinstance(loaded_set, set):
+                    loaded_set.discard(session_id)
 
         async def reset_session(self, session_id: str):
             with self._lock:
@@ -2427,9 +2552,22 @@ class OpenSourceRunner(BaseProgramRunner):
                 history = self.sessions_history.get(session_id, [])
                 for i, msg in enumerate(history):
                     if msg.get("id") == msg_id:
-                        if delete_media and (img_url := msg.get("image_url")):
-                            self._delete_local_image(img_url)
+                        was_user_dialogue = (
+                            msg.get("role") == "user"
+                            and not _is_hidden_turn_artifact(msg)
+                            and not str(msg.get("id") or "").startswith("sys_")
+                        )
+                        if delete_media:
+                            for media_key in ("image_url", "video_url"):
+                                media_url = msg.get(media_key)
+                                if isinstance(media_url, str) and media_url and not media_url.startswith("data:"):
+                                    self._delete_local_image(media_url)
                         del history[i]
+                        if was_user_dialogue:
+                            while i < len(history) and _is_hidden_turn_artifact(history[i]):
+                                del history[i]
+                        prune_orphan_turn_artifacts(history, is_generating=(session_id in self.generating_sessions))
+                        self._count_unsummarized_turns(session_id)
                         if save:
                             self._save_session_to_disk(session_id)
                         return True
@@ -2505,6 +2643,10 @@ class OpenSourceRunner(BaseProgramRunner):
                     if 0 <= idx < len(history):
                         del history[idx]
                         modified = True
+
+                if modified:
+                    prune_orphan_turn_artifacts(history, is_generating=(session_id in self.generating_sessions))
+                    self._count_unsummarized_turns(session_id)
 
                 file_deleted = self._delete_local_image(image_url, program_id=program_id)
                 if modified:
@@ -2668,6 +2810,9 @@ class OpenSourceRunner(BaseProgramRunner):
                     "epic_chronicle": "",
                     "last_summarized_turn": 0,
                 }
+                loaded_set = getattr(self, "_loaded_sessions", None)
+                if isinstance(loaded_set, set):
+                    loaded_set.add(session_id)
                 self._save_session_to_disk(session_id)
                 return copy.deepcopy(group_meta)
 

@@ -710,7 +710,7 @@ export async function getThreadsPostInsights({ postId, accessToken, fetchImpl } 
   return run();
 }
 
-export async function getThreadsPostsInsightsBatch({ postIds = [], accessToken = '', fetchImpl } = {}) {
+export async function getThreadsPostsInsightsBatch({ postIds = [], accessToken = '', forceRefresh = false, fetchImpl } = {}) {
   if (!accessToken) return {};
   const cleanIds = [];
   const seen = new Set();
@@ -723,7 +723,7 @@ export async function getThreadsPostsInsightsBatch({ postIds = [], accessToken =
   }
   if (cleanIds.length === 0) return {};
 
-  const useCache = typeof fetchImpl !== 'function';
+  const useCache = !forceRefresh && typeof fetchImpl !== 'function';
   const now = Date.now();
   const out = {};
   const missingIds = [];

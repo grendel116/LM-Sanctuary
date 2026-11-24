@@ -6,6 +6,8 @@ import {
 } from '../queries/sanctuary.js';
 import {
   canPersistVaultSecretsLocally,
+  clearAllCachedProgramHistory,
+  clearAllLocalVaultSecrets,
   deleteVaultSecret,
   kvGet,
   kvSet,
@@ -20,12 +22,34 @@ const ACTIVE_ACCOUNTS_KV_KEY = 'social_active_accounts';
 const PUBLIC_MEDIA_BASE_KV_KEY = 'public_media_base_url';
 const SERVER_DELETIONS_KV_KEY = 'social_server_deletions_v1';
 let serverSyncPromise = null;
+let keepassVaultMode = false;
 const warnedServerVaultContexts = new Set();
 const serverSyncedSecrets = new Map();
+
+export async function setKeePassVaultMode(enabled) {
+  const next = Boolean(enabled);
+  const changed = keepassVaultMode !== next;
+  keepassVaultMode = next;
+  if (keepassVaultMode && changed) {
+    await clearAllLocalVaultSecrets();
+    await clearAllCachedProgramHistory();
+  }
+}
+
+export async function lockSocialVaultSession() {
+  serverSyncedSecrets.clear();
+  authStore.set({ vaultLocked: true });
+  await clearAllCachedProgramHistory();
+}
+
+export function isKeePassVaultMode() {
+  return keepassVaultMode;
+}
 
 async function loadAccountSecrets(accountId) {
   const id = String(accountId);
   if (serverSyncedSecrets.has(id)) return serverSyncedSecrets.get(id);
+  if (keepassVaultMode) return null;
   return loadVaultSecret(id);
 }
 
@@ -53,6 +77,7 @@ function createInitialAuthState() {
     tightestCharLimit: 500,
     retryQueue: [],
     publicMediaBaseUrl: '',
+    vaultLocked: false,
     hydrated: false,
   };
 }
@@ -121,9 +146,13 @@ async function requestServerVault(method, accountId = '', json = undefined, opti
       throw new TypeError(`Unsupported social vault method: ${method}`);
     }
     warnedServerVaultContexts.delete(context.cacheKey);
+    if (authStore.get().vaultLocked) {
+      authStore.set({ vaultLocked: false });
+    }
     return result;
   } catch (err) {
     if (err?.status === 503) {
+      authStore.set({ vaultLocked: true });
       if (!warnedServerVaultContexts.has(context.cacheKey)) {
         warnedServerVaultContexts.add(context.cacheKey);
         console.warn('[social vault] Server returned HTTP 503; queued changes will retry after recovery.');
@@ -159,7 +188,7 @@ export async function syncSocialAccountsWithServer() {
   if (!getServerVaultContext({ allowOffline: true })) return false;
 
   serverSyncPromise = (async () => {
-    const serverOnlySecrets = !canPersistVaultSecretsLocally();
+    const serverOnlySecrets = keepassVaultMode || !canPersistVaultSecretsLocally();
     const pendingDeletes = await kvGet(SERVER_DELETIONS_KV_KEY, []);
     for (const accountId of Array.isArray(pendingDeletes) ? pendingDeletes : []) {
       const deleted = await requestServerVault('DELETE', String(accountId), undefined, { allowOffline: true });
@@ -271,7 +300,8 @@ export async function upsertSocialAccount(meta, secrets = null, options = {}) {
     throw new TypeError('Social account metadata requires id and platform');
   }
   const normPlatform = normalizePlatformKey(meta.platform);
-  const serverOnlySecrets = options.serverOnlySecrets === true
+  const serverOnlySecrets = keepassVaultMode
+    || options.serverOnlySecrets === true
     || !canPersistVaultSecretsLocally();
   if (secrets && typeof secrets === 'object') {
     if (serverOnlySecrets) {
@@ -367,18 +397,31 @@ export async function getAuthenticatedAccount(platform, accountId = null) {
   const s = authStore.get();
   const activeKey = activeFieldForPlatform(norm);
   const targetId = accountId || s[activeKey];
-  if (!targetId) return null;
-  const meta = s.accounts.find((a) => a.id === targetId && normalizePlatformKey(a.platform) === norm);
-  if (!meta) return null;
-  const secrets = await loadAccountSecrets(meta.id);
-  if (!secrets) return null;
-  return { meta, secrets };
+  if (targetId) {
+    const meta = s.accounts.find((a) => a.id === targetId && normalizePlatformKey(a.platform) === norm);
+    if (meta) {
+      const secrets = await loadAccountSecrets(meta.id);
+      if (secrets && (secrets.accessToken || secrets.accessJwt || secrets.refreshJwt || Object.keys(secrets).length > 0)) {
+        return { meta, secrets };
+      }
+    }
+  }
+  if (!accountId) {
+    for (const cand of s.accounts) {
+      if (normalizePlatformKey(cand.platform) !== norm || cand.id === targetId) continue;
+      const candSecrets = await loadAccountSecrets(cand.id);
+      if (candSecrets && (candSecrets.accessToken || candSecrets.accessJwt || candSecrets.refreshJwt || Object.keys(candSecrets).length > 0)) {
+        return { meta: cand, secrets: candSecrets };
+      }
+    }
+  }
+  return null;
 }
 
 export async function updateAccountTokens(accountId, tokenPatch) {
   const current = (await loadAccountSecrets(accountId)) || {};
   const merged = { ...current, ...tokenPatch };
-  const serverOnlySecrets = !canPersistVaultSecretsLocally();
+  const serverOnlySecrets = keepassVaultMode || !canPersistVaultSecretsLocally();
   if (serverOnlySecrets) {
     serverSyncedSecrets.set(String(accountId), merged);
   } else {
@@ -453,6 +496,7 @@ export async function setPublicMediaBaseUrl(url) {
 
 export function resetAuthStoreForTests() {
   serverSyncPromise = null;
+  keepassVaultMode = false;
   serverSyncedSecrets.clear();
   authStore.set(createInitialAuthState());
 }
