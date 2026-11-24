@@ -1,6 +1,6 @@
 # LM-Sanctuary
 
-**A private browser, open social app, and local AI companion on your own computer.** · [Live Site](https://grendel116.github.io/LM-Sanctuary/)
+**A private browser, open social app, and local AI companion on your own computer.**
 
 LM-Sanctuary keeps your web browsing, social feeds, AI chats, and passwords together in one local-first workspace. Everything runs on your own hardware—your chats, memories, bookmarks, and keys stay yours.
 
