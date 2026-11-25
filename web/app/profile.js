@@ -36,7 +36,7 @@ import {
 import { authStore, getAuthenticatedAccount, upsertSocialAccount } from '../state/authStore.js';
 import { computeRemainingCounts, prefillReply } from '../state/composeStore.js';
 import { applyPostInterestFeedback, mutatePostAcrossStreams, removePostAcrossStreams } from '../state/feedStore.js';
-import { applyKnownMetrics, hydrateMetricsLedger, networkKeysOf, recordItemMetrics } from '../state/metricsLedger.js';
+import { applyKnownMetrics, dropLinkedSiblings, hydrateMetricsLedger, recordItemMetrics } from '../state/metricsLedger.js';
 import { connectionStore } from '../state/sanctuary/connection.js';
 import { findLocalLinkedPostGroup, kvGet, kvSet } from '../storage/nativeStore.js';
 import { summarizeAccountIdentity, syncAutoHeight } from './composeModal.js';
@@ -1480,7 +1480,7 @@ export function mountProfileScreen(containerEl, {
       if (destroyed || epoch !== loadPostsEpoch || activeSubTab !== tab) return;
     }
     if (cached.length > 0) {
-      cached = cached.map((it) => applyKnownMetrics(it));
+      cached = dropLinkedSiblings(cached).map((it) => applyKnownMetrics(it));
       ownItemsByTab.set(tab, cached);
     }
     ownItems = cached;
@@ -1504,7 +1504,7 @@ export function mountProfileScreen(containerEl, {
       if (destroyed) return;
       const baseItems = Array.isArray(pageRes) ? pageRes : (pageRes?.items || []);
       const nextCursor = Array.isArray(pageRes) ? null : (pageRes?.nextCursor || null);
-      const mergedBaseItems = (Array.isArray(baseItems) ? baseItems : []).map((it) => applyKnownMetrics(it));
+      const mergedBaseItems = dropLinkedSiblings(Array.isArray(baseItems) ? baseItems : []).map((it) => applyKnownMetrics(it));
       ownItemsByTab.set(tab, mergedBaseItems);
       tabCursors.set(tab, nextCursor);
       if (primary.id) void persistProfileTabCache(primary.id, tab, mergedBaseItems);
@@ -1562,10 +1562,8 @@ export function mountProfileScreen(containerEl, {
       if (destroyed || epoch !== loadPostsEpoch || activeSubTab !== tab) return;
       const incoming = Array.isArray(pageRes) ? pageRes : (pageRes?.items || []);
       const existingIds = new Set(ownItems.map((it) => String(it?.id || '')));
-      const claimedKeys = new Set(ownItems.flatMap((it) => Object.values(networkKeysOf(it))));
       const addedItems = incoming
         .filter((it) => it?.id && !existingIds.has(String(it.id)))
-        .filter((it) => !Object.values(networkKeysOf(it)).some((k) => claimedKeys.has(k)))
         .map((it) => applyKnownMetrics(it));
       const nextCursor = Array.isArray(pageRes) ? null : (pageRes?.nextCursor || null);
       tabCursors.set(tab, addedItems.length === 0 && !nextCursor ? null : nextCursor);
@@ -1577,8 +1575,8 @@ export function mountProfileScreen(containerEl, {
             ...addedItems,
           ]
         : [...ownItems, ...addedItems];
-      ownItems = nextCombined;
-      ownItemsByTab.set(tab, nextCombined);
+      ownItems = dropLinkedSiblings(nextCombined);
+      ownItemsByTab.set(tab, ownItems);
       loadingOlderPosts = false;
       renderPosts();
       syncProfileInfiniteFooter();

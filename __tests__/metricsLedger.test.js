@@ -12,6 +12,7 @@ import {
 } from '../web/state/feedStore.js';
 import {
   applyKnownMetrics,
+  dropLinkedSiblings,
   getNetworkMetrics,
   hydrateMetricsLedger,
   networkKeysOf,
@@ -191,4 +192,49 @@ test('applyKnownMetrics leaves single-network items without breakdown untouched 
   };
   const out = applyKnownMetrics(item);
   assert.equal(out, item);
+});
+
+test('dropLinkedSiblings removes Bluesky twin even when it precedes Mastodon item', () => {
+  const bskyTwin = {
+    id: 'bluesky:a',
+    protocol: 'bluesky',
+    _meta: {
+      bluesky: { uri: 'at://did:plc:me/app.bsky.feed.post/a' },
+      linkedIds: { mastodonStatusId: '1' },
+    },
+  };
+  const masto = {
+    id: 'mastodon:1',
+    protocol: 'mastodon',
+    _meta: {
+      mastodon: { statusId: '1' },
+      linkedIds: {
+        mastodonStatusId: '1',
+        blueskyUri: 'at://did:plc:me/app.bsky.feed.post/a',
+      },
+    },
+  };
+  const bskyOther = {
+    id: 'bluesky:b',
+    protocol: 'bluesky',
+    _meta: {
+      bluesky: { uri: 'at://did:plc:me/app.bsky.feed.post/b' },
+    },
+  };
+  const out = dropLinkedSiblings([bskyTwin, masto, bskyOther]);
+  assert.deepEqual(
+    out.map((it) => it.id),
+    ['mastodon:1', 'bluesky:b']
+  );
+});
+
+test('dropLinkedSiblings returns original array reference when no Mastodon items exist', () => {
+  const onlyBsky = [
+    {
+      id: 'bluesky:a',
+      protocol: 'bluesky',
+      _meta: { bluesky: { uri: 'at://did:plc:me/app.bsky.feed.post/a' } },
+    },
+  ];
+  assert.equal(dropLinkedSiblings(onlyBsky), onlyBsky);
 });

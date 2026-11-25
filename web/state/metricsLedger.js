@@ -95,6 +95,25 @@ export function networkKeysOf(item) {
   return keys;
 }
 
+function primaryNetworkKey(item) {
+  const proto = item?.protocol || '';
+  const meta = item?._meta || {};
+  return networkKeysOf({ protocol: proto, id: item?.id, _meta: { [proto]: meta[proto] } })[proto] || '';
+}
+
+export function dropLinkedSiblings(items) {
+  const list = Array.isArray(items) ? items : [];
+  const claimed = new Set();
+  for (const it of list) {
+    if (it?.protocol === 'mastodon') {
+      for (const k of Object.values(networkKeysOf(it))) claimed.add(k);
+    }
+  }
+  if (claimed.size === 0) return list;
+  const out = list.filter((it) => it?.protocol === 'mastodon' || !claimed.has(primaryNetworkKey(it)));
+  return out.length === list.length ? list : out;
+}
+
 function breakdownOf(item) {
   const bd = item?._meta?.metricsBreakdown;
   return bd && typeof bd === 'object' ? bd : null;
