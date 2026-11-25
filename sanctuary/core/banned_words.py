@@ -342,6 +342,33 @@ _MOOD_TAG_RE = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 
+_WORD_RE = re.compile(r"[a-z0-9]+(?:['\u2019][a-z]+)?")
+_REWRITE_STOPWORDS = frozenset({
+    "that", "this", "with", "from", "have", "they", "them", "their", "there", "were", "what",
+    "when", "which", "will", "would", "your", "into", "just", "than", "then", "also", "only",
+    "very", "been", "being", "does", "here", "more", "most", "some", "such", "over", "about",
+})
+
+
+def _content_words(text: str) -> list[str]:
+    return [w for w in _WORD_RE.findall(text.lower()) if len(w) >= 4 and w not in _REWRITE_STOPWORDS]
+
+
+def _rewrite_rejection_reason(original: str, rewritten: str, banned_count: int, had_antithesis: bool) -> str:
+    """Return why a rewrite is unfaithful to the original sentence, or '' when acceptable."""
+    allowed_new = 2 * banned_count
+    orig_words = set(_content_words(original))
+    new_words = [w for w in _content_words(rewritten) if w not in orig_words]
+    if len(new_words) > allowed_new:
+        return f"introduced words not in original: {', '.join(sorted(set(new_words)))}"
+    if len(_WORD_RE.findall(rewritten.lower())) > len(_WORD_RE.findall(original.lower())) + allowed_new:
+        return "rewrite is longer than original"
+    if _SENTENCE_END_RE.search(original.strip()) and not _SENTENCE_END_RE.search(rewritten.strip()):
+        return "rewrite appears truncated"
+    if had_antithesis and ANTITHESIS_PATTERN.search(rewritten):
+        return "contrast still present"
+    return ""
+
 async def _rewrite_single_sentence(
     sentence: str,
     llm_call_func,
@@ -378,9 +405,7 @@ async def _rewrite_single_sentence(
         instructions.append(f"- Replace these words with direct synonyms: {words_str}.")
 
     if has_antithesis:
-        instructions.append(
-            "- State what is directly and affirmatively. Convert any binary contrast (such as 'not X, it is Y', 'X, not Y', or 'stop X and start Y') into a single clear, direct assertion."
-        )
+        instructions.append("- Keep only the affirmed claim, in the sentence's own words. Drop the negated claim. Add no new words or facts.")
 
     if is_narration:
         fmt_rule = "- Write plain present-tense prose without asterisks or quotation marks."
@@ -396,8 +421,8 @@ async def _rewrite_single_sentence(
     rules_text = "\n".join(instructions)
     ctx_clean = paragraph_context.strip()
     context_block = (
-        f'Context paragraph (for reference only; rewrite only the target sentence):\n"{ctx_clean}"\n\n'
-        if ctx_clean and ctx_clean != stripped
+        f'Context (for word choice only):\n"{ctx_clean}"\n\n'
+        if found_banned and ctx_clean and ctx_clean != stripped
         else ""
     )
     prompt = (
@@ -419,6 +444,11 @@ async def _rewrite_single_sentence(
         if rewritten and rewritten.strip():
             cleaned = rewritten.strip().strip('"')
             if cleaned:
+                reason = _rewrite_rejection_reason(stripped, cleaned, len(found_banned), has_antithesis)
+                if reason:
+                    print(f'[REWRITE REJECTED] "{stripped}" -> "{cleaned}" ({reason})', flush=True)
+                    return sentence
+                print(f'[REWRITE] "{stripped}" -> "{cleaned}"', flush=True)
                 return f"{lead_prefix}{cleaned}{trail_ws}"
     except Exception as e:
         print(f"[REWRITE ERROR] {e}", flush=True)

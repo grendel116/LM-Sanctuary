@@ -5,7 +5,8 @@ import {
 } from '../core/schema/unifiedItem.js';
 import { kvGet, kvSet } from '../storage/nativeStore.js';
 
-const LEDGER_KV_KEY = 'post_metrics_ledger_v1';
+const LEDGER_KV_KEY = 'post_metrics_ledger_v2';
+const NETWORKS = ['mastodon', 'bluesky', 'threads'];
 const MAX_ENTRIES = 1500;
 const PERSIST_DEBOUNCE_MS = 150;
 
@@ -83,32 +84,20 @@ export function networkKeysOf(item) {
   const meta = item._meta || {};
   const linked = meta.linkedIds || {};
   const keys = {};
-
   const mastoId = linked.mastodonStatusId
     || meta.mastodon?.statusId
-    || (item.source === 'mastodon' ? item.nativeId : null);
-  if (mastoId) {
-    keys.mastodon = `mastodon:${String(mastoId)}`;
-  }
-
-  const rawBsky = linked.blueskyUri
-    || meta.bluesky?.uri
-    || (item.source === 'bluesky' ? (item.nativeUri || item.nativeId) : null);
-  if (rawBsky) {
-    const normBsky = normalizeNativeUri(rawBsky) || String(rawBsky);
-    if (normBsky) {
-      keys.bluesky = `bluesky:${normBsky}`;
-    }
-  }
-
-  const threadsId = linked.threadsPostId
-    || meta.threads?.postId
-    || (item.source === 'threads' ? item.nativeId : null);
-  if (threadsId) {
-    keys.threads = `threads:${String(threadsId)}`;
-  }
-
+    || (item.protocol === 'mastodon' && item.id ? String(item.id).replace(/^mastodon:/, '') : '');
+  if (mastoId) keys.mastodon = `mastodon:${String(mastoId)}`;
+  const rawBsky = linked.blueskyUri || meta.bluesky?.uri || '';
+  if (rawBsky) keys.bluesky = `bluesky:${normalizeNativeUri(rawBsky) || String(rawBsky)}`;
+  const threadsId = linked.threadsPostId || meta.threads?.postId || '';
+  if (threadsId) keys.threads = `threads:${String(threadsId)}`;
   return keys;
+}
+
+function breakdownOf(item) {
+  const bd = item?._meta?.metricsBreakdown;
+  return bd && typeof bd === 'object' ? bd : null;
 }
 
 export function getNetworkMetrics(key) {
@@ -134,87 +123,41 @@ export function recordNetworkMetrics(key, metrics) {
 export function recordItemMetrics(item) {
   if (!item || typeof item !== 'object') return false;
   const keys = networkKeysOf(item);
+  const bd = breakdownOf(item);
   let changed = false;
-  const bd = item.metricsBreakdown || item._meta?.metricsBreakdown;
-
-  if (bd && typeof bd === 'object') {
-    for (const net of ['mastodon', 'bluesky', 'threads']) {
-      if (bd[net] && keys[net]) {
-        if (recordNetworkMetrics(keys[net], bd[net])) {
-          changed = true;
-        }
-      }
+  if (bd) {
+    for (const net of NETWORKS) {
+      if (bd[net] && keys[net] && recordNetworkMetrics(keys[net], bd[net])) changed = true;
     }
+    return changed;
   }
-
-  const keyEntries = Object.entries(keys);
-  if (keyEntries.length === 1 && item.metrics && (!bd || Object.keys(bd).length === 0)) {
-    const [, singleKey] = keyEntries[0];
-    if (recordNetworkMetrics(singleKey, item.metrics)) {
-      changed = true;
-    }
-  } else if (item.source && keys[item.source] && item.metrics && (!bd || !bd[item.source])) {
-    if (recordNetworkMetrics(keys[item.source], item.metrics)) {
-      changed = true;
-    }
-  }
-
+  const proto = item.protocol || '';
+  if (proto && keys[proto] && item.metrics) changed = recordNetworkMetrics(keys[proto], item.metrics);
   return changed;
 }
 
 export function applyKnownMetrics(item) {
   if (!item || typeof item !== 'object') return item;
   const keys = networkKeysOf(item);
-  const netList = ['mastodon', 'bluesky', 'threads'];
-  const existingBd = (item.metricsBreakdown && typeof item.metricsBreakdown === 'object')
-    ? item.metricsBreakdown
-    : (item._meta?.metricsBreakdown && typeof item._meta.metricsBreakdown === 'object'
-        ? item._meta.metricsBreakdown
-        : null);
-
-  const nextBd = existingBd ? { ...existingBd } : {};
-  let bdChanged = false;
-
-  if (!existingBd && item.source && keys[item.source] && item.metrics) {
-    const knownForSource = getNetworkMetrics(keys[item.source]);
-    if (hasAnyCount(item.metrics) || knownForSource) {
-      nextBd[item.source] = hasAnyCount(item.metrics)
-        ? pickMetrics(item.metrics)
-        : knownForSource;
-    }
-  }
-
-  for (const net of netList) {
-    const key = keys[net];
-    if (!key) continue;
-    const known = getNetworkMetrics(key);
+  const proto = item.protocol || '';
+  const existingBd = breakdownOf(item);
+  const nextBd = existingBd
+    ? { ...existingBd }
+    : (proto && keys[proto] ? { [proto]: pickMetrics(item.metrics) } : {});
+  let changed = false;
+  for (const net of NETWORKS) {
+    const known = getNetworkMetrics(keys[net]);
     if (!known) continue;
     const cur = nextBd[net];
-    if (!cur) {
+    if (!cur || (!hasAnyCount(cur) && hasAnyCount(known))) {
       nextBd[net] = known;
-      bdChanged = true;
-    } else if (!hasAnyCount(cur) && hasAnyCount(known)) {
-      nextBd[net] = known;
-      bdChanged = true;
+      changed = true;
     }
   }
-
-  const bdKeys = Object.keys(nextBd);
-  if (bdKeys.length === 0) return item;
-
-  const summed = sumMetricsBreakdown(nextBd);
-  const curMetrics = pickMetrics(item.metrics);
-  const metricsChanged = !metricsEqual(curMetrics, summed);
-
-  if (!bdChanged && !metricsChanged) {
-    return item;
-  }
-
-  return {
-    ...item,
-    metrics: summed,
-    metricsBreakdown: nextBd,
-  };
+  if (!changed) return item;
+  const metrics = sumMetricsBreakdown(nextBd);
+  if (Object.keys(nextBd).length < 2) return { ...item, metrics };
+  return { ...item, metrics, _meta: { ...(item._meta || {}), metricsBreakdown: nextBd } };
 }
 
 export function resetMetricsLedgerForTests() {
