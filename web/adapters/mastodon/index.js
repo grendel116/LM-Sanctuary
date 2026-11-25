@@ -137,7 +137,7 @@ export class MastodonAdapter extends SocialAdapter {
 
   async like(targetItem, undo = false) {
     const item = toUnifiedItem(targetItem);
-    const prevLikes = Number(item.metrics?.likes || 0);
+    const prevLikes = Number(item._meta?.metricsBreakdown?.mastodon?.likes ?? item.metrics?.likes ?? 0);
     const wasLiked = Boolean(item._meta?.mastodon?.favourited);
     const statusId = await this._resolveLocalStatusId(item);
     const updated = await toggleFavourite({
@@ -150,7 +150,7 @@ export class MastodonAdapter extends SocialAdapter {
     const preserved = this._preservePostIdentity(item, updated, statusId);
     const serverLikes = Number(preserved.metrics?.likes || 0);
     const nextLikes = undo
-      ? (wasLiked && serverLikes >= prevLikes ? Math.max(0, prevLikes - 1) : serverLikes)
+      ? (wasLiked ? Math.max(0, prevLikes - 1) : prevLikes)
       : Math.max(1, wasLiked ? prevLikes : prevLikes + 1, serverLikes);
     return {
       ...preserved,
@@ -160,7 +160,7 @@ export class MastodonAdapter extends SocialAdapter {
 
   async repost(targetItem, undo = false) {
     const item = toUnifiedItem(targetItem);
-    const prevReposts = Number(item.metrics?.reposts || 0);
+    const prevReposts = Number(item._meta?.metricsBreakdown?.mastodon?.reposts ?? item.metrics?.reposts ?? 0);
     const wasReposted = Boolean(item._meta?.mastodon?.reblogged);
     const statusId = await this._resolveLocalStatusId(item);
     const updated = await toggleReblog({
@@ -173,7 +173,7 @@ export class MastodonAdapter extends SocialAdapter {
     const preserved = this._preservePostIdentity(item, updated, statusId);
     const serverReposts = Number(preserved.metrics?.reposts || 0);
     const nextReposts = undo
-      ? (wasReposted && serverReposts >= prevReposts ? Math.max(0, prevReposts - 1) : serverReposts)
+      ? (wasReposted ? Math.max(0, prevReposts - 1) : prevReposts)
       : Math.max(1, wasReposted ? prevReposts : prevReposts + 1, serverReposts);
     return {
       ...preserved,

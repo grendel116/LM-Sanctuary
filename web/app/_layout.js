@@ -1,7 +1,7 @@
 import { openAuthorSheetModal } from '../components/AuthorSheetModal.js';
 import { parseSocialPostItemFromUrl } from '../components/PostCard.js';
 import { showAlert } from '../components/sanctuary/SanctuaryDialog.js';
-import { openSettingsModal } from '../components/sanctuary/SettingsModal.js';
+import { openSettingsModal, promptUnlockVault } from '../components/sanctuary/SettingsModal.js';
 import { openUserModal } from '../components/sanctuary/UserModal.js';
 import { createUserIconSvg } from '../constants/avatars.js';
 import { toUnifiedItem } from '../core/schema/unifiedItem.js';
@@ -38,6 +38,7 @@ import {
 } from '../state/browserStore.js';
 import { openCompose, prefillFromUserBubble, syncComposeDraftsWithServer } from '../state/composeStore.js';
 import { hydrateCachedFilters, hydrateCachedModeration, hydrateFeedTuning } from '../state/feedStore.js';
+import { hydrateMetricsLedger } from '../state/metricsLedger.js';
 import { connectionStore, initSanctuaryConnection, onSanctuaryEvent } from '../state/sanctuary/connection.js';
 import { attachOutboxAutoFlush, hydrateOutbox } from '../state/sanctuary/outboxModel.js';
 import { kvDelete, kvGet, kvSet } from '../storage/nativeStore.js';
@@ -722,6 +723,8 @@ export function createAppShell(
     }
   }
   const unsubActivityBadge = activityStore.subscribe(() => syncActivityUnreadBadge());
+  const onRequestUnlock = (e) => promptUnlockVault({ onUnlocked: async () => { await e?.detail?.onUnlocked?.(); } });
+  globalThis.addEventListener?.('sanctuary:request-unlock', onRequestUnlock);
 
   function askSanctuaryAboutPost(post) {
     closeDirectConvoInDock();
@@ -1015,6 +1018,7 @@ export function createAppShell(
           hydrateFeedTuning(),
           hydrateCachedModeration().catch(() => {}),
           hydrateCachedFilters().catch(() => {}),
+          hydrateMetricsLedger().catch(() => {}),
         ]);
         if (hydratedBrowser?.sanctuarySplitPct) {
           applySanctuarySplitWidth(hydratedBrowser.sanctuarySplitPct);
@@ -1360,6 +1364,7 @@ export function createAppShell(
       if (activityPollTimer) clearInterval(activityPollTimer);
       unsubAuthActivity();
       unsubActivityBadge();
+      globalThis.removeEventListener?.('sanctuary:request-unlock', onRequestUnlock);
       unsubComposeVaultLock();
       closePostThread({ restoreScroll: false });
       feedScreenHandle?.destroy?.();

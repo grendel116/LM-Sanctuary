@@ -149,11 +149,12 @@ export class BlueskyAdapter extends SocialAdapter {
       likeUri: undo ? meta.likeUri : null,
     });
     const nextLikeUri = undo ? null : (res?.uri || 'liked');
+    const prevLikes = Number(item._meta?.metricsBreakdown?.bluesky?.likes ?? item.metrics?.likes ?? 0);
     return {
       ...item,
       metrics: {
         ...item.metrics,
-        likes: Math.max(0, (item.metrics?.likes || 0) + (undo ? -1 : 1)),
+        likes: Math.max(0, prevLikes + (undo ? -1 : 1)),
       },
       _meta: { ...item._meta, bluesky: { ...meta, likeUri: nextLikeUri } },
     };
@@ -170,11 +171,12 @@ export class BlueskyAdapter extends SocialAdapter {
       repostUri: undo ? meta.repostUri : null,
     });
     const nextRepostUri = undo ? null : (res?.uri || 'reposted');
+    const prevReposts = Number(item._meta?.metricsBreakdown?.bluesky?.reposts ?? item.metrics?.reposts ?? 0);
     return {
       ...item,
       metrics: {
         ...item.metrics,
-        reposts: Math.max(0, (item.metrics?.reposts || 0) + (undo ? -1 : 1)),
+        reposts: Math.max(0, prevReposts + (undo ? -1 : 1)),
       },
       _meta: { ...item._meta, bluesky: { ...meta, repostUri: nextRepostUri } },
     };

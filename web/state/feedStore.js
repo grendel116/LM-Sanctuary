@@ -11,8 +11,14 @@ import {
   mergeViewerActivityMeta,
   normalizeNativeUri,
   reconcileViewerMetricFloors,
+  sumMetricsBreakdown,
   toUnifiedItem,
 } from '../core/schema/unifiedItem.js';
+import {
+  applyKnownMetrics,
+  hydrateMetricsLedger,
+  recordItemMetrics,
+} from './metricsLedger.js';
 import { fetchSanctuaryFeedProfile, saveSanctuaryFeedProfile } from '../queries/sanctuary.js';
 import { getLocalModeratedAccounts, storeDelete, storeGet, storePut } from '../storage/nativeStore.js';
 import { authStore } from './authStore.js';
@@ -378,7 +384,7 @@ export function setStreamLoading(loading, error = null) {
 export function setStreamItems(streamName, items, nextCursor = null, options = {}) {
   const prev = feedStore.get();
   const prevGen = prev.streams[streamName]?.generation || 0;
-  const deduped = mergeChronologicalPosts([], items);
+  const deduped = mergeChronologicalPosts([], items).map((it) => applyKnownMetrics(it));
   const shuffleSeed = typeof options?.shuffleSeed === 'string' || typeof options?.shuffleSeed === 'number'
     ? String(options.shuffleSeed)
     : '';
@@ -407,7 +413,9 @@ export function appendStreamItems(streamName, items, nextCursor = null) {
   const bucket = prev.streams[streamName] || createEmptyStreamBucket();
   const ledger = prev.viewerInteractions;
   const existingUnified = (bucket.items || []).map((it) => toUnifiedItem(it));
-  const incomingUnified = (Array.isArray(items) ? items : []).map((it) => applyViewerInteractionsToItem(it, ledger));
+  const incomingUnified = (Array.isArray(items) ? items : []).map((it) =>
+    applyKnownMetrics(applyViewerInteractionsToItem(it, ledger))
+  );
   const ownAccounts = authStore.get().accounts || [];
   const { nextExisting, appended } = deduplicateAppendItems(existingUnified, incomingUnified, { ownAccounts });
   feedStore.set({
@@ -513,6 +521,7 @@ export function mergePostMutation(prevItem, nextItem) {
     nextItem._meta.metricsBreakdown !== prev._meta?.metricsBreakdown
   ) {
     mergedMeta.metricsBreakdown = nextItem._meta.metricsBreakdown;
+    mergedMetrics = sumMetricsBreakdown(mergedMeta.metricsBreakdown);
   } else if (
     prev._meta?.metricsBreakdown &&
     typeof prev._meta.metricsBreakdown === 'object' &&
@@ -523,9 +532,6 @@ export function mergePostMutation(prevItem, nextItem) {
     const nextLikes = Number(next.metrics?.likes ?? prevProto.likes ?? 0);
     const nextReplies = Number(next.metrics?.replies ?? prevProto.replies ?? 0);
     const nextReposts = Number(next.metrics?.reposts ?? prevProto.reposts ?? 0);
-    const dLikes = nextLikes - Number(prevProto.likes ?? 0);
-    const dReplies = nextReplies - Number(prevProto.replies ?? 0);
-    const dReposts = nextReposts - Number(prevProto.reposts ?? 0);
     mergedMeta.metricsBreakdown = {
       ...prev._meta.metricsBreakdown,
       [prev.protocol]: {
@@ -535,11 +541,7 @@ export function mergePostMutation(prevItem, nextItem) {
         reposts: nextReposts,
       },
     };
-    mergedMetrics = {
-      likes: Math.max(0, Number(prev.metrics?.likes || 0) + dLikes),
-      replies: Math.max(0, Number(prev.metrics?.replies || 0) + dReplies),
-      reposts: Math.max(0, Number(prev.metrics?.reposts || 0) + dReposts),
-    };
+    mergedMetrics = sumMetricsBreakdown(mergedMeta.metricsBreakdown);
   }
 
   const explicitAttachments =
@@ -600,6 +602,7 @@ export function mutatePostAcrossStreams(predicateOrKey, updater) {
     feedStore.set({ streams: nextStreams });
     if (lastUpdated) {
       recordViewerInteraction(lastUpdated);
+      recordItemMetrics(lastUpdated);
     }
   }
 }
@@ -607,6 +610,9 @@ export function mutatePostAcrossStreams(predicateOrKey, updater) {
 export function reconcileEnrichedStreamItems(enrichedItems = []) {
   const enrichedList = Array.isArray(enrichedItems) ? enrichedItems.filter((it) => it?.id) : [];
   if (enrichedList.length === 0) return;
+  for (const item of enrichedList) {
+    recordItemMetrics(item);
+  }
   const byId = new Map(enrichedList.map((it) => [String(it.id), it]));
   const ownAccounts = authStore.get().accounts || [];
 
@@ -759,6 +765,7 @@ export async function persistStreamCache(streamName) {
 }
 
 export async function hydrateCachedStream(streamName) {
+  await hydrateMetricsLedger();
   const cached = await storeGet('timeline_cache', streamName);
   if (!cached || !Array.isArray(cached.items)) return null;
   const isDiscovery = ROLLING_DISCOVERY_STREAMS.has(streamName);
@@ -780,7 +787,7 @@ export async function hydrateCachedStream(streamName) {
     streams: {
       ...prev.streams,
       [streamName]: {
-        items: mergeChronologicalPosts([], validItems),
+        items: mergeChronologicalPosts([], validItems).map((it) => applyKnownMetrics(it)),
         nextCursor: cached.nextCursor || null,
         updatedAt: cached.updatedAt || 0,
         generation: prevGen + 1,

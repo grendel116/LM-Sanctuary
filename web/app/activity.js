@@ -12,14 +12,17 @@ import {
 } from '../queries/socialClient.js';
 import {
   activityStore,
+  beginActivityVisit,
   clearAllActivity,
   computeActivityTotals,
   dismissActivityGroup,
+  endActivityVisit,
   groupActivityNotifications,
   hydrateActivityStore,
   isActivityGroupUnread,
   refreshActivityNotifications,
   removeActivityByActor,
+  resetActivityVisitCutoff,
   updateActivityActorFollowState,
 } from '../state/activityStore.js';
 import { authStore, getAuthenticatedAccount } from '../state/authStore.js';
@@ -310,6 +313,46 @@ export function mountActivityScreen(containerEl, {
     listEl.replaceChildren(...visibleGroups.map((group) => buildGroupRow(group)));
   }
 
+  function canFollowPerson(person, protocol, authState) {
+    return Boolean(person?.id) && ((protocol === 'mastodon' && authState.isMastodonConnected)
+      || (protocol === 'bluesky' && authState.isBlueskyConnected));
+  }
+
+  function buildFollowButton(person, protocol) {
+    const isFollowing = Boolean(person.following);
+    const isRequested = Boolean(person.requested && !isFollowing);
+    const isActiveFollow = isFollowing || isRequested;
+    const followBtn = doc.createElement('button');
+    followBtn.type = 'button';
+    followBtn.className = `btn-sleek-pill activity-follow-btn${isActiveFollow ? ' is-following' : ''}`;
+    followBtn.dataset.actorName = person.name || person.handle || '';
+    followBtn.setAttribute('aria-pressed', isActiveFollow ? 'true' : 'false');
+    followBtn.textContent = isFollowing ? 'Following' : (isRequested ? 'Requested' : 'Follow Back');
+    followBtn.addEventListener('click', async () => {
+      followBtn.disabled = true;
+      const shouldUnfollow = isActiveFollow;
+      try {
+        const res = await toggleFollowAuthor(person.id, shouldUnfollow, {
+          protocol,
+          followUri: person.followUri || null,
+        });
+        const nextRequested = !shouldUnfollow && Boolean(res?.requested && !res?.following);
+        const nextFollowing = typeof res?.following === 'boolean'
+          ? res.following
+          : (!shouldUnfollow && !nextRequested);
+        const nextFollowUri = nextFollowing ? String(res?.followUri || res?.uri || '') : '';
+        updateActivityActorFollowState(person, protocol, {
+          following: nextFollowing,
+          requested: nextRequested,
+          followUri: nextFollowUri,
+        });
+      } catch {
+        followBtn.disabled = false;
+      }
+    });
+    return followBtn;
+  }
+
   function buildGroupRow(group) {
     const isUnread = isActivityGroupUnread(group, activityStore.get());
     const row = doc.createElement('div');
@@ -373,13 +416,15 @@ export function mountActivityScreen(containerEl, {
       });
       headline.appendChild(actorBtn);
 
-      if (group.totalActorCount > 1 && (group.kind === 'like' || group.kind === 'repost')) {
+      const isAggregateKind = group.kind === 'like' || group.kind === 'repost' || group.kind === 'follow';
+      if (group.totalActorCount > 1 && isAggregateKind) {
         const othersSpan = doc.createElement('span');
         othersSpan.className = 'activity-others-label';
         const extra = group.totalActorCount - 1;
         othersSpan.textContent = `and ${extra} ${extra === 1 ? 'other' : 'others'}`;
         headline.appendChild(othersSpan);
-      } else if (group.kind !== 'like' && group.kind !== 'repost') {
+      }
+      if (group.kind !== 'like' && group.kind !== 'repost') {
         const verbSpan = doc.createElement('span');
         verbSpan.className = 'activity-verb-label';
         verbSpan.textContent = VERB_LABELS[group.kind] || group.kind;
@@ -442,9 +487,14 @@ export function mountActivityScreen(containerEl, {
       mainCol.appendChild(snippet);
     }
 
-    if (!group.isSyntheticOnly && (group.kind === 'like' || group.kind === 'repost') && group.actors.length > 1) {
+    const authState = authStore.get();
+
+    if (!group.isSyntheticOnly && (group.kind === 'like' || group.kind === 'repost' || group.kind === 'follow') && group.actors.length > 1) {
       const peopleDetails = doc.createElement('details');
       peopleDetails.className = 'activity-actors-disclosure';
+      if (group.kind === 'follow') {
+        peopleDetails.open = true;
+      }
       const peopleSummary = doc.createElement('summary');
       peopleSummary.className = 'activity-actors-summary';
       peopleSummary.textContent = group.aggregateExtraCount > 0
@@ -460,7 +510,18 @@ export function mountActivityScreen(containerEl, {
         chip.addEventListener('click', () => {
           if (a.id || a.handle) onSelectAuthor?.(a, primaryItem);
         });
-        peopleList.appendChild(chip);
+        if (group.kind === 'follow') {
+          const entry = doc.createElement('div');
+          entry.className = 'activity-actor-entry';
+          entry.appendChild(chip);
+          const actorProto = a.protocol || primaryItem.protocol;
+          if (canFollowPerson(a, actorProto, authState)) {
+            entry.appendChild(buildFollowButton(a, actorProto));
+          }
+          peopleList.appendChild(entry);
+        } else {
+          peopleList.appendChild(chip);
+        }
       }
       peopleDetails.append(peopleSummary, peopleList);
       mainCol.appendChild(peopleDetails);
@@ -508,13 +569,11 @@ export function mountActivityScreen(containerEl, {
       }
     }
 
-    const authState = authStore.get();
     const replyCap = getPostActionCapabilities(primaryItem, authState).reply;
     const canCommentReply = group.kind === 'reply' || group.kind === 'mention' || group.kind === 'quote';
-    const canFollowBack = group.kind === 'follow'
-      && Boolean(actor.id)
-      && ((primaryItem.protocol === 'mastodon' && authState.isMastodonConnected)
-        || (primaryItem.protocol === 'bluesky' && authState.isBlueskyConnected));
+    const canSingleFollowBack = group.kind === 'follow'
+      && group.actors.length <= 1
+      && canFollowPerson(actor, primaryItem.protocol, authState);
 
     if (canCommentReply) {
       const replyBtn = doc.createElement('button');
@@ -531,38 +590,8 @@ export function mountActivityScreen(containerEl, {
         prefillReply(primaryItem);
       });
       subFooter.appendChild(replyBtn);
-    } else if (canFollowBack) {
-      const isFollowing = Boolean(actor.following);
-      const isRequested = Boolean(actor.requested && !isFollowing);
-      const isActiveFollow = isFollowing || isRequested;
-      const followBtn = doc.createElement('button');
-      followBtn.type = 'button';
-      followBtn.className = `btn-sleek-pill activity-follow-btn${isActiveFollow ? ' is-following' : ''}`;
-      followBtn.setAttribute('aria-pressed', isActiveFollow ? 'true' : 'false');
-      followBtn.textContent = isFollowing ? 'Following' : (isRequested ? 'Requested' : 'Follow Back');
-      followBtn.addEventListener('click', async () => {
-        followBtn.disabled = true;
-        const shouldUnfollow = isActiveFollow;
-        try {
-          const res = await toggleFollowAuthor(actor.id, shouldUnfollow, {
-            protocol: primaryItem.protocol,
-            followUri: actor.followUri || null,
-          });
-          const nextRequested = !shouldUnfollow && Boolean(res?.requested && !res?.following);
-          const nextFollowing = typeof res?.following === 'boolean'
-            ? res.following
-            : (!shouldUnfollow && !nextRequested);
-          const nextFollowUri = nextFollowing ? String(res?.followUri || res?.uri || '') : '';
-          updateActivityActorFollowState(actor, primaryItem.protocol, {
-            following: nextFollowing,
-            requested: nextRequested,
-            followUri: nextFollowUri,
-          });
-        } catch {
-          followBtn.disabled = false;
-        }
-      });
-      subFooter.appendChild(followBtn);
+    } else if (canSingleFollowBack) {
+      subFooter.appendChild(buildFollowButton(actor, primaryItem.protocol));
     }
 
     if (subFooter.childNodes.length > 0) {
@@ -731,10 +760,10 @@ export function mountActivityScreen(containerEl, {
 
   const scrollTarget = containerEl.closest?.('.center-column-wrap') || containerEl;
   const detachPull = attachPullToRefresh(scrollTarget, () =>
-    loadNotifications({ showSpinner: false, forceRefresh: true, advanceUnreadCutoff: true })
+    loadNotifications({ showSpinner: false, forceRefresh: true, resetNew: true })
   );
 
-  async function loadNotifications({ showSpinner = false, forceRefresh = false, advanceUnreadCutoff = false } = {}) {
+  async function loadNotifications({ showSpinner = false, forceRefresh = false, resetNew = false } = {}) {
     if (destroyed) return;
     const epoch = ++requestEpoch;
     inFlightRefresh = true;
@@ -751,6 +780,10 @@ export function mountActivityScreen(containerEl, {
         await hydrateActivityStore().catch(() => {});
         if (destroyed || epoch !== requestEpoch) return;
       }
+      void beginActivityVisit();
+      if (resetNew) {
+        void resetActivityVisitCutoff();
+      }
       const [fedi, bsky, thr] = await Promise.all([
         getAuthenticatedAccount('fediverse'),
         getAuthenticatedAccount('bluesky'),
@@ -764,7 +797,6 @@ export function mountActivityScreen(containerEl, {
       await refreshActivityNotifications({
         limit: 60,
         markSeen: true,
-        advanceUnreadCutoff,
         forceRefresh,
         background: false,
       }).catch(() => {});
@@ -785,7 +817,7 @@ export function mountActivityScreen(containerEl, {
   }
 
   refreshBtn.addEventListener('click', () => {
-    void loadNotifications({ showSpinner: true, forceRefresh: true, advanceUnreadCutoff: true });
+    void loadNotifications({ showSpinner: true, forceRefresh: true, resetNew: true });
   });
   clearAllBtn.addEventListener('click', () => void clearAllActivity());
 
@@ -804,13 +836,15 @@ export function mountActivityScreen(containerEl, {
     }
   });
 
+  if (activityStore.get().hydrated) void beginActivityVisit();
   renderFromStore();
-  void loadNotifications({ advanceUnreadCutoff: !activityStore.get().hasUnread });
+  void loadNotifications();
 
   return {
     refresh: (opts) => loadNotifications(opts),
     destroy() {
       destroyed = true;
+      endActivityVisit();
       detachPull?.();
       closeFallbackMenus();
       doc.removeEventListener?.('click', handleDocClickOutside);

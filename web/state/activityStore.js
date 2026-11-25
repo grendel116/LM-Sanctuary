@@ -44,8 +44,8 @@ function createInitialActivityState() {
     lastFetchedAt: 0,
     lastSeenTs: 0,
     seenThreadsMetrics: {},
-    sessionUnreadCutoffTs: 0,
-    sessionUnreadThreadsMetrics: {},
+    visitCutoffTs: null,
+    visitSeenThreads: {},
     hasUnread: false,
   };
 }
@@ -311,9 +311,15 @@ function extractThumbUrl(item) {
   return item?._meta?.linkCard?.image || item?._meta?.quotePost?.thumbUrl || '';
 }
 
+function localDayKey(ms) {
+  if (!ms) return 'unknown';
+  const d = new Date(ms);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
 /**
  * Group like and repost notifications targeting the same canonical/linked post across Mastodon, Bluesky, and Threads,
- * while keeping replies, mentions, quotes, and follows individually actionable.
+ * and group follow notifications per local calendar day, while keeping replies, mentions, and quotes individually actionable.
  */
 export function groupActivityNotifications(items = []) {
   if (!Array.isArray(items) || items.length === 0) return [];
@@ -324,8 +330,11 @@ export function groupActivityNotifications(items = []) {
     const nm = it._meta?.notification || {};
     const kind = normalizeNotificationKind(nm.type || it.type);
     const postKey = resolveCanonicalNotificationPostKey(it);
-    const canGroup = (kind === 'like' || kind === 'repost') && Boolean(postKey);
-    const groupKey = canGroup ? `${kind}:${postKey}` : String(it.id || `${kind}:${parseItemTimeMs(it)}:${buckets.size}`);
+    const isFollow = kind === 'follow';
+    const canGroup = ((kind === 'like' || kind === 'repost') && Boolean(postKey)) || isFollow;
+    const groupKey = isFollow
+      ? `follow:${localDayKey(parseItemTimeMs(it))}`
+      : canGroup ? `${kind}:${postKey}` : String(it.id || `${kind}:${parseItemTimeMs(it)}:${buckets.size}`);
     if (!buckets.has(groupKey)) {
       buckets.set(groupKey, { groupKey, kind, postKey, items: [] });
     }
@@ -578,9 +587,10 @@ export function computeActivityTotals(items = []) {
 
 export function isActivityGroupUnread(group, state = activityStore.get()) {
   if (!group || !state) return false;
-  const cutoffTs = state.hasUnread ? Number(state.lastSeenTs || 0) : Number(state.sessionUnreadCutoffTs || 0);
-  const seenThreads = state.hasUnread ? (state.seenThreadsMetrics || {}) : (state.sessionUnreadThreadsMetrics || {});
-  if (cutoffTs <= 0 && Object.keys(seenThreads).length === 0) return false;
+  const cutoffTs = state.visitCutoffTs;
+  if (cutoffTs === null || cutoffTs === undefined) return false;
+  const seenThreads = state.visitSeenThreads || {};
+  if (Number(cutoffTs) <= 0 && Object.keys(seenThreads).length === 0) return false;
 
   for (const it of group.items || []) {
     if (!it || typeof it !== 'object') continue;
@@ -594,7 +604,7 @@ export function isActivityGroupUnread(group, state = activityStore.get()) {
       continue;
     }
     const ts = parseItemTimeMs(it);
-    if (cutoffTs > 0 && ts > cutoffTs) return true;
+    if (Number(cutoffTs) > 0 && ts > Number(cutoffTs)) return true;
   }
   return false;
 }
@@ -619,24 +629,14 @@ export async function hydrateActivityStore() {
   });
 }
 
-export async function markActivitySeen({ advanceUnreadCutoff = false } = {}) {
+export async function markActivitySeen() {
   const cur = activityStore.get();
   const prevSeenTs = Number(cur.lastSeenTs || 0);
-  const prevSeenThreads = cur.seenThreadsMetrics && typeof cur.seenThreadsMetrics === 'object'
-    ? { ...cur.seenThreadsMetrics }
-    : {};
   const newestMs = computeNewestActivityTs(cur.items, prevSeenTs);
   const nextSeenThreads = mergeThreadsSeenSnapshots(cur.seenThreadsMetrics, collectThreadsSeenSnapshot(cur.items));
-  let cutoffPatch = {};
-  if (advanceUnreadCutoff) {
-    cutoffPatch = { sessionUnreadCutoffTs: newestMs, sessionUnreadThreadsMetrics: nextSeenThreads };
-  } else if (cur.hasUnread || (prevSeenTs > 0 && cur.sessionUnreadCutoffTs === 0)) {
-    cutoffPatch = { sessionUnreadCutoffTs: prevSeenTs, sessionUnreadThreadsMetrics: prevSeenThreads };
-  }
   activityStore.set({
     lastSeenTs: newestMs,
     seenThreadsMetrics: nextSeenThreads,
-    ...cutoffPatch,
     hasUnread: false,
   });
   await Promise.allSettled([
@@ -646,10 +646,32 @@ export async function markActivitySeen({ advanceUnreadCutoff = false } = {}) {
   ]);
 }
 
+export function beginActivityVisit() {
+  const cur = activityStore.get();
+  if (cur.visitCutoffTs === null) {
+    activityStore.set({
+      visitCutoffTs: Number(cur.lastSeenTs || 0),
+      visitSeenThreads: { ...(cur.seenThreadsMetrics || {}) },
+    });
+  }
+  return markActivitySeen();
+}
+
+export function resetActivityVisitCutoff() {
+  const cur = activityStore.get();
+  const newestMs = computeNewestActivityTs(cur.items, cur.lastSeenTs);
+  const seen = mergeThreadsSeenSnapshots(cur.seenThreadsMetrics, collectThreadsSeenSnapshot(cur.items));
+  activityStore.set({ visitCutoffTs: newestMs, visitSeenThreads: seen });
+  return markActivitySeen();
+}
+
+export function endActivityVisit() {
+  activityStore.set({ visitCutoffTs: null, visitSeenThreads: {} });
+}
+
 export async function refreshActivityNotifications({
   limit = 60,
   markSeen = false,
-  advanceUnreadCutoff = false,
   forceRefresh = false,
   background = false,
 } = {}) {
@@ -663,29 +685,7 @@ export async function refreshActivityNotifications({
     return { items: [], warnings: [] };
   }
 
-  const curNow = activityStore.get();
-  if (advanceUnreadCutoff) {
-    const preRefreshCutoffTs = (curNow.items.length > 0 || Number(curNow.lastSeenTs || 0) > 0)
-      ? computeNewestActivityTs(curNow.items, curNow.lastSeenTs)
-      : 0;
-    const preRefreshSeenThreads = mergeThreadsSeenSnapshots(
-      curNow.seenThreadsMetrics,
-      collectThreadsSeenSnapshot(curNow.items)
-    );
-    activityStore.set({
-      ...(preRefreshCutoffTs > 0
-        ? { lastSeenTs: preRefreshCutoffTs, sessionUnreadCutoffTs: preRefreshCutoffTs }
-        : {}),
-      seenThreadsMetrics: preRefreshSeenThreads,
-      sessionUnreadThreadsMetrics: preRefreshSeenThreads,
-      hasUnread: false,
-      ...(!background ? { loading: true, error: null } : {}),
-    });
-    if (preRefreshCutoffTs > 0) {
-      void kvSet(LAST_SEEN_TS_KEY, preRefreshCutoffTs).catch(() => {});
-    }
-    void kvSet(SEEN_THREADS_METRICS_KEY, preRefreshSeenThreads).catch(() => {});
-  } else if (!background) {
+  if (!background) {
     activityStore.set({ loading: true, error: null });
   }
   try {
@@ -706,7 +706,7 @@ export async function refreshActivityNotifications({
         error: null,
         lastFetchedAt: Date.now(),
       });
-      await markActivitySeen({ advanceUnreadCutoff: false });
+      await markActivitySeen();
     } else {
       activityStore.set({
         items: filtered,

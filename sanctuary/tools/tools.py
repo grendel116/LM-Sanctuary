@@ -892,6 +892,7 @@ def web_search(query: str) -> str:
             ex.map(fetch_one, thin)
 
     results_pool = []
+    cloud_note = ""
 
     # Parse prefixes for explicit single-source routing
     query_lower = query.lower().strip()
@@ -979,7 +980,8 @@ def web_search(query: str) -> str:
                     collected_hits.extend(greenpt_hits)
                     used_greenpt = True
             except Exception as e:
-                print(f"[Cloud WebSearch] Fallback to local search ({e})")
+                cloud_note = f"[Cloud search unavailable: {e}. Results below come from fallback search.]"
+                print(f"[Cloud WebSearch] Fallback to local search ({e})", flush=True)
 
             if not collected_hits:
                 collected_hits.extend(run_duckduckgo(query))
@@ -1006,11 +1008,13 @@ def web_search(query: str) -> str:
                 enrich_thin_results(results_pool)
 
     if not results_pool:
-        return "No search results found."
+        return f"{cloud_note}\nNo search results found.".strip()
 
     lines = []
     for r in results_pool[:10]:
         lines.append(f"Title: {r['title']}\nURL: {r['url']}\nSource: {r['source']}\nSnippet: {r['content']}")
+    if cloud_note:
+        return "\n\n".join([cloud_note, *lines])
     return "\n\n".join(lines)
 
 

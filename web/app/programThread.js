@@ -1100,6 +1100,15 @@ export function mountProgramThread(containerEl, {
           onAction: () => void flushOutbox().then(() => refreshSession()),
         })
       );
+    } else if (conn.mode === 'online' && state.error && (!Array.isArray(state.messages) || state.messages.length === 0)) {
+      statusHost.replaceChildren(
+        createOfflineNotice({
+          variant: 'offline',
+          message: `Could not load chat history • ${state.error}`,
+          actionLabel: 'Retry',
+          onAction: () => void refreshSession(),
+        })
+      );
     } else {
       statusHost.replaceChildren();
     }
@@ -1178,7 +1187,7 @@ export function mountProgramThread(containerEl, {
         pinnedToBottom = true;
         needsInitialScroll = true;
         lastSessionScrollKey = `${currentProgramId}:${currentSessionId}`;
-        if (!generating) {
+        if (!generating && conn.mode !== 'connecting') {
           void refreshSession();
         }
         return true;

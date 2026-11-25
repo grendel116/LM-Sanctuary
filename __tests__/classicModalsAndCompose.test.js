@@ -2816,17 +2816,17 @@ test('PostCard grays out and disables reaction and share buttons when authStore 
       showSanctuaryAction: true,
     });
 
-    assert.equal(card.querySelector('.post-action-like').disabled, true);
-    assert.equal(card.querySelector('.post-action-reply').disabled, true);
-    assert.equal(card.querySelector('.post-action-repost').disabled, true);
-    assert.equal(card.querySelector('.post-action-sanctuary').disabled, true);
+    assert.equal(card.querySelector('.post-action-like').dataset.needsUnlock, '1');
+    assert.equal(card.querySelector('.post-action-reply').dataset.needsUnlock, '1');
+    assert.equal(card.querySelector('.post-action-repost').dataset.needsUnlock, '1');
+    assert.equal(card.querySelector('.post-action-sanctuary').dataset.needsUnlock, '1');
 
     authStore.set({ vaultLocked: false });
     syncPostCardReactions(card, post);
-    assert.equal(card.querySelector('.post-action-like').disabled, false);
-    assert.equal(card.querySelector('.post-action-reply').disabled, false);
-    assert.equal(card.querySelector('.post-action-repost').disabled, false);
-    assert.equal(card.querySelector('.post-action-sanctuary').disabled, false);
+    assert.equal(card.querySelector('.post-action-like').dataset.needsUnlock, undefined);
+    assert.equal(card.querySelector('.post-action-reply').dataset.needsUnlock, undefined);
+    assert.equal(card.querySelector('.post-action-repost').dataset.needsUnlock, undefined);
+    assert.equal(card.querySelector('.post-action-sanctuary').dataset.needsUnlock, undefined);
   } finally {
     resetAuthStoreForTests();
     dom.restore();

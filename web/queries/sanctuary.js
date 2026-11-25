@@ -40,6 +40,9 @@ export function resolveSanctuaryMediaUrl(mediaPath, opts = {}) {
   if (typeof mediaPath === 'string' && (mediaPath.startsWith('data:') || mediaPath.startsWith('blob:'))) {
     return mediaPath;
   }
+  if (typeof mediaPath === 'string' && /^https?:\/\//i.test(mediaPath.trim())) {
+    return mediaPath.trim();
+  }
   const base = opts.nodeUrl ?? getSanctuaryNodeUrl();
   if (!base) return mediaPath;
   const url = resolveNodeUrl(mediaPath, base);

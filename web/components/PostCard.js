@@ -127,6 +127,10 @@ function formatRelativeTime(createdAt) {
   return new Date(ts).toLocaleDateString();
 }
 
+function requestVaultUnlock(onUnlocked) {
+  globalThis.dispatchEvent?.(new CustomEvent('sanctuary:request-unlock', { detail: { onUnlocked } }));
+}
+
 function applyActionButtonMeta(btn, {
   label = '',
   tooltip = '',
@@ -135,18 +139,26 @@ function applyActionButtonMeta(btn, {
   active = false,
   disabled = false,
   disabledReason = '',
+  needsUnlock = false,
 }) {
   const baseTip = tooltip || label;
   const isDisabled = Boolean(disabled);
+  const isNeedsUnlock = Boolean(needsUnlock);
   btn.disabled = isDisabled;
+  if (isNeedsUnlock) {
+    btn.dataset.needsUnlock = '1';
+  } else {
+    delete btn.dataset.needsUnlock;
+  }
   btn.classList.toggle('is-active', Boolean(active));
   if (pressed !== null && pressed !== undefined) {
     btn.setAttribute('aria-pressed', pressed ? 'true' : 'false');
   }
-  btn.title = isDisabled && disabledReason ? `${baseTip} — ${disabledReason}` : baseTip;
+  const reasonText = (isDisabled || isNeedsUnlock) && disabledReason ? disabledReason : '';
+  btn.title = reasonText ? `${baseTip} — ${reasonText}` : baseTip;
   btn.setAttribute('aria-label', count !== null && count !== undefined ? `${baseTip} (${count})` : baseTip);
-  if (isDisabled && disabledReason) {
-    btn.setAttribute('aria-description', disabledReason);
+  if (reasonText) {
+    btn.setAttribute('aria-description', reasonText);
   } else {
     btn.removeAttribute('aria-description');
   }
@@ -161,6 +173,7 @@ function createActionButton({
   active = false,
   disabled = false,
   disabledReason = '',
+  needsUnlock = false,
   hasHandler = true,
   className = '',
   onClick,
@@ -170,7 +183,7 @@ function createActionButton({
   btn.type = 'button';
   btn.className = ['post-action-btn', className].filter(Boolean).join(' ');
   btn.dataset.hasHandler = hasHandler ? '1' : '0';
-  applyActionButtonMeta(btn, { label, tooltip, count, pressed, active, disabled, disabledReason });
+  applyActionButtonMeta(btn, { label, tooltip, count, pressed, active, disabled, disabledReason, needsUnlock });
   const iconWrap = doc.createElement('span');
   iconWrap.className = 'post-action-icon';
   iconWrap.setAttribute('aria-hidden', 'true');
@@ -186,6 +199,10 @@ function createActionButton({
   btn.addEventListener('click', (e) => {
     e.stopPropagation();
     if (btn.disabled) return;
+    if (btn.dataset.needsUnlock === '1') {
+      requestVaultUnlock(() => onClick?.());
+      return;
+    }
     onClick?.();
   });
   return btn;
@@ -217,14 +234,14 @@ export function getPostActionCapabilities(rawPost, authState = authStore.get()) 
     if (unified.protocol === 'threads') {
       return {
         like: { enabled: false, reason: 'Likes are not supported by the Threads API' },
-        reply: { enabled: false, reason: 'Unlock vault to reply' },
+        reply: { enabled: false, needsUnlock: true, reason: 'Unlock vault to reply' },
         repost: { enabled: false, reason: 'Boosts are not supported by the Threads API' },
       };
     }
     return {
-      like: { enabled: false, reason: 'Unlock vault to like' },
-      reply: { enabled: false, reason: 'Unlock vault to reply' },
-      repost: { enabled: false, reason: 'Unlock vault to boost' },
+      like: { enabled: false, needsUnlock: true, reason: 'Unlock vault to like' },
+      reply: { enabled: false, needsUnlock: true, reason: 'Unlock vault to reply' },
+      repost: { enabled: false, needsUnlock: true, reason: 'Unlock vault to boost' },
     };
   }
 
@@ -330,9 +347,9 @@ function formatBreakdownTip(breakdown, baseLabel, metricKey) {
   return parts.length >= 2 ? `${baseLabel} · ${parts.join(' · ')}` : baseLabel;
 }
 
-function updateActionButtonState(btn, { iconSvg, count, label, tooltip, active, pressed, disabled, disabledReason }) {
+function updateActionButtonState(btn, { iconSvg, count, label, tooltip, active, pressed, disabled, disabledReason, needsUnlock = false }) {
   if (!btn) return;
-  applyActionButtonMeta(btn, { label, tooltip, count, pressed, active, disabled, disabledReason });
+  applyActionButtonMeta(btn, { label, tooltip, count, pressed, active, disabled, disabledReason, needsUnlock });
   const iconEl = btn.querySelector('.post-action-icon');
   if (iconEl) {
     iconEl.innerHTML = iconSvg;
@@ -391,9 +408,10 @@ function buildReactionControls(unified, rawPost) {
 }
 
 function resolveDisabledState(cap, hasHandler) {
-  const disabled = !cap.enabled || !hasHandler;
+  const needsUnlock = Boolean(cap.needsUnlock && hasHandler);
+  const disabled = (!cap.enabled && !needsUnlock) || !hasHandler;
   const disabledReason = !cap.enabled ? cap.reason : (!hasHandler ? 'Action unavailable' : '');
-  return { disabled, disabledReason };
+  return { disabled, disabledReason, needsUnlock };
 }
 
 function formatMediaClock(rawSec) {
@@ -489,7 +507,7 @@ export function syncPostCardReactions(cardEl, rawPost) {
     const btn = cardEl.querySelector(ctrl.selector);
     if (!btn) continue;
     const hasHandler = btn.dataset?.hasHandler !== '0';
-    const { disabled, disabledReason } = resolveDisabledState(ctrl.cap, hasHandler);
+    const { disabled, disabledReason, needsUnlock } = resolveDisabledState(ctrl.cap, hasHandler);
     updateActionButtonState(btn, {
       iconSvg: ctrl.iconSvg,
       count: ctrl.count,
@@ -499,6 +517,7 @@ export function syncPostCardReactions(cardEl, rawPost) {
       pressed: ctrl.pressed,
       disabled,
       disabledReason,
+      needsUnlock,
     });
   }
   const sanctuaryBtn = cardEl.querySelector('.post-action-sanctuary');
@@ -507,7 +526,8 @@ export function syncPostCardReactions(cardEl, rawPost) {
     applyActionButtonMeta(sanctuaryBtn, {
       label: 'Share to Program',
       count: null,
-      disabled: sanctuaryLocked,
+      disabled: false,
+      needsUnlock: sanctuaryLocked,
       disabledReason: sanctuaryLocked ? 'Unlock vault to share to Program' : '',
     });
   }
@@ -851,7 +871,7 @@ function appendReactionButtons(actionsEl, unified, rawPost, handlers, {
   for (const ctrl of buildReactionControls(unified, rawPost)) {
     const handler = handlers[ctrl.key];
     const hasHandler = typeof handler === 'function';
-    const { disabled, disabledReason } = resolveDisabledState(ctrl.cap, hasHandler);
+    const { disabled, disabledReason, needsUnlock } = resolveDisabledState(ctrl.cap, hasHandler);
     actionsEl.appendChild(
       createActionButton({
         iconSvg: ctrl.iconSvg,
@@ -862,6 +882,7 @@ function appendReactionButtons(actionsEl, unified, rawPost, handlers, {
         active: ctrl.active,
         disabled,
         disabledReason,
+        needsUnlock,
         hasHandler,
         className: ctrl.className,
         onClick: () => handler?.(rawPost),
@@ -875,7 +896,8 @@ function appendReactionButtons(actionsEl, unified, rawPost, handlers, {
         iconSvg: SANCTUARY_SVG,
         count: null,
         label: 'Share to Program',
-        disabled: sanctuaryLocked,
+        disabled: false,
+        needsUnlock: sanctuaryLocked,
         disabledReason: sanctuaryLocked ? 'Unlock vault to share to Program' : '',
         className: 'post-action-sanctuary',
         onClick: () => onAskSanctuary(rawPost),
@@ -1085,14 +1107,19 @@ function buildPostContextMenu(doc, rawPost, unified, isOwn, isPinned, {
     }
     itemBtn.className = `post-context-menuitem${danger ? ' is-danger' : ''}`;
     itemBtn.textContent = label;
-    if (requiresAuth && authStore.get()?.vaultLocked) {
-      itemBtn.disabled = true;
-      itemBtn.title = 'Unlock vault first';
+    const needsUnlock = Boolean(requiresAuth && authStore.get()?.vaultLocked);
+    if (needsUnlock) {
+      itemBtn.classList.add('needs-unlock');
+      itemBtn.title = 'Unlock vault to continue';
     }
     itemBtn.addEventListener('click', (e) => {
       e.stopPropagation();
       if (itemBtn.disabled) return;
       closeMenu();
+      if (needsUnlock) {
+        requestVaultUnlock(() => handler?.(rawPost, unified));
+        return;
+      }
       handler?.(rawPost, unified);
     });
     menuPanel.appendChild(itemBtn);

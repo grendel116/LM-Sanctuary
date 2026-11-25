@@ -183,8 +183,9 @@ def mark_greenpt_key_in_vault(in_vault: bool, secret: str = "") -> None:
             settings = json.load(f)
         settings["greenpt_api_key"] = ""
         settings["greenpt_api_key_in_vault"] = bool(in_vault)
-        with open(settings_path, "w", encoding="utf-8") as f:
-            json.dump(settings, f, indent=2, ensure_ascii=False)
+        from runners.program import _save_settings
+
+        _save_settings(settings)
     except Exception:
         pass
 
@@ -200,8 +201,9 @@ def migrate_plaintext_api_keys_to_vault() -> None:
         if plain and _write_vault_greenpt_key(plain):
             settings["greenpt_api_key"] = ""
             settings["greenpt_api_key_in_vault"] = True
-            with open(settings_path, "w", encoding="utf-8") as f:
-                json.dump(settings, f, indent=2, ensure_ascii=False)
+            from runners.program import _save_settings
+
+            _save_settings(settings)
             os.environ["GREENPT_API_KEY"] = plain
     except Exception:
         pass
@@ -243,8 +245,9 @@ def project_settings():
     if request.method == 'GET':
         if not os.path.exists(settings_path):
             try:
-                with open(settings_path, "w", encoding="utf-8") as f:
-                    json.dump(default_settings, f, indent=2)
+                from runners.program import _save_settings
+
+                _save_settings(default_settings)
                 return jsonify(default_settings)
             except Exception as e:
                 print(f"Error creating default project settings: {e}")
@@ -285,6 +288,8 @@ def project_settings():
                     dirty = True
 
                 for field_key, env_key, default_val in _OPENHANDS_ENV_FIELDS:
+                    if field_key == "greenpt_api_key" and settings.get("greenpt_api_key_in_vault"):
+                        continue
                     saved_val = str(settings.get(field_key) or "").strip()
                     env_val = os.getenv(env_key, "").strip()
                     if not saved_val and (env_val or default_val):
@@ -317,8 +322,9 @@ def project_settings():
                         dirty = True
 
                 if dirty:
-                    with open(settings_path, "w", encoding="utf-8") as f:
-                        json.dump(settings, f, indent=2)
+                    from runners.program import _save_settings
+
+                    _save_settings(settings)
 
                 resp_settings = dict(settings)
                 if vault_init and vault_unlocked and vault_key:
@@ -485,15 +491,9 @@ def project_settings():
             except Exception as sync_err:
                 print(f"OpenHands server sync skipped: {sync_err}")
             
-            with open(settings_path, "w", encoding="utf-8") as f:
-                json.dump(settings, f, indent=2, ensure_ascii=False)
-            try:
-                import runners.program as rp
+            from runners.program import _save_settings
 
-                rp._settings_cache = None
-                rp._settings_mtime = 0.0
-            except Exception:
-                pass
+            _save_settings(settings)
             resp_settings = dict(settings)
             if vault_init and vault_unlocked and vault_key_before:
                 resp_settings["greenpt_api_key"] = vault_key_before

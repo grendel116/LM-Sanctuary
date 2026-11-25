@@ -36,6 +36,7 @@ import {
 import { authStore, getAuthenticatedAccount, upsertSocialAccount } from '../state/authStore.js';
 import { computeRemainingCounts, prefillReply } from '../state/composeStore.js';
 import { applyPostInterestFeedback, mutatePostAcrossStreams, removePostAcrossStreams } from '../state/feedStore.js';
+import { applyKnownMetrics, hydrateMetricsLedger, recordItemMetrics } from '../state/metricsLedger.js';
 import { connectionStore } from '../state/sanctuary/connection.js';
 import { findLocalLinkedPostGroup, kvGet, kvSet } from '../storage/nativeStore.js';
 import { summarizeAccountIdentity, syncAutoHeight } from './composeModal.js';
@@ -1434,8 +1435,33 @@ export function mountProfileScreen(containerEl, {
     }
   }
 
+  function enrichProfileItems(tab, items, { persist = true } = {}) {
+    if (!Array.isArray(items) || items.length === 0) return;
+    const primary = getPrimaryAccount();
+    void enrichUnifiedItemsMetrics(items)
+      .then((enriched) => {
+        if (destroyed || !Array.isArray(enriched) || enriched.length === 0) return;
+        for (const item of enriched) {
+          recordItemMetrics(item);
+        }
+        applyEnrichedMetricsInPlace(enriched);
+        const byId = new Map(enriched.filter((it) => it?.id).map((it) => [String(it.id), it]));
+        const latestTabItems = activeSubTab === tab
+          ? ownItems
+          : (ownItemsByTab.get(tab) || []).map((it) => byId.get(String(it?.id)) || it);
+        ownItemsByTab.set(tab, latestTabItems);
+        if (persist && primary?.id) {
+          void persistProfileTabCache(primary.id, tab, latestTabItems);
+        }
+      })
+      .catch((err) => {
+        console.warn('[profile] Metrics enrichment failed:', err);
+      });
+  }
+
   async function loadOwnPosts() {
     if (destroyed) return;
+    await hydrateMetricsLedger();
     const primary = getPrimaryAccount();
     const isPrimaryBsky = primary?.platform === 'bluesky';
     const targetId = isPrimaryBsky
@@ -1452,7 +1478,10 @@ export function mountProfileScreen(containerEl, {
     if (cached.length === 0 && primary.id) {
       cached = await readPersistentProfileTabCache(primary.id, tab);
       if (destroyed || epoch !== loadPostsEpoch || activeSubTab !== tab) return;
-      if (cached.length > 0) ownItemsByTab.set(tab, cached);
+    }
+    if (cached.length > 0) {
+      cached = cached.map((it) => applyKnownMetrics(it));
+      ownItemsByTab.set(tab, cached);
     }
     ownItems = cached;
     loadingPosts = cached.length === 0;
@@ -1475,23 +1504,7 @@ export function mountProfileScreen(containerEl, {
       if (destroyed) return;
       const baseItems = Array.isArray(pageRes) ? pageRes : (pageRes?.items || []);
       const nextCursor = Array.isArray(pageRes) ? null : (pageRes?.nextCursor || null);
-      const cachedById = new Map(
-        (Array.isArray(cached) ? cached : [])
-          .filter((it) => it?.id)
-          .map((it) => [String(it.id), it])
-      );
-      const mergedBaseItems = (Array.isArray(baseItems) ? baseItems : []).map((it) => {
-        const prev = it?.id ? cachedById.get(String(it.id)) : null;
-        if (!prev?._meta?.metricsBreakdown || it?._meta?.metricsBreakdown) return it;
-        return {
-          ...it,
-          metrics: prev.metrics || it.metrics,
-          _meta: {
-            ...(it._meta || {}),
-            metricsBreakdown: prev._meta.metricsBreakdown,
-          },
-        };
-      });
+      const mergedBaseItems = (Array.isArray(baseItems) ? baseItems : []).map((it) => applyKnownMetrics(it));
       ownItemsByTab.set(tab, mergedBaseItems);
       tabCursors.set(tab, nextCursor);
       if (primary.id) void persistProfileTabCache(primary.id, tab, mergedBaseItems);
@@ -1505,18 +1518,7 @@ export function mountProfileScreen(containerEl, {
         void syncRecentUserPostsToSanctuary({ preloadedItems: ownItems }).catch(() => {});
       }
 
-      if (mergedBaseItems.length > 0) {
-        void enrichUnifiedItemsMetrics(mergedBaseItems)
-          .then((enriched) => {
-            if (destroyed || !Array.isArray(enriched)) return;
-            ownItemsByTab.set(tab, enriched);
-            if (primary.id) void persistProfileTabCache(primary.id, tab, enriched);
-            if (activeSubTab === tab) {
-              applyEnrichedMetricsInPlace(enriched);
-            }
-          })
-          .catch(() => {});
-      }
+      enrichProfileItems(tab, mergedBaseItems, { persist: true });
     } catch (err) {
       if (destroyed || epoch !== loadPostsEpoch || activeSubTab !== tab) return;
       if (cached.length === 0) {
@@ -1560,7 +1562,9 @@ export function mountProfileScreen(containerEl, {
       if (destroyed || epoch !== loadPostsEpoch || activeSubTab !== tab) return;
       const incoming = Array.isArray(pageRes) ? pageRes : (pageRes?.items || []);
       const existingIds = new Set(ownItems.map((it) => String(it?.id || '')));
-      const addedItems = incoming.filter((it) => it?.id && !existingIds.has(String(it.id)));
+      const addedItems = incoming
+        .filter((it) => it?.id && !existingIds.has(String(it.id)))
+        .map((it) => applyKnownMetrics(it));
       const nextCursor = Array.isArray(pageRes) ? null : (pageRes?.nextCursor || null);
       tabCursors.set(tab, addedItems.length === 0 && !nextCursor ? null : nextCursor);
 
@@ -1578,17 +1582,7 @@ export function mountProfileScreen(containerEl, {
       syncProfileInfiniteFooter();
       maybeAutoLoadOlderProfilePosts();
 
-      if (addedItems.length > 0) {
-        void enrichUnifiedItemsMetrics(addedItems)
-          .then((enrichedAdded) => {
-            if (destroyed || !Array.isArray(enrichedAdded)) return;
-            if (activeSubTab === tab) {
-              applyEnrichedMetricsInPlace(enrichedAdded);
-              ownItemsByTab.set(tab, ownItems);
-            }
-          })
-          .catch(() => {});
-      }
+      enrichProfileItems(tab, addedItems, { persist: false });
     } catch (err) {
       if (destroyed || epoch !== loadPostsEpoch || activeSubTab !== tab) return;
       loadingOlderPosts = false;
@@ -1986,19 +1980,7 @@ export function mountProfileScreen(containerEl, {
       const becameOnline = Boolean(isOnline && !wasNodeOnline);
       wasNodeOnline = Boolean(isOnline);
       if (!becameOnline || destroyed || ownItems.length === 0) return;
-      const tab = activeSubTab;
-      const primary = getPrimaryAccount();
-      const snapshot = ownItems;
-      void enrichUnifiedItemsMetrics(snapshot)
-        .then((enriched) => {
-          if (destroyed || !Array.isArray(enriched)) return;
-          ownItemsByTab.set(tab, enriched);
-          if (primary?.id) void persistProfileTabCache(primary.id, tab, enriched);
-          if (activeSubTab === tab) {
-            applyEnrichedMetricsInPlace(enriched);
-          }
-        })
-        .catch(() => {});
+      enrichProfileItems(activeSubTab, ownItems, { persist: true });
     }
   );
 

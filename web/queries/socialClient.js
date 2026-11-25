@@ -14,6 +14,11 @@ import {
   plainTextToHtml,
   toUnifiedItem,
 } from '../core/schema/unifiedItem.js';
+import {
+  getNetworkMetrics,
+  hydrateMetricsLedger,
+  recordItemMetrics,
+} from '../state/metricsLedger.js';
 import { fetchWrapper } from './fetch/fetchWrapper.js';
 import { extractFirstHttpsUrl, fetchLinkPreview } from './linkPreview.js';
 import {
@@ -546,8 +551,12 @@ function resolveLinkedRecordFromItem(item, stored) {
  */
 export async function enrichUnifiedItemsMetrics(items = []) {
   if (!Array.isArray(items) || items.length === 0) return Array.isArray(items) ? items : [];
+  await hydrateMetricsLedger();
 
-  const allStored = await listLocalLinkedPosts(1000).catch(() => []);
+  const allStored = await listLocalLinkedPosts(1000).catch((err) => {
+    console.warn('[socialClient] listLocalLinkedPosts failed:', err);
+    return [];
+  });
   const storedIndex = new Map();
   for (const rec of Array.isArray(allStored) ? allStored : []) {
     if (!rec || typeof rec !== 'object') continue;
@@ -598,14 +607,20 @@ export async function enrichUnifiedItemsMetrics(items = []) {
     bskyMetrics = await getBskyPostsMetrics({
       uris: [...bskyUris],
       ...getBskyReadOpts(bskyAuth),
-    }).catch(() => ({}));
+    }).catch((err) => {
+      console.warn('[socialClient] getBskyPostsMetrics failed:', err);
+      return {};
+    });
   }
 
   const threadsMetrics = {};
   const threadsToken = threadsAuth?.secrets?.accessToken || '';
   if (threadsIds.size > 0 && threadsToken) {
     const tids = [...threadsIds].slice(0, 25);
-    const batchRes = await getThreadsPostsInsightsBatch({ postIds: tids, accessToken: threadsToken }).catch(() => ({}));
+    const batchRes = await getThreadsPostsInsightsBatch({ postIds: tids, accessToken: threadsToken }).catch((err) => {
+      console.warn('[socialClient] getThreadsPostsInsightsBatch failed:', err);
+      return {};
+    });
     if (batchRes && typeof batchRes === 'object') {
       Object.assign(threadsMetrics, batchRes);
     }
@@ -632,11 +647,15 @@ export async function enrichUnifiedItemsMetrics(items = []) {
         reposts: Number(baseMetrics.reposts || 0),
       },
     };
-    const bM = link.blueskyUri ? (bskyMetrics[link.blueskyUri] || prevBd?.bluesky) : null;
+    const bM = link.blueskyUri
+      ? (bskyMetrics[link.blueskyUri] || prevBd?.bluesky || getNetworkMetrics(`bluesky:${link.blueskyUri}`))
+      : null;
     if (bM) {
       breakdown.bluesky = { ...bM };
     }
-    const tM = link.threadsPostId ? (threadsMetrics[link.threadsPostId] || prevBd?.threads) : null;
+    const tM = link.threadsPostId
+      ? (threadsMetrics[link.threadsPostId] || prevBd?.threads || getNetworkMetrics(`threads:${link.threadsPostId}`))
+      : null;
     if (tM) {
       breakdown.threads = { ...tM };
     }
@@ -649,7 +668,7 @@ export async function enrichUnifiedItemsMetrics(items = []) {
       total.reposts += Number(m.reposts || 0);
     }
 
-    return {
+    const enrichedItem = {
       ...item,
       metrics: keys.length >= 2
         ? total
@@ -664,6 +683,8 @@ export async function enrichUnifiedItemsMetrics(items = []) {
         ...(keys.length >= 2 ? { metricsBreakdown: breakdown } : {}),
       },
     };
+    recordItemMetrics(enrichedItem);
+    return enrichedItem;
   });
 }
 

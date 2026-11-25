@@ -79,6 +79,43 @@ def _key_fingerprint(api_key: str) -> str:
     return hashlib.sha256(api_key.encode("utf-8")).hexdigest()[:12]
 
 
+def _is_kdbx_vault_active() -> bool:
+    try:
+        from utils.social_vault import is_keepassxc_vault_enabled
+
+        return is_keepassxc_vault_enabled()
+    except Exception:
+        return False
+
+
+def _resolve_api_key(raw: dict[str, Any]) -> tuple[str, str]:
+    """Resolve the Cloud /v1 API key and an unavailable reason if missing or locked."""
+    in_vault = raw.get("greenpt_api_key_in_vault")
+    use_vault = bool(in_vault) or (
+        "greenpt_api_key_in_vault" not in raw
+        and not str(raw.get("greenpt_api_key") or "").strip()
+        and _is_kdbx_vault_active()
+    )
+    if use_vault:
+        try:
+            from utils.keepassxc_client import get_keepassxc_bridge
+
+            bridge = get_keepassxc_bridge()
+            if not bridge.is_unlocked():
+                return "", "vault locked: unlock the Sanctuary Vault to use Cloud /v1"
+            key = (bridge.get_secret("greenpt_api_key") or "").strip()
+            return key, "" if key else "Cloud API key missing from the unlocked vault"
+        except Exception as exc:
+            return "", f"vault unavailable ({exc})"
+
+    key = (
+        str(raw.get("greenpt_api_key") or "").strip()
+        or os.getenv("CLOUD_API_KEY", "").strip()
+        or os.getenv("GREENPT_API_KEY", "").strip()
+    )
+    return key, "" if key else "no Cloud API key configured"
+
+
 def get_greenpt_settings() -> dict[str, Any]:
     """Load Cloud /v1 settings from `project_settings.json` + env vars."""
     raw: dict[str, Any] = {}
@@ -91,11 +128,7 @@ def get_greenpt_settings() -> dict[str, Any]:
         except (OSError, json.JSONDecodeError):
             raw = {}
 
-    api_key = (
-        str(raw.get("greenpt_api_key") or "").strip()
-        or os.getenv("CLOUD_API_KEY", "").strip()
-        or os.getenv("GREENPT_API_KEY", "").strip()
-    )
+    api_key, key_unavailable_reason = _resolve_api_key(raw)
     base_url = (
         str(raw.get("greenpt_base_url") or "").strip()
         or os.getenv("CLOUD_BASE_URL", "").strip()
@@ -135,6 +168,7 @@ def get_greenpt_settings() -> dict[str, Any]:
 
     return {
         "api_key": api_key,
+        "key_unavailable_reason": key_unavailable_reason,
         "base_url": base_url,
         "provider": provider,
         "routing_policy": policy,
@@ -202,18 +236,23 @@ def clear_quota_cooldown() -> None:
         _quota_exhausted_key_fp = ""
 
 
-def is_cloud_enabled(require_native_greenpt: bool = False) -> bool:
-    """Return True when cloud routing is permitted, configured, and not in 402 cooldown."""
+def cloud_unavailable_reason(require_native_greenpt: bool = False) -> str:
+    """Return a short reason string if Cloud /v1 is unavailable, or '' when ready."""
     cfg = get_greenpt_settings()
     if cfg["routing_policy"] == "local_only":
-        return False
+        return "routing_policy=local_only"
     if not cfg["api_key"] and not is_local_endpoint(cfg["base_url"]):
-        return False
+        return cfg["key_unavailable_reason"] or "no Cloud API key configured"
     if require_native_greenpt and not is_native_greenpt(cfg["base_url"]):
-        return False
+        return "endpoint is not native GreenPT"
     if is_quota_exhausted(cfg["api_key"]):
-        return False
-    return True
+        return "HTTP 402 quota cooldown"
+    return ""
+
+
+def is_cloud_enabled(require_native_greenpt: bool = False) -> bool:
+    """Return True when cloud routing is permitted, configured, and not in 402 cooldown."""
+    return not cloud_unavailable_reason(require_native_greenpt)
 
 
 def _auth_headers(api_key: str, json_body: bool = True) -> dict[str, str]:
@@ -254,8 +293,11 @@ def websearch(
 ) -> list[dict[str, str]]:
     """Query GreenPT `/v1/tools/websearch` (with `/v1/tools/search/web` fallback)."""
     clean_q = (query or "").strip()
-    if not clean_q or not is_cloud_enabled(require_native_greenpt=True):
+    if not clean_q:
         return []
+    reason = cloud_unavailable_reason(require_native_greenpt=True)
+    if reason:
+        raise RuntimeError(reason)
 
     cfg = get_greenpt_settings()
     headers = _auth_headers(cfg["api_key"])
@@ -283,7 +325,7 @@ def websearch(
         _check_402(resp, cfg["api_key"])
 
     if resp.status_code != 200:
-        return []
+        raise RuntimeError(f"HTTP {resp.status_code}: {resp.text[:200]}")
 
     payload = resp.json() if resp.content else {}
     raw_items = (

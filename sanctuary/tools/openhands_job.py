@@ -145,11 +145,7 @@ def resolve_greenpt_config(model: str | None = None, subagent: str = "") -> dict
     if routing_policy not in greenpt_client.VALID_ROUTING_POLICIES:
         routing_policy = "auto"
 
-    api_key = (
-        str(settings.get("greenpt_api_key") or "").strip()
-        or os.getenv("CLOUD_API_KEY", "").strip()
-        or os.getenv("GREENPT_API_KEY", "").strip()
-    )
+    api_key, _ = greenpt_client._resolve_api_key(settings)
     base_url = (
         str(settings.get("greenpt_base_url") or "").strip()
         or os.getenv("CLOUD_BASE_URL", "").strip()

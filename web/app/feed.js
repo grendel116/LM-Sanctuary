@@ -73,6 +73,7 @@ import {
   setStreamLoading,
   setUserLists,
 } from '../state/feedStore.js';
+import { hydrateMetricsLedger } from '../state/metricsLedger.js';
 import { connectionStore, onSanctuaryEvent } from '../state/sanctuary/connection.js';
 import { publishOrganicPost } from './composeModal.js';
 import { openEditPostDialog } from './profile.js';
@@ -232,32 +233,19 @@ function buildOptimisticReactionPost(cur, kind, nextActive) {
   };
 }
 
-function scheduleMetricsEnrichment(items, isStale) {
+function scheduleMetricsEnrichment(items, isStale, streamName = null) {
   if (!Array.isArray(items) || items.length === 0) return;
-  void enrichUnifiedItemsMetrics(items).then((enriched) => {
-    if (isStale?.() || !Array.isArray(enriched)) return;
-    const changed = [];
-    for (let i = 0; i < enriched.length; i += 1) {
-      const next = enriched[i];
-      const prev = items[i];
-      if (!next?.id || next === prev) continue;
-      const linkedChanged =
-        Boolean(next._meta?.linkedIds) &&
-        JSON.stringify(next._meta.linkedIds) !== JSON.stringify(prev?._meta?.linkedIds || null);
-      if (
-        next.metrics?.likes !== prev?.metrics?.likes ||
-        next.metrics?.replies !== prev?.metrics?.replies ||
-        next.metrics?.reposts !== prev?.metrics?.reposts ||
-        Boolean(next._meta?.metricsBreakdown) !== Boolean(prev?._meta?.metricsBreakdown) ||
-        linkedChanged
-      ) {
-        changed.push(next);
+  void enrichUnifiedItemsMetrics(items)
+    .then((enriched) => {
+      if (isStale?.() || !Array.isArray(enriched) || enriched.length === 0) return;
+      reconcileEnrichedStreamItems(enriched);
+      if (streamName) {
+        void persistStreamCache(streamName).catch(() => {});
       }
-    }
-    if (changed.length > 0) {
-      reconcileEnrichedStreamItems(changed);
-    }
-  }).catch(() => {});
+    })
+    .catch((err) => {
+      console.warn('[feed] Metrics enrichment failed:', err);
+    });
 }
 
 /**
@@ -1019,6 +1007,7 @@ export function mountFeedScreen(containerEl, {
 
   async function loadStream(append = false, { showSpinner = false, forceRefresh = false } = {}) {
     if (destroyed) return;
+    await hydrateMetricsLedger();
     const state = feedStore.get();
     const streamName = ALLOWED_STREAMS.has(state.activeStream) ? state.activeStream : 'feed';
     const existingBucket = state.streams[streamName] || { items: [], nextCursor: null };
@@ -1187,16 +1176,13 @@ export function mountFeedScreen(containerEl, {
         }
 
         const nextCursor = (nextFedi || nextBsky) ? { fedi: nextFedi, bsky: nextBsky } : null;
-        const nextItems = append
-          ? combinedItems
-          : mergeChronologicalPosts([], combinedItems);
-        if (append) appendStreamItems('following', nextItems, nextCursor);
+        if (append) appendStreamItems('following', combinedItems, nextCursor);
         else {
           warmHydratedStreams.delete('following');
-          setStreamItems('following', nextItems, nextCursor);
+          setStreamItems('following', combinedItems, nextCursor);
         }
-        await persistStreamCache('following').catch(() => {});
-        scheduleMetricsEnrichment(nextItems, () => destroyed || epoch !== requestEpoch);
+        scheduleMetricsEnrichment(combinedItems, () => destroyed || epoch !== requestEpoch, 'following');
+        void persistStreamCache('following').catch(() => {});
         return;
       }
 
@@ -1247,9 +1233,7 @@ export function mountFeedScreen(containerEl, {
 
       let harvestedItems = Array.isArray(harvested?.items) ? harvested.items : [];
       let nextCursor = harvested?.nextCursor || null;
-      let nextItems = append
-        ? harvestedItems
-        : mergeChronologicalPosts([], harvestedItems);
+      let nextItems = harvestedItems;
 
       const latestSt = feedStore.get();
       const hasTasteSeed =
@@ -1296,11 +1280,11 @@ export function mountFeedScreen(containerEl, {
           deprioritizeIds: priorSeenIds,
         });
       }
-      await persistStreamCache(streamName).catch(() => {});
+      scheduleMetricsEnrichment(nextItems, () => destroyed || epoch !== requestEpoch, streamName);
+      void persistStreamCache(streamName).catch(() => {});
       if (!needPreScore && nextItems.length > 0) {
         void scoreItemsWithNode(nextItems);
       }
-      scheduleMetricsEnrichment(nextItems, () => destroyed || epoch !== requestEpoch);
     } catch (err) {
       if (destroyed || epoch !== requestEpoch) return;
       console.warn('[feed] loadStream error:', err?.message || err);

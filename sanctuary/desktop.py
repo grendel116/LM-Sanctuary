@@ -56,12 +56,22 @@ ERROR_HTML = """<html><body style="background:#121214;color:#f87171;font-family:
 <p>The local server failed to start. Details are in logs/flask_server.log.</p></body></html>"""
 
 
-def find_available_port(default_port: int = 5000) -> int:
-    """Finds an available TCP port on localhost."""
-    for port in range(default_port, default_port + 50):
+def find_available_port(default_port: int = 5000, wait_s: float = 15.0) -> int:
+    """Return default_port once free (waiting for a closing instance to release it), else the next free port."""
+    def _is_free(port: int) -> bool:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            if s.connect_ex(('127.0.0.1', port)) != 0:
-                return port
+            return s.connect_ex(('127.0.0.1', port)) != 0
+
+    deadline = time.time() + max(0.0, wait_s)
+    while True:
+        if _is_free(default_port):
+            return default_port
+        if time.time() >= deadline:
+            break
+        time.sleep(0.25)
+    for port in range(default_port + 1, default_port + 50):
+        if _is_free(port):
+            return port
     return default_port
 
 

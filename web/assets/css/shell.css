@@ -5065,6 +5065,24 @@ dialog.classic-modal-dialog:modal {
   background: var(--shell-hover);
 }
 
+.post-context-menuitem:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.post-context-menuitem:disabled:hover {
+  background: transparent;
+}
+
+.post-context-menuitem.needs-unlock::after {
+  content: ' 🔒';
+  font-size: 0.8em;
+}
+
+.post-action-btn[data-needs-unlock="1"] {
+  opacity: 0.7;
+}
+
 .post-context-menuitem:focus-visible {
   background: var(--shell-hover);
   outline: 2px solid var(--primary-accent, #9370db);
@@ -8046,6 +8064,12 @@ progress.threads-import-progress::-moz-progress-bar {
   flex-wrap: wrap;
   gap: 6px;
   margin-block-start: 6px;
+}
+
+.activity-actor-entry {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
 }
 
 .activity-actor-chip {

@@ -1184,6 +1184,24 @@ function matchPostDuplicate(exFeat, candFeat, windowMs) {
   return { duplicate: false, mergeCrossProtocolMeta: false };
 }
 
+export function pickMetrics(m) {
+  return {
+    likes: Number(m?.likes || 0),
+    replies: Number(m?.replies || 0),
+    reposts: Number(m?.reposts || 0),
+  };
+}
+
+export function sumMetricsBreakdown(bd) {
+  const t = { likes: 0, replies: 0, reposts: 0 };
+  for (const m of Object.values(bd || {})) {
+    t.likes += Number(m?.likes || 0);
+    t.replies += Number(m?.replies || 0);
+    t.reposts += Number(m?.reposts || 0);
+  }
+  return t;
+}
+
 function mergeAbsorbedMeta(target, absorbed, { mergeCrossProtocolMeta = false } = {}) {
   const absorbedBoosters = extractMetaBoosters(absorbed._meta);
   const absorbedVouches = extractMetaVouchActors(absorbed._meta);
@@ -1211,13 +1229,30 @@ function mergeAbsorbedMeta(target, absorbed, { mergeCrossProtocolMeta = false } 
         linkedIds: { ...(nextMeta.linkedIds || {}), ...(absorbed._meta?.linkedIds || {}) },
       };
     }
-    const candBd = absorbed._meta?.metricsBreakdown;
-    const prevBd = nextMeta.metricsBreakdown;
-    const candCount = candBd && typeof candBd === 'object' ? Object.keys(candBd).length : 0;
-    const prevCount = prevBd && typeof prevBd === 'object' ? Object.keys(prevBd).length : 0;
-    if (candCount > prevCount) {
-      nextMeta = { ...nextMeta, metricsBreakdown: candBd };
-      if (absorbed.metrics) nextMetrics = absorbed.metrics;
+    if (target.protocol && absorbed.protocol && target.protocol !== absorbed.protocol) {
+      const bd = { ...(target._meta?.metricsBreakdown || { [target.protocol]: pickMetrics(target.metrics) }) };
+      const aBd = absorbed._meta?.metricsBreakdown || { [absorbed.protocol]: pickMetrics(absorbed.metrics) };
+      for (const [p, m] of Object.entries(aBd)) {
+        const prev = bd[p];
+        bd[p] = prev
+          ? {
+              likes: Math.max(prev.likes || 0, m.likes || 0),
+              replies: Math.max(prev.replies || 0, m.replies || 0),
+              reposts: Math.max(prev.reposts || 0, m.reposts || 0),
+            }
+          : pickMetrics(m);
+      }
+      nextMeta = { ...nextMeta, metricsBreakdown: bd };
+      nextMetrics = sumMetricsBreakdown(bd);
+    } else {
+      const candBd = absorbed._meta?.metricsBreakdown;
+      const prevBd = nextMeta.metricsBreakdown;
+      const candCount = candBd && typeof candBd === 'object' ? Object.keys(candBd).length : 0;
+      const prevCount = prevBd && typeof prevBd === 'object' ? Object.keys(prevBd).length : 0;
+      if (candCount > prevCount) {
+        nextMeta = { ...nextMeta, metricsBreakdown: candBd };
+        if (absorbed.metrics) nextMetrics = absorbed.metrics;
+      }
     }
   }
 

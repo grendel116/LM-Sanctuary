@@ -909,18 +909,24 @@ class BaseProgramRunner:
                 if hasattr(adapter, "estimate_turn_tokens")
                 else 0
             )
+            cloud_reason = greenpt_client.cloud_unavailable_reason()
+            if iteration == 1 and cloud_reason and not active_story_mode:
+                print(f"[Transmission] Cloud unavailable ({cloud_reason}); staying on local LLM.", flush=True)
             shift = transmission.shift(
                 iteration=iteration,
                 estimated_tokens=est_tokens,
                 local_budget=adapter._get_chat_budget(),
                 has_vision_attachment=has_vision_attachment,
-                cloud_available=greenpt_client.is_cloud_enabled(),
+                cloud_available=not cloud_reason,
             )
             eff_directive = (
                 f"{turn_directive}\n\n{shift.directive}".strip()
                 if shift.directive and turn_directive
                 else (shift.directive or turn_directive)
             )
+            if cloud_reason.startswith("vault locked") and transmission.throttle_tier:
+                vault_note = "Note for this reply: Cloud research is unavailable because the Sanctuary Vault is locked; briefly tell the user to unlock the vault for cloud research."
+                eff_directive = f"{eff_directive}\n\n{vault_note}".strip() if eff_directive else vault_note
             messages = adapter.get_openai_messages(
                 sys_instructions,
                 rag_context,
@@ -1074,7 +1080,7 @@ class BaseProgramRunner:
                     local_error_msg = f"Error: Could not connect to LLM ({e}). Ensure local llama-server is running."
 
                 # Automatic Park -> Cloud Failover when llama-server is unloaded/offline
-                if not bot_response_text and greenpt_client.is_cloud_enabled():
+                if not bot_response_text and not cloud_reason:
                     try:
                         failover_tier = shift.cloud_tier or "fast"
                         step_res = await _invoke_cloud_gear(

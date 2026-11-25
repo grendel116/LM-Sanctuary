@@ -7,8 +7,9 @@ import { installMockDom } from '../__mocks__/mockDom.js';
 import { mountProgramThread } from '../web/app/programThread.js';
 import { connectionStore, emitSanctuaryEvent, resetConnectionStoreForTests } from '../web/state/sanctuary/connection.js';
 import { enqueueTurn, flushOutbox, outboxStore, removeQueuedTurn, resetOutboxForTests } from '../web/state/sanctuary/outboxModel.js';
-import { resetSessionStoreForTests } from '../web/state/sanctuary/sessionModel.js';
+import { loadProgramSession, resetSessionStoreForTests, sessionStore } from '../web/state/sanctuary/sessionModel.js';
 import { resetAuthStoreForTests } from '../web/state/authStore.js';
+import { resolveSanctuaryMediaUrl } from '../web/queries/sanctuary.js';
 import { cacheProgramHistory, getCachedProgramHistory, resetMemoryStorageForTests } from '../web/storage/kvStorage.js';
 
 function jsonResponse(body, status = 200) {
@@ -388,6 +389,170 @@ test('programThread hides cached chat and disables composer on 503 locked histor
     assert.match(host.textContent, /Full restored conversation/);
     assert.equal(host.querySelector('#user-input').disabled, false);
     assert.equal(host.querySelector('#send-btn').disabled, false);
+  } finally {
+    ctrl?.destroy();
+    globalThis.fetch = prevFetch;
+    resetAuthStoreForTests();
+    resetOutboxForTests();
+    resetSessionStoreForTests();
+    resetConnectionStoreForTests();
+    resetMemoryStorageForTests();
+    dom.restore();
+  }
+});
+
+test('loadProgramSession ignores stale connecting load when online 503 locked completes first', async () => {
+  const dom = installMockDom();
+  const prevFetch = globalThis.fetch;
+  resetMemoryStorageForTests();
+  resetAuthStoreForTests();
+  resetOutboxForTests();
+  resetSessionStoreForTests();
+  resetConnectionStoreForTests();
+
+  let vaultLocked = true;
+  globalThis.fetch = async (url) => {
+    const u = String(url);
+    if (u.startsWith('data:') || u.startsWith('blob:')) return new Response('', { status: 200 });
+    if (u.endsWith('/select_program') || u.endsWith('/api/select_program')) {
+      return jsonResponse({ status: 'ok', active_program: 'sebile' });
+    }
+    if (u.includes('/history')) {
+      if (vaultLocked) {
+        return jsonResponse({ error: 'Vault locked', locked: true, vault: 'keepassxc' }, 503);
+      }
+      return jsonResponse({
+        active_program: 'sebile',
+        character_name: 'Sebile',
+        history: [
+          { id: 'm_1', role: 'program', sender_id: 'sebile', text: 'First greeting', timestamp: 100 },
+          { id: 'u_1', role: 'user', text: 'Restored after race', timestamp: 101 },
+        ],
+      });
+    }
+    if (u.endsWith('/models')) return jsonResponse({ models: [{ value: 'local-llm', label: 'Local LLM' }] });
+    if (u.endsWith('/api/config')) return jsonResponse({ active_user: 'builder', program_moods: {} });
+    return jsonResponse({});
+  };
+
+  let ctrl = null;
+  try {
+    connectionStore.set({ mode: 'dormant', nodeUrl: '', programs: [] });
+    const host = dom.document.createElement('div');
+    dom.document.body.appendChild(host);
+    ctrl = mountProgramThread(host, { sessionId: 'default' });
+
+    connectionStore.set({
+      mode: 'connecting',
+      nodeUrl: 'http://127.0.0.1:5000',
+      activeProgram: 'sebile',
+      programs: [{ id: 'sebile', name: 'Sebile', theme: { primary_accent: '#38bdf8' } }],
+    });
+    const staleConnectingLoad = loadProgramSession('sebile', 'default');
+
+    connectionStore.set({
+      mode: 'online',
+      nodeUrl: 'http://127.0.0.1:5000',
+      activeProgram: 'sebile',
+      programs: [{ id: 'sebile', name: 'Sebile', theme: { primary_accent: '#38bdf8' } }],
+    });
+    emitSanctuaryEvent('sanctuary:online', {});
+    const onlineLoad = loadProgramSession('sebile', 'default');
+
+    await Promise.all([staleConnectingLoad, onlineLoad]);
+    await new Promise((r) => setTimeout(r, 35));
+
+    assert.equal(sessionStore.get().vaultLocked, true);
+    assert.match(host.textContent, /Unlock/);
+    assert.equal(host.querySelector('#user-input').disabled, true);
+
+    vaultLocked = false;
+    emitSanctuaryEvent('sanctuary:vault-changed', { unlocked: true });
+    await new Promise((r) => setTimeout(r, 40));
+
+    assert.match(host.textContent, /Restored after race/);
+    assert.equal(host.querySelector('#user-input').placeholder, 'Ask Sebile');
+  } finally {
+    ctrl?.destroy();
+    globalThis.fetch = prevFetch;
+    resetAuthStoreForTests();
+    resetOutboxForTests();
+    resetSessionStoreForTests();
+    resetConnectionStoreForTests();
+    resetMemoryStorageForTests();
+    dom.restore();
+  }
+});
+
+test('programThread renders external http(s) media URLs without throwing cross-origin error', async () => {
+  assert.equal(
+    resolveSanctuaryMediaUrl('https://onlabor.org/x.jpg', { nodeUrl: 'http://127.0.0.1:5000' }),
+    'https://onlabor.org/x.jpg'
+  );
+  assert.equal(
+    resolveSanctuaryMediaUrl('/images/a.png', { nodeUrl: 'http://127.0.0.1:5000' }),
+    'http://127.0.0.1:5000/images/a.png'
+  );
+
+  const dom = installMockDom();
+  const prevFetch = globalThis.fetch;
+  resetMemoryStorageForTests();
+  resetAuthStoreForTests();
+  resetOutboxForTests();
+  resetSessionStoreForTests();
+  resetConnectionStoreForTests();
+
+  globalThis.fetch = async (url) => {
+    const u = String(url);
+    if (u.startsWith('data:') || u.startsWith('blob:')) return new Response('', { status: 200 });
+    if (u.endsWith('/select_program') || u.endsWith('/api/select_program')) {
+      return jsonResponse({ status: 'ok', active_program: 'sebile' });
+    }
+    if (u.includes('/history')) {
+      return jsonResponse({
+        active_program: 'sebile',
+        character_name: 'Sebile',
+        history: [
+          { id: 'u_ext', role: 'user', text: 'Show me labour news', timestamp: 101 },
+          {
+            id: 'p_ext',
+            role: 'program',
+            sender_id: 'sebile',
+            text: 'Labour news digest',
+            media: [
+              {
+                type: 'image',
+                url: 'https://onlabor.org/wp-content/uploads/2026/11/Reuters_Building.jpg',
+                program_id: 'sebile',
+              },
+            ],
+            timestamp: 102,
+          },
+        ],
+      });
+    }
+    if (u.endsWith('/models')) return jsonResponse({ models: [{ value: 'local-llm', label: 'Local LLM' }] });
+    if (u.endsWith('/api/config')) return jsonResponse({ active_user: 'builder', program_moods: {} });
+    return jsonResponse({});
+  };
+
+  let ctrl = null;
+  try {
+    connectionStore.set({
+      mode: 'online',
+      nodeUrl: 'http://127.0.0.1:5000',
+      activeProgram: 'sebile',
+      programs: [{ id: 'sebile', name: 'Sebile', theme: { primary_accent: '#38bdf8' } }],
+    });
+    const host = dom.document.createElement('div');
+    dom.document.body.appendChild(host);
+    ctrl = mountProgramThread(host, { programId: 'sebile', sessionId: 'default' });
+    await new Promise((r) => setTimeout(r, 40));
+
+    assert.match(host.textContent, /Labour news digest/);
+    assert.doesNotMatch(host.textContent, /Could not load chat history/);
+    assert.equal(sessionStore.get().error, null);
+    assert.equal(sessionStore.get().messages.length, 2);
   } finally {
     ctrl?.destroy();
     globalThis.fetch = prevFetch;

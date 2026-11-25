@@ -2238,11 +2238,8 @@ test('Activity follow notifications show Following when already followed and tog
     actCtrl = mountActivityScreen(host);
     await new Promise((r) => setTimeout(r, 30));
 
-    const findFollowBtnByActor = (actorName) => {
-      const rows = Array.from(host.querySelectorAll('.activity-row'));
-      const row = rows.find((r) => r.querySelector('.activity-actor-btn')?.textContent === actorName);
-      return row?.querySelector('.activity-follow-btn') || null;
-    };
+    const findFollowBtnByActor = (actorName) =>
+      host.querySelector(`.activity-follow-btn[data-actor-name="${actorName}"]`);
 
     const bimboBtn = findFollowBtnByActor('Bimbo');
     const newcomerBtn = findFollowBtnByActor('Newcomer');

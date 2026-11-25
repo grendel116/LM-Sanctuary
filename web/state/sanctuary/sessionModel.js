@@ -32,6 +32,8 @@ function createInitialSessionState() {
 
 export const sessionStore = createStore(createInitialSessionState());
 
+let latestLoadSeq = 0;
+
 function mergeQueuedOutbox(messages, queuedRecords) {
   const base = Array.isArray(messages) ? [...messages] : [];
   if (!Array.isArray(queuedRecords) || queuedRecords.length === 0) {
@@ -70,6 +72,7 @@ export async function loadProgramSession(programId, sessionId = 'default', optio
   }
   if (!targetProgram) {
     if (conn.mode === 'dormant') {
+      ++latestLoadSeq;
       sessionStore.set({
         activeProgramId: '',
         activeSessionId: targetSession,
@@ -82,6 +85,9 @@ export async function loadProgramSession(programId, sessionId = 'default', optio
     targetProgram = 'sebile';
   }
 
+  const seq = ++latestLoadSeq;
+  const rosterName = roster.find((p) => p?.id === targetProgram)?.name || '';
+
   sessionStore.set({
     activeProgramId: targetProgram,
     activeSessionId: targetSession,
@@ -90,38 +96,34 @@ export async function loadProgramSession(programId, sessionId = 'default', optio
   });
 
   const queued = await getOutboxForSession(targetProgram, targetSession);
+  if (seq !== latestLoadSeq) {
+    return sessionStore.get();
+  }
 
   if (conn.mode === 'online') {
+    let data;
     try {
       if (targetProgram && targetProgram !== conn.activeProgram) {
         await transport.selectProgram(targetProgram);
+        if (seq !== latestLoadSeq) {
+          return sessionStore.get();
+        }
         connectionStore.set({ activeProgram: targetProgram });
       }
-      const data = await transport.fetchHistory(targetSession);
+      data = await transport.fetchHistory(targetSession);
+      if (seq !== latestLoadSeq) {
+        return sessionStore.get();
+      }
       if (!isKeePassVaultMode()) {
         await cacheProgramHistory(targetProgram, targetSession, data);
+        if (seq !== latestLoadSeq) {
+          return sessionStore.get();
+        }
       }
-
-      const mergedMessages = mergeQueuedOutbox(data?.history, queued);
-      sessionStore.set({
-        activeProgramId: data?.active_program || targetProgram,
-        activeSessionId: targetSession,
-        characterName: data?.character_name || targetProgram,
-        messages: mergedMessages,
-        moodState: data?.state || null,
-        inversionActive: data?.inversion_active || '',
-        inversionState: data?.inversion_state || null,
-        theme: data?.theme || null,
-        welcomeMessage: data?.welcome_message || '',
-        groupMeta: data?.group_meta || null,
-        generating: Boolean(data?.generating),
-        vaultLocked: false,
-        fromCache: false,
-        loading: false,
-        error: null,
-      });
-      return sessionStore.get();
     } catch (err) {
+      if (seq !== latestLoadSeq) {
+        return sessionStore.get();
+      }
       const errMsg = String(err?.message || '');
       const isVaultLocked =
         err?.status === 503 &&
@@ -130,10 +132,13 @@ export async function loadProgramSession(programId, sessionId = 'default', optio
           errMsg.toLowerCase().includes('keepassxc'));
       if (isVaultLocked) {
         await clearAllCachedProgramHistory();
+        if (seq !== latestLoadSeq) {
+          return sessionStore.get();
+        }
         sessionStore.set({
           activeProgramId: targetProgram,
           activeSessionId: targetSession,
-          characterName: targetProgram,
+          characterName: rosterName || targetProgram,
           messages: [],
           moodState: null,
           inversionActive: '',
@@ -150,12 +155,15 @@ export async function loadProgramSession(programId, sessionId = 'default', optio
         return sessionStore.get();
       }
       const cached = await getCachedProgramHistory(targetProgram, targetSession);
+      if (seq !== latestLoadSeq) {
+        return sessionStore.get();
+      }
       const cachedHist = Array.isArray(cached?.history) ? cached.history : [];
       const mergedMessages = mergeQueuedOutbox(cachedHist, queued);
       sessionStore.set({
         activeProgramId: cached?.active_program || targetProgram,
         activeSessionId: targetSession,
-        characterName: cached?.character_name || targetProgram,
+        characterName: cached?.character_name || rosterName || targetProgram,
         messages: mergedMessages,
         moodState: cached?.state || null,
         inversionActive: cached?.inversion_active || '',
@@ -171,14 +179,37 @@ export async function loadProgramSession(programId, sessionId = 'default', optio
       });
       return sessionStore.get();
     }
+
+    const mergedMessages = mergeQueuedOutbox(data?.history, queued);
+    sessionStore.set({
+      activeProgramId: data?.active_program || targetProgram,
+      activeSessionId: targetSession,
+      characterName: data?.character_name || targetProgram,
+      messages: mergedMessages,
+      moodState: data?.state || null,
+      inversionActive: data?.inversion_active || '',
+      inversionState: data?.inversion_state || null,
+      theme: data?.theme || null,
+      welcomeMessage: data?.welcome_message || '',
+      groupMeta: data?.group_meta || null,
+      generating: Boolean(data?.generating),
+      vaultLocked: false,
+      fromCache: false,
+      loading: false,
+      error: null,
+    });
+    return sessionStore.get();
   }
 
   const cached = isKeePassVaultMode() ? null : await getCachedProgramHistory(targetProgram, targetSession);
+  if (seq !== latestLoadSeq) {
+    return sessionStore.get();
+  }
   const mergedMessages = mergeQueuedOutbox(cached?.history, queued);
   sessionStore.set({
     activeProgramId: cached?.active_program || targetProgram,
     activeSessionId: targetSession,
-    characterName: cached?.character_name || targetProgram,
+    characterName: cached?.character_name || rosterName || targetProgram,
     messages: mergedMessages,
     moodState: cached?.state || null,
     inversionActive: cached?.inversion_active || '',
@@ -196,5 +227,6 @@ export async function loadProgramSession(programId, sessionId = 'default', optio
 }
 
 export function resetSessionStoreForTests() {
+  latestLoadSeq = 0;
   sessionStore.set(createInitialSessionState());
 }

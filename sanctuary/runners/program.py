@@ -1,12 +1,15 @@
 import sys
 import os
 import json
+import threading
+import time
 
 # Ensure the parent directory is in sys.path so we can import variables package
 PARENT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PARENT_DIR not in sys.path:
     sys.path.insert(0, PARENT_DIR)
 
+_SETTINGS_LOCK = threading.RLock()
 _settings_cache: dict | None = None
 _settings_mtime: float = 0.0
 
@@ -46,36 +49,63 @@ def _migrate_legacy_folders(data: dict) -> bool:
 def _load_settings() -> dict:
     global _settings_cache, _settings_mtime
     path = _get_settings_path()
-    if os.path.exists(path):
-        try:
-            mtime = os.path.getmtime(path)
-            if _settings_cache is not None and mtime == _settings_mtime:
-                return _settings_cache
-            with open(path, "r", encoding="utf-8") as f:
-                loaded = json.load(f)
-            if _migrate_legacy_folders(loaded):
-                _save_settings(loaded)
-            else:
-                _settings_cache = loaded
-                _settings_mtime = mtime
-            return _settings_cache
-        except Exception as e:
-            print(f"Error loading project settings: {e}")
-    return {}
+    with _SETTINGS_LOCK:
+        if os.path.exists(path):
+            last_err: Exception | None = None
+            for attempt in range(3):
+                try:
+                    mtime = os.path.getmtime(path)
+                    if _settings_cache is not None and mtime == _settings_mtime:
+                        return dict(_settings_cache)
+                    with open(path, "r", encoding="utf-8") as f:
+                        loaded = json.load(f)
+                    if _migrate_legacy_folders(loaded):
+                        _save_settings(loaded)
+                    else:
+                        _settings_cache = dict(loaded)
+                        _settings_mtime = mtime
+                    return dict(_settings_cache)
+                except OSError as e:
+                    last_err = e
+                    if attempt < 2:
+                        time.sleep(0.02)
+                except Exception as e:
+                    last_err = e
+                    break
+            if last_err is not None:
+                print(f"Error loading project settings: {last_err}")
+                if _settings_cache is not None:
+                    return dict(_settings_cache)
+        return {}
+
 
 def _save_settings(settings: dict):
     global _settings_cache, _settings_mtime
     path = _get_settings_path()
-    try:
-        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-        temp_path = f"{path}.tmp"
-        with open(temp_path, "w", encoding="utf-8") as f:
-            json.dump(settings, f, indent=2, ensure_ascii=False)
-        os.replace(temp_path, path)
-        _settings_cache = settings
-        _settings_mtime = os.path.getmtime(path)
-    except Exception as e:
-        print(f"Error saving project settings: {e}")
+    with _SETTINGS_LOCK:
+        temp_path = f"{path}.{os.getpid()}.{threading.get_ident()}.tmp"
+        try:
+            os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+            with open(temp_path, "w", encoding="utf-8") as f:
+                json.dump(settings, f, indent=2, ensure_ascii=False)
+            for attempt in range(5):
+                try:
+                    os.replace(temp_path, path)
+                    break
+                except PermissionError:
+                    if attempt == 4:
+                        raise
+                    time.sleep(0.02)
+            _settings_cache = dict(settings)
+            _settings_mtime = os.path.getmtime(path)
+        except Exception as e:
+            print(f"Error saving project settings: {e}")
+        finally:
+            try:
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+            except OSError:
+                pass
 
 def _has_valid_program_files(folder_path: str, prog_id: str) -> bool:
     if not prog_id or not folder_path or not os.path.isdir(folder_path):
