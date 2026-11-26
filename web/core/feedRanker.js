@@ -204,6 +204,9 @@ const BOT_HANDLE_LOCAL_RE = /(?:^|[_.-])(?:rss|newsbot|feedbot|autobot|mirrorbot
 const SYNDICATION_NAME_RE = /\b(?:federated\s+reader|rss\s*(?:feed|bot|reader|bridge)|feed\s*(?:bot|reader)|news\s*(?:bot|wire|feed)|auto\s*post(?:er)?|mirror\s*bot|syndicat(?:or|ion))\b/i;
 const NEWS_WIRE_TEXT_RE = /#(?:news|breaking|breakingnews|worldnews|ukrainewar|politics)\b|\b(?:breaking:|wire\s+report)\b/i;
 
+/** Discovery posts whose semantic taste score is at or below this are hidden (strong "Not Interested" match). */
+export const TASTE_HIDE_THRESHOLD = -0.4;
+
 export const DEFAULT_RANKING_MANIFEST = Object.freeze({
   version: 1,
   name: 'Sanctuary Default Commons Manifest',

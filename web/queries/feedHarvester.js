@@ -535,10 +535,23 @@ export async function fetchDiscoveryInstanceTimeline({
         ...(timeoutMs ? { timeoutMs } : {}),
         fetchImpl,
       });
-      return {
-        items: res.items,
-        nextCursor: res.nextOffset ? String(res.nextOffset) : null,
-      };
+      if (Array.isArray(res.items) && res.items.length > 0) {
+        return {
+          items: res.items,
+          nextCursor: res.nextOffset ? String(res.nextOffset) : null,
+        };
+      }
+      return await getTimeline({
+        instanceUrl,
+        accessToken,
+        stream: 'local',
+        onlyMedia,
+        maxId,
+        limit,
+        ...(cache !== undefined ? { cache } : {}),
+        ...(timeoutMs ? { timeoutMs } : {}),
+        fetchImpl,
+      });
     } catch (err) {
       if (err?.status === 404) {
         return getLemmyLocalPosts({

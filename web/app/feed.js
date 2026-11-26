@@ -13,7 +13,7 @@ import { createClassicModalDialog, showAlert, showConfirm } from '../components/
 import { createLoadingState } from '../components/ui/index.js';
 import { normalizeInstanceUrl } from '../constants/endpoints.js';
 import { DEFAULT_AVATAR_DATA_URI } from '../constants/avatars.js';
-import { hasVisualMediaAttachment, isAutomatedSyndicationOrBotItem, rankFeedItems } from '../core/feedRanker.js';
+import { hasVisualMediaAttachment, isAutomatedSyndicationOrBotItem, rankFeedItems, TASTE_HIDE_THRESHOLD } from '../core/feedRanker.js';
 import {
   applyKeywordFilters,
   buildOwnAccountKeySet,
@@ -1593,8 +1593,9 @@ export function mountFeedScreen(containerEl, {
     }
 
     const dismissed = new Set(state.dismissedPostIds || []);
+    const tasteScores = isDiscovery ? (state.tasteScores || {}) : null;
     let ordered = order.orderedIds
-      .filter((id) => !dismissed.has(id))
+      .filter((id) => !dismissed.has(id) && !(tasteScores && Number(tasteScores[id]) <= TASTE_HIDE_THRESHOLD))
       .map((id) => byId.get(id))
       .filter(Boolean);
     const keepBotsExplicitly = state.rankingManifest?.caps?.filterDiscoveryBotsByDefault === false;
@@ -2089,6 +2090,14 @@ export function mountFeedScreen(containerEl, {
     if (destroyed) return;
     clearTimeout(tasteRescoreTimer);
   };
+  const onTasteChanged = () => {
+    if (destroyed) return;
+    clearTimeout(tasteRescoreTimer);
+    tasteRescoreTimer = setTimeout(() => {
+      if (destroyed) return;
+      void scoreItemsWithNode(feedStore.get().streams?.feed?.items || []);
+    }, 400);
+  };
   async function openHashtagFeed(rawTag) {
     const cleanTag = String(rawTag || '').replace(/^#+/, '').trim();
     if (!cleanTag || destroyed) return;
@@ -2127,6 +2136,7 @@ export function mountFeedScreen(containerEl, {
   globalThis.addEventListener?.('sanctuary:feed-reset', onFeedReset);
   globalThis.addEventListener?.('sanctuary:manifest-updated', onManifestUpdated);
   globalThis.addEventListener?.('sanctuary:taste-reset', onTasteReset);
+  globalThis.addEventListener?.('sanctuary:taste-changed', onTasteChanged);
 
   render();
   const initialStream = ALLOWED_STREAMS.has(feedStore.get().activeStream) ? feedStore.get().activeStream : 'feed';
@@ -2163,6 +2173,7 @@ export function mountFeedScreen(containerEl, {
       globalThis.removeEventListener?.('sanctuary:feed-reset', onFeedReset);
       globalThis.removeEventListener?.('sanctuary:manifest-updated', onManifestUpdated);
       globalThis.removeEventListener?.('sanctuary:taste-reset', onTasteReset);
+      globalThis.removeEventListener?.('sanctuary:taste-changed', onTasteChanged);
       clearTimeout(autoCheckTimer);
       clearTimeout(sourceRefreshTimer);
       clearTimeout(tasteRescoreTimer);

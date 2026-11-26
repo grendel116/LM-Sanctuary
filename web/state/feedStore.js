@@ -1174,6 +1174,7 @@ export async function applyPostInterestFeedback(rawPost, direction = 'interested
   const isDislike = direction === 'not_interested';
   await recordAuthorInteraction(u, u.protocol, isDislike ? -4.5 : 3.5);
   await recordBehavioralSignal(u, isDislike ? 'not_interested' : 'interested');
+  globalThis.dispatchEvent?.(new Event('sanctuary:taste-changed'));
 
   if (isDislike) {
     if (postKey) {
