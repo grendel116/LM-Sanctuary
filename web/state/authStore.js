@@ -1,3 +1,4 @@
+import { bskyPdsFromDidDoc } from '../constants/endpoints.js';
 import {
   deleteSanctuarySocialAccount,
   fetchSanctuarySocialAccounts,
@@ -419,8 +420,9 @@ export async function getAuthenticatedAccount(platform, accountId = null) {
 }
 
 export async function updateAccountTokens(accountId, tokenPatch) {
+  const { didDoc: _didDoc, ...cleanPatch } = tokenPatch || {};
   const current = (await loadAccountSecrets(accountId)) || {};
-  const merged = { ...current, ...tokenPatch };
+  const merged = { ...current, ...cleanPatch };
   const serverOnlySecrets = keepassVaultMode || !canPersistVaultSecretsLocally();
   if (serverOnlySecrets) {
     serverSyncedSecrets.set(String(accountId), merged);
@@ -430,7 +432,8 @@ export async function updateAccountTokens(accountId, tokenPatch) {
   }
   const currentMeta = authStore.get().accounts.find((account) => account.id === accountId);
   if (currentMeta) {
-    const meta = { ...currentMeta, updatedAt: Date.now() };
+    const refreshedPds = currentMeta.platform === 'bluesky' ? bskyPdsFromDidDoc(tokenPatch?.didDoc) : '';
+    const meta = { ...currentMeta, ...(refreshedPds ? { serviceUrl: refreshedPds } : {}), updatedAt: Date.now() };
     await setAccountMetadata(meta);
     const saved = await requestServerVault('PUT', accountId, { meta, secrets: merged }, {
       allowOffline: serverOnlySecrets,

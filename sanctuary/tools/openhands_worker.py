@@ -36,7 +36,7 @@ _SANCTUARY_BUILTIN_SUBAGENTS: tuple[dict[str, Any], ...] = (
         "tools": ["file_editor", "terminal"],
         "system_prompt": (
             "You are the `researcher` subagent. Inspect files via `file_editor` (`view`) and "
-            "run strictly read-only search/status commands via `terminal` (e.g., `rg`, `Select-String`, "
+            "run strictly read-only search/status commands via `terminal` (e.g., `rg`, `git grep -n`, "
             "`git status`, `git diff`, `git log`). Never modify files."
         ),
     },
@@ -367,11 +367,16 @@ def build_workspace_grounding_block(
     """Build deterministic OS, shell, search, top-level tree, test, and skill grounding."""
     if not cwd or not os.path.isdir(cwd):
         return ""
+    from tools.coding_tools import workspace_python
+
     is_win = os.name == "nt"
-    shell_name = "Windows PowerShell" if is_win else "POSIX shell"
-    sep_rule = "Separate commands with `;` (never `&&`)." if is_win else "Standard `&&` / `;` supported."
-    py_venv = os.path.join(cwd, ".venv", "Scripts", "python.exe") if is_win else os.path.join(cwd, ".venv", "bin", "python")
-    py_cmd = r".\.venv\Scripts\python.exe" if (is_win and os.path.isfile(py_venv)) else (".venv/bin/python" if os.path.isfile(py_venv) else "python")
+    shell_name = "Windows PowerShell (OpenHands terminal backend on Windows)" if is_win else "POSIX shell"
+    sep_rule = (
+        "Separate commands with `;` (never `&&`). Forward-slash paths work (e.g. `.venv/Scripts/python.exe`)."
+        if is_win
+        else "Standard `&&` / `;` supported."
+    )
+    py_cmd = workspace_python(cwd)
 
     skip = {"__pycache__", "node_modules", ".git", ".venv", ".ruff_cache", ".pytest_cache"}
     try:
@@ -385,9 +390,11 @@ def build_workspace_grounding_block(
 
     test_hints: list[str] = []
     if os.path.isfile(os.path.join(cwd, "package.json")) and os.path.isdir(os.path.join(cwd, "__tests__")):
-        test_hints.append("JS tests: `node --test __tests__\\<file>.test.js`")
+        test_hints.append("JS tests: `node --test __tests__/<file>.test.js`")
     if os.path.isdir(os.path.join(cwd, "__tests__", "backend")):
-        test_hints.append(f"Backend tests: `{py_cmd} __tests__\\backend\\<file>.py`")
+        test_hints.append(f"Backend tests: `{py_cmd} __tests__/backend/<file>.py`")
+    if os.path.isdir(os.path.join(cwd, "sanctuary", "tests")):
+        test_hints.append(f"Sanctuary tests: `{py_cmd} -m unittest discover -s sanctuary/tests`")
 
     lines = [
         "## Workspace & Environment Grounding",

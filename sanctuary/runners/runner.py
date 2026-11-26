@@ -30,10 +30,12 @@ from utils.utils import (
     THINK_TAG_PATTERN as THINK_TAG_RE,
     _build_tool_calls_pair,
     _build_vector_query,
+    _drop_dangling_called_line,
     _execute_emulated_tool,
     _extract_tool_calls,
     _get_databank_contexts,
     _get_safe_local_path,
+    _has_dangling_called_line,
     _normalize_tool_name,
     _run_async_in_background_thread,
     _strip_tool_calls,
@@ -852,8 +854,26 @@ class BaseProgramRunner:
             )
             turn_directive = f"{turn_directive}\n{plan_rule}".strip() if turn_directive else plan_rule
 
+        from core.plan_state import activate_plan, has_active_plan, record_tool_ledger, stage_plan
         from core.program_config import is_story_mode
+
         active_story_mode = is_story_mode(speaker_id or self.program_id)
+        mem_meta = self._get_memory_meta(session_id)
+        if is_proceed_turn and not active_story_mode:
+            for hist_msg in reversed(self.sessions_history.get(session_id, [])):
+                if hist_msg.get("role") == "program":
+                    extracted = _extract_fenced_sanctuary_plan(str(hist_msg.get("text") or ""))
+                    if extracted:
+                        approved_plan_md = extracted
+                        break
+            if not approved_plan_md:
+                approved_plan_md = (mem_meta.get("coding_state") or {}).get("staged_plan_markdown", "")
+            if approved_plan_md:
+                activate_plan(mem_meta, approved_plan_md)
+                self._save_session_to_disk(session_id)
+        elif not is_plan_turn and not active_story_mode and has_active_plan(mem_meta):
+            approved_plan_md = (mem_meta.get("coding_state") or {}).get("plan_markdown", "")
+
         if not is_plan_turn and not active_story_mode:
             history_snapshot = self.sessions_history.get(session_id, [])
             prefetch_urls = _resolve_turn_webpage_urls(history_snapshot, new_message_text, shared_post=shared_post)
@@ -892,6 +912,7 @@ class BaseProgramRunner:
             active_story_mode=active_story_mode,
             prior_tool_error=_has_prior_turn_tool_error(history_now),
             has_active_research=bool(all_tool_calls),
+            has_active_plan=(has_active_plan(mem_meta) and not active_story_mode),
             routing_policy=cloud_cfg.get("routing_policy", "auto"),
         )
 
@@ -1015,14 +1036,15 @@ class BaseProgramRunner:
                             ],
                         }
                         break
-                vision_tools = None
-                if transmission.coding_engaged or any(
+                from tools.coding_tools import READ_BAND_SCHEMAS, WRITE_BAND_SCHEMAS
+
+                coding_now = transmission.coding_engaged or any(
                     r.get("name") == "auto_programming"
                     for r in (getattr(adapter, "matched_skill_records", None) or [])
-                ):
-                    from tools.coding_tools import READ_BAND_SCHEMAS, WRITE_BAND_SCHEMAS
-
-                    vision_tools = list(READ_BAND_SCHEMAS) + ([] if is_plan_turn else list(WRITE_BAND_SCHEMAS))
+                )
+                vision_tools = list(READ_BAND_SCHEMAS) + (
+                    list(WRITE_BAND_SCHEMAS) if coding_now and not is_plan_turn else []
+                )
                 try:
                     step_res = await _invoke_cloud_gear(vision_msgs, cloud_tier="vision", native_tools=vision_tools)
                     bot_response_text = step_res.get("content", "")
@@ -1107,8 +1129,17 @@ class BaseProgramRunner:
             matches, bot_response_text = self._filter_story_mode_matches(matches, bot_response_text, speaker_id or self.program_id)
 
             if shift.halt_tools:
+                bot_response_text = _drop_dangling_called_line(_strip_tool_calls(bot_response_text, matches))
+                if not bot_response_text.strip():
+                    bot_response_text = (
+                        f"I hit the same tool error twice (`{transmission.strike_tracker.tripped_on}`) and stopped "
+                        "so I don't make things worse. Can you check the tool calls above?"
+                    )
                 native_tool_calls = []
                 matches = []
+            elif not matches and not native_tool_calls and _has_dangling_called_line(bot_response_text):
+                truncated_tool_call = True
+                bot_response_text = _drop_dangling_called_line(bot_response_text)
 
             if matches or native_tool_calls:
                 if session_id in cancelled_sessions:
@@ -1117,6 +1148,8 @@ class BaseProgramRunner:
                 clean_text = _strip_tool_calls(bot_response_text, matches)
 
                 tools.current_speaker_id.set(speaker_id)
+                sess_token = tools.current_session_id.set(session_id)
+                runner_token = tools.current_runner.set(self)
                 budget_token = tools.current_turn_image_budget.set(turn_image_budget)
                 plan_token = tools.current_plan_mode.set(is_plan_turn)
                 write_token = tools.current_write_disengaged.set(shift.write_disengaged)
@@ -1149,6 +1182,8 @@ class BaseProgramRunner:
                     tools.current_write_disengaged.reset(write_token)
                     tools.current_plan_mode.reset(plan_token)
                     tools.current_turn_image_budget.reset(budget_token)
+                    tools.current_runner.reset(runner_token)
+                    tools.current_session_id.reset(sess_token)
 
                 if session_id in cancelled_sessions:
                     raise asyncio.CancelledError("Session cancelled by user request.")
@@ -1212,6 +1247,7 @@ class BaseProgramRunner:
                     break
 
                 transmission.record_tool_results(results)
+                record_tool_ledger(self._get_memory_meta(session_id), results)
 
                 adapter.append_assistant_message("", tool_calls, invocation_id, intermediate=True, speaker_id=speaker_id)
                 adapter.append_tool_events(results, invocation_id)
@@ -1289,6 +1325,11 @@ class BaseProgramRunner:
         final_response_text = self._ensure_images_are_embedded(final_response_text)
         if isinstance(session_id, str) and session_id.endswith("_voice"):
             final_response_text = strip_story(final_response_text)
+
+        new_fenced_plan = _extract_fenced_sanctuary_plan(final_response_text)
+        if new_fenced_plan:
+            stage_plan(self._get_memory_meta(session_id), new_fenced_plan)
+            self._save_session_to_disk(session_id)
 
         prog = getattr(self, "sessions_program", {}).get(session_id) or getattr(self, "program_id", None) or get_active_program()
         self.trigger_memory_pipeline(session_id=session_id, active_model=target_model or "", program_id=prog)
@@ -1719,7 +1760,7 @@ class BaseProgramRunner:
         else:
             instructions = get_compiled_instructions()
 
-        if "CONCISENESS" not in instructions and "brief, succinct, and natural" not in instructions:
+        if not story_active and "CONCISENESS" not in instructions and "brief, succinct, and natural" not in instructions:
             instructions += (
                 "\n\n# STYLE\n"
                 "Be brief and natural. No monologues, lectures, or forced questions. Ask questions only if contextually natural.\n"

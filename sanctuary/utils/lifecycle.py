@@ -38,6 +38,51 @@ def _apply_no_window_popen_defaults(kwargs: dict) -> None:
         kwargs["startupinfo"] = si
 
 
+def group_popen_kwargs() -> dict:
+    """Popen kwargs that put a child in its own process group (POSIX) / hide its console (Windows)."""
+    if os.name == "nt":
+        kwargs: dict = {}
+        _apply_no_window_popen_defaults(kwargs)
+        return kwargs
+    return {"start_new_session": True}
+
+
+def kill_process_tree(proc: subprocess.Popen, grace: float = 1.0) -> None:
+    """Terminate a child and all its descendants; never raises."""
+    if proc is None or proc.poll() is not None:
+        return
+    try:
+        if os.name == "nt":
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                timeout=5,
+                creationflags=_CREATE_NO_WINDOW,
+            )
+        else:
+            try:
+                pgid = os.getpgid(proc.pid)
+            except ProcessLookupError:
+                return
+            os.killpg(pgid, signal.SIGTERM)
+            try:
+                proc.wait(timeout=grace)
+                return
+            except subprocess.TimeoutExpired:
+                os.killpg(pgid, signal.SIGKILL)
+    except Exception:
+        pass
+    try:
+        proc.kill()
+    except Exception:
+        pass
+    try:
+        proc.wait(timeout=grace)
+    except Exception:
+        pass
+
+
 def _suppress_headless_windows_consoles(*, force: bool = False) -> bool:
     """Ensure child processes spawned inside a windowless Windows host never flash a console."""
     global _popen_wrapped

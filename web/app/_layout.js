@@ -8,6 +8,7 @@ import { toUnifiedItem } from '../core/schema/unifiedItem.js';
 import { NEWTAB_URL, stripTrackingParams } from '../core/urlPrivacy.js';
 import { refreshKeePassStatus, subscribeBrowserHostEvents } from '../adapters/browserBridge.js';
 import { exchangeOAuthCode, verifyCredentials } from '../queries/fediverse.js';
+import { describeFetchError } from '../queries/fetch/FetchError.js';
 import {
   completeThreadsOAuthFlow,
   fetchKeywordFilters,
@@ -523,6 +524,7 @@ export function createAppShell(
 
   const sanctuaryCtrl = mountProgramThread(sanctuaryDockPane, {
     onOpenCompose: () => openCompose({}),
+    onOpenPrograms: () => openProgramsPage(),
     onProgramChanged: () => {
       if (activeTab === 'messages') renderActiveScreen();
     },
@@ -664,7 +666,7 @@ export function createAppShell(
       const convo = await resolveDirectConversationTarget(target);
       if (convo) openDirectConvoInDock(convo);
     } catch (err) {
-      showAlert('Direct Message Failed', err?.message || 'Unable to open direct conversation.');
+      showAlert('Direct Message Failed', describeFetchError(err, 'Unable to open direct conversation.'));
     }
   }
 
@@ -678,6 +680,16 @@ export function createAppShell(
         void sanctuaryCtrl.refresh();
       },
     });
+  }
+
+  function openProgramsPage() {
+    if (activeTab === 'messages' && typeof activeScreenHandle?.setTab === 'function') {
+      closePostThread({ restoreScroll: false });
+      activeScreenHandle.setTab('programs');
+      return;
+    }
+    msgNavPayload = { initialTab: 'programs' };
+    navigateToTab('messages');
   }
 
   railUserBtn.addEventListener('click', () => navigateToTab('profile'));

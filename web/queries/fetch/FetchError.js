@@ -19,3 +19,15 @@ export class FetchError extends Error {
     this.isAborted = Boolean(options.isAborted || causeName === 'AbortError');
   }
 }
+
+/** User-facing error text that names the failing server, e.g. "MethodNotImplemented (HTTP 501 from bsky.social/xrpc/chat.bsky.convo.getConvoForMembers)". */
+export function describeFetchError(err, fallback = 'Request failed.') {
+  const base = err?.message || fallback;
+  if (!(err instanceof FetchError) || !err.status || !err.url) return base;
+  try {
+    const u = new URL(err.url);
+    return `${base} (HTTP ${err.status} from ${u.host}${u.pathname})`;
+  } catch {
+    return `${base} (HTTP ${err.status})`;
+  }
+}

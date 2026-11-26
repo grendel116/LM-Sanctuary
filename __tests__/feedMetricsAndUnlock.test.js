@@ -189,3 +189,80 @@ test('Locked vault actions show needs-unlock and dispatch sanctuary:request-unlo
     dom.restore();
   }
 });
+
+test('Unlocking authStore clears lock markers on already-rendered PostCard controls and skips unlock prompt', async () => {
+  const dom = installMockDom();
+  const prevAdd = globalThis.addEventListener;
+  const prevRemove = globalThis.removeEventListener;
+  const prevDispatch = globalThis.dispatchEvent;
+  const eventTarget = new EventTarget();
+  globalThis.addEventListener = eventTarget.addEventListener.bind(eventTarget);
+  globalThis.removeEventListener = eventTarget.removeEventListener.bind(eventTarget);
+  globalThis.dispatchEvent = eventTarget.dispatchEvent.bind(eventTarget);
+
+  let muteCalls = 0;
+  let likeCalls = 0;
+  let unlockEvents = 0;
+  const onReqUnlock = (e) => {
+    unlockEvents += 1;
+    void e?.detail?.onUnlocked?.();
+  };
+  globalThis.addEventListener('sanctuary:request-unlock', onReqUnlock);
+
+  try {
+    resetAuthStoreForTests();
+    authStore.set({
+      vaultLocked: true,
+      accounts: [{ id: 'fedi_1', platform: 'fediverse', acct: 'me@mastodon.social' }],
+      isMastodonConnected: true,
+    });
+
+    const card = createPostCard(
+      {
+        id: 'mastodon:m401',
+        protocol: 'mastodon',
+        date_published: '2026-11-24T12:00:00.000Z',
+        author: { id: 'u9', name: 'Bob', handle: 'bob@mastodon.social' },
+        content_text: 'Test post',
+        metrics: { likes: 0, replies: 0, reposts: 0 },
+        _meta: { mastodon: { statusId: 'm401', instanceUrl: 'https://mastodon.social' } },
+      },
+      {
+        onToggleLike: () => { likeCalls += 1; },
+        onReply: () => {},
+        onToggleRepost: () => {},
+        onMuteAuthor: () => { muteCalls += 1; },
+      }
+    );
+
+    const likeBtn = card.querySelector('.post-action-like');
+    const moreBtn = card.querySelector('.post-more-btn');
+    moreBtn.click();
+    const muteItem = Array.from(card.querySelectorAll('.post-context-menuitem'))
+      .find((b) => b.textContent.includes('Mute Account'));
+    assert.ok(likeBtn);
+    assert.ok(muteItem);
+    assert.equal(muteItem.classList.contains('needs-unlock'), true);
+    assert.equal(likeBtn.dataset.needsUnlock, '1');
+
+    authStore.set({ vaultLocked: false });
+
+    assert.equal(muteItem.classList.contains('needs-unlock'), false);
+    assert.equal(likeBtn.dataset.needsUnlock, undefined);
+
+    muteItem.click();
+    assert.equal(muteCalls, 1);
+    assert.equal(unlockEvents, 0);
+
+    likeBtn.click();
+    assert.equal(likeCalls, 1);
+    assert.equal(unlockEvents, 0);
+  } finally {
+    globalThis.removeEventListener('sanctuary:request-unlock', onReqUnlock);
+    globalThis.addEventListener = prevAdd;
+    globalThis.removeEventListener = prevRemove;
+    globalThis.dispatchEvent = prevDispatch;
+    resetAuthStoreForTests();
+    dom.restore();
+  }
+});

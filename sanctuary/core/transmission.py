@@ -116,6 +116,7 @@ class StrikeTracker:
         """Record tool results from one iteration and return updated strike state."""
         had_error = False
         had_clean_read = False
+        tripped_this_batch = False
 
         for tool_name, raw_args, raw_out in results:
             args = raw_args if isinstance(raw_args, dict) else {}
@@ -128,15 +129,18 @@ class StrikeTracker:
                 if target_key != sig_key:
                     self.counts[target_key] = self.counts.get(target_key, 0) + 1
                 if self.counts.get(sig_key, 0) >= 2 or self.counts.get(target_key, 0) >= 2:
-                    self.trip_count += 1
+                    tripped_this_batch = True
                     self.tripped_on = sig_key
-                    if self.trip_count == 1:
-                        self.replan_required = True
-                    else:
-                        self.replan_required = False
-                        self.halt_tools = True
             elif tool_name in _READ_TOOL_NAMES and not _is_band_notice(output):
                 had_clean_read = True
+
+        if tripped_this_batch:
+            self.trip_count += 1
+            if self.trip_count == 1:
+                self.replan_required = True
+            else:
+                self.replan_required = False
+                self.halt_tools = True
 
         if self.replan_required and not had_error and had_clean_read:
             self.replan_required = False
@@ -179,6 +183,7 @@ class TransmissionController:
         active_story_mode: bool = False,
         prior_tool_error: bool = False,
         has_active_research: bool = False,
+        has_active_plan: bool = False,
         routing_policy: str = "auto",
     ) -> None:
         self.utterance = (utterance or "").strip()
@@ -188,11 +193,12 @@ class TransmissionController:
         self.active_story_mode = bool(active_story_mode)
         self.prior_tool_error = bool(prior_tool_error)
         self.has_active_research = bool(has_active_research)
+        self.has_active_plan = bool(has_active_plan)
         self.routing_policy = (routing_policy or "auto").strip().lower()
 
         self.coding_engaged = False
         self.web_engaged = bool(has_active_research)
-        self.has_explored_workspace = False
+        self.has_explored_workspace = bool((self.is_proceed_turn or self.has_active_plan) and not self.is_plan_turn)
         self.has_mutated_files = False
         self.kickdown = bool(prior_tool_error)
         self.throttle_tier: str | None = None
@@ -213,12 +219,13 @@ class TransmissionController:
         if (
             self.is_plan_turn
             or self.is_proceed_turn
+            or self.has_active_plan
             or "```" in self.utterance
             or "Traceback (most recent call last)" in self.utterance
         ):
             self.throttle_tier = "deep"
             self.throttle_reason = "complex_topic"
-            if self.is_plan_turn or self.is_proceed_turn:
+            if self.is_plan_turn or self.is_proceed_turn or self.has_active_plan:
                 self.coding_engaged = True
             return
 
@@ -259,6 +266,10 @@ class TransmissionController:
             elif tool_name == "delegate_coding":
                 self.coding_engaged = True
         self.strike_tracker.record(results)
+
+    def _ambient_tools(self) -> list[dict[str, Any]]:
+        """Read band is always engaged on cloud gears; web band joins once research is active."""
+        return list(READ_BAND_SCHEMAS) + (list(WEB_BAND_SCHEMAS) if self.web_engaged else [])
 
     def shift(
         self,
@@ -349,7 +360,7 @@ class TransmissionController:
             tools_for_step = (
                 list(READ_BAND_SCHEMAS) + list(WRITE_BAND_SCHEMAS)
                 if self.coding_engaged
-                else (list(WEB_BAND_SCHEMAS) if self.web_engaged else None)
+                else self._ambient_tools()
             )
             directive = ""
             if self.kickdown and not self.coding_engaged:
@@ -389,6 +400,7 @@ class TransmissionController:
                 cloud_tier="deep",
                 phase="cruising",
                 reason="high_load_or_complex" if engine_load >= 0.70 else (self.throttle_reason or "complex_topic"),
+                native_tools=self._ambient_tools(),
                 directive=(
                     "# DEPTH & ACCURACY DIRECTIVE\n"
                     "This turn involves a complex topic or requires verified factual accuracy. "
@@ -403,7 +415,7 @@ class TransmissionController:
                 cloud_tier="fast",
                 phase="cruising",
                 reason=self.throttle_reason or "web_research",
-                native_tools=list(WEB_BAND_SCHEMAS) if self.web_engaged else None,
+                native_tools=self._ambient_tools(),
                 engine_load=engine_load,
             )
 

@@ -2,7 +2,7 @@
 
 Supports two execution backends selectable via Project or `OPENHANDS_MODE`:
 1. `cli`: Headless CLI subprocess (`python -m tools.openhands_worker --headless --json`)
-   with native Windows PowerShell/POSIX terminal tools, `TaskToolSet` subagents,
+   with native terminal tools, `TaskToolSet` subagents,
    HITL `confirm_tool_execution` gating, and Program decision brokering.
 2. `server`: Managed local OpenHands Agent Server (`runners.openhands_server`) exposing
    an OpenAI-compatible `/v1/chat/completions` gateway with `"openhands_greenpt"`.
@@ -24,6 +24,7 @@ from typing import Any
 import requests
 
 from runners.local_server import _win_no_window_kwargs
+from utils.lifecycle import kill_process_tree
 from variables.settings import (
     BASE_DIR as SANCTUARY_DIR,
     LOCAL_SERVER_URL,
@@ -465,24 +466,7 @@ def _kill_proc_tree(proc: subprocess.Popen, grace: float = 0.5) -> None:
     except subprocess.TimeoutExpired:
         pass
 
-    try:
-        if os.name == "nt":
-            subprocess.run(
-                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
-                capture_output=True,
-                **_win_no_window_kwargs(),
-            )
-        else:
-            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-            try:
-                proc.wait(timeout=1.0)
-            except subprocess.TimeoutExpired:
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-    except Exception:
-        try:
-            proc.kill()
-        except Exception:
-            pass
+    kill_process_tree(proc, grace=1.0)
 
 
 def _register_job(session_id: str | None, entry: dict[str, Any]) -> None:

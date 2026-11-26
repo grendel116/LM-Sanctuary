@@ -3654,3 +3654,26 @@ input.onboarding-input {
         transform: translateY(0) scale(1);
     }
 }
+
+/* Low-profile markdown headings inside chat messages and plan cards */
+.message-text :is(h1, h2, h3, h4, h5, h6),
+.sanctuary-plan-body :is(h1, h2, h3, h4, h5, h6) {
+    font-size: 1em;
+    font-weight: 650;
+    line-height: 1.35;
+    letter-spacing: normal;
+    margin: 0.9em 0 0.3em;
+}
+.message-text h1,
+.sanctuary-plan-body h1 {
+    font-size: 1.08em;
+}
+.message-text :is(h4, h5, h6),
+.sanctuary-plan-body :is(h4, h5, h6) {
+    font-size: 0.95em;
+    color: var(--text-muted);
+}
+.message-text > :is(h1, h2, h3, h4, h5, h6):first-child,
+.sanctuary-plan-body > :is(h1, h2, h3, h4, h5, h6):first-child {
+    margin-top: 0.5em;
+}

@@ -337,3 +337,11 @@ export function resolveNodeUrl(path, nodeUrl) {
   const cleanRel = raw.replace(/^\.?\//, '');
   return `${base}/${cleanRel}`;
 }
+
+/** Resolve the account's real PDS origin from an atproto session/didDoc; '' when absent. */
+export function bskyPdsFromDidDoc(didDoc) {
+  const services = Array.isArray(didDoc?.service) ? didDoc.service : [];
+  const pds = services.find((s) => String(s?.id || '').endsWith('#atproto_pds') && s?.type === 'AtprotoPersonalDataServer');
+  const endpoint = String(pds?.serviceEndpoint || '').trim();
+  return endpoint.startsWith('https://') ? normalizeInstanceUrl(endpoint) : '';
+}

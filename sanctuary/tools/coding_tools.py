@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
 import time
 from typing import Any
+
+from utils import lifecycle
 
 _SKIP_DIRS = frozenset({
     ".git",
@@ -55,6 +58,82 @@ _MAX_READ_CHARS = 24000
 _MAX_CMD_OUTPUT_CHARS = 12000
 _MAX_GREP_MATCHES = 60
 _CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000) if sys.platform == "win32" else 0
+
+
+def _resolve_shell() -> tuple[str, list[str], str]:
+    """(kind, argv_prefix, label): bash/sh everywhere, Git Bash on Windows, PowerShell only as last resort."""
+    override = os.environ.get("SANCTUARY_SHELL", "").strip()
+    if override and os.path.isfile(override):
+        name = os.path.basename(override).lower()
+        if "pwsh" in name or "powershell" in name:
+            return "powershell", [override, "-NoProfile", "-NonInteractive", "-Command"], f"PowerShell ({override})"
+        kind = "sh" if name in ("sh", "sh.exe", "dash", "dash.exe") else "bash"
+        return kind, [override, "-c"], f"{kind} ({override})"
+    if os.name != "nt":
+        for cand in (shutil.which("bash"), "/bin/bash", "/usr/bin/bash"):
+            if cand and os.path.isfile(cand):
+                return "bash", [cand, "-c"], "bash"
+        return "sh", ["/bin/sh", "-c"], "sh"
+    candidates: list[str] = []
+    git_exe = shutil.which("git")
+    if git_exe:
+        git_root = os.path.dirname(os.path.dirname(os.path.realpath(git_exe)))
+        candidates.append(os.path.join(git_root, "bin", "bash.exe"))
+    for env_key in ("ProgramFiles", "ProgramW6432", "ProgramFiles(x86)"):
+        base = os.environ.get(env_key)
+        if base:
+            candidates.append(os.path.join(base, "Git", "bin", "bash.exe"))
+    for cand in candidates:
+        if os.path.isfile(cand):
+            return "bash", [cand, "-c"], "bash (Git Bash)"
+    return "powershell", ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command"], "Windows PowerShell 5.1 (Git Bash not found)"
+
+
+_SHELL_KIND, _SHELL_ARGV, _SHELL_LABEL = _resolve_shell()
+
+
+def workspace_python(root: str) -> str:
+    """Forward-slash, workspace-relative venv interpreter (portable across Windows/Linux shells)."""
+    if root and os.path.isfile(os.path.join(root, ".venv", "Scripts", "python.exe")):
+        return ".venv/Scripts/python.exe"
+    if root and os.path.isfile(os.path.join(root, ".venv", "bin", "python")):
+        return ".venv/bin/python"
+    return "python3" if shutil.which("python3") else "python"
+
+
+_UNIX_TOOL_HINTS = {
+    "grep": "use the grep_search tool (or Select-String -Pattern '...' -Path file)",
+    "egrep": "use the grep_search tool (or Select-String)",
+    "rg": "use the grep_search tool (or Select-String)",
+    "cat": "use the read_file tool (or Get-Content file)",
+    "head": "use read_file with start_line/end_line (or Get-Content file -TotalCount N)",
+    "tail": "use read_file with start_line/end_line (or Get-Content file -Tail N)",
+    "ls": "use the list_dir tool (or Get-ChildItem)",
+    "find": "use list_dir / grep_search (or Get-ChildItem -Recurse -Filter '*.js')",
+    "sed": "use the edit_file tool",
+    "awk": "use read_file/grep_search, or PowerShell ForEach-Object",
+    "which": "use Get-Command name",
+    "touch": "use write_file (or New-Item file -ItemType File)",
+    "rm": "use Remove-Item (ask the user before deleting)",
+    "wc": "use (Get-Content file | Measure-Object -Line).Lines",
+}
+
+
+def _shell_hint(command: str, output: str) -> str:
+    """One-line fix-up hint when a POSIX-ism fails under Windows PowerShell fallback; '' otherwise."""
+    if _SHELL_KIND != "powershell":
+        return ""
+    text = output or ""
+    if "is not a valid statement separator" in text and "&&" in (command or ""):
+        return "[Shell hint] This is Windows PowerShell 5.1: chain with ';' or `cmd1; if ($LASTEXITCODE -eq 0) { cmd2 }` instead of '&&'."
+    if "is not recognized as the name of a cmdlet" in text:
+        first = (command or "").strip().split(None, 1)[0] if (command or "").strip() else ""
+        name = first.lower().removesuffix(".exe")
+        tip = _UNIX_TOOL_HINTS.get(name)
+        if tip:
+            return f"[Shell hint] '{first}' does not exist in Windows PowerShell: {tip}."
+        return "[Shell hint] This is Windows PowerShell 5.1; Unix commands are unavailable. Prefer the grep_search/read_file/list_dir/edit_file tools."
+    return ""
 
 
 def _allowed_roots() -> tuple[str, list[str]]:
@@ -301,7 +380,7 @@ def grep_search(query: str, path: str = "", case_sensitive: bool = False) -> str
             for idx, line in enumerate(text.splitlines(), start=1):
                 hay = line if case_sensitive else line.lower()
                 if needle in hay:
-                    entry = f"{rel}:{idx}: {line.strip()}"
+                    entry = f"{rel}:{idx}: {line.rstrip()}"
                     if entry not in seen_lines:
                         seen_lines.add(entry)
                         matches.append(entry[:400])
@@ -312,6 +391,100 @@ def grep_search(query: str, path: str = "", case_sensitive: bool = False) -> str
         return f"No matches found for '{clean_q}'."
     suffix = f"\n... [showing first {_MAX_GREP_MATCHES} matches]" if len(matches) >= _MAX_GREP_MATCHES else ""
     return f"[grep_search: '{clean_q}' ({len(matches)} matches)]\n" + "\n".join(matches) + suffix
+
+
+_PROBE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+_PROBE_BLOCKED_HEADERS = frozenset({"authorization", "cookie", "proxy-authorization"})
+_PROBE_SHOWN_HEADERS = ("content-type", "www-authenticate", "location", "retry-after", "atproto-content-labelers")
+
+
+def http_probe(url: str, method: str = "GET", headers: dict | None = None) -> str:
+    """Send one credential-free HTTP request and report status, key headers, and body (for API debugging)."""
+    clean_url = str(url or "").strip()
+    if not clean_url.startswith(("http://", "https://")):
+        return "Error: url must start with http:// or https://."
+    clean_method = str(method or "GET").strip().upper()
+    if clean_method not in _PROBE_METHODS:
+        return "Error: http_probe only sends GET, HEAD, or OPTIONS."
+
+    hdrs: dict[str, str] = {}
+    if headers is not None:
+        if not isinstance(headers, dict) or any(
+            not isinstance(k, str) or not isinstance(v, str) for k, v in headers.items()
+        ):
+            return "Error: headers must be an object of string values."
+        for k, v in headers.items():
+            if k.lower() in _PROBE_BLOCKED_HEADERS:
+                return "Error: http_probe never sends credentials (Authorization/Cookie). Probe unauthenticated, or ask the user to run the authenticated request."
+            hdrs[k] = v
+
+    import requests
+
+    try:
+        resp = requests.request(clean_method, clean_url, headers=hdrs, timeout=15, allow_redirects=False)
+    except requests.RequestException as exc:
+        return f"Error: Request failed: {exc}"
+
+    lines = [f"[HTTP {resp.status_code} {resp.reason or ''}] {clean_method} {clean_url}".rstrip()]
+    lower_headers = {k.lower(): (k, v) for k, v in resp.headers.items()}
+    for h_name in _PROBE_SHOWN_HEADERS:
+        if h_name in lower_headers:
+            _, val = lower_headers[h_name]
+            lines.append(f"{h_name}: {val}")
+
+    body_text = resp.content.decode("utf-8", errors="replace") if resp.content else (resp.text or "")
+    if len(body_text) > 4000:
+        omitted = len(body_text) - 4000
+        body_text = f"{body_text[:4000]}\n... [truncated {omitted} chars]"
+    lines.append("")
+    lines.append(body_text)
+    return "\n".join(lines)
+
+
+def _leading_spaces(line: str) -> int | None:
+    """Count leading spaces; None if indentation contains tabs (no safe shift)."""
+    body = line.lstrip(" \t")
+    indent = line[: len(line) - len(body)]
+    return None if "\t" in indent else len(indent)
+
+
+def _shift_line(line: str, delta: int) -> str | None:
+    if not line.strip() or delta == 0:
+        return line
+    if delta > 0:
+        return " " * delta + line
+    lead = _leading_spaces(line)
+    if lead is None or lead < -delta:
+        return None
+    return line[-delta:]
+
+
+def _indent_shift_matches(file_lines: list[str], target_lines: list[str]) -> list[tuple[int, int]]:
+    """(start_index, delta) for every window equal to target after one uniform indentation shift."""
+    n = len(target_lines)
+    hits: list[tuple[int, int]] = []
+    for i in range(len(file_lines) - n + 1):
+        delta: int | None = None
+        ok = True
+        for tl, fl in zip(target_lines, file_lines[i : i + n]):
+            if not tl.strip() and not fl.strip():
+                continue
+            if tl.strip() != fl.strip():
+                ok = False
+                break
+            t_lead, f_lead = _leading_spaces(tl), _leading_spaces(fl)
+            if t_lead is None or f_lead is None:
+                ok = False
+                break
+            d = f_lead - t_lead
+            if delta is None:
+                delta = d
+            elif d != delta:
+                ok = False
+                break
+        if ok and delta is not None:
+            hits.append((i, delta))
+    return hits
 
 
 def edit_file(path: str = "", target: str = "", replacement: str | None = None) -> str:
@@ -351,6 +524,44 @@ def edit_file(path: str = "", target: str = "", replacement: str | None = None) 
 
     count = norm_text.count(norm_target)
     if count == 0:
+        file_lines = norm_text.split("\n")
+        target_lines = norm_target.split("\n")
+        hits = _indent_shift_matches(file_lines, target_lines)
+        if len(hits) == 1:
+            start_idx, delta = hits[0]
+            shifted = [_shift_line(ln, delta) for ln in norm_repl.split("\n")] if norm_repl else []
+            if all(s is not None for s in shifted):
+                new_lines = file_lines[:start_idx] + shifted + file_lines[start_idx + len(target_lines) :]
+                new_norm = "\n".join(new_lines)
+                try:
+                    with open(abs_path, "wb") as f:
+                        f.write(new_norm.replace("\n", newline).encode("utf-8"))
+                except OSError as exc:
+                    return f"Error: Unable to write '{rel_display}': {exc}"
+                start_line = start_idx + 1
+                added = len(shifted)
+                removed = len(target_lines)
+                p_start = max(1, start_line - 1)
+                p_end = min(len(new_lines), start_line + max(1, added) + 1)
+                preview = "\n".join(f"{ln}: {new_lines[ln - 1]}" for ln in range(p_start, p_end + 1))
+                return (
+                    f"Edited {rel_display} (+{added} -{removed} lines at L{start_line}; matched ignoring indentation, "
+                    f"re-indented replacement by {delta:+d} spaces).\n{preview}"
+                )
+        if len(hits) > 1:
+            where = ", ".join(f"L{i + 1}" for i, _ in hits[:10])
+            return (
+                f"Error: Target matched {len(hits)} locations in {rel_display} only when ignoring indentation ({where}). "
+                "Include 2-3 surrounding lines with exact indentation to make it unique."
+            )
+        first = next((ln.strip() for ln in target_lines if ln.strip()), "")
+        near = [idx for idx, ln in enumerate(file_lines) if first and ln.strip() == first][:5]
+        if near:
+            shown = "\n".join(f"{i + 1}: {file_lines[i]}" for i in near)
+            return (
+                f"Error: Target block not found in {rel_display}. Its first line exists at the lines below, "
+                f"but the following lines differ. Re-read that range with read_file and copy it exactly:\n{shown}"
+            )
         return f"Error: Target block not found in {rel_display}. Call read_file first to copy exact lines and indentation."
     if count > 1:
         occ_lines: list[str] = []
@@ -423,26 +634,6 @@ def write_file(path: str, content: str, overwrite: bool = True) -> str:
     return f"Wrote {rel_display} ({line_count} lines)."
 
 
-def _kill_process_tree(proc: subprocess.Popen[bytes]) -> None:
-    if proc.poll() is not None:
-        return
-    if sys.platform == "win32":
-        try:
-            subprocess.run(
-                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
-                stdin=subprocess.DEVNULL,
-                capture_output=True,
-                timeout=5,
-                creationflags=_CREATE_NO_WINDOW,
-            )
-        except Exception:
-            pass
-    try:
-        proc.kill()
-    except Exception:
-        pass
-
-
 def _truncate_cmd_output(text: str) -> str:
     if len(text) <= _MAX_CMD_OUTPUT_CHARS:
         return text
@@ -476,18 +667,14 @@ def run_command(command: str, cwd: str = "", timeout: int = 60) -> str:
     except (TypeError, ValueError):
         eff_timeout = 60
 
-    argv = (
-        ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", clean_cmd]
-        if sys.platform == "win32"
-        else ["/bin/sh", "-c", clean_cmd]
-    )
+    argv = _SHELL_ARGV + [clean_cmd]
     proc = subprocess.Popen(
         argv,
         cwd=work_cwd,
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
-        creationflags=_CREATE_NO_WINDOW,
+        **lifecycle.group_popen_kwargs(),
     )
 
     sess_id = tools_mod.current_session_id.get()
@@ -502,11 +689,11 @@ def run_command(command: str, cwd: str = "", timeout: int = 60) -> str:
     while proc.poll() is None:
         if sess_id and sess_id in cancelled_sessions:
             cancelled = True
-            _kill_process_tree(proc)
+            lifecycle.kill_process_tree(proc)
             break
         if time.monotonic() >= deadline:
             timed_out = True
-            _kill_process_tree(proc)
+            lifecycle.kill_process_tree(proc)
             break
         time.sleep(0.2)
 
@@ -522,7 +709,33 @@ def run_command(command: str, cwd: str = "", timeout: int = 60) -> str:
         return f"Error: Command timed out after {eff_timeout}s.\n{out_text}".strip()
     if proc.returncode == 0:
         return f"[Command succeeded (exit 0)]\n{out_text}" if out_text else "[Command succeeded (exit 0)]"
-    return f"Error: Command exited with code {proc.returncode}.\n{out_text}".strip()
+    hint = _shell_hint(clean_cmd, out_text)
+    msg = f"Error: Command exited with code {proc.returncode}.\n{out_text}".strip()
+    return f"{msg}\n{hint}" if hint else msg
+
+
+def update_plan_step(step: int, status: str, note: str = "") -> str:
+    """Update the status of a numbered step in the active session's persisted implementation plan."""
+    from contextlib import nullcontext
+    import tools.tools as tools_mod
+    from core.plan_state import update_step_status
+
+    runner = tools_mod.current_runner.get()
+    sess_id = tools_mod.current_session_id.get()
+    if runner is None:
+        return "Error: No active session runner for update_plan_step."
+    try:
+        step_int = int(step)
+    except (TypeError, ValueError):
+        return "Error: step must be an integer."
+
+    lock_ctx = runner._lock if hasattr(runner, "_lock") else nullcontext()
+    with lock_ctx:
+        meta = runner._get_memory_meta(sess_id)
+        res = update_step_status(meta, step_int, str(status or ""), str(note or ""))
+        if not res.startswith("Error:") and hasattr(runner, "_save_session_to_disk"):
+            runner._save_session_to_disk(sess_id)
+    return res
 
 
 def _fn_schema(name: str, description: str, properties: dict[str, Any], required: list[str]) -> dict[str, Any]:
@@ -549,7 +762,7 @@ READ_BAND_SCHEMAS: list[dict[str, Any]] = [
     ),
     _fn_schema(
         "read_file",
-        "Read numbered lines from a text file in the workspace.",
+        "Read numbered lines from a text file in the workspace (the Sanctuary codebase). Inspect before changing code; edit_file, write_file, and run_command unlock after a successful read.",
         {
             "path": {"type": "string", "description": "File path to read."},
             "start_line": {"type": "integer", "description": "1-based start line (default 1)."},
@@ -567,7 +780,37 @@ READ_BAND_SCHEMAS: list[dict[str, Any]] = [
         },
         ["query"],
     ),
+    _fn_schema(
+        "http_probe",
+        "Send one unauthenticated GET/HEAD/OPTIONS request and return the HTTP status, key headers, and body. Use it to reproduce API errors and identify which server returns them (e.g. 501 = that host does not implement the method).",
+        {
+            "url": {"type": "string", "description": "HTTP or HTTPS URL to probe."},
+            "method": {"type": "string", "description": "GET (default), HEAD, or OPTIONS."},
+            "headers": {
+                "type": "object",
+                "description": "Optional extra request headers (no Authorization/Cookie).",
+                "additionalProperties": {"type": "string"},
+            },
+        },
+        ["url"],
+    ),
 ]
+
+_REPO_ROOT_GUESS = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if _SHELL_KIND == "powershell":
+    _RUN_COMMAND_DESC = (
+        f"Run a headless {_SHELL_LABEL} command (tests, git, builds) in the workspace. "
+        "Unix tools (grep, sed, cat, head, ls -la) and '&&' are unavailable: use the grep_search/read_file/list_dir/edit_file tools, "
+        f"or Select-String / Get-Content / Get-ChildItem, and chain with ';'. Python: {workspace_python(_REPO_ROOT_GUESS)}."
+    )
+    _RUN_COMMAND_ARG_DESC = "PowerShell command line to execute."
+else:
+    _RUN_COMMAND_DESC = (
+        f"Run a headless {_SHELL_LABEL} command (tests, git, builds) in the workspace. Pipes and '&&' work normally; "
+        "prefer the grep_search/read_file/list_dir/edit_file tools for searching and editing code. "
+        f"Python: {workspace_python(_REPO_ROOT_GUESS)}; JS tests: node --test __tests__/<file>.test.js."
+    )
+    _RUN_COMMAND_ARG_DESC = "Shell command line to execute (bash syntax)."
 
 WRITE_BAND_SCHEMAS: list[dict[str, Any]] = [
     _fn_schema(
@@ -592,13 +835,26 @@ WRITE_BAND_SCHEMAS: list[dict[str, Any]] = [
     ),
     _fn_schema(
         "run_command",
-        "Run a headless shell command (tests, git, builds) in the workspace.",
+        _RUN_COMMAND_DESC,
         {
-            "command": {"type": "string", "description": "Command line to execute."},
+            "command": {
+                "type": "string",
+                "description": _RUN_COMMAND_ARG_DESC,
+            },
             "cwd": {"type": "string", "description": "Optional working directory inside workspace."},
             "timeout": {"type": "integer", "description": "Timeout in seconds (default 60)."},
         },
         ["command"],
+    ),
+    _fn_schema(
+        "update_plan_step",
+        "Update the status of a numbered step in the active implementation plan (persisted across turns). Pass step=0, status='done' to finish the whole plan.",
+        {
+            "step": {"type": "integer", "description": "1-based step number from # ACTIVE IMPLEMENTATION PLAN (or 0 for all)."},
+            "status": {"type": "string", "description": "One of: in_progress, done, skipped, pending, clear."},
+            "note": {"type": "string", "description": "Optional brief summary of what changed or passed."},
+        },
+        ["step", "status"],
     ),
 ]
 
@@ -614,5 +870,19 @@ WEB_BAND_SCHEMAS: list[dict[str, Any]] = [
         "Search the web for documentation or current information.",
         {"query": {"type": "string", "description": "Search query."}},
         ["query"],
+    ),
+    _fn_schema(
+        "http_probe",
+        "Send one unauthenticated GET/HEAD/OPTIONS request and return the HTTP status, key headers, and body. Use it to reproduce API errors and identify which server returns them (e.g. 501 = that host does not implement the method).",
+        {
+            "url": {"type": "string", "description": "HTTP or HTTPS URL to probe."},
+            "method": {"type": "string", "description": "GET (default), HEAD, or OPTIONS."},
+            "headers": {
+                "type": "object",
+                "description": "Optional extra request headers (no Authorization/Cookie).",
+                "additionalProperties": {"type": "string"},
+            },
+        },
+        ["url"],
     ),
 ]

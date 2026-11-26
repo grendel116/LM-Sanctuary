@@ -87,7 +87,7 @@ STANDALONE_ASTERISK_RE = re.compile(r'(?<!\*)\*(?!\*)')
 MULTI_NEWLINE_RE = re.compile(r'\n\s*\n+')
 MULTI_SPACE_RE = re.compile(r' +')
 TOOL_ARG_RE = re.compile(r'(\w+)\s*=\s*(?:("""|\'\'\'|["\'])((?:\\.|(?!\2)[\s\S])*?)\2|([^,\s\)]+))', re.DOTALL)
-_TOOL_OPEN_RE = re.compile(r"\[([a-zA-Z_][\w\.:]*)\(")
+_TOOL_OPEN_RE = re.compile(r"\[([a-zA-Z_][\w\.:]*)\(|^[ \t]*Called ([a-zA-Z_][\w\.:]*)\(", re.MULTILINE)
 
 
 class _ToolTagMatch:
@@ -100,10 +100,11 @@ class _ToolTagMatch:
 
 
 def _extract_tool_calls(text: str) -> list[_ToolTagMatch]:
-    """Extracts [tool_name(args)] tags using a quote- and parenthesis-aware scanner
+    """Extracts [tool_name(args)] tags and whole-line `Called tool_name(args)` echoes
+    (the cloud history summary format) using a quote- and parenthesis-aware scanner
     so code strings containing ')]' inside arguments never truncate the tool call.
     """
-    if not text or "[" not in text:
+    if not text or ("[" not in text and "Called " not in text):
         return []
 
     matches = []
@@ -115,7 +116,8 @@ def _extract_tool_calls(text: str) -> list[_ToolTagMatch]:
         if not m:
             break
 
-        name = m.group(1)
+        bracketed = m.group(1) is not None
+        name = m.group(1) if bracketed else m.group(2)
         i = m.end()
         paren_depth = 1
         found_end = -1
@@ -145,13 +147,20 @@ def _extract_tool_calls(text: str) -> list[_ToolTagMatch]:
                 paren_depth -= 1
                 if paren_depth == 0:
                     args_end = i
-                    j = i + 1
-                    while j < n and text[j] in " \t\r\n":
-                        j += 1
-                    if j < n and text[j] == "]":
-                        found_end = j + 1
+                    if bracketed:
+                        j = i + 1
+                        while j < n and text[j] in " \t\r\n":
+                            j += 1
+                        if j < n and text[j] == "]":
+                            found_end = j + 1
+                    else:
+                        j = i + 1
+                        while j < n and text[j] in " \t\r":
+                            j += 1
+                        if j >= n or text[j] == "\n":
+                            found_end = i + 1
                     break
-            elif ch == "]" and paren_depth == 1:
+            elif bracketed and ch == "]" and paren_depth == 1:
                 args_end = i
                 found_end = i + 1
                 break
@@ -175,6 +184,24 @@ def _strip_tool_calls(text: str, matches: list[_ToolTagMatch] | None = None) -> 
     for m in matches:
         text = text.replace(m.group(0), "")
     return text.strip()
+
+
+def _has_dangling_called_line(text: str) -> bool:
+    """True when the reply ends in an unclosed `Called tool_name(` line (output cut off mid-call)."""
+    lines = (text or "").rstrip().splitlines()
+    if not lines:
+        return False
+    last = lines[-1].lstrip()
+    if not last.startswith("Called "):
+        return False
+    head, sep, _ = last[len("Called "):].partition("(")
+    return bool(sep) and head.replace(".", "_").replace(":", "_").isidentifier() and not _extract_tool_calls(last)
+
+
+def _drop_dangling_called_line(text: str) -> str:
+    if not _has_dangling_called_line(text):
+        return text
+    return "\n".join((text or "").rstrip().splitlines()[:-1]).rstrip()
 
 
 def _escape_newlines_in_single_quotes(s: str) -> str:

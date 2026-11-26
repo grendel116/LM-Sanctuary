@@ -222,10 +222,10 @@ test('programThread avatar opens straight to most recent image in classic viewer
     ctrl = mountProgramThread(host, { programId: 'sebile', sessionId: 'default' });
     await new Promise((r) => setTimeout(r, 25));
 
-    // Verify Sanctuary header button order: Voice Call, Quests, Gallery, Knowledge
+    // Verify Sanctuary header button order: Voice Call, Quests, Gallery, Knowledge, Programs
     assert.deepEqual(
       Array.from(host.querySelectorAll('.header-actions button')).map((b) => b.getAttribute('aria-label')),
-      ['Voice Call', 'Quest Log', 'Image Gallery', 'Memory / Knowledge']
+      ['Voice Call', 'Quest Log', 'Image Gallery', 'Memory / Knowledge', 'Programs']
     );
 
     // 1. Clicking Program avatar opens classic viewer straight to the most recent image

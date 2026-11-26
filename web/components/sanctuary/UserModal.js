@@ -1,5 +1,5 @@
 import { createUserIconSvg, DEFAULT_AVATAR_DATA_URI } from '../../constants/avatars.js';
-import { DEFAULT_THREADS_SCOPES } from '../../constants/endpoints.js';
+import { bskyPdsFromDidDoc, DEFAULT_THREADS_SCOPES } from '../../constants/endpoints.js';
 import { createBskySession, getBskyProfile } from '../../queries/bluesky.js';
 import {
   buildOAuthAuthorizeUrl,
@@ -805,8 +805,9 @@ export function openUserModal({
           identifier: handle,
           password: pass,
         });
+        const pdsUrl = bskyPdsFromDidDoc(session.didDoc) || 'https://bsky.social';
         const profile = await getBskyProfile({
-          serviceUrl: 'https://bsky.social',
+          serviceUrl: pdsUrl,
           actor: session.did,
           accessJwt: session.accessJwt,
         }).catch(() => null);
@@ -814,7 +815,7 @@ export function openUserModal({
           {
             id: `bluesky:${session.did}`,
             platform: 'bluesky',
-            serviceUrl: 'https://bsky.social',
+            serviceUrl: pdsUrl,
             handle: session.handle,
             acct: session.handle,
             displayName: profile?.displayName || session.handle,

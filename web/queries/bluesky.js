@@ -1948,6 +1948,73 @@ export async function acceptBskyConvo(opts) {
   });
 }
 
+export async function updateBskyConvoRead(opts) {
+  const { convoId, messageId = '', ...auth } = opts;
+  return bskyRequest({
+    ...auth,
+    endpoint: 'chat.bsky.convo.updateRead',
+    method: 'POST',
+    json: { convoId, ...(messageId ? { messageId } : {}) },
+    headers: { 'Atproto-Proxy': BLUESKY_CHAT_PROXY },
+  });
+}
+
+export async function getBskyConvoLog(opts) {
+  const { cursor = '', ...auth } = opts;
+  return bskyRequest({
+    ...auth,
+    endpoint: 'chat.bsky.convo.getLog',
+    params: cursor ? { cursor } : {},
+    headers: { 'Atproto-Proxy': BLUESKY_CHAT_PROXY },
+  });
+}
+
+const BSKY_CHAT_REFUSALS = [
+  {
+    codes: ['NotFollowedBySender'],
+    phrases: ['incoming messages to come from someone they follow'],
+    text: (who) => `${who} only accepts messages from people they follow.`,
+  },
+  {
+    codes: ['MessagesDisabled', 'RecipientDisabled'],
+    phrases: ['disabled incoming messages'],
+    text: (who) => `${who} has turned off direct messages.`,
+  },
+  {
+    codes: ['BlockedActor', 'BlockedSubject'],
+    phrases: ['block between recipient and sender'],
+    text: (who) => (
+      who === 'This account'
+        ? "You can't message this account because one of you has blocked the other."
+        : `You can't message ${who} because one of you has blocked the other.`
+    ),
+  },
+  {
+    codes: ['AccountSuspended'],
+    phrases: ['account is suspended'],
+    text: () => 'This conversation is unavailable because one of the accounts is suspended.',
+  },
+  {
+    codes: ['RecipientNotFound'],
+    phrases: [],
+    text: (who) => `Couldn't find ${who} on Bluesky.`,
+  },
+];
+
+/** Plain-language text for known Bluesky chat refusals (recipient settings, blocks, suspension); '' otherwise. */
+export function describeBskyChatRefusal(err, peerHandle = '') {
+  const body = err?.body && typeof err.body === 'object' ? err.body : null;
+  if (!body) return '';
+  const code = String(body.error || '');
+  const message = String(body.message || '').toLowerCase();
+  const clean = String(peerHandle || '').trim().replace(/^@/, '');
+  const who = clean ? `@${clean}` : 'This account';
+  const hit = BSKY_CHAT_REFUSALS.find(
+    (r) => r.codes.includes(code) || r.phrases.some((p) => message.includes(p))
+  );
+  return hit ? hit.text(who) : '';
+}
+
 export async function deleteBskyPost({ serviceUrl = DEFAULT_BSKY_SERVICE, repo, uri, accessJwt, refreshJwt, onSessionRefreshed, fetchImpl }) {
   const rkey = rkeyFromAtUri(uri);
   if (!rkey) return false;

@@ -57,6 +57,7 @@ const VOICE_CALL_SVG = `<svg width="16" height="16" viewBox="0 0 24 24" fill="no
 const GALLERY_SVG = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><circle cx="8.5" cy="8.5" r="1.5"></circle><polyline points="21 15 16 10 5 21"></polyline></svg>`;
 const QUEST_SVG = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"></path></svg>`;
 const DATABANK_SVG = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="12 2 2 7 12 12 22 7 12 2"></polygon><polyline points="2 17 12 22 22 17"></polyline><polyline points="2 12 12 17 22 12"></polyline></svg>`;
+const PROGRAMS_SVG = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></svg>`;
 const PORTRAIT_SVG = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"></path><circle cx="12" cy="13" r="4"></circle></svg>`;
 const ATTACH_SVG = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"></path></svg>`;
 const IMPERSONATE_SVG = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"></path><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"></path></svg>`;
@@ -74,6 +75,7 @@ export function mountProgramThread(containerEl, {
   initialDraft = '',
   onBack = null,
   onOpenCompose = null,
+  onOpenPrograms = null,
   onProgramChanged = null,
   onClientAction = null,
   onBrowserCommand = null,
@@ -208,7 +210,15 @@ export function mountProgramThread(containerEl, {
     });
   });
 
-  headerActions.append(voiceBtn, questBtn, galleryBtn, databankBtn);
+  const programsBtn = doc.createElement('button');
+  programsBtn.type = 'button';
+  programsBtn.className = 'gallery-btn programs-btn';
+  programsBtn.setAttribute('aria-label', 'Programs');
+  programsBtn.title = 'Programs';
+  programsBtn.innerHTML = PROGRAMS_SVG;
+  programsBtn.addEventListener('click', () => onOpenPrograms?.());
+
+  headerActions.append(voiceBtn, questBtn, galleryBtn, databankBtn, programsBtn);
   header.append(titleArea, headerActions);
 
   // Offline / Queued banner host

@@ -1591,6 +1591,15 @@ export async function getConversations({ instanceUrl, accessToken, maxId = '', l
     : [];
 }
 
+export async function markConversationRead({ instanceUrl, accessToken, conversationId, fetchImpl }) {
+  const origin = normalizeInstanceUrl(instanceUrl);
+  return fetchWrapper(`${origin}/api/v1/conversations/${encodeURIComponent(conversationId)}/read`, {
+    method: 'POST',
+    headers: authHeaders(accessToken),
+    fetchImpl,
+  });
+}
+
 export async function getAccountProfile({ instanceUrl, accessToken = '', accountId, fetchImpl }) {
   const origin = normalizeInstanceUrl(instanceUrl);
   const raw = await fetchWrapper(`${origin}/api/v1/accounts/${encodeURIComponent(accountId)}`, {

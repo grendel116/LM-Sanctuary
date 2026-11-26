@@ -131,6 +131,36 @@ function requestVaultUnlock(onUnlocked) {
   globalThis.dispatchEvent?.(new CustomEvent('sanctuary:request-unlock', { detail: { onUnlocked } }));
 }
 
+const lockedVaultElements = new Set();
+let vaultUnlockSyncInstalled = false;
+
+function clearVaultLockMarker(el) {
+  if (el.classList?.contains('post-context-menuitem')) {
+    el.classList.remove('needs-unlock');
+    if (el.title === 'Unlock vault to continue') el.removeAttribute('title');
+  } else if (el.dataset?.needsUnlock === '1') {
+    delete el.dataset.needsUnlock;
+    const base = String(el.title || '').split(' — ')[0];
+    if (base) el.title = base;
+    el.removeAttribute('aria-description');
+  }
+}
+
+function trackVaultLockedElement(el) {
+  lockedVaultElements.add(el);
+  if (vaultUnlockSyncInstalled) return;
+  vaultUnlockSyncInstalled = true;
+  authStore.subscribe((state) => {
+    if (state?.vaultLocked || lockedVaultElements.size === 0) return;
+    for (const node of lockedVaultElements) clearVaultLockMarker(node);
+    lockedVaultElements.clear();
+  });
+}
+
+function isVaultLockedNow() {
+  return Boolean(authStore.get()?.vaultLocked);
+}
+
 function applyActionButtonMeta(btn, {
   label = '',
   tooltip = '',
@@ -147,6 +177,7 @@ function applyActionButtonMeta(btn, {
   btn.disabled = isDisabled;
   if (isNeedsUnlock) {
     btn.dataset.needsUnlock = '1';
+    trackVaultLockedElement(btn);
   } else {
     delete btn.dataset.needsUnlock;
   }
@@ -200,8 +231,11 @@ function createActionButton({
     e.stopPropagation();
     if (btn.disabled) return;
     if (btn.dataset.needsUnlock === '1') {
-      requestVaultUnlock(() => onClick?.());
-      return;
+      if (isVaultLockedNow()) {
+        requestVaultUnlock(() => onClick?.());
+        return;
+      }
+      clearVaultLockMarker(btn);
     }
     onClick?.();
   });
@@ -1111,14 +1145,18 @@ function buildPostContextMenu(doc, rawPost, unified, isOwn, isPinned, {
     if (needsUnlock) {
       itemBtn.classList.add('needs-unlock');
       itemBtn.title = 'Unlock vault to continue';
+      trackVaultLockedElement(itemBtn);
     }
     itemBtn.addEventListener('click', (e) => {
       e.stopPropagation();
       if (itemBtn.disabled) return;
       closeMenu();
-      if (needsUnlock) {
+      if (requiresAuth && isVaultLockedNow()) {
         requestVaultUnlock(() => handler?.(rawPost, unified));
         return;
+      }
+      if (itemBtn.classList.contains('needs-unlock')) {
+        clearVaultLockMarker(itemBtn);
       }
       handler?.(rawPost, unified);
     });

@@ -28,6 +28,14 @@ def _extract_retrieval_query(user_msg: dict | None, raw_text: str) -> str:
     return header
 
 
+def _preview_tool_args(args: dict) -> dict:
+    """Bounded copy of tool args for history display (long strings clipped to 320 chars)."""
+    out = {}
+    for k, v in (args or {}).items():
+        out[k] = f"{v[:320]}..." if isinstance(v, str) and len(v) > 320 else v
+    return out
+
+
 class OsHistoryAdapter:
     def __init__(self, runner_obj, session_id: str, file_path_resolved, image_data, image_mime, query_vector=None):
         self.runner_obj = runner_obj
@@ -171,6 +179,12 @@ class OsHistoryAdapter:
                 dropped += 2
             if dropped:
                 print(f"[CONTEXT] Dropped {dropped} old tool-loop messages from the current turn.", flush=True)
+                if hasattr(self.runner_obj, "_get_memory_meta"):
+                    ledger = ((self.runner_obj._get_memory_meta(self.session_id).get("coding_state") or {}).get("ledger") or [])[-8:]
+                    if ledger:
+                        note = "[Earlier tool steps in this turn compacted; work ledger so far:\n" + "\n".join(f"- {x}" for x in ledger) + "]"
+                        kept.insert(user_pos + 1, {"role": "user", "content": note})
+                        kept_lengths.insert(user_pos + 1, len(note))
             if sum(kept_lengths) > available and len(kept) - user_pos - 1 >= 1:
                 last = kept[-1]
                 if isinstance(last.get("content"), str) and len(last["content"]) > 1500:
@@ -286,6 +300,7 @@ class OsHistoryAdapter:
             for m in filtered_history[latest_user_idx + 1:]
         )
 
+        pending_call_labels: list[str] = []
         for idx, msg in enumerate(filtered_history):
             role = "assistant" if msg["role"] == "program" else "user"
             msg_id = msg.get("id", "")
@@ -305,22 +320,29 @@ class OsHistoryAdapter:
                 if not content_text.startswith(f"[{s_name}]") and not content_text.startswith(f"{s_name}:"):
                     content_text = f"[{s_name}]: {content_text}"
 
-            # Only re-serialize tool call summaries on intermediate (itm_) turns that directly preceded a tool response.
-            # When cloud_gear=True, emit plain `Called ...` summaries so Cloud models keep using native JSON tool_calls.
+            # Intermediate (itm_) tool-call turns: local models see their own [tool(...)] tags;
+            # cloud models see no call syntax in assistant content (they use native tool_calls),
+            # and each call's args ride on the matching tool response header instead.
             if msg.get("tool_calls") and msg_id.startswith("itm_"):
-                for tc in msg["tool_calls"]:
-                    if tc.get("type") == "call":
-                        args_list = []
-                        for k, v in tc.get("args", {}).items():
-                            if isinstance(v, str):
-                                preview = f"{v[:320]}..." if len(v) > 320 else v
-                                args_list.append(f"{k}={json.dumps(preview, ensure_ascii=False)}")
-                            else:
-                                args_list.append(f"{k}={v}")
-                        if cloud_gear:
-                            content_text += f"\nCalled {tc.get('name')}({', '.join(args_list)})"
-                        else:
-                            content_text += f"\n[{tc.get('name')}({', '.join(args_list)})]"
+                calls = [tc for tc in msg["tool_calls"] if tc.get("type") == "call"]
+                if cloud_gear:
+                    pending_call_labels.extend(
+                        f"{tc.get('name')} {json.dumps(_preview_tool_args(tc.get('args') or {}), ensure_ascii=False)}"
+                        for tc in calls
+                    )
+                else:
+                    for tc in calls:
+                        args_list = [
+                            f"{k}={json.dumps(v, ensure_ascii=False)}" if isinstance(v, str) else f"{k}={v}"
+                            for k, v in _preview_tool_args(tc.get("args") or {}).items()
+                        ]
+                        content_text += f"\n[{tc.get('name')}({', '.join(args_list)})]"
+            if cloud_gear and msg_id.startswith("tool_") and content_text.startswith("[Tool Response from ") and pending_call_labels:
+                header, sep, body = content_text.partition("]:")
+                if sep:
+                    content_text = f"[Tool Response from {pending_call_labels.pop(0)}]:{body}"
+            if cloud_gear and role == "assistant" and msg_id.startswith("itm_") and not content_text.strip():
+                continue
 
             # Compact large tool outputs from completed prior turns so they do not crowd out dialogue history
             if (
@@ -540,6 +562,40 @@ class OsHistoryAdapter:
                     post_blocks.append(replace_placeholders(post_inst))
         except Exception as e:
             print(f"Error loading post-history instructions: {e}", flush=True)
+
+        if not story_active and hasattr(self.runner_obj, "_get_memory_meta"):
+            try:
+                from core.plan_state import format_coding_state_block
+
+                meta = self.runner_obj._get_memory_meta(self.session_id)
+                coding_names = {
+                    "list_dir",
+                    "read_file",
+                    "grep_search",
+                    "http_probe",
+                    "edit_file",
+                    "write_file",
+                    "run_command",
+                    "update_plan_step",
+                    "delegate_coding",
+                }
+                recent_coding = any(
+                    tc.get("name") in coding_names
+                    for m in filtered_history[-8:]
+                    for tc in (m.get("tool_calls") or [])
+                )
+                coding_block = format_coding_state_block(meta, include_ledger_only=recent_coding)
+                if coding_block:
+                    post_blocks.append(coding_block)
+            except Exception as ce:
+                print(f"[plan_state] Post-injection error: {ce}", flush=True)
+
+        if story_active:
+            post_blocks.append(replace_placeholders(
+                "# STORY MODE REMINDER\n"
+                "Write this reply as a lengthy story passage: 3–6 full paragraphs with vivid scene detail and a plot development. "
+                "Do not write {{user}}'s actions, words, or thoughts."
+            ))
 
         if turn_directive:
             post_blocks.append(turn_directive)

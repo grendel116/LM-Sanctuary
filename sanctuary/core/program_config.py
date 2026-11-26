@@ -124,11 +124,14 @@ def get_message_formatting(story_mode: bool) -> str:
     """Returns the standardized message formatting directive for system instructions."""
     if story_mode:
         return (
-            "\n\n# MESSAGE FORMAT (MANDATORY)\n"
-            "- Narration: Use *italics* and present tense to describe actions, setting details, and other characters.\n"
-            "- Dialogue: Use plain text without quotation marks. Only use **bold** for emphasis.\n"
-            "- Style: Use short words, literal language, and direct phrasing. Write with linear progression.\n"
-            "- Plot: Write prose. Build engaging narrative conflict.\n"
+            "\n\n# STORY MODE (MANDATORY — overrides earlier reply length)\n"
+            "Tell an immersive, lengthy story with {{user}}, in {{char}}'s own voice.\n"
+            "- Length: write 3–6 full paragraphs per reply. Never answer in a single line.\n"
+            "- Narration in *italics*, present tense: setting, sensory detail, atmosphere, body language, and other characters' actions and dialogue.\n"
+            "- Dialogue in plain text without quotation marks. Use **bold** only for emphasis.\n"
+            "- Advance the plot every reply with a development, complication, discovery, or choice. Vary pacing between action, dialogue, and quiet moments.\n"
+            "- Never write {{user}}'s dialogue, thoughts, or decisions. End each reply at a moment where {{user}} can act.\n"
+            "- Earlier short replies predate Story Mode; do not imitate their length.\n"
         )
     return (
         "\n\n# MESSAGE FORMAT (MANDATORY)\n"
@@ -211,7 +214,7 @@ def compile_speaker_instructions(speaker_id: str, host_id: str = None, guest_ids
 
     base = replace_placeholders(base_inst + load_user_instructions(), program_id=speaker_id)
     story_mode = is_story_mode(speaker_id)
-    formatting = get_message_formatting(story_mode)
+    formatting = replace_placeholders(get_message_formatting(story_mode), program_id=speaker_id)
 
     from core.mood_inversion import get_mood_declaration_prompt
     mood_directive = get_mood_declaration_prompt(speaker_id)
@@ -418,7 +421,7 @@ def get_compiled_instructions() -> str:
 
     active_program = get_active_program()
     story_mode = is_story_mode(active_program)
-    base += get_message_formatting(story_mode)
+    base += replace_placeholders(get_message_formatting(story_mode), program_id=active_program)
 
     from core.mood_inversion import get_mood_declaration_prompt
     base += get_mood_declaration_prompt(active_program)

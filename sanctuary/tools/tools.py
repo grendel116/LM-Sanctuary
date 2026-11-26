@@ -26,6 +26,7 @@ current_turn_image_budget = contextvars.ContextVar('current_turn_image_budget', 
 current_plan_mode = contextvars.ContextVar('current_plan_mode', default=False)
 current_write_disengaged = contextvars.ContextVar('current_write_disengaged', default=False)
 current_approved_plan = contextvars.ContextVar('current_approved_plan', default='')
+current_runner = contextvars.ContextVar('current_runner', default=None)
 session_tool_calls = {}
 session_tool_calls_lock = threading.Lock()
 
@@ -1702,6 +1703,8 @@ grep_search = track_tool_activity(_coding_tools.grep_search)
 edit_file = track_tool_activity(_coding_tools.edit_file)
 write_file = track_tool_activity(_coding_tools.write_file)
 run_command = track_tool_activity(_coding_tools.run_command)
+http_probe = track_tool_activity(_coding_tools.http_probe)
+update_plan_step = track_tool_activity(_coding_tools.update_plan_step)
 
 delegate_coding = track_tool_activity(_openhands_job.delegate_coding)
 

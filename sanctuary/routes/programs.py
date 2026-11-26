@@ -11,10 +11,12 @@ import uuid
 from contextlib import nullcontext
 from pathlib import Path
 
+import httpx
 from flask import Blueprint, Response, jsonify, make_response, request, send_file, send_from_directory
 
 import state as st
 import variables.settings as vs
+from variables.settings import get_local_server_headers
 from runners.runner import cancelled_sessions, voice_call_sessions
 from runners.program import (
     get_active_program,
@@ -1561,11 +1563,12 @@ First message hint: {first_mes or 'not specified'}
 
 Output a single JSON object with EXACTLY these keys:
 {{
-  "description": "2-4 sentence narrative bio. No physical appearance.",
-  "personality": "1-3 descriptive tags (e.g. Stoic, Loyal, Guarded).",
-  "scenario": "Short scene-setting sentence (one sentence).",
-  "first_mes": "In-character opening message (1-2 sentences, first person).",
-  "system_prompt": "Concise response style directive (e.g. contractions, tone, length).",
+  "description": "2-3 short paragraphs: backstory, motivations, relationships, quirks, and how they treat {{user}}. No physical appearance.",
+  "personality": "5-8 comma-separated traits, then one sentence on speech style (vocabulary, rhythm, verbal habits).",
+  "scenario": "2-3 sentences setting the current situation and why {{char}} and {{user}} are together.",
+  "first_mes": "In-character opening, 2-4 sentences, first person, with one *italic action* and a hook {{user}} can respond to.",
+  "mes_example": "Two short example exchanges in this exact format: <START>\\n{{user}}: ...\\n{{char}}: *action* dialogue (each {{char}} line 1-3 sentences).",
+  "system_prompt": "2-3 sentence response-style directive (tone, length, what {{char}} never does).",
   "image_positive": "Comma-separated tags for intrinsic physical traits only: hair color/style, eye color, face/skin, body build, and simple base garments (e.g. silver hair, purple eyes, fair skin, simple tunic). Do not include weapons, armor, accessories, quality buzzwords, backgrounds, poses, or narrative items.",
   "image_negative": "Comma-separated tags for undesired physical traits and rendering artifacts (e.g. extra limbs, bad anatomy, deformed, mutated hands). Do not include story, armor, or narrative elements.",
   "main_color": "#9370db",
@@ -1606,7 +1609,7 @@ Directives:
                 {"role": "user", "content": prompt},
             ],
             "temperature": 0.4,
-            "max_tokens": 1536,
+            "max_tokens": 3072,
         }
 
         try:
@@ -1631,6 +1634,21 @@ Directives:
         except Exception as e:
             print(f"Error calling local model for card generation: {e}")
 
+        if not raw_response:
+            try:
+                from core import greenpt_client
+                if not greenpt_client.cloud_unavailable_reason():
+                    step = greenpt_client.chat_completion_step(
+                        payload["messages"],
+                        tier="fast",
+                        temperature=0.6,
+                        max_tokens=3072,
+                        timeout=120.0,
+                    )
+                    raw_response = (step.get("content") or "").strip() or None
+            except Exception as e:
+                print(f"Cloud fallback for card generation failed: {e}")
+
         # 2. JSON Parsing
         parsed = {}
         if raw_response:
@@ -1650,6 +1668,11 @@ Directives:
                     parsed = result
             except Exception as e:
                 print(f"Failed to parse card JSON: {e}. Raw response: {raw_response}")
+
+        if not parsed or not str(parsed.get("description") or "").strip():
+            raise RuntimeError(
+                "Character generation failed: the language model returned no usable card (is the local model loaded or Cloud enabled?)."
+            )
 
         raw_inversion = parsed.get("inversion")
         if isinstance(raw_inversion, dict) and raw_inversion:
@@ -1686,7 +1709,7 @@ Directives:
                 "first_mes": parsed.get("first_mes")
                 or first_mes
                 or f"Hello, I'm {name}.",
-                "mes_example": "",
+                "mes_example": parsed.get("mes_example") or "",
                 "system_prompt": parsed.get("system_prompt")
                 or "Speak naturally using contractions. Be warm and concise.",
                 "post_history_instructions": "",

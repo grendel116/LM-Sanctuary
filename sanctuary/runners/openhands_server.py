@@ -16,6 +16,7 @@ import requests
 
 from variables.settings import BASE_DIR as SANCTUARY_DIR
 from runners.local_server import _win_no_window_kwargs
+from utils.lifecycle import kill_process_tree
 
 DATA_DIR = os.path.join(SANCTUARY_DIR, "data", "openhands", "server")
 _CREDENTIALS_PATH = os.path.join(DATA_DIR, "credentials.json")
@@ -117,28 +118,16 @@ def check_openhands_server_status(port: int | None = None) -> bool:
 def _kill_process_tree(proc: subprocess.Popen) -> None:
     if proc.poll() is not None:
         return
-    try:
-        if os.name == "nt":
-            proc.terminate()
-            try:
-                proc.wait(timeout=2.0)
-            except subprocess.TimeoutExpired:
-                subprocess.run(
-                    ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
-                    capture_output=True,
-                    **_win_no_window_kwargs(),
-                )
-        else:
-            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-            try:
-                proc.wait(timeout=2.0)
-            except subprocess.TimeoutExpired:
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-    except Exception:
+    if os.name == "nt":
         try:
-            proc.kill()
+            proc.terminate()
+            proc.wait(timeout=2.0)
+            return
+        except subprocess.TimeoutExpired:
+            pass
         except Exception:
             pass
+    kill_process_tree(proc, grace=2.0)
 
 
 def _close_log_handle() -> None:

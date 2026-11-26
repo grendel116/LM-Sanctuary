@@ -10,21 +10,27 @@ import {
 import { showAlert, showConfirm } from '../components/sanctuary/SanctuaryDialog.js';
 import {
   acceptBskyConvo,
+  describeBskyChatRefusal,
   getBskyConvoForMembers,
+  getBskyConvoLog,
   getBskyConvoMessages,
   getBskyProfile,
   listBskyConvos,
   searchBskyActors,
   sendBskyConvoMessage,
+  updateBskyConvoRead,
 } from '../queries/bluesky.js';
 import {
   cleanMastodonMediaUrl,
   getConversations,
   getStatusContext,
+  markConversationRead,
   publishStatus,
   renderSanitizedHtml,
   searchFediverse,
+  uploadMedia,
 } from '../queries/fediverse.js';
+import { describeFetchError } from '../queries/fetch/FetchError.js';
 import {
   createSession,
   deleteProgram,
@@ -45,6 +51,7 @@ import {
 import { getCachedProgramsDirectory } from '../storage/nativeStore.js';
 
 const SEND_SVG = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>`;
+const ATTACH_SVG = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"></path></svg>`;
 const PALETTE_ICON_SVG = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="13.5" cy="6.5" r=".5" fill="currentColor"></circle><circle cx="17.5" cy="10.5" r=".5" fill="currentColor"></circle><circle cx="8.5" cy="7.5" r=".5" fill="currentColor"></circle><circle cx="6.5" cy="12.5" r=".5" fill="currentColor"></circle><path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10c.926 0 1.648-.746 1.648-1.688 0-.437-.18-.835-.437-1.125-.29-.289-.438-.652-.438-1.125a1.64 1.64 0 0 1 1.668-1.668h1.996c3.051 0 5.555-2.503 5.555-5.554C21.965 6.012 17.461 2 12 2z"></path></svg>`;
 const EDIT_ICON_SVG = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"></path><path d="m15 5 4 4"></path></svg>`;
 const TRASH_ICON_SVG = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18"></path><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"></path><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"></path></svg>`;
@@ -171,6 +178,16 @@ export function getDirectConvoKey(convo) {
   return `${network}:${idPart || (handlePart ? `new:${handlePart}` : '')}`;
 }
 
+async function withBskyChatRefusal(peerHandle, call) {
+  try {
+    return await call();
+  } catch (err) {
+    const friendly = describeBskyChatRefusal(err, peerHandle);
+    if (friendly) throw new Error(friendly, { cause: err });
+    throw err;
+  }
+}
+
 /**
  * Resolve a DM recipient handle, DID, or author object into a normalized conversation descriptor.
  */
@@ -222,13 +239,13 @@ export async function resolveDirectConversationTarget(
       peerAvatar = prof?.avatar || peerAvatar;
     }
     if (!peerDid) throw new Error(`Could not find Bluesky account @${rawHandle}.`);
-    const res = await getBskyConvoForMembers({
+    const res = await withBskyChatRefusal(rawHandle, () => getBskyConvoForMembers({
       serviceUrl: bsky.meta.serviceUrl,
       accessJwt: bsky.secrets.accessJwt,
       refreshJwt: bsky.secrets.refreshJwt,
       onSessionRefreshed: (tok) => updateAccountTokens(bsky.meta.id, tok),
       members: bsky.meta.did ? [bsky.meta.did, peerDid] : [peerDid],
-    });
+    }));
     const convo = res?.convo;
     const peer = (convo?.members || []).find((m) => m.did !== bsky.meta.did) || convo?.members?.[0];
     return {
@@ -478,6 +495,13 @@ export function mountDirectMessageThread(containerEl, { convo, onBack, onMessage
 
   const replyForm = doc.createElement('form');
   replyForm.className = 'sanctuary-input-area human-dm-reply-form';
+  const allowMedia = convo?.network !== 'bluesky';
+  let stagedFile = null;
+
+  const dmAttachmentBar = doc.createElement('div');
+  dmAttachmentBar.className = 'dm-attachment-bar';
+  dmAttachmentBar.hidden = true;
+
   const wrapper = doc.createElement('div');
   wrapper.className = 'input-wrapper';
 
@@ -493,8 +517,52 @@ export function mountDirectMessageThread(containerEl, { convo, onBack, onMessage
   input.placeholder = `Message ${convo?.displayName || convo?.handle || 'peer'}...`;
 
   const syncInputState = () => {
-    wrapper.classList.toggle('has-unsent-text', input.value.trim().length > 0);
+    wrapper.classList.toggle('has-unsent-text', input.value.trim().length > 0 || Boolean(stagedFile));
   };
+
+  let fileInput = null;
+  const syncAttachmentUi = () => {
+    dmAttachmentBar.replaceChildren();
+    dmAttachmentBar.hidden = !stagedFile;
+    if (!stagedFile) return;
+    const nameEl = doc.createElement('span');
+    nameEl.className = 'dm-attachment-name';
+    nameEl.textContent = stagedFile.name || 'Attachment';
+    const removeBtn = doc.createElement('button');
+    removeBtn.type = 'button';
+    removeBtn.className = 'dm-attachment-remove';
+    removeBtn.setAttribute('aria-label', 'Remove attachment');
+    removeBtn.textContent = '×';
+    removeBtn.addEventListener('click', () => {
+      stagedFile = null;
+      if (fileInput) fileInput.value = '';
+      syncAttachmentUi();
+      syncInputState();
+    });
+    dmAttachmentBar.append(nameEl, removeBtn);
+  };
+
+  if (allowMedia) {
+    fileInput = doc.createElement('input');
+    fileInput.type = 'file';
+    fileInput.accept = 'image/*,video/*,audio/*';
+    fileInput.hidden = true;
+    fileInput.addEventListener('change', () => {
+      stagedFile = fileInput.files?.[0] || null;
+      syncAttachmentUi();
+      syncInputState();
+    });
+
+    const attachBtn = doc.createElement('button');
+    attachBtn.type = 'button';
+    attachBtn.className = 'attach-btn dm-attach-btn';
+    attachBtn.setAttribute('aria-label', 'Attach media');
+    attachBtn.title = 'Attach media';
+    attachBtn.innerHTML = ATTACH_SVG;
+    attachBtn.addEventListener('click', () => fileInput.click());
+    wrapper.append(fileInput, attachBtn);
+  }
+
   input.addEventListener('input', syncInputState);
   input.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -515,14 +583,14 @@ export function mountDirectMessageThread(containerEl, { convo, onBack, onMessage
   controls.appendChild(sendBtn);
 
   wrapper.append(lbl, input, controls);
-  replyForm.appendChild(wrapper);
+  replyForm.append(dmAttachmentBar, wrapper);
   wrap.append(header, streamEl, replyForm);
   containerEl.appendChild(wrap);
 
   replyForm.addEventListener('submit', async (e) => {
     e.preventDefault();
     const text = input.value.trim();
-    if (!text || threadDestroyed) return;
+    if ((!text && !(allowMedia && stagedFile)) || threadDestroyed) return;
     sendBtn.disabled = true;
     try {
       if (convo.network === 'bluesky') {
@@ -538,29 +606,41 @@ export function mountDirectMessageThread(containerEl, { convo, onBack, onMessage
           });
           convo.status = 'accepted';
         }
-        await sendBskyConvoMessage({
+        await withBskyChatRefusal(convo.handle, () => sendBskyConvoMessage({
           serviceUrl: bsky.meta.serviceUrl,
           accessJwt: bsky.secrets.accessJwt,
           refreshJwt: bsky.secrets.refreshJwt,
           onSessionRefreshed: (tok) => updateAccountTokens(bsky.meta.id, tok),
           convoId: convo.id,
           text,
-        });
+        }));
         input.value = '';
         syncInputState();
         await loadMessages();
       } else {
         const fedi = await getAuthenticatedAccount('fediverse');
         if (!fedi) throw new Error('Connect Fediverse under Profile → Accounts & Bridges.');
+        const uploaded = stagedFile
+          ? await uploadMedia({
+              instanceUrl: fedi.meta.instanceUrl,
+              accessToken: fedi.secrets.accessToken,
+              file: stagedFile,
+            })
+          : null;
         const prefix = convo.handle ? `@${String(convo.handle).replace(/^@/, '')} ` : '';
+        const statusText = text ? (text.startsWith('@') ? text : `${prefix}${text}`) : prefix.trim();
         const created = await publishStatus({
           instanceUrl: fedi.meta.instanceUrl,
           accessToken: fedi.secrets.accessToken,
-          status: text.startsWith('@') ? text : `${prefix}${text}`,
+          status: statusText,
           visibility: 'direct',
+          mediaIds: uploaded?.id ? [uploaded.id] : [],
           inReplyToId: lastReplyStatusId || null,
         });
         if (created?.id) lastReplyStatusId = created.id;
+        stagedFile = null;
+        if (fileInput) fileInput.value = '';
+        syncAttachmentUi();
         input.value = '';
         syncInputState();
         if (streamEl.querySelector('.empty-state, .loading-state-card')) streamEl.replaceChildren();
@@ -568,6 +648,7 @@ export function mountDirectMessageThread(containerEl, { convo, onBack, onMessage
           buildDmBubbleRow({
             isMe: true,
             text,
+            media: created?.media?.length ? created.media : (uploaded ? [uploaded] : []),
             timestamp: created?.createdAt || Date.now(),
           })
         );
@@ -575,7 +656,7 @@ export function mountDirectMessageThread(containerEl, { convo, onBack, onMessage
       }
       onMessageSent?.(convo);
     } catch (err) {
-      showAlert('Message Failed', err?.message || 'Unable to send direct message.');
+      showAlert('Message Failed', describeFetchError(err, 'Unable to send direct message.'));
     } finally {
       if (!threadDestroyed) sendBtn.disabled = false;
     }
@@ -623,6 +704,8 @@ export function mountMessagesScreen(containerEl, {
   let fediConvos = [];
   let bskyConvos = [];
   let dmLoading = false;
+  let bskyLogCursor = '';
+  let dmPollInFlight = false;
   let cachedPrograms = [];
   const sessionsByProgram = new Map();
   let activeProgId = currentProgramId || connectionStore.get().activeProgram || 'sebile';
@@ -807,8 +890,8 @@ export function mountMessagesScreen(containerEl, {
     if (activeTab === 'direct' && !activeDirectConvo && !destroyed) renderView();
   }
 
-  async function refreshLists() {
-    dmLoading = true;
+  async function refreshLists({ silent = false, skipBskyConvos = false } = {}) {
+    if (!silent) dmLoading = true;
     try {
       const [progsFromStore, fediAuth, bskyAuth] = await Promise.all([
         getCachedProgramsDirectory().catch(() => []),
@@ -846,34 +929,51 @@ export function mountMessagesScreen(containerEl, {
       }
 
       if (bskyAuth) {
-        tasks.push(
-          listBskyConvos({
-            serviceUrl: bskyAuth.meta.serviceUrl,
-            accessJwt: bskyAuth.secrets.accessJwt,
-            refreshJwt: bskyAuth.secrets.refreshJwt,
-            onSessionRefreshed: (tok) => updateAccountTokens(bskyAuth.meta.id, tok),
-          })
-            .then((data) => {
-              bskyConvos = (data?.convos || []).map((c) => {
-                const peer = (c.members || []).find((m) => m.did !== bskyAuth.meta.did) || c.members?.[0];
-                return {
-                  kind: 'human',
-                  network: 'bluesky',
-                  id: c.id,
-                  displayName: peer?.displayName || peer?.handle || 'Bluesky DM',
-                  handle: peer?.handle || '',
-                  avatar: peer?.avatar || '',
-                  snippet: c.lastMessage?.text || '',
-                  unread: (c.unreadCount || 0) > 0,
-                  status: c.status || 'accepted',
-                  rawConvo: c,
-                };
-              });
+        if (!skipBskyConvos) {
+          tasks.push(
+            listBskyConvos({
+              serviceUrl: bskyAuth.meta.serviceUrl,
+              accessJwt: bskyAuth.secrets.accessJwt,
+              refreshJwt: bskyAuth.secrets.refreshJwt,
+              onSessionRefreshed: (tok) => updateAccountTokens(bskyAuth.meta.id, tok),
             })
-            .catch(() => {})
-        );
+              .then((data) => {
+                bskyConvos = (data?.convos || []).map((c) => {
+                  const peer = (c.members || []).find((m) => m.did !== bskyAuth.meta.did) || c.members?.[0];
+                  return {
+                    kind: 'human',
+                    network: 'bluesky',
+                    id: c.id,
+                    displayName: peer?.displayName || peer?.handle || 'Bluesky DM',
+                    handle: peer?.handle || '',
+                    avatar: peer?.avatar || '',
+                    snippet: c.lastMessage?.text || '',
+                    unread: (c.unreadCount || 0) > 0,
+                    status: c.status || 'accepted',
+                    rawConvo: c,
+                  };
+                });
+              })
+              .catch(() => {})
+          );
+        }
+        if (!bskyLogCursor) {
+          tasks.push(
+            getBskyConvoLog({
+              serviceUrl: bskyAuth.meta.serviceUrl,
+              accessJwt: bskyAuth.secrets.accessJwt,
+              refreshJwt: bskyAuth.secrets.refreshJwt,
+              onSessionRefreshed: (tok) => updateAccountTokens(bskyAuth.meta.id, tok),
+            })
+              .then((res) => {
+                if (res?.cursor) bskyLogCursor = String(res.cursor);
+              })
+              .catch(() => {})
+          );
+        }
       } else {
         bskyConvos = [];
+        bskyLogCursor = '';
       }
 
       if (getProgramsDirectory().length > 0 && sessionsByProgram.size === 0) {
@@ -882,7 +982,45 @@ export function mountMessagesScreen(containerEl, {
       await Promise.all(tasks);
     } finally {
       dmLoading = false;
-      if (!destroyed) renderView();
+      if (
+        !destroyed
+        && (!silent || (!renamingSessionKey && !(activeDirectConvo && typeof onOpenDirectConvo !== 'function')))
+      ) {
+        renderView();
+      }
+    }
+  }
+
+  async function pollDirectMessages() {
+    if (destroyed || dmPollInFlight || doc.visibilityState === 'hidden') return;
+    dmPollInFlight = true;
+    try {
+      const [fediAuth, bskyAuth] = await Promise.all([
+        getAuthenticatedAccount('fediverse').catch(() => null),
+        getAuthenticatedAccount('bluesky').catch(() => null),
+      ]);
+      if (destroyed || (!fediAuth && !bskyAuth)) return;
+      let bskyChanged = Boolean(bskyAuth);
+      if (bskyAuth && bskyLogCursor) {
+        const logRes = await getBskyConvoLog({
+          serviceUrl: bskyAuth.meta.serviceUrl,
+          accessJwt: bskyAuth.secrets.accessJwt,
+          refreshJwt: bskyAuth.secrets.refreshJwt,
+          onSessionRefreshed: (tok) => updateAccountTokens(bskyAuth.meta.id, tok),
+          cursor: bskyLogCursor,
+        }).catch(() => null);
+        if (logRes && Array.isArray(logRes.logs)) {
+          if (logRes.cursor) bskyLogCursor = String(logRes.cursor);
+          bskyChanged = logRes.logs.length > 0;
+        }
+      }
+      if (!fediAuth && !bskyChanged) return;
+      await refreshLists({ silent: true, skipBskyConvos: Boolean(bskyAuth && !bskyChanged) });
+      if (!destroyed && inlineDmHandle?.refresh && (fediAuth || bskyChanged)) {
+        await inlineDmHandle.refresh().catch?.(() => {});
+      }
+    } finally {
+      dmPollInFlight = false;
     }
   }
 
@@ -1039,9 +1177,18 @@ export function mountMessagesScreen(containerEl, {
       row.dataset.programId = sess.programId;
       row.dataset.sessionId = sess.id;
 
-      const rowMain = doc.createElement(isRenaming ? 'div' : 'button');
-      if (!isRenaming) rowMain.type = 'button';
+      const rowMain = doc.createElement('div');
       rowMain.className = 'convo-row-main';
+      if (!isRenaming) {
+        rowMain.setAttribute('role', 'button');
+        rowMain.tabIndex = 0;
+        rowMain.addEventListener('keydown', (e) => {
+          if (e.target === rowMain && (e.key === 'Enter' || e.key === ' ')) {
+            e.preventDefault();
+            rowMain.click();
+          }
+        });
+      }
 
       const avatarWrap = doc.createElement('div');
       avatarWrap.className = 'convo-avatar-wrap';
@@ -1113,10 +1260,23 @@ export function mountMessagesScreen(containerEl, {
         subtitleEl.className = 'post-author-handle convo-session-subtitle';
         subtitleEl.textContent = sess.is_group ? 'Group' : sess.title;
 
+        const renameBtn = doc.createElement('button');
+        renameBtn.type = 'button';
+        renameBtn.className = 'row-icon-btn convo-rename-btn';
+        renameBtn.title = 'Rename chat';
+        renameBtn.setAttribute('aria-label', `Rename ${sess.programName} — ${sess.title}`);
+        renameBtn.disabled = !isOnline;
+        renameBtn.innerHTML = EDIT_ICON_SVG;
+        renameBtn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          renamingSessionKey = sessionKey;
+          renderView();
+        });
+
         const timeEl = doc.createElement('span');
         timeEl.className = 'convo-time';
         timeEl.textContent = formatSessionTime(sess.updated_at);
-        topLine.append(titleEl, subtitleEl, timeEl);
+        topLine.append(titleEl, subtitleEl, renameBtn, timeEl);
 
         rowMain.addEventListener('click', () => {
           activeProgId = sess.programId;
@@ -1137,19 +1297,6 @@ export function mountMessagesScreen(containerEl, {
 
       const rowActions = doc.createElement('div');
       rowActions.className = 'row-icon-actions';
-
-      const renameBtn = doc.createElement('button');
-      renameBtn.type = 'button';
-      renameBtn.className = 'row-icon-btn';
-      renameBtn.title = 'Rename chat';
-      renameBtn.setAttribute('aria-label', `Rename ${sess.programName} — ${sess.title}`);
-      renameBtn.disabled = !isOnline;
-      renameBtn.innerHTML = EDIT_ICON_SVG;
-      renameBtn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        renamingSessionKey = sessionKey;
-        renderView();
-      });
 
       const isDefault = sess.id === 'default';
       const delSessBtn = doc.createElement('button');
@@ -1182,7 +1329,7 @@ export function mountMessagesScreen(containerEl, {
         });
       });
 
-      rowActions.append(renameBtn, delSessBtn);
+      rowActions.append(delSessBtn);
       row.append(rowMain, rowActions);
       sessionsHost.appendChild(row);
     }
@@ -1191,8 +1338,49 @@ export function mountMessagesScreen(containerEl, {
     return focusRenameEl;
   }
 
+  async function markDirectConvoRead(convo) {
+    if (!convo) return;
+    const wasUnread = Boolean(convo.unread || (convo.unreadCount && convo.unreadCount > 0));
+    convo.unread = false;
+    convo.unreadCount = 0;
+    const list = convo.network === 'bluesky' ? bskyConvos : fediConvos;
+    for (const item of list) {
+      if (item.id === convo.id) {
+        item.unread = false;
+        item.unreadCount = 0;
+      }
+    }
+    if (!wasUnread || !convo.id) return;
+    try {
+      if (convo.network === 'bluesky') {
+        const bsky = await getAuthenticatedAccount('bluesky');
+        if (bsky?.secrets?.accessJwt) {
+          await updateBskyConvoRead({
+            serviceUrl: bsky.meta.serviceUrl,
+            accessJwt: bsky.secrets.accessJwt,
+            refreshJwt: bsky.secrets.refreshJwt,
+            onSessionRefreshed: (tok) => updateAccountTokens(bsky.meta.id, tok),
+            convoId: convo.id,
+          });
+        }
+      } else if (convo.network === 'fediverse') {
+        const fedi = await getAuthenticatedAccount('fediverse');
+        if (fedi?.secrets?.accessToken) {
+          await markConversationRead({
+            instanceUrl: fedi.meta.instanceUrl,
+            accessToken: fedi.secrets.accessToken,
+            conversationId: convo.id,
+          });
+        }
+      }
+    } catch {
+      // Non-blocking read receipt
+    }
+  }
+
   function activateDirectConversation(convo) {
     if (!convo) return;
+    void markDirectConvoRead(convo);
     selectedDirectKey = getDirectConvoKey(convo);
     if (typeof onOpenDirectConvo === 'function') {
       activeDirectConvo = null;
@@ -1253,7 +1441,7 @@ export function mountMessagesScreen(containerEl, {
       try {
         await startDirectConversation(raw);
       } catch (err) {
-        showAlert('Direct Message Failed', err?.message || 'Unable to start conversation.');
+        showAlert('Direct Message Failed', describeFetchError(err, 'Unable to start conversation.'));
       } finally {
         startDmBtn.disabled = false;
       }
@@ -1269,8 +1457,8 @@ export function mountMessagesScreen(containerEl, {
         if (!q) return [];
         const matches = [];
         for (const c of [...fediConvos, ...bskyConvos]) {
-          const acct = String(c?.peerAcct || c?.peerHandle || '').replace(/^@/, '');
-          const name = String(c?.peerName || '');
+          const acct = String(c?.peerAcct || c?.peerHandle || c?.handle || c?.acct || '').replace(/^@/, '');
+          const name = String(c?.peerName || c?.displayName || '');
           if (!acct) continue;
           if (acct.toLowerCase().includes(q) || name.toLowerCase().includes(q)) {
             matches.push({
@@ -1342,7 +1530,7 @@ export function mountMessagesScreen(containerEl, {
         try {
           await startDirectConversation(item.value);
         } catch (err) {
-          showAlert('Direct Message Failed', err?.message || 'Unable to start conversation.');
+          showAlert('Direct Message Failed', describeFetchError(err, 'Unable to start conversation.'));
         } finally {
           startDmBtn.disabled = false;
         }
@@ -1368,9 +1556,10 @@ export function mountMessagesScreen(containerEl, {
     for (const convo of humanPool) {
       const convoKey = getDirectConvoKey(convo);
       const isSelected = Boolean(selectedDirectKey && convoKey === selectedDirectKey);
+      const isUnread = Boolean(convo.unread || (convo.unreadCount && convo.unreadCount > 0));
       const rowBtn = doc.createElement('button');
       rowBtn.type = 'button';
-      rowBtn.className = `convo-row convo-row--human${isSelected ? ' is-selected' : ''}`;
+      rowBtn.className = `convo-row convo-row--human${isSelected ? ' is-selected' : ''}${isUnread ? ' is-unread' : ''}`;
 
       const avatarWrap = doc.createElement('div');
       avatarWrap.className = 'convo-avatar-wrap';
@@ -1379,6 +1568,12 @@ export function mountMessagesScreen(containerEl, {
       img.src = convo.avatar || DEFAULT_AVATAR_DATA_URI;
       img.alt = convo.displayName;
       avatarWrap.appendChild(img);
+      if (isUnread) {
+        const badge = doc.createElement('span');
+        badge.className = 'convo-badge';
+        badge.setAttribute('aria-label', 'Unread');
+        avatarWrap.appendChild(badge);
+      }
 
       const bodyCol = doc.createElement('div');
       bodyCol.className = 'convo-body';
@@ -1691,7 +1886,7 @@ export function mountMessagesScreen(containerEl, {
         });
       });
 
-      actions.append(paletteBtn, editBtn, deleteBtn);
+      actions.append(editBtn, paletteBtn, deleteBtn);
       card.append(mainBtn, actions);
       rosterHost.appendChild(card);
     }
@@ -1790,10 +1985,20 @@ export function mountMessagesScreen(containerEl, {
     void loadAllProgramSessions();
   }
   void refreshLists();
+  const dmPollTimer = setInterval(() => {
+    if (!destroyed) void pollDirectMessages();
+  }, 60_000);
+  dmPollTimer?.unref?.();
+  const onVisibilityDmCheck = () => {
+    if (doc.visibilityState === 'visible' && !destroyed) {
+      void pollDirectMessages();
+    }
+  };
+  doc.addEventListener?.('visibilitychange', onVisibilityDmCheck);
   renderView();
   if (initialDirectRecipient) {
     void startDirectConversation(initialDirectRecipient).catch((err) => {
-      showAlert('Direct Message Failed', err?.message || 'Unable to open direct conversation.');
+      showAlert('Direct Message Failed', describeFetchError(err, 'Unable to open direct conversation.'));
     });
   }
 
@@ -1814,11 +2019,16 @@ export function mountMessagesScreen(containerEl, {
     },
     openDirectRecipient(target) {
       return startDirectConversation(target).catch((err) => {
-        showAlert('Direct Message Failed', err?.message || 'Unable to open direct conversation.');
+        showAlert('Direct Message Failed', describeFetchError(err, 'Unable to open direct conversation.'));
       });
+    },
+    pollNow() {
+      return pollDirectMessages();
     },
     destroy() {
       destroyed = true;
+      clearInterval(dmPollTimer);
+      doc.removeEventListener?.('visibilitychange', onVisibilityDmCheck);
       destroyInlineDm();
       unsubConn();
       unsubAuth();
