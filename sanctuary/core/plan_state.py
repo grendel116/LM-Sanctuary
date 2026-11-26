@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 _GENERIC_HEADINGS = frozenset({
@@ -216,6 +217,77 @@ def record_tool_ledger(meta: dict[str, Any], results: list[tuple[str, dict[str, 
                 _append_ledger(cs, f"Command failed: `{cmd}` ({detail})")
 
 
+_CHECKPOINT_TRIGGER_RATIO = 0.5
+_CHECKPOINT_MAX_CHARS = 4000
+
+
+def _is_turn_artifact(msg: dict[str, Any]) -> bool:
+    msg_id = str(msg.get("id") or "")
+    return msg_id.startswith(("itm_", "tool_")) or str(msg.get("text") or "").startswith("[Tool Response from")
+
+
+def select_checkpoint_span(history: list[dict[str, Any]], budget_chars: int) -> list[int]:
+    """Indices of current-turn tool-loop messages to compact once they fill half the budget; the newest exchange stays verbatim."""
+    user_idx = next(
+        (
+            i
+            for i in range(len(history) - 1, -1, -1)
+            if isinstance(history[i], dict)
+            and history[i].get("role") == "user"
+            and not _is_turn_artifact(history[i])
+        ),
+        -1,
+    )
+    if user_idx < 0:
+        return []
+    loop = [
+        i
+        for i in range(user_idx + 1, len(history))
+        if isinstance(history[i], dict) and not history[i].get("compacted")
+    ]
+    total = sum(len(str(history[i].get("text") or "")) for i in loop)
+    if total < budget_chars * _CHECKPOINT_TRIGGER_RATIO:
+        return []
+    last_itm = next((i for i in reversed(loop) if str(history[i].get("id") or "").startswith("itm_")), -1)
+    span = [i for i in loop if i < last_itm]
+    return span if len(span) >= 3 else []
+
+
+def build_checkpoint_messages(
+    task: str, span_msgs: list[dict[str, Any]], max_input_chars: int = 60000
+) -> list[dict[str, str]]:
+    """Build system/user prompt messages to summarize a tool-loop span into a progress checkpoint."""
+    tool_count = sum(1 for m in span_msgs if not str(m.get("id") or "").startswith("itm_")) or 1
+    per_tool = max(1500, max_input_chars // tool_count)
+    parts: list[str] = []
+    for m in span_msgs:
+        text = str(m.get("text") or "").strip()
+        if str(m.get("id") or "").startswith("itm_"):
+            calls = [
+                f"{tc.get('name')}({json.dumps(tc.get('args') or {}, ensure_ascii=False)[:300]})"
+                for tc in (m.get("tool_calls") or [])
+                if isinstance(tc, dict) and tc.get("type") == "call"
+            ]
+            line = " ".join(x for x in (text, ("Called: " + "; ".join(calls)) if calls else "") if x)
+            if line:
+                parts.append(f"[Agent] {line}")
+        elif text:
+            parts.append(text if len(text) <= per_tool else f"{text[:per_tool]}\n... [truncated {len(text) - per_tool} chars]")
+    system = (
+        "You are compacting the working memory of a coding agent in the middle of a task. The steps below will be deleted; "
+        "the agent continues from your PROGRESS CHECKPOINT alone. Use these sections: Goal; Key findings (exact file paths with "
+        "line numbers, function/variable names, and short verbatim code lines the upcoming edits need); Done so far (edits made, "
+        "commands run and their results); Ruled out; Next steps. Be concrete and terse. Stay under 2500 characters."
+    )
+    user = f"Task:\n{(task or '').strip()[:2000]}\n\nSteps to compact:\n\n" + "\n\n".join(parts)
+    return [{"role": "system", "content": system}, {"role": "user", "content": user}]
+
+
+def record_checkpoint(meta: dict[str, Any], text: str) -> None:
+    """Persist the latest coding progress checkpoint in session coding_state."""
+    meta.setdefault("coding_state", {})["checkpoint"] = str(text or "").strip()[:_CHECKPOINT_MAX_CHARS]
+
+
 def format_coding_state_block(meta: dict[str, Any] | None, include_ledger_only: bool = False) -> str:
     cs = (meta or {}).get("coding_state") or {}
     if not isinstance(cs, dict):
@@ -233,4 +305,7 @@ def format_coding_state_block(meta: dict[str, Any] | None, include_ledger_only: 
     ledger = cs.get("ledger") or []
     if ledger and (active or include_ledger_only):
         blocks.append("# RECENT WORK LEDGER\n" + "\n".join(f"- {item}" for item in ledger[-10:]))
+    checkpoint = str(cs.get("checkpoint") or "").strip()
+    if checkpoint and (active or include_ledger_only):
+        blocks.append("# CODING PROGRESS CHECKPOINT (earlier steps compacted)\n" + checkpoint)
     return "\n\n".join(blocks)

@@ -430,13 +430,16 @@ class OsHistoryAdapter:
         # They are computed once per turn so every tool-loop pass shares the same prefix.
         if self._cached_post_injection is None:
             self._cached_post_injection = self._build_post_injection(
-                history, filtered_history, latest_user_idx, active_prog, story_active, rag_context, turn_directive
+                history, filtered_history, latest_user_idx, active_prog, story_active, rag_context, ""
             )
+        post_injection = self._cached_post_injection
+        if turn_directive:
+            post_injection = f"{post_injection}\n\n{turn_directive}" if post_injection else turn_directive
 
         msgs = self._build_tiered_messages(
             system_content=system_content,
             raw_messages=raw_messages,
-            post_injection=self._cached_post_injection,
+            post_injection=post_injection,
             in_tool_loop=in_tool_loop,
             cloud_gear=cloud_gear,
         )

@@ -224,6 +224,21 @@ class TestTransmissionAndTwoStrikeRule(unittest.TestCase):
         itm_summary = next(m["content"] for m in cloud_msgs if "Called read_file" in str(m.get("content")))
         self.assertNotIn("[read_file(", itm_summary)
 
+    def test_turn_directive_updates_across_iterations_without_stale_cache(self) -> None:
+        runner = BaseProgramRunner.__new__(BaseProgramRunner)
+        runner.sessions_history = {
+            "s_dir": [{"id": "usr_1", "role": "user", "text": "Fix the bug"}],
+        }
+        runner._get_memory_meta = lambda sid: {"last_summarized_turn": 0}
+        adapter = OsHistoryAdapter(runner, "s_dir", None, None, None)
+
+        msgs_a = adapter.get_openai_messages("sys", "", turn_directive="DIRECTIVE-A", cloud_gear=True)
+        msgs_b = adapter.get_openai_messages("sys", "", turn_directive="DIRECTIVE-B", cloud_gear=True)
+        last_user_b = next(m["content"] for m in reversed(msgs_b) if m.get("role") == "user")
+        self.assertIn("DIRECTIVE-B", str(last_user_b))
+        self.assertNotIn("DIRECTIVE-A", str(last_user_b))
+        self.assertIn("DIRECTIVE-A", str(msgs_a[-1]["content"]))
+
     def test_xml_tool_call_extraction_truncation_and_prior_turn_recovery(self) -> None:
         # Complete GLM XML tool_call block is extracted cleanly
         raw_ok = (

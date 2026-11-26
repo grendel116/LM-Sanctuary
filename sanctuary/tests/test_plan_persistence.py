@@ -13,10 +13,13 @@ if str(SANCTUARY_DIR) not in sys.path:
 from adapters.history_adapters import OsHistoryAdapter  # noqa: E402
 from core.plan_state import (  # noqa: E402
     activate_plan,
+    build_checkpoint_messages,
     extract_plan_steps,
     format_coding_state_block,
     has_active_plan,
+    record_checkpoint,
     record_tool_ledger,
+    select_checkpoint_span,
     stage_plan,
 )
 from core.transmission import TransmissionController  # noqa: E402
@@ -178,6 +181,70 @@ class PlanPersistenceTests(unittest.TestCase):
         block = format_coding_state_block(meta, include_ledger_only=True)
         self.assertIn("# RECENT WORK LEDGER", block)
         self.assertIn("echo 14", block)
+
+    def test_select_checkpoint_span_and_prompt_builder(self):
+        history = [
+            {"id": "u_1", "role": "user", "text": "Fix X"},
+            {"id": "itm_1", "role": "program", "text": "", "tool_calls": [{"type": "call", "name": "read_file", "args": {"path": "a.js"}}]},
+            {"id": "tool_1", "role": "user", "text": "[Tool Response from read_file]:\n" + ("x" * 30000)},
+            {"id": "itm_2", "role": "program", "text": "", "tool_calls": [{"type": "call", "name": "read_file", "args": {"path": "b.js"}}]},
+            {"id": "tool_2", "role": "user", "text": "[Tool Response from read_file]:\n" + ("y" * 30000)},
+            {"id": "itm_3", "role": "program", "text": "", "tool_calls": [{"type": "call", "name": "grep_search", "args": {"query": "foo"}}]},
+            {"id": "tool_3", "role": "user", "text": "[Tool Response from grep_search]:\nok"},
+        ]
+        self.assertEqual(select_checkpoint_span(history, 100000), [1, 2, 3, 4])
+        self.assertEqual(select_checkpoint_span(history, 200000), [])
+        msgs = build_checkpoint_messages("Fix X", [history[i] for i in (1, 2, 3, 4)])
+        self.assertIn("read_file(", msgs[1]["content"])
+        self.assertIn("Task:\nFix X", msgs[1]["content"])
+
+    def test_format_coding_state_block_includes_checkpoint_when_coding(self):
+        meta = {}
+        record_checkpoint(meta, "Goal: fix X")
+        block = format_coding_state_block(meta, include_ledger_only=True)
+        self.assertIn("# CODING PROGRESS CHECKPOINT", block)
+        self.assertIn("Goal: fix X", block)
+        self.assertEqual(format_coding_state_block(meta, include_ledger_only=False), "")
+
+    def test_checkpoint_coding_progress_compacts_history_and_persists_meta(self):
+        import asyncio
+        from unittest import mock
+
+        with tempfile.TemporaryDirectory() as tmp:
+            runner = _TestRunner(tmp)
+            sid = "s"
+            runner._loaded_sessions.add(sid)
+            runner.sessions_program[sid] = "sebile"
+            runner.sessions_history[sid] = [
+                {"id": "u_1", "role": "user", "text": "Fix X"},
+                {"id": "itm_1", "role": "program", "text": "", "tool_calls": [{"type": "call", "name": "read_file", "args": {"path": "a.js"}}]},
+                {"id": "tool_1", "role": "user", "text": "[Tool Response from read_file]:\n" + ("x" * 30000)},
+                {"id": "itm_2", "role": "program", "text": "", "tool_calls": [{"type": "call", "name": "read_file", "args": {"path": "b.js"}}]},
+                {"id": "tool_2", "role": "user", "text": "[Tool Response from read_file]:\n" + ("y" * 30000)},
+                {"id": "itm_3", "role": "program", "text": "", "tool_calls": [{"type": "call", "name": "grep_search", "args": {"query": "foo"}}]},
+                {"id": "tool_3", "role": "user", "text": "[Tool Response from grep_search]:\nok"},
+            ]
+
+            class _StubAdapter:
+                CHARS_PER_TOKEN = 3.5
+
+                def _get_max_input_tokens(self, in_tool_loop=False, cloud_gear=False):
+                    return 20000
+
+            with mock.patch("core.greenpt_client.chat_completion_step", return_value={"content": "Goal: fix X\nFindings: a.js:12", "tool_calls": []}):
+                ok = asyncio.run(
+                    runner._checkpoint_coding_progress(sid, _StubAdapter(), "Fix X", use_cloud=True, sensitive=False)
+                )
+
+            self.assertTrue(ok)
+            hist = runner.sessions_history[sid]
+            self.assertTrue(hist[1]["id"].startswith("tool_ckpt_"))
+            self.assertIn("Findings: a.js:12", hist[1]["text"])
+            for idx in (2, 3, 4, 5):
+                self.assertTrue(hist[idx].get("compacted"))
+            for idx in (6, 7):
+                self.assertFalse(hist[idx].get("compacted"))
+            self.assertTrue(runner._get_memory_meta(sid)["coding_state"]["checkpoint"].startswith("Goal"))
 
 
 if __name__ == "__main__":

@@ -831,7 +831,7 @@ def chat_completion_step(
     body = resp.json() if resp.content else {}
     choices = body.get("choices") or []
     if not choices:
-        return {"content": "", "tool_calls": [], "model": chosen_model, "truncated_tool_call": False}
+        return {"content": "", "tool_calls": [], "model": chosen_model, "truncated_tool_call": False, "finish_reason": ""}
 
     finish_reason = str(choices[0].get("finish_reason") or "").lower()
     msg = choices[0].get("message") or {}
@@ -879,6 +879,7 @@ def chat_completion_step(
         "tool_calls": parsed_tcs,
         "model": chosen_model,
         "truncated_tool_call": truncated_tool_call,
+        "finish_reason": finish_reason,
     }
 
 

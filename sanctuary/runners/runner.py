@@ -511,6 +511,79 @@ class BaseProgramRunner:
             meta["recent_chapters"] = meta["recent_chapters"][-2:]
         return meta
 
+    async def _checkpoint_coding_progress(
+        self, session_id: str, adapter: OsHistoryAdapter, task_text: str, *, use_cloud: bool, sensitive: bool
+    ) -> bool:
+        """Compact older tool-loop steps of the current coding turn into a progress checkpoint before the window overflows."""
+        try:
+            from core.plan_state import build_checkpoint_messages, record_checkpoint, select_checkpoint_span
+
+            budget_fn = getattr(adapter, "_get_max_input_tokens", None)
+            if not callable(budget_fn):
+                return False
+            budget_chars = int(budget_fn(in_tool_loop=True, cloud_gear=use_cloud) * getattr(adapter, "CHARS_PER_TOKEN", 3.5))
+            with self._lock:
+                history = self.sessions_history.get(session_id, [])
+                span = select_checkpoint_span(history, budget_chars)
+                if not span:
+                    return False
+                span_msgs = [dict(history[i]) for i in span]
+            prompt = build_checkpoint_messages(task_text, span_msgs, max_input_chars=min(60000, budget_chars // 2))
+            if use_cloud:
+                from core import greenpt_client
+
+                loop = asyncio.get_running_loop()
+                step = await loop.run_in_executor(
+                    None,
+                    lambda: greenpt_client.chat_completion_step(
+                        prompt, tier="fast", temperature=0.2, max_tokens=1500, sensitive=sensitive, timeout=60.0
+                    ),
+                )
+                summary = str(step.get("content") or "")
+            else:
+                from variables.settings import DISABLED_THINKING
+
+                payload = {"messages": prompt, "temperature": 0.2, "max_tokens": 1200, "cache_prompt": False}
+                if isinstance(DISABLED_THINKING, dict):
+                    payload.update(DISABLED_THINKING)
+                resp = await self._post_llm_request(
+                    LOCAL_SERVER_URL, payload, get_local_server_headers(), timeout=120.0, session_id=session_id
+                )
+                summary = resp.json()["choices"][0]["message"].get("content", "") if resp.status_code == 200 else ""
+            summary = self._sanitize_thinking_tags(summary).strip()
+            if not summary:
+                return False
+            ids = {m.get("id") for m in span_msgs if m.get("id")}
+            with self._lock:
+                history = self.sessions_history.get(session_id, [])
+                first_idx = None
+                for i, m in enumerate(history):
+                    if isinstance(m, dict) and m.get("id") in ids:
+                        m["compacted"] = True
+                        if first_idx is None:
+                            first_idx = i
+                if first_idx is None:
+                    return False
+                history.insert(
+                    first_idx,
+                    {
+                        "id": f"tool_ckpt_{uuid.uuid4().hex}",
+                        "role": "user",
+                        "text": f"[Progress checkpoint: earlier steps of this task were compacted]\n{summary}",
+                        "tool_calls": [],
+                        "timestamp": time.time(),
+                    },
+                )
+                record_checkpoint(self._get_memory_meta(session_id), summary)
+            save = getattr(self, "_save_session_to_disk", None)
+            if callable(save):
+                save(session_id)
+            print(f"[Checkpoint] Compacted {len(ids)} tool-loop messages into a {len(summary)}-char progress checkpoint.", flush=True)
+            return True
+        except Exception as exc:
+            print(f"[Checkpoint] Skipped ({type(exc).__name__}: {exc})", flush=True)
+            return False
+
     async def _post_llm_request(
         self,
         url: str,
@@ -955,6 +1028,35 @@ class BaseProgramRunner:
                 turn_directive=eff_directive,
                 cloud_gear=(shift.gear != "park"),
             )
+            if (
+                iteration == 1
+                and shift.gear == "park"
+                and not transmission.coding_engaged
+                and not active_story_mode
+                and not cloud_reason
+                and any(r.get("name") == "auto_programming" for r in (getattr(adapter, "matched_skill_records", None) or []))
+            ):
+                # The coding skill matched while the prompt was built: plan on the cloud gear instead of the slow local model.
+                transmission.coding_engaged = True
+                shift = transmission.shift(
+                    iteration=iteration,
+                    estimated_tokens=est_tokens,
+                    local_budget=adapter._get_chat_budget(),
+                    has_vision_attachment=has_vision_attachment,
+                    cloud_available=True,
+                )
+                eff_directive = (
+                    f"{turn_directive}\n\n{shift.directive}".strip()
+                    if shift.directive and turn_directive
+                    else (shift.directive or turn_directive)
+                )
+                messages = adapter.get_openai_messages(
+                    sys_instructions,
+                    rag_context,
+                    memory_context=memory_block,
+                    turn_directive=eff_directive,
+                    cloud_gear=(shift.gear != "park"),
+                )
             if is_proceed_turn and iteration == 1 and not approved_plan_md:
                 for hist_msg in reversed(messages):
                     if hist_msg.get("role") == "assistant":
@@ -1072,6 +1174,13 @@ class BaseProgramRunner:
                             f"reason={shift.reason} load={shift.engine_load}",
                             flush=True,
                         )
+                    elif not truncated_tool_call:
+                        print(
+                            f"[Transmission] Cloud gear returned an empty reply "
+                            f"(finish_reason={step_res.get('finish_reason') or 'none'}, model={step_res.get('model') or '?'}); "
+                            f"falling back to local LLM.",
+                            flush=True,
+                        )
                 except Exception as upscale_exc:
                     print(f"[Transmission] Cloud gear unavailable, falling back to local LLM ({upscale_exc})", flush=True)
 
@@ -1099,7 +1208,7 @@ class BaseProgramRunner:
                 except asyncio.CancelledError:
                     raise
                 except Exception as e:
-                    local_error_msg = f"Error: Could not connect to LLM ({e}). Ensure local llama-server is running."
+                    local_error_msg = f"Error: Could not connect to LLM ({type(e).__name__}: {e}). Ensure local llama-server is running."
 
                 # Automatic Park -> Cloud Failover when llama-server is unloaded/offline
                 if not bot_response_text and not cloud_reason:
@@ -1251,6 +1360,14 @@ class BaseProgramRunner:
 
                 adapter.append_assistant_message("", tool_calls, invocation_id, intermediate=True, speaker_id=speaker_id)
                 adapter.append_tool_events(results, invocation_id)
+                if transmission.coding_engaged and not active_story_mode:
+                    await self._checkpoint_coding_progress(
+                        session_id,
+                        adapter,
+                        new_message_text,
+                        use_cloud=(shift.gear != "park" and not cloud_reason),
+                        sensitive=bool(getattr(adapter, "has_sensitive_context", False)),
+                    )
 
                 continue
             elif truncated_tool_call and iteration < (18 if transmission.coding_engaged else max_iterations):
