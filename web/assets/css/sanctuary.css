@@ -847,6 +847,25 @@ button, input, select, textarea {
     transform: scale(1.15);
 }
 
+#auto-generate-user-btn.is-generating {
+    opacity: 1;
+    color: var(--primary-accent, #9370db);
+    cursor: progress;
+}
+#auto-generate-user-btn.is-generating svg {
+    display: none;
+}
+#auto-generate-user-btn.is-generating::after {
+    content: '';
+    width: 16px;
+    height: 16px;
+    box-sizing: border-box;
+    border: 2px solid currentColor;
+    border-right-color: transparent;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+}
+
 .send-btn {
     background: #2a2d35;
     color: #ffffff;

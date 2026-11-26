@@ -98,6 +98,7 @@ export function mountProgramThread(containerEl, {
   let attachedFilename = '';
   let attachedSharedPost = null;
   let generating = false;
+  let impersonating = false;
   let abortController = null;
   let activeTurnPromise = null;
   let activeCancelPromise = null;
@@ -306,8 +307,8 @@ export function mountProgramThread(containerEl, {
   impersonateBtn.id = 'auto-generate-user-btn';
   impersonateBtn.className = 'icon-btn';
   impersonateBtn.style.cssText = 'margin-left: -6px; margin-right: 8px; flex-shrink: 0;';
-  impersonateBtn.setAttribute('aria-label', 'Auto-Generate Response');
-  impersonateBtn.title = 'Auto-Generate Response';
+  impersonateBtn.setAttribute('aria-label', 'Impersonate');
+  impersonateBtn.title = 'Impersonate';
   impersonateBtn.innerHTML = IMPERSONATE_SVG;
 
   const textareaLbl = doc.createElement('label');
@@ -373,6 +374,10 @@ export function mountProgramThread(containerEl, {
   function syncPlaceholder() {
     if (connectionStore.get().mode === 'online' && sessionStore.get().vaultLocked) {
       textarea.placeholder = 'Unlock .kdbx vault to continue…';
+      return;
+    }
+    if (impersonating) {
+      textarea.placeholder = 'Writing your reply…';
       return;
     }
     textarea.placeholder = attachedSharedPost
@@ -475,11 +480,17 @@ export function mountProgramThread(containerEl, {
     moodHeart.setGeneratingPulse(generating);
     sendBtn.hidden = generating;
     stopBtn.hidden = !generating;
-    textarea.disabled = generating || locked;
-    sendBtn.disabled = locked;
-    attachBtn.disabled = locked;
-    portraitBtn.disabled = locked;
-    impersonateBtn.disabled = locked;
+    applyComposerLocks(locked);
+  }
+
+  function applyComposerLocks(locked) {
+    textarea.disabled = generating || impersonating || locked;
+    sendBtn.disabled = locked || impersonating;
+    attachBtn.disabled = locked || impersonating;
+    portraitBtn.disabled = locked || impersonating;
+    impersonateBtn.disabled = locked || impersonating;
+    impersonateBtn.classList.toggle('is-generating', impersonating);
+    impersonateBtn.setAttribute('aria-busy', impersonating ? 'true' : 'false');
   }
 
   function stopReattachedMonitor() {
@@ -1072,11 +1083,7 @@ export function mountProgramThread(containerEl, {
     );
 
     const locked = conn.mode === 'online' && Boolean(state.vaultLocked);
-    textarea.disabled = generating || locked;
-    sendBtn.disabled = locked;
-    attachBtn.disabled = locked;
-    portraitBtn.disabled = locked;
-    impersonateBtn.disabled = locked;
+    applyComposerLocks(locked);
 
     if (generating) {
       statusHost.replaceChildren();
@@ -1258,7 +1265,7 @@ export function mountProgramThread(containerEl, {
   }
 
   async function submitTurn() {
-    if (generating) return;
+    if (generating || impersonating) return;
     const text = textarea.value.trim();
     const stagedFile = attachedFile;
     const stagedPreviewUrl = attachedPreviewUrl;
@@ -1465,8 +1472,11 @@ export function mountProgramThread(containerEl, {
   });
 
   impersonateBtn.addEventListener('click', async () => {
-    if (connectionStore.get().mode !== 'online' || generating) return;
-    impersonateBtn.disabled = true;
+    if (connectionStore.get().mode !== 'online' || generating || impersonating) return;
+    const vaultLocked = () => connectionStore.get().mode === 'online' && Boolean(sessionStore.get().vaultLocked);
+    impersonating = true;
+    applyComposerLocks(vaultLocked());
+    syncPlaceholder();
     try {
       const res = await generateUserImpersonation({
         session_id: currentSessionId,
@@ -1477,7 +1487,12 @@ export function mountProgramThread(containerEl, {
         syncComposerHeight();
       }
     } finally {
-      impersonateBtn.disabled = false;
+      impersonating = false;
+      if (!destroyed) {
+        applyComposerLocks(vaultLocked());
+        syncPlaceholder();
+        textarea.focus?.();
+      }
     }
   });
 

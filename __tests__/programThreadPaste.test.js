@@ -564,3 +564,89 @@ test('programThread renders external http(s) media URLs without throwing cross-o
     dom.restore();
   }
 });
+
+test('impersonate locks composer and shows generating indicator while pending', async () => {
+  const dom = installMockDom();
+  const prevFetch = globalThis.fetch;
+  resetMemoryStorageForTests();
+  resetAuthStoreForTests();
+  resetOutboxForTests();
+  resetSessionStoreForTests();
+  resetConnectionStoreForTests();
+
+  const impDeferred = Promise.withResolvers();
+  globalThis.fetch = async (url, init = {}) => {
+    const u = String(url);
+    if (u.startsWith('data:') || u.startsWith('blob:')) return new Response('', { status: 200 });
+    if (u.endsWith('/select_program') || u.endsWith('/api/select_program')) {
+      return jsonResponse({ status: 'ok', active_program: 'sebile' });
+    }
+    if (u.includes('/history')) {
+      return jsonResponse({
+        active_program: 'sebile',
+        character_name: 'Sebile',
+        history: [
+          { id: 'm_1', role: 'program', sender_id: 'sebile', text: 'Ready.', timestamp: 100 },
+        ],
+      });
+    }
+    if (u.endsWith('/models')) return jsonResponse({ models: [{ value: 'local-llm', label: 'Local LLM' }] });
+    if (u.endsWith('/api/config')) return jsonResponse({ active_user: 'builder', program_moods: {} });
+    if (u.endsWith('/api/generate_user_message') && init.method === 'POST') {
+      return impDeferred.promise.then((reply) => jsonResponse(reply));
+    }
+    if (u.includes('/api/tool_status')) return jsonResponse({ pending: null });
+    return jsonResponse({});
+  };
+
+  let ctrl = null;
+  try {
+    connectionStore.set({
+      mode: 'online',
+      nodeUrl: 'http://127.0.0.1:5000',
+      activeProgram: 'sebile',
+      programs: [{ id: 'sebile', name: 'Sebile', theme: { primary_accent: '#38bdf8' } }],
+    });
+
+    const host = dom.document.createElement('div');
+    dom.document.body.appendChild(host);
+    ctrl = mountProgramThread(host, { programId: 'sebile', sessionId: 'default' });
+    await new Promise((r) => setTimeout(r, 30));
+
+    const textarea = host.querySelector('#user-input');
+    const sendBtn = host.querySelector('#send-btn');
+    const impBtn = host.querySelector('#auto-generate-user-btn');
+    assert.ok(impBtn, 'impersonate button is mounted');
+    assert.equal(impBtn.getAttribute('aria-label'), 'Impersonate');
+    assert.equal(impBtn.title, 'Impersonate');
+
+    impBtn.click();
+    await new Promise((r) => setTimeout(r, 10));
+
+    assert.equal(textarea.disabled, true, 'textarea is locked while impersonating');
+    assert.equal(sendBtn.disabled, true, 'send button is locked while impersonating');
+    assert.equal(impBtn.disabled, true, 'impersonate button is disabled while impersonating');
+    assert.equal(impBtn.classList.contains('is-generating'), true, 'impersonate button has is-generating class');
+    assert.equal(impBtn.getAttribute('aria-busy'), 'true', 'impersonate button sets aria-busy=true');
+    assert.equal(textarea.placeholder, 'Writing your reply…', 'textarea placeholder indicates generation');
+
+    impDeferred.resolve({ message: 'Drafted reply' });
+    await new Promise((r) => setTimeout(r, 20));
+
+    assert.equal(textarea.value, 'Drafted reply', 'textarea receives drafted reply');
+    assert.equal(textarea.disabled, false, 'textarea unlocks after impersonating');
+    assert.equal(sendBtn.disabled, false, 'send button unlocks after impersonating');
+    assert.equal(impBtn.disabled, false, 'impersonate button re-enables after impersonating');
+    assert.equal(impBtn.classList.contains('is-generating'), false, 'is-generating class is cleared');
+    assert.equal(impBtn.getAttribute('aria-busy'), 'false', 'aria-busy resets to false');
+  } finally {
+    ctrl?.destroy();
+    globalThis.fetch = prevFetch;
+    resetAuthStoreForTests();
+    resetOutboxForTests();
+    resetSessionStoreForTests();
+    resetConnectionStoreForTests();
+    resetMemoryStorageForTests();
+    dom.restore();
+  }
+});
