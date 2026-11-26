@@ -1058,6 +1058,15 @@ export function unlockKeePassXC(password = '', opts = {}) {
   });
 }
 
+export function recoverStaleEncryptedFiles(previousPassword, opts = {}) {
+  return requestNode('/api/keepassxc/recover-encrypted', {
+    method: 'POST',
+    json: { previousPassword },
+    timeoutMs: 30000,
+    ...opts,
+  });
+}
+
 export function lockKeePassXC(opts = {}) {
   return requestNode('/api/keepassxc/lock', { method: 'POST', timeoutMs: 5000, ...opts });
 }

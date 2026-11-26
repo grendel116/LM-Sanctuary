@@ -12,6 +12,7 @@ from cryptography.fernet import Fernet, InvalidToken
 from utils.social_vault import VaultLockedError, decrypt_data, encrypt_data
 
 _ENCRYPTED_PREFIX = b"LM_SANCTUARY_SESSION_V1\n"
+_PROTECTED_PATTERNS = ("*/sessions/*.json", "*/journals.json", "*/quest_log.json", "*/databank.json")
 
 
 def write_session_data(path: str | os.PathLike[str], data: Any) -> None:
@@ -41,13 +42,34 @@ def read_session_data(path: str | os.PathLike[str]) -> Any:
     return data
 
 
+def find_undecryptable_files(programs_dir: str | os.PathLike[str]) -> list[str]:
+    """Relative paths of encrypted program files the active vault key cannot decrypt (written under an older key)."""
+    root = Path(programs_dir)
+    stale: list[str] = []
+    for pattern in _PROTECTED_PATTERNS:
+        for path in sorted(root.glob(pattern)):
+            try:
+                raw = path.read_bytes()
+            except OSError:
+                continue
+            if not raw.startswith(_ENCRYPTED_PREFIX):
+                continue
+            try:
+                decrypt_data(raw[len(_ENCRYPTED_PREFIX):])
+            except InvalidToken:
+                stale.append(path.relative_to(root).as_posix())
+            except VaultLockedError:
+                return []
+    return stale
+
+
 def reencrypt_with_donor_keys(programs_dir: str | os.PathLike[str], donor_keys: list[bytes]) -> int:
     if not donor_keys:
         return 0
     root = Path(programs_dir)
     reencrypted = 0
     targets: list[Path] = []
-    for pattern in ("*/sessions/*.json", "*/journals.json", "*/quest_log.json", "*/databank.json"):
+    for pattern in _PROTECTED_PATTERNS:
         targets.extend(root.glob(pattern))
     for path in targets:
         try:
@@ -79,7 +101,7 @@ def migrate_session_files(programs_dir: str | os.PathLike[str]) -> tuple[int, li
     migrated = 0
     failures = []
     targets: list[Path] = []
-    for pattern in ("*/sessions/*.json", "*/journals.json", "*/quest_log.json", "*/databank.json"):
+    for pattern in _PROTECTED_PATTERNS:
         targets.extend(root.glob(pattern))
     for path in targets:
         try:

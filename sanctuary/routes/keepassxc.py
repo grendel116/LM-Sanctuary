@@ -104,9 +104,22 @@ def _sync_unlocked_vault_master_key(
     social_vault.enable_keepassxc_vault(db_hash)
 
 
+def _stale_encrypted_files() -> list[str]:
+    try:
+        import state as st
+        from utils.session_data import find_undecryptable_files
+
+        if not get_keepassxc_bridge().is_unlocked():
+            return []
+        return find_undecryptable_files(os.path.join(st.base_dir, "core", "programs"))
+    except Exception:
+        return []
+
+
 def _status_payload() -> dict:
     status = get_keepassxc_bridge().get_status()
     status["vault_mode"] = social_vault.get_vault_mode()
+    status["stale_encrypted_files"] = _stale_encrypted_files()
     return status
 
 
@@ -149,7 +162,7 @@ def _recover_donor_encrypted_files(
     password: str,
     previous_password: str = "",
     extra_paths: list[Path] | None = None,
-) -> None:
+) -> int:
     try:
         import state as st
         from utils.session_data import reencrypt_with_donor_keys
@@ -183,9 +196,10 @@ def _recover_donor_encrypted_files(
                     break
 
         if donor_keys:
-            reencrypt_with_donor_keys(os.path.join(st.base_dir, "core", "programs"), donor_keys)
+            return reencrypt_with_donor_keys(os.path.join(st.base_dir, "core", "programs"), donor_keys)
+        return 0
     except Exception:
-        pass
+        return 0
 
 
 def _sync_system_api_keys(*, migrate: bool = False, clear: bool = False) -> None:
@@ -258,6 +272,20 @@ def unlock():
     _clear_runner_session_cache()
     _sync_system_api_keys(migrate=True)
     return jsonify(_status_payload())
+
+
+@keepassxc_bp.route("/recover-encrypted", methods=["POST"])
+def recover_encrypted():
+    data = request.get_json(silent=True) or {}
+    prev_pw = str(data.get("previousPassword") or "")
+    if not prev_pw:
+        return jsonify({"error": "Previous vault password is required."}), 400
+    bridge = get_keepassxc_bridge()
+    if not bridge.is_unlocked():
+        raise KeePassXCLockedError("Unlock the vault before recovering files.")
+    recovered = _recover_donor_encrypted_files(bridge, password=prev_pw, previous_password=prev_pw)
+    _clear_runner_session_cache()
+    return jsonify({**_status_payload(), "recovered": recovered})
 
 
 @keepassxc_bp.route("/browse-file", methods=["POST"])

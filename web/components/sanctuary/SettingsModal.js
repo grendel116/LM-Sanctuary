@@ -18,6 +18,7 @@ import {
   lockKeePassXC,
   openKeePassXCFile,
   openModelsFolder,
+  recoverStaleEncryptedFiles,
   saveGenerationParams,
   saveKeePassXCLogin,
   saveProjectSettings,
@@ -113,6 +114,35 @@ function promptPreviousVaultPassword(onPreviousPassword) {
   );
 }
 
+function promptRecoverStaleFiles(files, onDone = null) {
+  const list = (files || []).slice(0, 6).join(', ');
+  return showPrompt(
+    'Recover Encrypted Files',
+    `${files.length} file(s) were encrypted under your previous vault key and cannot be read (${list}). Enter the master password of your previous Sanctuary vault (social/data/sanctuary.kdbx) to re-encrypt them with your current vault:`,
+    '',
+    async (prevPw) => {
+      if (!prevPw) return;
+      try {
+        const res = await recoverStaleEncryptedFiles(prevPw);
+        const left = Array.isArray(res?.stale_encrypted_files) ? res.stale_encrypted_files.length : 0;
+        if (res?.recovered > 0 && left === 0) {
+          showAlert('Files Recovered', `Recovered ${res.recovered} file(s).`);
+        } else {
+          showAlert(
+            'Recovery Incomplete',
+            `Recovered ${res?.recovered || 0} file(s); ${left} still use an unknown key. That password may not belong to the vault that encrypted them.`
+          );
+        }
+        await onDone?.(res);
+      } catch (err) {
+        showAlert('Recovery Failed', formatApiErrorMessage(err?.message, 'Could not recover files.'));
+      }
+    },
+    null,
+    { inputType: 'password', placeholder: 'Previous vault password', confirmLabel: 'Recover' }
+  );
+}
+
 /**
  * Lightweight 1-field master-password prompt for unlocking the .kdbx vault on demand.
  */
@@ -129,6 +159,9 @@ export function promptUnlockVault({
       await refreshKeePassStatus().catch(() => {});
       emitSanctuaryEvent('sanctuary:vault-changed', { unlocked: true });
       await onUnlocked?.(st);
+      if (!previousPassword && st?.stale_encrypted_files?.length) {
+        promptRecoverStaleFiles(st.stale_encrypted_files);
+      }
     } catch (err) {
       if (!previousPassword && isPreviousVaultPasswordNeeded(err)) {
         promptPreviousVaultPassword((prevPw) => attemptUnlock(pw, prevPw));
@@ -705,6 +738,12 @@ export function openSettingsModal({
           emitSanctuaryEvent('sanctuary:vault-changed', { unlocked: true });
           vaultFeedback = '';
           vaultFeedbackIsError = false;
+          if (!previousPassword && vaultStatus?.stale_encrypted_files?.length) {
+            promptRecoverStaleFiles(vaultStatus.stale_encrypted_files, async () => {
+              await refreshVaultState();
+              if (!closed && activeTab === 'project') renderProjectTab();
+            });
+          }
         } catch (err) {
           vaultFeedback = formatApiErrorMessage(err?.message, 'Failed to create vault.');
           vaultFeedbackIsError = true;
@@ -755,6 +794,12 @@ export function openSettingsModal({
           emitSanctuaryEvent('sanctuary:vault-changed', { unlocked: true });
           vaultFeedback = '';
           vaultFeedbackIsError = false;
+          if (!previousPassword && vaultStatus?.stale_encrypted_files?.length) {
+            promptRecoverStaleFiles(vaultStatus.stale_encrypted_files, async () => {
+              await refreshVaultState();
+              if (!closed && activeTab === 'project') renderProjectTab();
+            });
+          }
         } catch (err) {
           if (!previousPassword && isPreviousVaultPasswordNeeded(err)) {
             vaultBusy = false;
@@ -878,7 +923,30 @@ export function openSettingsModal({
         }
       });
 
-      vActions.append(openKeyBoxBtn, impBtn, expBtn, lockBtn);
+      const staleFiles = Array.isArray(vaultStatus?.stale_encrypted_files)
+        ? vaultStatus.stale_encrypted_files
+        : [];
+      let recoverBtn = null;
+      if (staleFiles.length > 0) {
+        recoverBtn = doc.createElement('button');
+        recoverBtn.type = 'button';
+        recoverBtn.id = 'recover-stale-files-btn';
+        recoverBtn.className = 'edit-btn';
+        recoverBtn.textContent = `Recover ${staleFiles.length} locked file(s)…`;
+        recoverBtn.disabled = vaultBusy;
+        recoverBtn.addEventListener('click', () => {
+          promptRecoverStaleFiles(staleFiles, async () => {
+            await refreshVaultState();
+            if (!closed && activeTab === 'project') renderProjectTab();
+          });
+        });
+      }
+
+      if (recoverBtn) {
+        vActions.append(openKeyBoxBtn, impBtn, expBtn, recoverBtn, lockBtn);
+      } else {
+        vActions.append(openKeyBoxBtn, impBtn, expBtn, lockBtn);
+      }
       vaultBlock.append(vDesc, vActions);
     }
 
