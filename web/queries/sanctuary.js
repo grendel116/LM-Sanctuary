@@ -695,19 +695,6 @@ export function saveProjectSettings(settings, opts = {}) {
   });
 }
 
-export function fetchOpenHandsServerStatus(opts = {}) {
-  return requestNode('/api/openhands/server', opts);
-}
-
-export function controlOpenHandsServer(action, opts = {}) {
-  return requestNode('/api/openhands/server', {
-    method: 'POST',
-    json: { action },
-    timeoutMs: 30000,
-    ...opts,
-  });
-}
-
 export function saveGenerationParams(temperature, opts = {}) {
   return requestNode('/api/save_generation_params', {
     method: 'POST',

@@ -174,16 +174,9 @@ def shutdown():
         pass
 
     try:
-        from tools import openhands_job
+        from core import openhands_harness
 
-        openhands_job.cancel_all_openhands_jobs(grace=0.3, timeout=1.5)
-    except Exception:
-        pass
-
-    try:
-        from runners import openhands_server
-
-        openhands_server.stop_openhands_server()
+        openhands_harness.cancel_all_coding_sessions()
     except Exception:
         pass
 

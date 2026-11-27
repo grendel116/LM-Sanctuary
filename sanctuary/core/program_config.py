@@ -429,54 +429,71 @@ def get_compiled_instructions() -> str:
     return base
 
 
-_DEFAULT_ROOT_CODE_DIRECTIVES = """<rules>
-# Directives of Dialectical Sources & Clean Architecture
-
-1. **Root Code Focus:**
-   Ground every decision in the concrete source conditions of the system—the raw binary structures, memory layouts, engine semantics, and actual data flow. Reject speculative assumptions and abstractions. Perform concrete analysis for simple logic conditions before acting.
-
-2. **Rejection of Capitalist Logic and Churn:**
-   Prioritize genuine user-value, structural integrity, and consolodation over specialization and velocity.
-
-3. **Affirmative Directives and Simplicity:**
-   Write direct, affirmative directives. Consolidated architecture is the governing principle. Act as a strict code minimalist. Less is more.
-</rules>"""
+_AGENTS_MD_CACHE: dict[str, tuple[float, str]] = {}
 
 
-def _read_global_coding_rules() -> str:
-    """Reads global AGENTS.md/GEMINI.md rules and strips optional YAML frontmatter and HTML comments."""
-    home = os.path.expanduser("~")
-    candidates = (
-        os.path.join(home, ".openhands", "AGENTS.md"),
-        os.path.join(home, ".agents", "AGENTS.md"),
-        os.path.join(home, ".gemini", "GEMINI.md"),
-    )
-    for global_path in candidates:
-        if not os.path.isfile(global_path):
+def _strip_frontmatter_and_html_comments(raw: str) -> str:
+    """Strip optional leading YAML frontmatter and HTML comments without regex."""
+    text = str(raw or "").strip()
+    if text.startswith("---"):
+        end_fm = text.find("\n---", 3)
+        if end_fm != -1:
+            text = text[end_fm + 4 :].strip()
+    while True:
+        c_start = text.find("<!--")
+        if c_start == -1:
+            break
+        c_end = text.find("-->", c_start + 4)
+        if c_end == -1:
+            break
+        text = (text[:c_start] + text[c_end + 3 :]).strip()
+    return text
+
+
+def load_agents_md(workspace_dir: str = "") -> str:
+    """Load the single workspace `AGENTS.md` (mtime-cached, zero regex), falling back to repo root if needed."""
+    candidates: list[str] = []
+    clean_ws = str(workspace_dir or "").strip()
+    if clean_ws:
+        candidates.append(os.path.join(clean_ws, "AGENTS.md"))
+    else:
+        try:
+            from tools import tools as tools_mod
+
+            ws_root, _, _ = tools_mod.resolve_coding_workspace("")
+            if ws_root:
+                candidates.append(os.path.join(ws_root, "AGENTS.md"))
+        except Exception:
+            pass
+
+    repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    candidates.append(os.path.join(repo_root, "AGENTS.md"))
+
+    for cand in candidates:
+        if not os.path.isfile(cand):
             continue
         try:
-            with open(global_path, "r", encoding="utf-8") as f:
-                raw = f.read().strip()
-            if raw.startswith("---"):
-                parts = raw.split("---", 2)
-                if len(parts) >= 3:
-                    raw = parts[2].strip()
-            raw = re.sub(r"<!--[\s\S]*?-->", "", raw).strip()
-            if raw:
-                return raw
-        except Exception as e:
-            print(f"[program_config] Error reading global rules from {global_path}: {e}")
-    return _DEFAULT_ROOT_CODE_DIRECTIVES
+            mtime = os.path.getmtime(cand)
+            cached = _AGENTS_MD_CACHE.get(cand)
+            if cached and cached[0] == mtime:
+                return cached[1]
+            with open(cand, "r", encoding="utf-8") as f:
+                cleaned = _strip_frontmatter_and_html_comments(f.read())
+            _AGENTS_MD_CACHE[cand] = (mtime, cleaned)
+            return cleaned
+        except OSError as e:
+            print(f"[program_config] Error reading AGENTS.md from {cand}: {e}")
+    return ""
 
 
-def compile_program_agents_md(program_id: str = None) -> str:
-    """Compiles a program-specific AGENTS.md combining global root-code rules with the program's ethos."""
+def compile_program_agents_md(program_id: str = None, workspace_dir: str = "") -> str:
+    """Compile OpenHands `AGENTS.md` from the single root `AGENTS.md` plus the active program's personality."""
     active_program = program_id or get_active_program()
     card = _load_card_data(active_program)
     program_name = get_program_name(active_program)
     user_name = get_active_user_display_name()
 
-    base_rules = _read_global_coding_rules()
+    base_rules = load_agents_md(workspace_dir)
     description = replace_placeholders((card.get("description") or "").strip(), program_id=active_program)
     personality = replace_placeholders((card.get("personality") or "").strip(), program_id=active_program)
     system_prompt = replace_placeholders((card.get("system_prompt") or "").strip(), program_id=active_program)

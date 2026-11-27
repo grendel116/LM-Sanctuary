@@ -8,7 +8,7 @@ SANCTUARY_DIR = Path(__file__).resolve().parents[1]
 if str(SANCTUARY_DIR) not in sys.path:
     sys.path.insert(0, str(SANCTUARY_DIR))
 
-from tools.coding_tools import READ_BAND_SCHEMAS, http_probe  # noqa: E402
+from tools.coding_tools import WEB_BAND_SCHEMAS, http_probe  # noqa: E402
 
 
 class HttpProbeTests(unittest.TestCase):
@@ -42,8 +42,8 @@ class HttpProbeTests(unittest.TestCase):
         self.assertIn("MethodNotImplemented", out)
         self.assertFalse(out.startswith("Error:"))
 
-    def test_registered_in_read_band_and_tools_module(self):
-        names = {s["function"]["name"] for s in READ_BAND_SCHEMAS}
+    def test_registered_in_web_band_and_tools_module(self):
+        names = {s["function"]["name"] for s in WEB_BAND_SCHEMAS}
         self.assertIn("http_probe", names)
         import tools.tools as tools_mod
 

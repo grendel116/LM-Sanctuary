@@ -213,24 +213,6 @@ def prewarm_caches():
     except Exception as e:
         print(f"Error prewarming STT model: {e}")
 
-    # Auto-start OpenHands Agent Server if enabled in settings/env
-    try:
-        from tools import openhands_job
-
-        oh_cfg = openhands_job.resolve_greenpt_config()
-        if oh_cfg.get("auto_start_server"):
-            from runners import openhands_server
-
-            print(">>> Auto-starting OpenHands Agent Server...")
-            threading.Thread(
-                target=openhands_server.start_openhands_server,
-                kwargs={"port": oh_cfg["server_port"], "sync_profiles": True},
-                name="openhands-server-autostart",
-                daemon=True,
-            ).start()
-    except Exception as e:
-        print(f"Error auto-starting OpenHands Agent Server: {e}")
-
     print(">>> Backend caches pre-warmed successfully!")
 
 
@@ -494,12 +476,13 @@ def authenticate():
 
 
 def cancel_session_work(session_id):
-    from tools import openhands_job, tools as tools_mod
+    from core import openhands_harness
+    from tools import tools as tools_mod
     from utils import image_cancellation
 
     cancelled_sessions.add(session_id)
     tools_mod.cancel_pending_tool_confirmations(session_id)
-    oh_cancelled = openhands_job.cancel_openhands_jobs(session_id)
+    oh_cancelled = openhands_harness.cancel_coding_session(session_id)
     img_cancelled = image_cancellation.cancel(session_ids={session_id})
     return bool(oh_cancelled or img_cancelled)
 

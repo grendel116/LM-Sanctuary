@@ -86,6 +86,7 @@ class TestWebToolsGrounding(unittest.TestCase):
         fake_runner.sessions_group_meta = {}
         fake_runner.sessions_memory_state = {}
         fake_runner.sessions_inversion_state = {}
+        fake_runner.generating_sessions = {"s1"}
         fake_runner._get_memory_meta.return_value = {"last_summarized_turn": 0}
         fake_runner.sessions_history = {
             "s1": [
@@ -177,10 +178,10 @@ class TestWebToolsGrounding(unittest.TestCase):
         import json
         import os
         import tempfile
-        from core import greenpt_client
+        from core import v1_client
         from core.skill_retriever import get_toolbelt_block
         from tools.tools import list_tools
-        from tools.openhands_worker import _compute_disabled_project_skills
+        from core.openhands_harness import compute_disabled_project_skills as _compute_disabled_project_skills
         from adapters.history_adapters import _extract_retrieval_query
 
         # 1. Inference Co-op role-slot resolution (normal, sensitive/TEE, vision, custom override)
@@ -194,16 +195,16 @@ class TestWebToolsGrounding(unittest.TestCase):
             json.dump(coop_cfg, tmp)
             tmp_path = tmp.name
         try:
-            with patch.object(greenpt_client, "_SETTINGS_PATH", tmp_path):
-                s = greenpt_client.get_greenpt_settings()
+            with patch.object(v1_client, "_SETTINGS_PATH", tmp_path):
+                s = v1_client.get_v1_settings()
                 self.assertEqual(s["provider"], "inference_coop")
                 self.assertEqual(s["default_model"], "greenpt/glm-5.3")
-                self.assertEqual(greenpt_client.resolve_cloud_tier_model("fast"), "glm-flash-green")
-                self.assertEqual(greenpt_client.resolve_cloud_tier_model("deep"), "greenpt/glm-5.3")
-                self.assertEqual(greenpt_client.resolve_cloud_tier_model("vision", has_vision=True), "deepseek-flash-green")
-                self.assertEqual(greenpt_client.resolve_cloud_tier_model("deep", sensitive=True), "glm-tee")
-                self.assertEqual(greenpt_client.resolve_cloud_tier_model("vision", has_vision=True, sensitive=True), "deepseek-flash-tee")
-                self.assertTrue(greenpt_client.supports_systemone())
+                self.assertEqual(v1_client.resolve_v1_tier_model("fast"), "glm-flash-green")
+                self.assertEqual(v1_client.resolve_v1_tier_model("deep"), "greenpt/glm-5.3")
+                self.assertEqual(v1_client.resolve_v1_tier_model("vision", has_vision=True), "deepseek-flash-green")
+                self.assertEqual(v1_client.resolve_v1_tier_model("deep", sensitive=True), "glm-tee")
+                self.assertEqual(v1_client.resolve_v1_tier_model("vision", has_vision=True, sensitive=True), "deepseek-flash-tee")
+                self.assertTrue(v1_client.supports_systemone())
 
                 # Custom role-slot override + Regolo Apertus preset
                 with open(tmp_path, "w", encoding="utf-8") as f:
@@ -215,10 +216,10 @@ class TestWebToolsGrounding(unittest.TestCase):
                         "cloud_fast_model": "qwen3.5-122b",
                         "cloud_vision_model": "gemma4-31b",
                     }, f)
-                self.assertEqual(greenpt_client.resolve_cloud_tier_model("deep"), "apertus-70b")
-                self.assertEqual(greenpt_client.resolve_cloud_tier_model("fast"), "qwen3.5-122b")
-                self.assertEqual(greenpt_client.resolve_cloud_tier_model("vision", has_vision=True), "gemma4-31b")
-                self.assertFalse(greenpt_client.supports_systemone())
+                self.assertEqual(v1_client.resolve_v1_tier_model("deep"), "apertus-70b")
+                self.assertEqual(v1_client.resolve_v1_tier_model("fast"), "qwen3.5-122b")
+                self.assertEqual(v1_client.resolve_v1_tier_model("vision", has_vision=True), "gemma4-31b")
+                self.assertFalse(v1_client.supports_systemone())
 
                 with open(tmp_path, "w", encoding="utf-8") as f:
                     json.dump({
@@ -229,7 +230,7 @@ class TestWebToolsGrounding(unittest.TestCase):
                         "cloud_fast_model": "qwen3.5-122b",
                         "cloud_vision_model": "gemma4-31b",
                     }, f)
-                self.assertEqual(greenpt_client.resolve_cloud_tier_model("fast"), "apertus-70b")
+                self.assertEqual(v1_client.resolve_v1_tier_model("fast"), "apertus-70b")
 
                 # Metis /v1/systemone call
                 with open(tmp_path, "w", encoding="utf-8") as f:
@@ -237,7 +238,7 @@ class TestWebToolsGrounding(unittest.TestCase):
                 fake_resp = MagicMock(status_code=200, content=b'{"go":{"true":0.9}}')
                 fake_resp.json.return_value = {"go": {"true": 0.9}}
                 with patch("requests.post", return_value=fake_resp) as m_post:
-                    dec = greenpt_client.systemone_decide("state text", {"go": {"type": "noul"}})
+                    dec = v1_client.systemone_decide("state text", {"go": {"type": "noul"}})
                     self.assertEqual(dec, {"go": {"true": 0.9}})
                     self.assertTrue(m_post.call_args[0][0].endswith("/systemone"))
         finally:
@@ -263,27 +264,41 @@ class TestWebToolsGrounding(unittest.TestCase):
         self.assertIn("modern-web-guidance", disabled_py)
         self.assertNotIn("sanctuary-architecture", disabled_py)
 
-    def test_cloud_reasoning_effort_and_fallback(self):
+    def test_v1_models_discovery_and_loud_400_error(self):
         import json
         import os
         import tempfile
-        from core import greenpt_client
+        from core import v1_client
 
-        # chat_completion sends reasoning_effort="low" for glm-5.3-flash on GreenPT and retries on 400
         with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8") as tmp:
-            json.dump({"greenpt_api_key": "sk-test", "greenpt_base_url": "https://api.greenpt.ai/v1", "routing_policy": "auto"}, tmp)
+            json.dump({"v1_api_key": "sk-test", "v1_base_url": "https://api.example.com/v1", "routing_policy": "auto"}, tmp)
             tmp_path = tmp.name
         try:
-            with patch.object(greenpt_client, "_SETTINGS_PATH", tmp_path):
-                resp_400 = MagicMock(status_code=400, text="unsupported reasoning_effort")
-                resp_200 = MagicMock(status_code=200, content=b'{"choices":[{"message":{"content":"OK"}}]}')
-                resp_200.json.return_value = {"choices": [{"message": {"content": "OK"}}]}
-                with patch("requests.post", side_effect=[resp_400, resp_200]) as m_post:
-                    out = greenpt_client.chat_completion([{"role": "user", "content": "Hi"}], tier="fast")
-                    self.assertEqual(out, "OK")
-                    self.assertEqual(m_post.call_count, 2)
-                    self.assertEqual(m_post.call_args_list[0].kwargs["json"].get("reasoning_effort"), "low")
-                    self.assertNotIn("reasoning_effort", m_post.call_args_list[1].kwargs["json"])
+            with patch.object(v1_client, "_SETTINGS_PATH", tmp_path):
+                v1_client.clear_quota_cooldown()
+                models_resp = MagicMock(
+                    status_code=200,
+                    content=b'{"data":[{"id":"glm-5.3-flash","context_length":1000000,"max_output_tokens":65536,"supported_parameters":["reasoning_effort"]}]}',
+                )
+                models_resp.json.return_value = {
+                    "data": [{
+                        "id": "glm-5.3-flash",
+                        "context_length": 1000000,
+                        "max_output_tokens": 65536,
+                        "supported_parameters": ["reasoning_effort"],
+                    }]
+                }
+                resp_400 = MagicMock(status_code=400, text="bad request")
+                with (
+                    patch("requests.get", return_value=models_resp),
+                    patch("requests.post", return_value=resp_400) as m_post,
+                ):
+                    info = v1_client.get_v1_model_info("glm-5.3-flash")
+                    self.assertEqual(info["context_tokens"], 1000000)
+                    self.assertEqual(info["max_output_tokens"], 65536)
+                    with self.assertRaises(RuntimeError):
+                        v1_client.chat_completion([{"role": "user", "content": "Hi"}], tier="fast")
+                    self.assertEqual(m_post.call_count, 1)
         finally:
             os.unlink(tmp_path)
 

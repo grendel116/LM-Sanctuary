@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { installMockDom } from '../__mocks__/mockDom.js';
 import { createAppShell } from '../web/app/_layout.js';
 import { createPostCard } from '../web/components/PostCard.js';
+import { BlueskyAdapter } from '../web/adapters/bluesky/index.js';
 import {
   bskyRequest,
   extractUtf8ByteFacets,
@@ -88,6 +89,242 @@ test('bskyRequest automatically refreshes ExpiredToken JWTs once and persists ro
     'Bearer old_refresh_jwt',
     'Bearer new_access_jwt',
   ]);
+});
+
+test('bskyRequest coalesces concurrent ExpiredToken refreshes for the same refreshJwt', async () => {
+  let refreshCount = 0;
+  const savedA = [];
+  const savedB = [];
+
+  const mockFetch = async (url, init) => {
+    const auth = init.headers instanceof Headers
+      ? init.headers.get('Authorization')
+      : init.headers?.Authorization;
+
+    if (url.includes('com.atproto.server.refreshSession')) {
+      refreshCount += 1;
+      assert.equal(auth, 'Bearer conc_ref_1');
+      await new Promise((r) => setTimeout(r, 15));
+      return new Response(
+        JSON.stringify({ accessJwt: 'conc_acc_2', refreshJwt: 'conc_ref_2' }),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      );
+    }
+    if (auth === 'Bearer conc_acc_1') {
+      return new Response(
+        JSON.stringify({ error: 'ExpiredToken', message: 'Token expired' }),
+        { status: 400, headers: { 'content-type': 'application/json' } }
+      );
+    }
+    assert.equal(auth, 'Bearer conc_acc_2');
+    return new Response(
+      JSON.stringify({ ok: true }),
+      { status: 200, headers: { 'content-type': 'application/json' } }
+    );
+  };
+
+  const [resA, resB] = await Promise.all([
+    bskyRequest({
+      endpoint: 'app.bsky.feed.getTimeline',
+      accessJwt: 'conc_acc_1',
+      refreshJwt: 'conc_ref_1',
+      onSessionRefreshed: async (tok) => { savedA.push(tok); },
+      fetchImpl: mockFetch,
+    }),
+    bskyRequest({
+      endpoint: 'app.bsky.actor.searchActors',
+      accessJwt: 'conc_acc_1',
+      refreshJwt: 'conc_ref_1',
+      onSessionRefreshed: async (tok) => { savedB.push(tok); },
+      fetchImpl: mockFetch,
+    }),
+  ]);
+
+  assert.deepEqual(resA, { ok: true });
+  assert.deepEqual(resB, { ok: true });
+  assert.equal(refreshCount, 1);
+  assert.deepEqual(savedA, [{ accessJwt: 'conc_acc_2', refreshJwt: 'conc_ref_2' }]);
+  assert.deepEqual(savedB, [{ accessJwt: 'conc_acc_2', refreshJwt: 'conc_ref_2' }]);
+});
+
+test('bskyRequest follows chained rotations R1->R2->R3 for stale callers without re-fetching refreshSession', async () => {
+  const refreshCalls = [];
+  const savedStale = [];
+  let phase = 1;
+
+  const mockFetch = async (url, init) => {
+    const auth = init.headers instanceof Headers
+      ? init.headers.get('Authorization')
+      : init.headers?.Authorization;
+
+    if (url.includes('com.atproto.server.refreshSession')) {
+      refreshCalls.push(auth);
+      if (auth === 'Bearer chain_ref_1') {
+        return new Response(
+          JSON.stringify({ accessJwt: 'chain_acc_2', refreshJwt: 'chain_ref_2' }),
+          { status: 200, headers: { 'content-type': 'application/json' } }
+        );
+      }
+      if (auth === 'Bearer chain_ref_2') {
+        return new Response(
+          JSON.stringify({ accessJwt: 'chain_acc_3', refreshJwt: 'chain_ref_3' }),
+          { status: 200, headers: { 'content-type': 'application/json' } }
+        );
+      }
+    }
+    if (auth === 'Bearer chain_acc_1' || (phase >= 2 && auth === 'Bearer chain_acc_2')) {
+      return new Response(
+        JSON.stringify({ error: 'ExpiredToken', message: 'Token expired' }),
+        { status: 400, headers: { 'content-type': 'application/json' } }
+      );
+    }
+    return new Response(
+      JSON.stringify({ tokenUsed: auth }),
+      { status: 200, headers: { 'content-type': 'application/json' } }
+    );
+  };
+
+  // First rotation: R1 -> R2
+  await bskyRequest({
+    endpoint: 'app.bsky.feed.getTimeline',
+    accessJwt: 'chain_acc_1',
+    refreshJwt: 'chain_ref_1',
+    onSessionRefreshed: async () => {},
+    fetchImpl: mockFetch,
+  });
+
+  // Stale caller still holding R1 reuses R2 without calling refreshSession
+  const resAfterFirst = await bskyRequest({
+    endpoint: 'app.bsky.feed.getTimeline',
+    accessJwt: 'chain_acc_1',
+    refreshJwt: 'chain_ref_1',
+    onSessionRefreshed: async (tok) => { savedStale.push(tok); },
+    fetchImpl: mockFetch,
+  });
+  assert.deepEqual(resAfterFirst, { tokenUsed: 'Bearer chain_acc_2' });
+  assert.equal(refreshCalls.length, 1);
+  assert.deepEqual(savedStale, [{ accessJwt: 'chain_acc_2', refreshJwt: 'chain_ref_2' }]);
+
+  // Second rotation: R2 -> R3
+  phase = 2;
+  await bskyRequest({
+    endpoint: 'app.bsky.feed.getTimeline',
+    accessJwt: 'chain_acc_2',
+    refreshJwt: 'chain_ref_2',
+    onSessionRefreshed: async () => {},
+    fetchImpl: mockFetch,
+  });
+
+  // Stale caller still holding R1 resolves through R1 -> R2 -> R3
+  savedStale.length = 0;
+  const resAfterSecond = await bskyRequest({
+    endpoint: 'app.bsky.feed.getTimeline',
+    accessJwt: 'chain_acc_1',
+    refreshJwt: 'chain_ref_1',
+    onSessionRefreshed: async (tok) => { savedStale.push(tok); },
+    fetchImpl: mockFetch,
+  });
+  assert.deepEqual(resAfterSecond, { tokenUsed: 'Bearer chain_acc_3' });
+  assert.deepEqual(refreshCalls, ['Bearer chain_ref_1', 'Bearer chain_ref_2']);
+  assert.deepEqual(savedStale, [{ accessJwt: 'chain_acc_3', refreshJwt: 'chain_ref_3' }]);
+});
+
+test('bskyRequest fails loud when refreshJwt is provided without onSessionRefreshed', async () => {
+  await assert.rejects(
+    () => bskyRequest({
+      endpoint: 'app.bsky.actor.searchActors',
+      accessJwt: 'missing_cb_acc',
+      refreshJwt: 'missing_cb_ref',
+      fetchImpl: async () => {
+        throw new Error('fetch should not be called');
+      },
+    }),
+    /refreshJwt requires onSessionRefreshed/
+  );
+});
+
+test('bskyRequest propagates errors thrown by onSessionRefreshed', async () => {
+  const mockFetch = async (url, init) => {
+    const auth = init.headers instanceof Headers
+      ? init.headers.get('Authorization')
+      : init.headers?.Authorization;
+    if (url.includes('com.atproto.server.refreshSession')) {
+      return new Response(
+        JSON.stringify({ accessJwt: 'prop_acc_2', refreshJwt: 'prop_ref_2' }),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      );
+    }
+    if (auth === 'Bearer prop_acc_1') {
+      return new Response(
+        JSON.stringify({ error: 'ExpiredToken', message: 'Token expired' }),
+        { status: 400, headers: { 'content-type': 'application/json' } }
+      );
+    }
+    throw new Error('should not retry request when persistence failed');
+  };
+
+  await assert.rejects(
+    () => bskyRequest({
+      endpoint: 'app.bsky.feed.getTimeline',
+      accessJwt: 'prop_acc_1',
+      refreshJwt: 'prop_ref_1',
+      onSessionRefreshed: async () => {
+        throw new Error('vault locked');
+      },
+      fetchImpl: mockFetch,
+    }),
+    /vault locked/
+  );
+});
+
+test('BlueskyAdapter updates its in-memory accessJwt and refreshJwt after a refresh', async () => {
+  const persisted = [];
+  const mockFetch = async (url, init) => {
+    const auth = init.headers instanceof Headers
+      ? init.headers.get('Authorization')
+      : init.headers?.Authorization;
+    if (url.includes('com.atproto.server.refreshSession')) {
+      return new Response(
+        JSON.stringify({ accessJwt: 'adp_acc_2', refreshJwt: 'adp_ref_2' }),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      );
+    }
+    if (auth === 'Bearer adp_acc_1') {
+      return new Response(
+        JSON.stringify({ error: 'ExpiredToken', message: 'Token expired' }),
+        { status: 400, headers: { 'content-type': 'application/json' } }
+      );
+    }
+    if (url.includes('com.atproto.repo.uploadBlob')) {
+      return new Response(
+        JSON.stringify({ blob: { $type: 'blob', ref: { $link: 'bafy123' }, mimeType: 'image/png', size: 3 } }),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      );
+    }
+    if (url.includes('com.atproto.repo.createRecord')) {
+      return new Response(
+        JSON.stringify({ uri: 'at://did:plc:adp/app.bsky.feed.post/1', cid: 'bafypost1' }),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      );
+    }
+    return new Response(JSON.stringify({}), { status: 200, headers: { 'content-type': 'application/json' } });
+  };
+
+  const adapter = new BlueskyAdapter({
+    serviceUrl: 'https://bsky.social',
+    did: 'did:plc:adp',
+    handle: 'adp.bsky.social',
+    accessJwt: 'adp_acc_1',
+    refreshJwt: 'adp_ref_1',
+    onSessionRefreshed: async (tok) => { persisted.push(tok); },
+    fetchImpl: mockFetch,
+  });
+
+  const item = await adapter.publish('hello', [{ blob: new Blob(['abc'], { type: 'image/png' }), mimeType: 'image/png' }]);
+  assert.equal(item._meta.bluesky.uri, 'at://did:plc:adp/app.bsky.feed.post/1');
+  assert.equal(adapter.accessJwt, 'adp_acc_2');
+  assert.equal(adapter.refreshJwt, 'adp_ref_2');
+  assert.deepEqual(persisted, [{ accessJwt: 'adp_acc_2', refreshJwt: 'adp_ref_2' }]);
 });
 
 test('sanitizeFediverseHtmlToString strips XSS payloads/attributes while keeping safe links and custom emojis', () => {

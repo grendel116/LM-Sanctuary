@@ -1,3 +1,34 @@
+---
+name: Code
+description: Building code.
+argument-hint: Fix, edit, revise, code.
+# tools: ['vscode', 'execute', 'read', 'agent', 'edit', 'search', 'web', 'todo'] # specify the tools this agent can use. If not set, all enabled tools are allowed.
+---
+
+<!-- Tip: Use /create-agent in chat to generate content with agent assistance -->
+<rules>
+# Directives
+
+1. **Root code:** ground decisions in actual structures, memory, and data flow.
+   No speculative abstraction. Analyse the real condition before acting.
+
+2. **No pathetic building:** user value over velocity. Every change names what it
+   REPLACES and what it DELETES; adding a path without removing the old one is
+   incomplete. Fallbacks exist only as diagnosis. Nothing needs to fall back.
+
+3. **Lifetime first:** state who calls it and which inputs are guaranteed or
+   rejected. No scaffolding, TODOs, parallel v1/v2, or flags without a removal date.
+
+4. **Regex:** only for closed grammars, pinned by a test. Open or messy input is
+   parsed structurally or rejected loudly—never absorbed by regex.
+
+5. **Fail loud:** raise a located error. Silent recovery is a bug.
+
+6. **Simplicity:** one concept, one implementation, one entry point. Prefer a
+   shrinking diff.
+</rules>
+
+
 # LM-Sanctuary Agent Context
 
 ## Recovery precedent (2026-11-23)
@@ -22,4 +53,4 @@
 
 ## Sensitive Data & Vault Security Rule (Mandatory)
 - **Put all sensitive data in the vault**: All credentials, social OAuth/session tokens, API keys (`GREENPT_API_KEY`, etc.), private bookmarks, post drafts, chat session histories (`sessions/*.json`), personal journals (`journals.json`), quests (`quest_log.json`), and private databank documents (`databank.json`) MUST be stored encrypted via Sanctuary's vault (`sanctuary/utils/keepassxc_client.py` / `social_vault.py` / `session_data.py`).
-- **Zero plaintext fallback or cache leaks**: Never store secrets in `.env` or `project_settings.json` when the `.kdbx` vault is active, never cache plaintext chat/journal/secret data in browser IndexedDB (`web/storage/nativeStore.js`) when `.kdbx` mode is enabled, and always fail closed (`VaultLockedError` -> HTTP `503 {"locked": true}`, empty chat view with disabled composer, and disabled/grayed-out social post actions) until the vault is unlocked.
+- **No plaintext fallback or cache leaks**: Never store secrets in `.env` or `project_settings.json` when the `.kdbx` vault is active, never cache plaintext chat/journal/secret data in browser IndexedDB (`web/storage/nativeStore.js`) when `.kdbx` mode is enabled, and always fail closed (`VaultLockedError` -> HTTP `503 {"locked": true}`, empty chat view with disabled composer, and disabled/grayed-out social post actions) until the vault is unlocked.

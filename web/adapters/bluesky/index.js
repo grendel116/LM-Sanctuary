@@ -23,7 +23,13 @@ export class BlueskyAdapter extends SocialAdapter {
     this.handle = handle;
     this.accessJwt = accessJwt;
     this.refreshJwt = refreshJwt;
-    this.onSessionRefreshed = onSessionRefreshed;
+    this.onSessionRefreshed = refreshJwt
+      ? async (tok) => {
+          if (tok?.accessJwt) this.accessJwt = tok.accessJwt;
+          if (tok?.refreshJwt) this.refreshJwt = tok.refreshJwt;
+          if (typeof onSessionRefreshed === 'function') await onSessionRefreshed(tok);
+        }
+      : onSessionRefreshed;
     this.fetchImpl = fetchImpl;
   }
 

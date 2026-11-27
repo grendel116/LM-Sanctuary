@@ -90,19 +90,9 @@ _OPENHANDS_ENV_FIELDS = (
     ("cloud_fast_model", "CLOUD_FAST_MODEL", ""),
     ("cloud_vision_model", "CLOUD_VISION_MODEL", ""),
     ("cloud_private_model", "CLOUD_PRIVATE_MODEL", ""),
-    ("openhands_mode", "OPENHANDS_MODE", "auto"),
+    ("cloud_checkpoint_model", "CLOUD_CHECKPOINT_MODEL", ""),
     ("routing_policy", "SANCTUARY_ROUTING_POLICY", "auto"),
 )
-
-
-def _normalize_port(value, default: int = 8091) -> int:
-    try:
-        port = int(value)
-        if 1024 <= port <= 65535:
-            return port
-    except (TypeError, ValueError):
-        pass
-    return default
 
 
 def _sync_openhands_env(settings: dict) -> None:
@@ -117,12 +107,17 @@ def _sync_openhands_env(settings: dict) -> None:
             os.environ[env_key] = val
         else:
             os.environ.pop(env_key, None)
-    os.environ["OPENHANDS_SERVER_PORT"] = str(
-        _normalize_port(settings.get("openhands_server_port"))
-    )
-    os.environ["OPENHANDS_AUTO_START_SERVER"] = (
-        "true" if settings.get("openhands_auto_start_server") else "false"
-    )
+    for opt_key, env_key in (
+        ("cloud_context_tokens", "CLOUD_CONTEXT_TOKENS"),
+        ("cloud_max_output_tokens", "CLOUD_MAX_OUTPUT_TOKENS"),
+    ):
+        opt_val = str(settings.get(opt_key) or "").strip()
+        if opt_val:
+            os.environ[env_key] = opt_val
+        else:
+            os.environ.pop(env_key, None)
+    for stale_env in ("OPENHANDS_MODE", "OPENHANDS_SERVER_PORT", "OPENHANDS_AUTO_START_SERVER"):
+        os.environ.pop(stale_env, None)
 
 
 def _read_vault_greenpt_key() -> tuple[str, bool, bool]:
@@ -232,9 +227,7 @@ def project_settings():
         "cloud_fast_model": os.getenv("CLOUD_FAST_MODEL", "").strip(),
         "cloud_vision_model": os.getenv("CLOUD_VISION_MODEL", "").strip(),
         "cloud_private_model": os.getenv("CLOUD_PRIVATE_MODEL", "").strip(),
-        "openhands_mode": (os.getenv("OPENHANDS_MODE", "auto").strip().lower() if os.getenv("OPENHANDS_MODE", "auto").strip().lower() in ("auto", "cli", "server") else "auto"),
-        "openhands_server_port": _normalize_port(os.getenv("OPENHANDS_SERVER_PORT", "8091")),
-        "openhands_auto_start_server": os.getenv("OPENHANDS_AUTO_START_SERVER", "false").lower() in ("true", "1", "yes"),
+        "cloud_checkpoint_model": os.getenv("CLOUD_CHECKPOINT_MODEL", "").strip(),
         "search_engine": "web_crawling",
         "searxng_url": "",
         "browser_search_engine": "",
@@ -287,6 +280,18 @@ def project_settings():
                     settings.pop("gemini_api_key", None)
                     dirty = True
 
+                for stale_key in ("openhands_mode", "openhands_server_port", "openhands_auto_start_server"):
+                    if stale_key in settings:
+                        settings.pop(stale_key, None)
+                        dirty = True
+
+                if str(settings.get("cloud_context_tokens") or "").strip() == "262144":
+                    settings.pop("cloud_context_tokens", None)
+                    dirty = True
+                if str(settings.get("cloud_max_output_tokens") or "").strip() == "32768":
+                    settings.pop("cloud_max_output_tokens", None)
+                    dirty = True
+
                 for field_key, env_key, default_val in _OPENHANDS_ENV_FIELDS:
                     if field_key == "greenpt_api_key" and settings.get("greenpt_api_key_in_vault"):
                         continue
@@ -296,19 +301,9 @@ def project_settings():
                         settings[field_key] = env_val or default_val
                         dirty = True
 
-                norm_mode = str(settings.get("openhands_mode") or "auto").strip().lower()
-                if norm_mode not in ("auto", "cli", "server"):
-                    settings["openhands_mode"] = "auto"
-                    dirty = True
-
                 norm_policy = str(settings.get("routing_policy") or "auto").strip().lower()
                 if norm_policy not in ("auto", "local_only", "eco_flash"):
                     settings["routing_policy"] = "auto"
-                    dirty = True
-
-                norm_port = _normalize_port(settings.get("openhands_server_port"))
-                if settings.get("openhands_server_port") != norm_port:
-                    settings["openhands_server_port"] = norm_port
                     dirty = True
 
                 _sync_openhands_env(settings)
@@ -406,11 +401,24 @@ def project_settings():
             settings.pop("gemini_api_key", None)
             os.environ.pop("GEMINI_API_KEY", None)
 
+            for opt_key, default_stamped in (
+                ("cloud_context_tokens", "262144"),
+                ("cloud_max_output_tokens", "32768"),
+            ):
+                if opt_key in data:
+                    raw_opt = str(data.get(opt_key) or "").strip()
+                    if raw_opt:
+                        settings[opt_key] = raw_opt
+                    else:
+                        settings.pop(opt_key, None)
+                elif str(settings.get(opt_key) or "").strip() == default_stamped:
+                    settings.pop(opt_key, None)
+
             oh_updates = {}
             for field_key, _env_key, default_val in _OPENHANDS_ENV_FIELDS:
                 if field_key in data:
                     val = str(data.get(field_key) or "").strip()
-                    allow_empty = field_key in ("greenpt_api_key", "cloud_fast_model", "cloud_vision_model", "cloud_private_model")
+                    allow_empty = field_key in ("greenpt_api_key", "cloud_fast_model", "cloud_vision_model", "cloud_private_model", "cloud_checkpoint_model")
                     oh_updates[field_key] = val if (val or allow_empty) else default_val
                 else:
                     oh_updates[field_key] = (
@@ -418,37 +426,25 @@ def project_settings():
                         or default_val
                     )
 
-            if oh_updates["openhands_mode"].lower() not in ("auto", "cli", "server"):
-                oh_updates["openhands_mode"] = "auto"
-            else:
-                oh_updates["openhands_mode"] = oh_updates["openhands_mode"].lower()
-
             if oh_updates["routing_policy"].lower() not in ("auto", "local_only", "eco_flash", "private_tee"):
                 oh_updates["routing_policy"] = "auto"
             else:
                 oh_updates["routing_policy"] = oh_updates["routing_policy"].lower()
 
             try:
-                from core import greenpt_client
-                greenpt_client.clear_quota_cooldown()
+                from core import v1_client
+                v1_client.clear_quota_cooldown()
             except Exception:
                 pass
 
-            openhands_server_port = _normalize_port(
-                data.get("openhands_server_port", settings.get("openhands_server_port", 8091))
-            )
-            if "openhands_auto_start_server" in data:
-                openhands_auto_start_server = bool(data.get("openhands_auto_start_server"))
-            else:
-                openhands_auto_start_server = bool(settings.get("openhands_auto_start_server", False))
+            for stale_key in ("openhands_mode", "openhands_server_port", "openhands_auto_start_server"):
+                settings.pop(stale_key, None)
 
             settings.update({
                 "folders": cleaned_folders,
                 "security_preset": security_preset,
                 "artifact_review_policy": artifact_review_policy,
                 **oh_updates,
-                "openhands_server_port": openhands_server_port,
-                "openhands_auto_start_server": openhands_auto_start_server,
                 "search_engine": search_engine,
                 "searxng_url": searxng_url,
                 "browser_search_engine": browser_search_engine,
@@ -474,23 +470,7 @@ def project_settings():
             _sync_openhands_env(settings)
             if vault_unlocked and vault_key_before:
                 os.environ["GREENPT_API_KEY"] = vault_key_before
-            try:
-                from runners import openhands_server
 
-                if openhands_server.check_openhands_server_status(openhands_server_port):
-                    openhands_server.sync_greenpt_profiles(port=openhands_server_port)
-                elif openhands_auto_start_server:
-                    import threading
-
-                    threading.Thread(
-                        target=openhands_server.start_openhands_server,
-                        kwargs={"port": openhands_server_port, "sync_profiles": True},
-                        name="openhands-server-save-start",
-                        daemon=True,
-                    ).start()
-            except Exception as sync_err:
-                print(f"OpenHands server sync skipped: {sync_err}")
-            
             from runners.program import _save_settings
 
             _save_settings(settings)
@@ -712,46 +692,6 @@ def open_models_folder():
             subprocess.Popen(['xdg-open', target_dir])
 
         return jsonify({"success": True, "path": target_dir})
-    except Exception as e:
-        return jsonify({"success": False, "error": str(e)}), 500
-
-
-@system_bp.route('/api/openhands/server', methods=['GET', 'POST'])
-@st.requires_auth
-def openhands_server_control():
-    """Inspect or control the managed OpenHands Agent Server (/v1 OpenAI gateway)."""
-    from runners import openhands_server
-
-    if request.method == 'GET':
-        try:
-            raw_port = request.args.get("port")
-            port = _normalize_port(raw_port) if raw_port else None
-            return jsonify({"success": True, **openhands_server.get_openhands_server_info(port=port)})
-        except Exception as e:
-            return jsonify({"success": False, "error": str(e)}), 500
-
-    try:
-        data = request.get_json(silent=True) or {}
-        action = str(data.get("action") or "start").strip().lower()
-        raw_port = data.get("port")
-        port = _normalize_port(raw_port) if raw_port is not None else None
-        workspace_path = str(data.get("workspace_path") or "").strip() or None
-
-        if action == "start":
-            info = openhands_server.start_openhands_server(
-                port=port,
-                workspace_path=workspace_path,
-                sync_profiles=True,
-            )
-            return jsonify({"success": True, "action": "start", **info})
-        if action == "stop":
-            info = openhands_server.stop_openhands_server()
-            return jsonify({"success": True, "action": "stop", **info})
-        if action == "sync":
-            sync_res = openhands_server.sync_greenpt_profiles(port=port)
-            info = openhands_server.get_openhands_server_info(port=port)
-            return jsonify({"success": True, "action": "sync", "profile_sync": sync_res, **info})
-        return jsonify({"success": False, "error": f"Unknown action: {action}"}), 400
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
 

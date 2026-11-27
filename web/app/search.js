@@ -15,7 +15,7 @@ import {
   toggleFollowAuthor,
   toggleMuteAuthor,
 } from '../queries/socialClient.js';
-import { authStore, getAuthenticatedAccount } from '../state/authStore.js';
+import { authStore, getAuthenticatedAccount, updateAccountTokens } from '../state/authStore.js';
 import { prefillReply } from '../state/composeStore.js';
 import { applyPostInterestFeedback, feedStore, removePostAcrossStreams } from '../state/feedStore.js';
 import { connectionStore } from '../state/sanctuary/connection.js';
@@ -155,6 +155,7 @@ export function mountSearchScreen(containerEl, {
             serviceUrl: bskyAuth.meta.serviceUrl,
             accessJwt: bskyAuth.secrets.accessJwt,
             refreshJwt: bskyAuth.secrets.refreshJwt,
+            onSessionRefreshed: (tok) => updateAccountTokens(bskyAuth.meta.id, tok),
           }
         : {};
       const [bskyRes, fediRes] = await Promise.allSettled([

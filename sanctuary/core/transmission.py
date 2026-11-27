@@ -1,15 +1,13 @@
-"""Automatic transmission controller for Sanctuary gear-shifting and 2-strike recovery (zero regex)."""
+"""Automatic transmission controller for Sanctuary gear-shifting (zero regex)."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
-from tools.coding_tools import READ_BAND_SCHEMAS, WEB_BAND_SCHEMAS, WRITE_BAND_SCHEMAS
+from tools.coding_tools import WEB_BAND_SCHEMAS
 
-_READ_TOOL_NAMES = frozenset({"list_dir", "read_file", "grep_search"})
-_WRITE_TOOL_NAMES = frozenset({"edit_file", "write_file", "run_command", "set_working_folder"})
-_WEB_TOOL_NAMES = frozenset({"read_webpage", "web_search", "open_in_browser", "browser_action"})
+_WEB_TOOL_NAMES = frozenset({"read_webpage", "web_search", "open_in_browser", "browser_action", "http_probe"})
 
 TURN_SEMANTIC_POLES: dict[str, tuple[str, ...]] = {
     "coding_intent": (
@@ -77,92 +75,13 @@ def score_utterance_pedals(utterance: str) -> dict[str, float]:
         return {}
 
 
-def _is_band_notice(output: str) -> bool:
-    return output.startswith(("[Read-Only Band Active]", "[Plan Mode Read-Only Band]", "[2-Strike Read-Only Band]"))
-
-
-def _is_tool_error(output: str) -> bool:
-    if not output or _is_band_notice(output):
-        return False
-    return output.startswith(("Error:", "[Tool Error]"))
-
-
-@dataclass
-class StrikeTracker:
-    """Enforces the 2-Strike Rule across in-process tool calls without regex."""
-
-    counts: dict[str, int] = field(default_factory=dict)
-    active_strikes: int = 0
-    trip_count: int = 0
-    replan_required: bool = False
-    halt_tools: bool = False
-    tripped_on: str = ""
-
-    @staticmethod
-    def _error_signatures(tool_name: str, args: dict[str, Any], output: str) -> tuple[str, str]:
-        first_line = ""
-        for ln in str(output or "").splitlines():
-            s = ln.strip()
-            if s:
-                first_line = s
-                break
-        norm_err = "".join(ch for ch in first_line.lower() if not ch.isdigit())[:100]
-        sig_key = f"{tool_name}:{norm_err}"
-        target_val = str(args.get("path") or args.get("command") or args.get("url") or "")[:80].lower()
-        target_key = f"{tool_name}:{target_val}" if target_val else sig_key
-        return sig_key, target_key
-
-    def record(self, results: list[tuple[str, dict[str, Any], str]]) -> dict[str, Any]:
-        """Record tool results from one iteration and return updated strike state."""
-        had_error = False
-        had_clean_read = False
-        tripped_this_batch = False
-
-        for tool_name, raw_args, raw_out in results:
-            args = raw_args if isinstance(raw_args, dict) else {}
-            output = str(raw_out or "")
-            if _is_tool_error(output):
-                had_error = True
-                self.active_strikes += 1
-                sig_key, target_key = self._error_signatures(tool_name, args, output)
-                self.counts[sig_key] = self.counts.get(sig_key, 0) + 1
-                if target_key != sig_key:
-                    self.counts[target_key] = self.counts.get(target_key, 0) + 1
-                if self.counts.get(sig_key, 0) >= 2 or self.counts.get(target_key, 0) >= 2:
-                    tripped_this_batch = True
-                    self.tripped_on = sig_key
-            elif tool_name in _READ_TOOL_NAMES and not _is_band_notice(output):
-                had_clean_read = True
-
-        if tripped_this_batch:
-            self.trip_count += 1
-            if self.trip_count == 1:
-                self.replan_required = True
-            else:
-                self.replan_required = False
-                self.halt_tools = True
-
-        if self.replan_required and not had_error and had_clean_read:
-            self.replan_required = False
-            self.counts.clear()
-            self.active_strikes = 0
-
-        return {
-            "active_strikes": self.active_strikes,
-            "trip_count": self.trip_count,
-            "replan_required": self.replan_required,
-            "halt_tools": self.halt_tools,
-            "tripped_on": self.tripped_on,
-        }
-
-
 @dataclass(frozen=True)
 class ShiftDecision:
     """Computed transmission gear, cloud tier, engaged tool bands, and directive."""
 
-    gear: str  # "park" | "first" | "second" | "vision"
+    gear: str  # "park" | "first" | "second" | "vision" | "openhands"
     cloud_tier: str | None
-    phase: str  # "idle" | "planning" | "cruising" | "verifying" | "replanning" | "halted"
+    phase: str  # "idle" | "planning" | "coding" | "cruising"
     reason: str
     write_disengaged: bool = False
     halt_tools: bool = False
@@ -172,7 +91,7 @@ class ShiftDecision:
 
 
 class TransmissionController:
-    """Monitors prompt throttle, token load, and strikes to select gears & tool bands."""
+    """Monitors prompt throttle and token load to route between Local Park, Cloud Web/Chat, and In-Process OpenHands."""
 
     def __init__(
         self,
@@ -187,7 +106,6 @@ class TransmissionController:
         routing_policy: str = "auto",
     ) -> None:
         self.utterance = (utterance or "").strip()
-        self.utterance_lower = self.utterance.lower()
         self.is_plan_turn = bool(is_plan_turn)
         self.is_proceed_turn = bool(is_proceed_turn)
         self.active_story_mode = bool(active_story_mode)
@@ -198,12 +116,9 @@ class TransmissionController:
 
         self.coding_engaged = False
         self.web_engaged = bool(has_active_research)
-        self.has_explored_workspace = bool((self.is_proceed_turn or self.has_active_plan) and not self.is_plan_turn)
-        self.has_mutated_files = False
         self.kickdown = bool(prior_tool_error)
         self.throttle_tier: str | None = None
         self.throttle_reason: str = ""
-        self.strike_tracker = StrikeTracker()
 
         self._assess_initial_throttle()
 
@@ -253,23 +168,11 @@ class TransmissionController:
             self.throttle_reason = "accuracy_or_research"
 
     def record_tool_results(self, results: list[tuple[str, dict[str, Any], str]]) -> None:
-        for tool_name, _, output in results:
-            if tool_name in _READ_TOOL_NAMES and not _is_tool_error(str(output or "")):
-                self.has_explored_workspace = True
-                self.coding_engaged = True
-            elif tool_name in _WRITE_TOOL_NAMES:
-                self.coding_engaged = True
-                if not _is_tool_error(str(output or "")) and not _is_band_notice(str(output or "")):
-                    self.has_mutated_files = True
-            elif tool_name in _WEB_TOOL_NAMES:
+        for tool_name, _, _ in results:
+            if tool_name in _WEB_TOOL_NAMES:
                 self.web_engaged = True
             elif tool_name == "delegate_coding":
                 self.coding_engaged = True
-        self.strike_tracker.record(results)
-
-    def _ambient_tools(self) -> list[dict[str, Any]]:
-        """Read band is always engaged on cloud gears; web band joins once research is active."""
-        return list(READ_BAND_SCHEMAS) + (list(WEB_BAND_SCHEMAS) if self.web_engaged else [])
 
     def shift(
         self,
@@ -283,13 +186,36 @@ class TransmissionController:
         budget = max(1024, int(local_budget or 4096))
         engine_load = round(estimated_tokens / float(budget), 3)
 
-        if self.active_story_mode or not cloud_available or self.routing_policy == "local_only":
+        if self.active_story_mode:
             return ShiftDecision(
                 gear="park",
                 cloud_tier=None,
                 phase="idle",
-                reason="story_or_local_only",
+                reason="story_mode",
+                engine_load=engine_load,
+            )
+
+        if self.is_plan_turn or self.is_proceed_turn or self.has_active_plan or self.coding_engaged:
+            tier = (
+                "deep_plan"
+                if self.is_plan_turn
+                else ("fast" if self.routing_policy == "eco_flash" else "deep")
+            )
+            return ShiftDecision(
+                gear="openhands",
+                cloud_tier=tier,
+                phase="planning" if self.is_plan_turn else "coding",
+                reason="openhands_in_process",
                 write_disengaged=self.is_plan_turn,
+                engine_load=engine_load,
+            )
+
+        if not cloud_available or self.routing_policy == "local_only":
+            return ShiftDecision(
+                gear="park",
+                cloud_tier=None,
+                phase="idle",
+                reason="local_only_or_cloud_unavailable",
                 engine_load=engine_load,
             )
 
@@ -299,98 +225,23 @@ class TransmissionController:
                 cloud_tier="vision",
                 phase="idle",
                 reason="vision_attachment",
-                write_disengaged=self.is_plan_turn,
+                native_tools=list(WEB_BAND_SCHEMAS),
                 engine_load=engine_load,
             )
 
-        if self.strike_tracker.halt_tools:
+        if self.kickdown:
             return ShiftDecision(
                 gear="second",
-                cloud_tier="deep_plan",
-                phase="halted",
-                reason="two_strike_halt",
-                write_disengaged=True,
-                halt_tools=True,
-                native_tools=None,
+                cloud_tier="deep_recovery",
+                phase="cruising",
+                reason="kickdown",
+                native_tools=list(WEB_BAND_SCHEMAS),
                 directive=(
-                    "# 2-STRIKE HALT DIRECTIVE\n"
-                    f"Repeated tool errors persisted (`{self.strike_tracker.tripped_on}`). "
-                    "Tools are disengaged for this final response. Write a concise 2-sentence root-cause hypothesis "
-                    "of why the attempts failed and report the exact blocking error to the user without guessing."
-                ),
-                engine_load=engine_load,
-            )
-
-        if self.strike_tracker.replan_required:
-            return ShiftDecision(
-                gear="second",
-                cloud_tier="deep_plan",
-                phase="replanning",
-                reason="two_strike_replan",
-                write_disengaged=True,
-                native_tools=list(READ_BAND_SCHEMAS),
-                directive=(
-                    "# 2-STRIKE RULE — MANDATORY READ-ONLY RE-PLAN\n"
-                    f"Two consecutive failures occurred on `{self.strike_tracker.tripped_on}`. "
-                    "Write tools (`edit_file`, `write_file`, `run_command`) are disengaged for this step. "
-                    "Inspect the relevant file or directory read-only (`read_file`, `grep_search`, `list_dir`), "
-                    "form a 2-sentence root-cause hypothesis, and pivot before attempting another edit."
-                ),
-                engine_load=engine_load,
-            )
-
-        if self.is_plan_turn or (self.coding_engaged and not self.has_explored_workspace and not self.is_proceed_turn):
-            tools_for_step = (
-                list(READ_BAND_SCHEMAS)
-                if self.is_plan_turn
-                else list(READ_BAND_SCHEMAS) + list(WRITE_BAND_SCHEMAS)
-            )
-            return ShiftDecision(
-                gear="second",
-                cloud_tier="deep_plan",
-                phase="planning",
-                reason="planning_always_deep",
-                write_disengaged=self.is_plan_turn,
-                native_tools=tools_for_step,
-                engine_load=engine_load,
-            )
-
-        if self.strike_tracker.active_strikes >= 1 or self.kickdown or iteration >= 4:
-            phase = "verifying" if self.has_mutated_files else "cruising"
-            tools_for_step = (
-                list(READ_BAND_SCHEMAS) + list(WRITE_BAND_SCHEMAS)
-                if self.coding_engaged
-                else self._ambient_tools()
-            )
-            directive = ""
-            if self.kickdown and not self.coding_engaged:
-                directive = (
                     "# HIGH-PRECISION ESCALATION DIRECTIVE\n"
                     "The user is signaling urgency, frustration, or correcting an earlier mistake. "
                     "Drop any prior erroneous assumptions immediately—verify facts directly from retrieved tool outputs "
                     "and deliver a clear, accurate, concrete answer in character."
-                )
-            return ShiftDecision(
-                gear="second",
-                cloud_tier="deep_recovery",
-                phase=phase,
-                reason="strike_or_kickdown",
-                write_disengaged=False,
-                native_tools=tools_for_step,
-                directive=directive,
-                engine_load=engine_load,
-            )
-
-        if self.coding_engaged or self.is_proceed_turn:
-            use_fast_cruise = self.routing_policy == "eco_flash" and engine_load < 0.85
-            phase = "verifying" if self.has_mutated_files else "cruising"
-            return ShiftDecision(
-                gear="first" if use_fast_cruise else "second",
-                cloud_tier="fast" if use_fast_cruise else "deep",
-                phase=phase,
-                reason="coding_cruise",
-                write_disengaged=False,
-                native_tools=list(READ_BAND_SCHEMAS) + list(WRITE_BAND_SCHEMAS),
+                ),
                 engine_load=engine_load,
             )
 
@@ -400,7 +251,7 @@ class TransmissionController:
                 cloud_tier="deep",
                 phase="cruising",
                 reason="high_load_or_complex" if engine_load >= 0.70 else (self.throttle_reason or "complex_topic"),
-                native_tools=self._ambient_tools(),
+                native_tools=list(WEB_BAND_SCHEMAS),
                 directive=(
                     "# DEPTH & ACCURACY DIRECTIVE\n"
                     "This turn involves a complex topic or requires verified factual accuracy. "
@@ -415,7 +266,7 @@ class TransmissionController:
                 cloud_tier="fast",
                 phase="cruising",
                 reason=self.throttle_reason or "web_research",
-                native_tools=self._ambient_tools(),
+                native_tools=list(WEB_BAND_SCHEMAS),
                 engine_load=engine_load,
             )
 

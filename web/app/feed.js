@@ -1123,7 +1123,7 @@ export function mountFeedScreen(containerEl, {
               serviceUrl: bskyAuth.meta.serviceUrl,
               accessJwt: bskyAuth.secrets.accessJwt,
               refreshJwt: bskyAuth.secrets.refreshJwt,
-              onSessionRefreshed: (tok) => updateAccountTokens(bskyAuth.meta.id, tok).catch(() => {}),
+              onSessionRefreshed: (tok) => updateAccountTokens(bskyAuth.meta.id, tok),
               cursor: append ? (curCursor.bsky || '') : '',
               limit: 50,
               ...(forceRefresh && !append ? { cache: 'no-store' } : {}),

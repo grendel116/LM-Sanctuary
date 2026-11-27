@@ -1636,9 +1636,9 @@ Directives:
 
         if not raw_response:
             try:
-                from core import greenpt_client
-                if not greenpt_client.cloud_unavailable_reason():
-                    step = greenpt_client.chat_completion_step(
+                from core import v1_client
+                if not v1_client.v1_unavailable_reason():
+                    step = v1_client.chat_completion_step(
                         payload["messages"],
                         tier="fast",
                         temperature=0.6,

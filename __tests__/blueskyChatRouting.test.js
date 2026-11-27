@@ -76,6 +76,7 @@ test('sendBskyConvoMessage refreshes expired token on PDS origin without Referen
     serviceUrl: 'https://pds.example.com',
     accessJwt: 'old',
     refreshJwt: 'r1',
+    onSessionRefreshed: async () => {},
     convoId: 'c1',
     text: 'hello',
     fetchImpl,

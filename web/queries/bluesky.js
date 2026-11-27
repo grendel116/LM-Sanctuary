@@ -161,6 +161,33 @@ export async function refreshBskySession({
   });
 }
 
+const rotatedBskySessions = new Map();
+
+async function rotateBskySession({ origin, refreshJwt, fetchImpl }) {
+  let pending = rotatedBskySessions.get(refreshJwt);
+  if (!pending) {
+    if (rotatedBskySessions.size >= 32) {
+      rotatedBskySessions.delete(rotatedBskySessions.keys().next().value);
+    }
+    pending = refreshBskySession({
+      serviceUrl: origin,
+      refreshJwt,
+      fetchImpl,
+    }).catch((err) => {
+      rotatedBskySessions.delete(refreshJwt);
+      throw err;
+    });
+    rotatedBskySessions.set(refreshJwt, pending);
+  }
+  const seen = new Set([refreshJwt]);
+  let session = await pending;
+  while (session?.refreshJwt && !seen.has(session.refreshJwt) && rotatedBskySessions.has(session.refreshJwt)) {
+    seen.add(session.refreshJwt);
+    session = await rotatedBskySessions.get(session.refreshJwt);
+  }
+  return session;
+}
+
 /**
  * Execute an XRPC call and automatically refresh once when the accessJwt expires.
  */
@@ -179,6 +206,9 @@ export async function bskyRequest({
   timeoutMs,
   fetchImpl,
 }) {
+  if (refreshJwt && typeof onSessionRefreshed !== 'function') {
+    throw new Error(`bskyRequest(${endpoint}): refreshJwt requires onSessionRefreshed so rotated tokens are persisted`);
+  }
   const origin = cleanServiceOrigin(serviceUrl);
   const url = new URL(`${origin}/xrpc/${endpoint}`);
   if (params && typeof params === 'object') {
@@ -217,14 +247,12 @@ export async function bskyRequest({
       (err.status === 400 && err.body?.error === 'ExpiredToken')
     );
     if (isExpired && refreshJwt) {
-      const refreshed = await refreshBskySession({
-        serviceUrl: origin,
+      const refreshed = await rotateBskySession({
+        origin,
         refreshJwt,
         fetchImpl,
       });
-      if (typeof onSessionRefreshed === 'function') {
-        await onSessionRefreshed(refreshed);
-      }
+      await onSessionRefreshed(refreshed);
       return runWithToken(refreshed.accessJwt);
     }
     throw err;

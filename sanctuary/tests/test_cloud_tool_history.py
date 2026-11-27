@@ -92,9 +92,13 @@ class CloudToolHistoryTests(unittest.TestCase):
                 self.assertNotIn("Called ", content)
                 self.assertNotIn("[read_file(", content)
 
-            all_contents = [str(m.get("content") or "") for m in msgs]
-            expected_header = '[Tool Response from read_file {"path": "web/app/messages.js", "start_line": 1600}]:'
-            self.assertTrue(any(expected_header in c for c in all_contents))
+            asst_tcs = [m for m in msgs if m.get("role") == "assistant" and m.get("tool_calls")]
+            tool_msgs = [m for m in msgs if m.get("role") == "tool"]
+            self.assertEqual(len(asst_tcs), 1)
+            self.assertEqual(asst_tcs[0]["tool_calls"][0]["id"], "c1")
+            self.assertEqual(len(tool_msgs), 1)
+            self.assertEqual(tool_msgs[0]["tool_call_id"], "c1")
+            self.assertEqual(tool_msgs[0]["content"], "1600: const actions")
 
     def test_local_history_keeps_bracket_tags(self):
         with tempfile.TemporaryDirectory() as tmp:

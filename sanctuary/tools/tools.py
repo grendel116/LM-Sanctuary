@@ -430,8 +430,8 @@ def read_webpage(url: str) -> str:
     # Escalate to Cloud crawl/scrape when static fetch failed or returned a JS shell (< 240 chars)
     if len(markdown_text) < 240:
         try:
-            from core import greenpt_client
-            scraped_md = greenpt_client.scrape_markdown(clean_url)
+            from core import v1_client
+            scraped_md = v1_client.scrape_markdown(clean_url)
             if scraped_md and len(scraped_md) > len(markdown_text):
                 markdown_text = scraped_md
         except Exception:
@@ -967,7 +967,7 @@ def web_search(query: str) -> str:
         if search_engine == "wikipedia" or browser_search_engine == "wikipedia":
             results_pool = run_wikipedia(query)
         elif search_engine == "web_crawling":
-            from core import greenpt_client
+            from core import v1_client
 
             collected_hits = []
             used_greenpt = False
@@ -976,7 +976,7 @@ def web_search(query: str) -> str:
                 collected_hits.extend(query_searxng(query, base_url=searxng_url))
 
             try:
-                greenpt_hits = greenpt_client.websearch(query, count=6, full_page_content="auto")
+                greenpt_hits = v1_client.websearch(query, count=6, full_page_content="auto")
                 if greenpt_hits:
                     collected_hits.extend(greenpt_hits)
                     used_greenpt = True
@@ -1054,13 +1054,13 @@ def consult_cloud(prompt: str, tier: str = "fast", context: str = "") -> str:
         tier: 'fast' (`glm-5.3-flash`, default) or 'deep' (`glm-5.3` / configured default).
         context: Optional supporting facts, excerpts, or constraints.
     """
-    from core import greenpt_client
+    from core import v1_client
 
     clean_prompt = str(prompt or "").strip()
     if not clean_prompt:
         return "Error: `prompt` must not be empty when calling consult_cloud."
 
-    if not greenpt_client.is_cloud_enabled(require_native_greenpt=False):
+    if not v1_client.is_v1_enabled(require_coop_extensions=False):
         return (
             "Cloud baton unavailable (routing policy is 'local_only', API key is unset, or credits are exhausted). "
             "Continue directly with local reasoning."
@@ -1079,10 +1079,10 @@ def consult_cloud(prompt: str, tier: str = "fast", context: str = "") -> str:
         {"role": "user", "content": user_content},
     ]
     try:
-        answer = greenpt_client.chat_completion(messages, tier=tier, temperature=0.3, max_tokens=4096)
-        chosen = greenpt_client.resolve_cloud_tier_model(tier=tier)
+        answer = v1_client.chat_completion(messages, tier=tier, temperature=0.3, max_tokens=4096)
+        chosen = v1_client.resolve_v1_tier_model(tier=tier)
         return f"[CLOUD SYNTHESIS ({chosen})]\n{answer}" if answer else "Error: Empty cloud synthesis response."
-    except greenpt_client.GreenPTQuotaError as exc:
+    except v1_client.V1QuotaError as exc:
         return f"Cloud credits exhausted ({exc}). Continue directly with local reasoning."
     except Exception as exc:
         return f"Cloud synthesis unavailable ({exc}). Continue directly with local reasoning."
@@ -1694,19 +1694,13 @@ def add_quest(
         f"{due_dt.strftime('%A, %B %d at %I:%M %p')}{rec_suffix} with {len(objectives)} objectives."
     )
 
+from core import openhands_harness as _openhands_harness
 from tools import coding_tools as _coding_tools
-from tools import openhands_job as _openhands_job
 
-list_dir = track_tool_activity(_coding_tools.list_dir)
-read_file = track_tool_activity(_coding_tools.read_file)
-grep_search = track_tool_activity(_coding_tools.grep_search)
-edit_file = track_tool_activity(_coding_tools.edit_file)
-write_file = track_tool_activity(_coding_tools.write_file)
-run_command = track_tool_activity(_coding_tools.run_command)
 http_probe = track_tool_activity(_coding_tools.http_probe)
 update_plan_step = track_tool_activity(_coding_tools.update_plan_step)
 
-delegate_coding = track_tool_activity(_openhands_job.delegate_coding)
+delegate_coding = track_tool_activity(_openhands_harness.delegate_coding)
 
 @track_tool_activity
 def add_journal_entry(keyphrases: str, content: str) -> str:

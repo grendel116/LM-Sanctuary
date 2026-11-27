@@ -128,7 +128,7 @@ function getBskyReadOpts(bskyAuth, fetchImpl) {
         accessJwt: bskyAuth.secrets.accessJwt,
         refreshJwt: bskyAuth.secrets.refreshJwt,
         ...(bskyAuth.meta?.id
-          ? { onSessionRefreshed: (tok) => updateAccountTokens(bskyAuth.meta.id, tok).catch(() => {}) }
+          ? { onSessionRefreshed: (tok) => updateAccountTokens(bskyAuth.meta.id, tok) }
           : {}),
       }
     : {};

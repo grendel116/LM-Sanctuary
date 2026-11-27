@@ -18,7 +18,7 @@ Ground every engineering decision in Sanctuary's concrete modules and strict cod
 - **3-Gear Continuum**:
   - Gear 1 (Local GGUF): `sanctuary/runners/runner.py` + `sanctuary/adapters/history_adapters.py`
   - Gear 2 (Cloud `/v1` Endpoint): `sanctuary/core/greenpt_client.py` (`websearch`, `scrape_markdown`, `convert_document`, `rerank`, `sync_skill`, `chat_completion`) + `consult_cloud` in `sanctuary/tools/tools.py`
-  - Gear 3 (OpenHands Coding & Subagents): `sanctuary/tools/openhands_job.py`, `sanctuary/tools/openhands_worker.py`, `sanctuary/runners/openhands_server.py`
+  - Gear 3 (In-Process OpenHands + Git Bash Coding): `sanctuary/core/openhands_harness.py` (`GitBashTerminalTool`, `FileEditorTool`, `GrepTool`, `GlobTool`, `LLMSummarizingCondenser`, `stuck_detection=True`, subagents)
 - **Skills & Subagents**:
   - Companion skills (`sanctuary/core/skills/*/SKILL.md`): Indexed by `sanctuary/core/skill_retriever.py` and synced lazily to `/v1/skills` when supported. Must keep `name` (`[a-z0-9-_]`), `title`, and `description` (`<= 500` chars).
   - Engineering skills (`.agents/skills/*/SKILL.md`) & custom subagents (`.agents/agents/*.md`): Auto-loaded by OpenHands `AgentContext(load_project_skills=True)`.

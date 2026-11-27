@@ -77,7 +77,10 @@ class OsHistoryAdapter:
         # Conversational turns stay within LOCAL_CHAT_BUDGET so memory + vectors replace long-context prefill.
         # Active tool-loop iterations expand into the allocated KV context; Cloud Gears unlock 32K.
         if cloud_gear:
-            return 32768
+            from core import v1_client
+
+            cfg = v1_client.get_v1_settings()
+            return v1_client.get_v1_model_info(cfg["default_model"])["context_tokens"]
         chat_budget = self._get_chat_budget()
         if not in_tool_loop:
             return chat_budget
@@ -174,9 +177,14 @@ class OsHistoryAdapter:
         if user_pos >= 0:
             dropped = 0
             while sum(kept_lengths) > available and len(kept) - user_pos - 1 > 2:
-                del kept[user_pos + 1:user_pos + 3]
-                del kept_lengths[user_pos + 1:user_pos + 3]
-                dropped += 2
+                end_del = user_pos + 2
+                while end_del < len(kept) and kept[end_del].get("role") == "tool":
+                    end_del += 1
+                if end_del >= len(kept):
+                    break
+                dropped += end_del - (user_pos + 1)
+                del kept[user_pos + 1:end_del]
+                del kept_lengths[user_pos + 1:end_del]
             if dropped:
                 print(f"[CONTEXT] Dropped {dropped} old tool-loop messages from the current turn.", flush=True)
                 if hasattr(self.runner_obj, "_get_memory_meta"):
@@ -300,7 +308,7 @@ class OsHistoryAdapter:
             for m in filtered_history[latest_user_idx + 1:]
         )
 
-        pending_call_labels: list[str] = []
+        pending_cloud_calls: list[str] = []
         for idx, msg in enumerate(filtered_history):
             role = "assistant" if msg["role"] == "program" else "user"
             msg_id = msg.get("id", "")
@@ -320,16 +328,40 @@ class OsHistoryAdapter:
                 if not content_text.startswith(f"[{s_name}]") and not content_text.startswith(f"{s_name}:"):
                     content_text = f"[{s_name}]: {content_text}"
 
-            # Intermediate (itm_) tool-call turns: local models see their own [tool(...)] tags;
-            # cloud models see no call syntax in assistant content (they use native tool_calls),
-            # and each call's args ride on the matching tool response header instead.
+            # Intermediate (itm_) tool-call turns: local models see [tool(...)] tags;
+            # cloud gears emit native OpenAI assistant(tool_calls) + role="tool"(tool_call_id) pairs.
             if msg.get("tool_calls") and msg_id.startswith("itm_"):
                 calls = [tc for tc in msg["tool_calls"] if tc.get("type") == "call"]
                 if cloud_gear:
-                    pending_call_labels.extend(
-                        f"{tc.get('name')} {json.dumps(_preview_tool_args(tc.get('args') or {}), ensure_ascii=False)}"
-                        for tc in calls
-                    )
+                    follow_count = 0
+                    scan = idx + 1
+                    while scan < len(filtered_history):
+                        fm = filtered_history[scan]
+                        f_id = str(fm.get("id") or "")
+                        f_txt = str(fm.get("text") or "")
+                        if f_id.startswith("tool_") and not f_id.startswith("tool_ckpt_") and f_txt.startswith("[Tool Response from "):
+                            follow_count += 1
+                            scan += 1
+                        else:
+                            break
+                    paired_calls = calls[-follow_count:] if follow_count and len(calls) >= follow_count else calls[:follow_count]
+                    if paired_calls:
+                        oa_tcs = []
+                        for c_idx, tc in enumerate(paired_calls):
+                            cid = str(tc.get("id") or f"{msg_id}_tc_{c_idx}")
+                            pending_cloud_calls.append(cid)
+                            oa_tcs.append({
+                                "id": cid,
+                                "type": "function",
+                                "function": {
+                                    "name": str(tc.get("name") or "tool"),
+                                    "arguments": json.dumps(tc.get("args") or {}, ensure_ascii=False),
+                                },
+                            })
+                        raw_messages.append({"role": "assistant", "content": content_text, "tool_calls": oa_tcs})
+                        continue
+                    if not content_text.strip():
+                        continue
                 else:
                     for tc in calls:
                         args_list = [
@@ -337,10 +369,6 @@ class OsHistoryAdapter:
                             for k, v in _preview_tool_args(tc.get("args") or {}).items()
                         ]
                         content_text += f"\n[{tc.get('name')}({', '.join(args_list)})]"
-            if cloud_gear and msg_id.startswith("tool_") and content_text.startswith("[Tool Response from ") and pending_call_labels:
-                header, sep, body = content_text.partition("]:")
-                if sep:
-                    content_text = f"[Tool Response from {pending_call_labels.pop(0)}]:{body}"
             if cloud_gear and role == "assistant" and msg_id.startswith("itm_") and not content_text.strip():
                 continue
 
@@ -367,6 +395,14 @@ class OsHistoryAdapter:
                 and len(content_text) > loop_tool_cap
             ):
                 content_text = f"{content_text[:int(loop_tool_cap * 0.6)]}\n... [Earlier tool output compacted ({len(content_text)} chars); re-read if needed]"
+
+            if cloud_gear and msg_id.startswith("tool_") and pending_cloud_calls and content_text.startswith("[Tool Response from "):
+                cid = pending_cloud_calls.pop(0)
+                _, sep, body = content_text.partition("]:\n")
+                if not sep:
+                    _, _, body = content_text.partition("]:")
+                raw_messages.append({"role": "tool", "tool_call_id": cid, "content": body.lstrip("\n")})
+                continue
 
             if idx == latest_user_idx:
                 msg_media_local = _resolve_existing_media_source(
@@ -435,6 +471,21 @@ class OsHistoryAdapter:
         post_injection = self._cached_post_injection
         if turn_directive:
             post_injection = f"{post_injection}\n\n{turn_directive}" if post_injection else turn_directive
+        if (
+            not story_active
+            and "# WORKSPACE AGENTS.MD" not in post_injection
+            and ("# RESEARCH PROTOCOL" in (turn_directive or "") or (cloud_gear and in_tool_loop))
+        ):
+            from core.program_config import get_program_name, load_agents_md
+
+            agents_md = load_agents_md()
+            if agents_md:
+                prog_name = get_program_name(active_prog)
+                agents_block = (
+                    f"# WORKSPACE AGENTS.MD\n{agents_md}\n\n"
+                    f"Keep your natural personality and voice as {prog_name} while following these engineering directives."
+                )
+                post_injection = f"{post_injection}\n\n{agents_block}" if post_injection else agents_block
 
         msgs = self._build_tiered_messages(
             system_content=system_content,
@@ -575,6 +626,7 @@ class OsHistoryAdapter:
                     "list_dir",
                     "read_file",
                     "grep_search",
+                    "trace_symbol",
                     "http_probe",
                     "edit_file",
                     "write_file",
@@ -587,9 +639,25 @@ class OsHistoryAdapter:
                     for m in filtered_history[-8:]
                     for tc in (m.get("tool_calls") or [])
                 )
-                coding_block = format_coding_state_block(meta, include_ledger_only=recent_coding)
+                coding_block = format_coding_state_block(meta)
                 if coding_block:
                     post_blocks.append(coding_block)
+                coding_context_active = (
+                    stripped_user.lower().startswith("/plan")
+                    or recent_coding
+                    or bool(coding_block)
+                    or any(r.get("name") == "auto_programming" for r in (self.matched_skill_records or []))
+                )
+                if coding_context_active:
+                    from core.program_config import get_program_name, load_agents_md
+
+                    agents_md = load_agents_md()
+                    if agents_md:
+                        prog_name = get_program_name(active_prog)
+                        post_blocks.append(
+                            f"# WORKSPACE AGENTS.MD\n{agents_md}\n\n"
+                            f"Keep your natural personality and voice as {prog_name} while following these engineering directives."
+                        )
             except Exception as ce:
                 print(f"[plan_state] Post-injection error: {ce}", flush=True)
 

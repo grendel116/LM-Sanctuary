@@ -103,9 +103,9 @@ class DataBankManager:
             return static_text
 
         try:
-            from core import greenpt_client
+            from core import v1_client
 
-            cloud_md = greenpt_client.scrape_markdown(clean_url)
+            cloud_md = v1_client.scrape_markdown(clean_url)
             if cloud_md:
                 return cloud_md
         except Exception:
@@ -244,9 +244,9 @@ class DataBankManager:
                 clean_text = ""
             if len(clean_text.strip()) < 80:
                 try:
-                    from core import greenpt_client
+                    from core import v1_client
 
-                    ocr_md = greenpt_client.convert_document(file_path, original_filename)
+                    ocr_md = v1_client.convert_document(file_path, original_filename)
                     if ocr_md:
                         clean_text = ocr_md
                 except Exception:
@@ -254,9 +254,9 @@ class DataBankManager:
             return self.ingest_text(clean_text, original_filename, "file")
 
         if ext in ('.docx', '.pptx', '.xlsx', '.png', '.jpg', '.jpeg', '.webp', '.tiff'):
-            from core import greenpt_client
+            from core import v1_client
 
-            converted = greenpt_client.convert_document(file_path, original_filename)
+            converted = v1_client.convert_document(file_path, original_filename)
             if not converted:
                 raise ValueError(
                     f"Converting '{ext}' files requires a Cloud API Key (Docling `/v1/tools/documents/convert/file`)."
@@ -354,11 +354,11 @@ class DataBankManager:
 
         if len(results) > 1 and (results[0][0] - results[1][0]) < 0.08:
             try:
-                from core import greenpt_client
+                from core import v1_client
 
-                if greenpt_client.is_cloud_enabled(require_native_greenpt=True):
+                if v1_client.is_v1_enabled(require_coop_extensions=True):
                     candidates = results[: max(top_k, min(12, len(results)))]
-                    reranked = greenpt_client.rerank(
+                    reranked = v1_client.rerank(
                         query_text,
                         [item[2] for item in candidates],
                         top_n=top_k,

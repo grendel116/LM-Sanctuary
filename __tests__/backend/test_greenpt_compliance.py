@@ -30,9 +30,9 @@ if str(SANCTUARY_DIR) not in sys.path:
     sys.path.insert(0, str(SANCTUARY_DIR))
 
 import app as app_mod
-from core import greenpt_client, quest_manager, scheduler, skill_retriever
+from core import openhands_harness, quest_manager, scheduler, skill_retriever, v1_client
 from core.skills.vectorized_databank.databank import DataBankManager
-from tools import openhands_job, openhands_worker, tools as tools_mod
+from tools import tools as tools_mod
 from utils import utils as utils_mod
 
 
@@ -182,7 +182,7 @@ def verify_all_skills_are_greenpt_and_agentskills_compliant() -> None:
     assert "auto_programming" in names
 
     for rec in companion_records:
-        payload = greenpt_client.format_greenpt_skill_payload(rec)
+        payload = v1_client.format_skill_payload(rec)
         assert 1 <= len(payload["name"]) <= 64
         assert all(c.isalnum() or c in "-_" for c in payload["name"]), payload["name"]
         assert 1 <= len(payload["title"]) <= 120
@@ -237,14 +237,14 @@ def verify_greenpt_endpoints_and_fallbacks() -> None:
         )
 
         with (
-            mock.patch.object(greenpt_client, "_SETTINGS_PATH", str(settings_file)),
-            mock.patch.object(greenpt_client, "_SKILL_SYNC_CACHE_PATH", str(sync_cache_file)),
-            mock.patch.object(greenpt_client, "is_native_greenpt", return_value=True),
+            mock.patch.object(v1_client, "_SETTINGS_PATH", str(settings_file)),
+            mock.patch.object(v1_client, "_SKILL_SYNC_CACHE_PATH", str(sync_cache_file)),
+            mock.patch.object(v1_client, "supports_coop_extensions", return_value=True),
         ):
-            greenpt_client.clear_quota_cooldown()
+            v1_client.clear_quota_cooldown()
 
             # 1. WebSearch
-            hits = greenpt_client.websearch("worker cooperatives", count=4, full_page_content="auto")
+            hits = v1_client.websearch("worker cooperatives", count=4, full_page_content="auto")
             assert len(hits) == 1
             assert hits[0]["source"] == "Cloud Search"
             assert "Detailed extracted passage" in hits[0]["content"]
@@ -294,14 +294,14 @@ def verify_greenpt_endpoints_and_fallbacks() -> None:
 
             # 4. Lazy Hash-Cached Skill Sync + Cloud Completion (`consult_cloud` & `ask_cloud` alias)
             gen_skill = next(r for r in skill_retriever._get_skill_registry() if r["name"] == "generative_ui")
-            slug1 = greenpt_client.sync_skill(gen_skill)
+            slug1 = v1_client.sync_skill(gen_skill)
             post_skills_count = sum(1 for r in _MockGreenPTHandler.log_requests if r["path"] == "/v1/skills")
-            slug2 = greenpt_client.sync_skill(gen_skill)
+            slug2 = v1_client.sync_skill(gen_skill)
             post_skills_count_after = sum(1 for r in _MockGreenPTHandler.log_requests if r["path"] == "/v1/skills")
             assert slug1 == "generative_ui" and slug2 == "generative_ui"
             assert post_skills_count == 1 and post_skills_count_after == 1, "Unchanged skill must hit sha256 cache"
 
-            reply_cloud = greenpt_client.chat_completion(
+            reply_cloud = v1_client.chat_completion(
                 [{"role": "user", "content": "Build an interactive slider"}],
                 tier="fast",
                 skill_record=gen_skill,
@@ -318,9 +318,9 @@ def verify_greenpt_endpoints_and_fallbacks() -> None:
             _MockGreenPTHandler.return_402 = True
             graceful_msg = tools_mod.consult_cloud("Test under 402")
             assert "credits exhausted" in graceful_msg.lower() or "unavailable" in graceful_msg.lower()
-            assert greenpt_client.is_quota_exhausted("sk-greenpt-test") is True
-            assert greenpt_client.is_cloud_enabled() is False
-            greenpt_client.clear_quota_cooldown()
+            assert v1_client.is_quota_exhausted("sk-greenpt-test") is True
+            assert v1_client.is_v1_enabled() is False
+            v1_client.clear_quota_cooldown()
             _MockGreenPTHandler.return_402 = False
     finally:
         httpd.shutdown()
@@ -343,15 +343,14 @@ def verify_subagent_tiering_auto_mode_and_user_choice_escalation() -> None:
             ),
             encoding="utf-8",
         )
-        with mock.patch.object(openhands_job, "_PROJECT_SETTINGS_PATH", str(settings_file)):
-            lead_cfg = openhands_job.resolve_greenpt_config(model="auto", subagent="")
-            res_cfg = openhands_job.resolve_greenpt_config(model="auto", subagent="researcher")
-            ver_cfg = openhands_job.resolve_greenpt_config(model="auto", subagent="verifier")
-            imp_cfg = openhands_job.resolve_greenpt_config(model="auto", subagent="implementer")
+        with mock.patch.object(openhands_harness, "_PROJECT_SETTINGS_PATH", str(settings_file)):
+            lead_cfg = openhands_harness.resolve_v1_config(model="auto", subagent="")
+            res_cfg = openhands_harness.resolve_v1_config(model="auto", subagent="researcher")
+            ver_cfg = openhands_harness.resolve_v1_config(model="auto", subagent="verifier")
+            imp_cfg = openhands_harness.resolve_v1_config(model="auto", subagent="implementer")
 
             assert lead_cfg["raw_model"] == "glm-5.3"
             assert lead_cfg["fast_litellm_model"] == "openai/glm-5.3-flash"
-            assert lead_cfg["mode"] == "auto"
             assert res_cfg["raw_model"] == "glm-5.3-flash"
             assert ver_cfg["raw_model"] == "glm-5.3-flash"
             assert imp_cfg["raw_model"] == "glm-5.3"
@@ -363,7 +362,7 @@ def verify_subagent_tiering_auto_mode_and_user_choice_escalation() -> None:
 
         get_default_tools(enable_browser=False, enable_sub_agents=True)
         _reset_registry_for_tests()
-        openhands_worker.register_sanctuary_subagents(str(tmp), fast_model="openai/glm-5.3-flash")
+        openhands_harness.register_sanctuary_subagents(str(tmp), fast_model="openai/glm-5.3-flash")
         parent_llm = LLM(model="openai/glm-5.3", api_key="sk-test", base_url="https://api.greenpt.ai/v1")
 
         res_agent = get_agent_factory("researcher").factory_func(parent_llm)

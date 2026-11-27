@@ -107,7 +107,7 @@ class ProgramGenerationAndStoryModeTests(unittest.TestCase):
         with (
             patch("adapters.vram_orchestrator.start_llm"),
             patch.object(programs_routes.httpx, "post", side_effect=httpx.ConnectError("down")),
-            patch("core.greenpt_client.cloud_unavailable_reason", return_value="disabled"),
+            patch("core.v1_client.v1_unavailable_reason", return_value="disabled"),
         ):
             with self.assertRaises(RuntimeError):
                 programs_routes.generate_character_json("Nova", "A pilot", "", "", "", "")

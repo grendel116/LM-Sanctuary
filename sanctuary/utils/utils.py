@@ -274,7 +274,13 @@ def _merge_consecutive_messages(messages: list[dict]) -> list[dict]:
 
     merged = []
     for msg in messages:
-        if merged and merged[-1]["role"] == msg["role"]:
+        if (
+            merged
+            and merged[-1]["role"] == msg["role"]
+            and msg["role"] != "tool"
+            and not msg.get("tool_calls")
+            and not merged[-1].get("tool_calls")
+        ):
             prev, curr = merged[-1]["content"], msg["content"]
             if isinstance(prev, str) and isinstance(curr, str):
                 merged[-1]["content"] = f"{prev}\n\n{curr}"
@@ -689,8 +695,8 @@ def extract_uploaded_file_content(file_path: str | Path, max_chars: int = 8000) 
             content = "\n\n".join(extracted_pages)[:max_chars]
             if len(content.strip()) < 80:
                 try:
-                    from core import greenpt_client
-                    ocr_md = greenpt_client.convert_document(str(p), filename)
+                    from core import v1_client
+                    ocr_md = v1_client.convert_document(str(p), filename)
                     if ocr_md:
                         content = ocr_md[:max_chars]
                 except Exception:
@@ -704,8 +710,8 @@ def extract_uploaded_file_content(file_path: str | Path, max_chars: int = 8000) 
 
     if ext in {".docx", ".pptx", ".xlsx"}:
         try:
-            from core import greenpt_client
-            converted = greenpt_client.convert_document(str(p), filename)
+            from core import v1_client
+            converted = v1_client.convert_document(str(p), filename)
             if converted:
                 snippet = converted[:max_chars]
                 return (
