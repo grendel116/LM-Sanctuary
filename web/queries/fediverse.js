@@ -1662,11 +1662,16 @@ export async function uploadMedia({
   accessToken,
   file,
   description = '',
-  pollDelayMs = 500,
-  maxPolls = 12,
+  pollDelayMs,
+  maxPolls,
   fetchImpl,
 }) {
   const origin = normalizeInstanceUrl(instanceUrl);
+  const isVideo = String(file?.type || '').toLowerCase().startsWith('video/')
+    || /\.(?:mp4|webm|mov|m4v)(?:[?#]|$)/i.test(String(file?.name || ''));
+  const effPollDelayMs = pollDelayMs ?? (isVideo ? 1000 : 500);
+  const effMaxPolls = maxPolls ?? (isVideo ? 90 : 12);
+
   const form = new FormData();
   form.append('file', file);
   if (description) {
@@ -1678,14 +1683,14 @@ export async function uploadMedia({
     headers: authHeaders(accessToken),
     body: form,
     responseType: 'raw',
-    timeoutMs: 60000,
+    timeoutMs: isVideo ? 180000 : 60000,
     fetchImpl,
   });
   let media = await res.json();
 
   if ((res.status === 202 || !media?.url) && media?.id) {
-    for (let attempt = 0; attempt < maxPolls; attempt += 1) {
-      if (pollDelayMs > 0) await sleep(pollDelayMs);
+    for (let attempt = 0; attempt < effMaxPolls; attempt += 1) {
+      if (effPollDelayMs > 0) await sleep(effPollDelayMs);
       const checkRes = await fetchWrapper(`${origin}/api/v1/media/${encodeURIComponent(media.id)}`, {
         headers: authHeaders(accessToken),
         responseType: 'raw',
@@ -1702,7 +1707,7 @@ export async function uploadMedia({
     id: String(media.id),
     url: media.url || '',
     previewUrl: media.preview_url || media.url || '',
-    type: media.type || 'image',
+    type: media.type || (isVideo ? 'video' : 'image'),
     description: media.description || description,
   };
 }

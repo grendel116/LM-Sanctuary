@@ -9,6 +9,7 @@ export const THREADS_MAX_CHARS = 500;
 export const BLUESKY_CHAT_PROXY = 'did:web:api.bsky.chat#bsky_chat';
 export const DEFAULT_BSKY_SERVICE = 'https://bsky.social';
 export const PUBLIC_BSKY_API = 'https://public.api.bsky.app';
+export const BLUESKY_VIDEO_SERVICE = 'https://video.bsky.app';
 export const THREADS_GRAPH_BASE = 'https://graph.threads.net/v1.0';
 export const THREADS_TOKEN_BASE = 'https://graph.threads.net';
 export const THREADS_OAUTH_AUTHORIZE_URL = 'https://threads.net/oauth/authorize';

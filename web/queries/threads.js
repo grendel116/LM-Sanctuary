@@ -59,11 +59,24 @@ const THREADS_MANAGE_REPLIES_PERM_MSG =
   "Threads token lacks 'threads_manage_replies' permission. Enable threads_manage_replies under Use Cases → Permissions in your Meta App and update your token.";
 const THREADS_TRANSIENT_LAG_RE = /2207027|4279009|cannot be found|does not exist|not ready|processing|"is_transient":\s*true/i;
 
-function isTransientThreadsLag(err) {
+function isExplicitThreadsLag(err) {
   if (!(err instanceof FetchError)) return false;
-  if (err.status >= 500) return true;
   const rawErr = `${err.message || ''} ${JSON.stringify(err.body || '')}`;
   return THREADS_TRANSIENT_LAG_RE.test(rawErr);
+}
+
+function isTransientThreadsLag(err) {
+  if (!(err instanceof FetchError)) return false;
+  if (isExplicitThreadsLag(err)) return true;
+  if (err.status === 502 || err.status === 504) return false;
+  return err.status >= 500;
+}
+
+function isThreadsVideoAttachment(att, resolvedUrl = '') {
+  const t = String(att?.type || '').toLowerCase();
+  const m = String(att?.mimeType || att?.mime_type || att?.file?.type || att?.blob?.type || '').toLowerCase();
+  const u = String(resolvedUrl || att?.url || '').split(/[?#]/)[0].toLowerCase();
+  return t === 'video' || t === 'gifv' || m.startsWith('video/') || /\.(?:mp4|webm|mov|m4v)$/.test(u);
 }
 
 function extractThreadsErrorMessage(err, fallback = 'Threads request failed') {
@@ -305,7 +318,8 @@ export async function createThreadsContainer({
       });
     } catch (err) {
       lastErr = err;
-      if (attempt + 1 < maxAttempts && isTransientThreadsLag(err)) {
+      const canRetry = replyToId ? isTransientThreadsLag(err) : isExplicitThreadsLag(err);
+      if (attempt + 1 < maxAttempts && canRetry) {
         if (pollDelayMs > 0) await sleep(pollDelayMs * (1 + attempt * 0.75));
         continue;
       }
@@ -373,13 +387,16 @@ export async function publishThreadsContainer({ userId, accessToken, creationId,
       if (attempt + 1 < maxAttempts && isTransientThreadsLag(err)) {
         const waitMs = pollDelayMs > 0 ? Math.round(pollDelayMs * (1 + attempt * 0.75)) : 0;
         const t0 = Date.now();
-        await waitThreadsContainerReady({
+        const readyInfo = await waitThreadsContainerReady({
           containerId: creationId,
           accessToken,
           pollDelayMs: waitMs,
           maxPolls: 6,
           fetchImpl,
         });
+        if (String(readyInfo?.status || '').toUpperCase() === 'PUBLISHED') {
+          return { id: String(readyInfo.id || creationId) };
+        }
         const elapsed = Date.now() - t0;
         if (waitMs > 0 && elapsed < waitMs * 0.5) {
           await sleep(waitMs);
@@ -443,7 +460,7 @@ export async function publishThreadsPost({
       mastodonUploadedUrl: mastodonUrls[0] || '',
       publicMediaBaseUrl,
     });
-    const isVideo = String(att?.type || att?.mimeType || '').startsWith('video');
+    const isVideo = isThreadsVideoAttachment(att, resolvedUrl);
     const created = await createThreadsContainer({
       userId,
       accessToken,
@@ -458,10 +475,13 @@ export async function publishThreadsPost({
       pollDelayMs,
       fetchImpl,
     });
+    const readyPollDelay = isVideo && pollDelayMs >= 500 ? Math.max(pollDelayMs, 2000) : pollDelayMs;
+    const readyMaxPolls = isVideo && pollDelayMs >= 500 ? 60 : 15;
     await waitThreadsContainerReady({
       containerId: created.id,
       accessToken,
-      pollDelayMs,
+      pollDelayMs: readyPollDelay,
+      maxPolls: readyMaxPolls,
       fetchImpl,
     });
     return publishThreadsContainer({
@@ -480,7 +500,7 @@ export async function publishThreadsPost({
       mastodonUploadedUrl: mastodonUrls[i] || '',
       publicMediaBaseUrl,
     });
-    const isVideo = String(att?.type || att?.mimeType || '').startsWith('video');
+    const isVideo = isThreadsVideoAttachment(att, resolvedUrl);
     const child = await createThreadsContainer({
       userId,
       accessToken,
@@ -491,10 +511,13 @@ export async function publishThreadsPost({
       pollDelayMs,
       fetchImpl,
     });
+    const readyPollDelay = isVideo && pollDelayMs >= 500 ? Math.max(pollDelayMs, 2000) : pollDelayMs;
+    const readyMaxPolls = isVideo && pollDelayMs >= 500 ? 60 : 15;
     await waitThreadsContainerReady({
       containerId: child.id,
       accessToken,
-      pollDelayMs,
+      pollDelayMs: readyPollDelay,
+      maxPolls: readyMaxPolls,
       fetchImpl,
     });
     childIds.push(child.id);

@@ -11,7 +11,15 @@ import {
   repostBskyPost,
   updateBskyNotificationsSeen,
   uploadBskyBlob,
+  uploadBskyVideo,
 } from '../../queries/bluesky.js';
+
+function isBskyVideoAttachment(att) {
+  const t = String(att?.type || '').toLowerCase();
+  const m = String(att?.mimeType || att?.mime_type || att?.file?.type || att?.blob?.type || '').toLowerCase();
+  const u = String(att?.url || att?.file?.name || '').split(/[?#]/)[0].toLowerCase();
+  return t === 'video' || t === 'gifv' || m.startsWith('video/') || /\.(?:mp4|webm|mov|m4v)$/.test(u);
+}
 
 export class BlueskyAdapter extends SocialAdapter {
   protocol = 'bluesky';
@@ -45,18 +53,40 @@ export class BlueskyAdapter extends SocialAdapter {
 
   async publish(draft, media = [], options = {}) {
     const uploadedImages = [];
-    for (const att of (media || []).slice(0, 4)) {
-      const blob = att.blob || att.file;
-      if (!blob) continue;
-      const uploadedBlob = await uploadBskyBlob({
+    let uploadedVideo = null;
+    const videoAtt = (media || []).find((att) => (att?.blob || att?.file) && isBskyVideoAttachment(att));
+
+    if (videoAtt) {
+      const blob = videoAtt.blob || videoAtt.file;
+      const mimeType = videoAtt.mimeType || videoAtt.mime_type || blob.type || 'video/mp4';
+      const uploadedVideoBlob = await uploadBskyVideo({
         ...this._authArgs(),
+        did: this.did,
         blob,
-        mimeType: att.mimeType || att.mime_type || blob.type || 'image/jpeg',
+        mimeType,
+        name: blob.name || 'video.mp4',
       });
-      uploadedImages.push({ alt: att.altText || att.alt_text || '', blob: uploadedBlob });
+      uploadedVideo = {
+        blob: uploadedVideoBlob,
+        alt: videoAtt.altText || videoAtt.alt_text || '',
+        ...(videoAtt.width > 0 && videoAtt.height > 0
+          ? { aspectRatio: { width: videoAtt.width, height: videoAtt.height } }
+          : {}),
+      };
+    } else {
+      for (const att of (media || []).slice(0, 4)) {
+        const blob = att.blob || att.file;
+        if (!blob) continue;
+        const uploadedBlob = await uploadBskyBlob({
+          ...this._authArgs(),
+          blob,
+          mimeType: att.mimeType || att.mime_type || blob.type || 'image/jpeg',
+        });
+        uploadedImages.push({ alt: att.altText || att.alt_text || '', blob: uploadedBlob });
+      }
     }
     let externalEmbed = null;
-    if (uploadedImages.length === 0 && options.externalEmbed?.url) {
+    if (!uploadedVideo && uploadedImages.length === 0 && options.externalEmbed?.url) {
       externalEmbed = { ...options.externalEmbed };
       if (!externalEmbed.thumb && typeof externalEmbed.image === 'string' && /^https:\/\//i.test(externalEmbed.image)) {
         try {
@@ -86,6 +116,7 @@ export class BlueskyAdapter extends SocialAdapter {
       repo: this.did,
       text: draft,
       images: uploadedImages,
+      video: uploadedVideo,
       externalEmbed,
       reply: options.reply || null,
       sensitive: Boolean(options.sensitive),
@@ -94,7 +125,7 @@ export class BlueskyAdapter extends SocialAdapter {
     const cid = created?.cid || '';
     const rkey = uri.split('/').pop() || '';
     const resolvedFacets = Array.isArray(created?.facets) ? created.facets : [];
-    const hasSensitiveMedia = Boolean(options.sensitive && uploadedImages.length > 0);
+    const hasSensitiveMedia = Boolean(options.sensitive && (uploadedImages.length > 0 || uploadedVideo));
     return {
       id: `bluesky:${uri || cid}`,
       protocol: 'bluesky',

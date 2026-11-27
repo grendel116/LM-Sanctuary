@@ -19,7 +19,7 @@ social_bridge_bp = Blueprint("social_bridge", __name__, url_prefix="/api/social"
 _THREADS_ALLOWED_METHODS = frozenset({"GET", "POST", "DELETE"})
 _THREADS_POST_ID_RE = re.compile(r"^[A-Za-z0-9_:-]{1,64}$")
 _SHARED_THREADS_CLIENT = httpx.Client(
-    timeout=15.0,
+    timeout=45.0,
     follow_redirects=False,
     limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
 )

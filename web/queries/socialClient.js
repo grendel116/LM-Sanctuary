@@ -1003,6 +1003,31 @@ async function publishThreadsSegments({
   return { protocol: 'threads', ids, items: publishedItems };
 }
 
+function isVideoAttachment(att) {
+  const t = String(att?.type || '').toLowerCase();
+  const m = String(att?.mimeType || att?.mime_type || att?.file?.type || att?.blob?.type || '').toLowerCase();
+  const u = String(att?.url || att?.file?.name || '').split(/[?#]/)[0].toLowerCase();
+  return t === 'video' || t === 'gifv' || m.startsWith('video/') || /\.(?:mp4|webm|mov|m4v)$/.test(u);
+}
+
+function normalizeOutboundAttachment(att) {
+  const rawMime = String(att?.mimeType || att?.mime_type || att?.file?.type || att?.blob?.type || '').trim();
+  const isVid = isVideoAttachment(att);
+  const inferredMime = rawMime && rawMime !== 'application/octet-stream'
+    ? rawMime
+    : (isVid ? 'video/mp4' : 'image/jpeg');
+  const type = String(att?.type || (isVid ? 'video' : inferredMime.startsWith('audio/') ? 'audio' : 'image')).toLowerCase();
+  return {
+    blob: att.blob || att.file || null,
+    url: att.url || '',
+    mimeType: inferredMime,
+    type,
+    altText: att.altText || att.alt_text || '',
+    ...(Number.isFinite(Number(att.width)) && Number(att.width) > 0 ? { width: Number(att.width) } : {}),
+    ...(Number.isFinite(Number(att.height)) && Number(att.height) > 0 ? { height: Number(att.height) } : {}),
+  };
+}
+
 /**
  * Automatic outbound fan-out: Mastodon primary + concurrent non-blocking Promise.allSettled
  * fan-out to Bluesky and Threads with retry queuing and linkedIds local mapping.
@@ -1029,12 +1054,7 @@ export async function publishUnified({
     throw new Error('Connect Mastodon under Profile -> Accounts & Bridges.');
   }
 
-  const normalizedMedia = (mediaAttachments || []).map((att) => ({
-    blob: att.blob || att.file || null,
-    url: att.url || '',
-    mimeType: att.mimeType || att.mime_type || att.file?.type || 'image/jpeg',
-    altText: att.altText || att.alt_text || '',
-  }));
+  const normalizedMedia = (mediaAttachments || []).map(normalizeOutboundAttachment);
 
   let resolvedCard = null;
   if (normalizedMedia.length === 0 && !dismissLinkCard) {
@@ -1062,6 +1082,9 @@ export async function publishUnified({
     });
     if (i === 0 && Array.isArray(published._uploadedMediaUrls)) {
       uploadedUrls = published._uploadedMediaUrls;
+    }
+    if (i === 0 && uploadedUrls.length === 0 && Array.isArray(published.attachments)) {
+      uploadedUrls = published.attachments.map((att) => att?.url).filter(Boolean);
     }
     delete published._uploadedMediaUrls;
     if (i === 0 && resolvedCard && !published._meta?.linkCard) {
@@ -1139,6 +1162,13 @@ export async function publishUnified({
           ...(partial ? { segmentOffset: partial.published.length } : {}),
           ...(partial && proto === 'bluesky' ? { replyRoot: partial.published[0] || null, replyParent: partial.lastParent } : {}),
           ...(partial && proto === 'threads' ? { replyToThreadsId: String(partial.lastParent || '') } : {}),
+          ...(partial ? {} : {
+            mediaTypes: normalizedMedia.map((att) => ({
+              type: att.type || 'image',
+              mimeType: att.mimeType || '',
+              altText: att.altText || '',
+            })),
+          }),
           mastodonMediaUrls: partial ? [] : uploadedUrls,
         },
         lastError: errMsg,
@@ -4371,11 +4401,22 @@ export async function runBridgeRetry(retryId) {
       await threads.delete({ postId: entry.payload?.nativeId || '' });
     } else {
       const mediaUrls = offset === 0 ? (entry.payload?.mastodonMediaUrls || []).filter(Boolean) : [];
+      const mediaMeta = offset === 0 && Array.isArray(entry.payload?.mediaTypes) ? entry.payload.mediaTypes : [];
+      const retryMedia = mediaUrls.map((url, idx) => {
+        const meta = mediaMeta[idx] || {};
+        const isVid = meta.type === 'video' || String(meta.mimeType || '').startsWith('video/') || /\.(?:mp4|webm|mov|m4v)(?:[?#]|$)/i.test(url);
+        return {
+          url,
+          type: meta.type || (isVid ? 'video' : 'image'),
+          mimeType: meta.mimeType || (isVid ? 'video/mp4' : ''),
+          altText: meta.altText || '',
+        };
+      });
       try {
         const res = await publishThreadsSegments({
           threads,
           textParts: parts,
-          media: mediaUrls.map((url) => ({ url })),
+          media: retryMedia,
           uploadedUrls: mediaUrls,
           parentTid: entry.payload?.replyToThreadsId || '',
         });

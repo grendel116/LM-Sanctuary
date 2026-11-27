@@ -45,26 +45,79 @@ function createInitialComposeState() {
 
 export const composeStore = createStore(createInitialComposeState());
 
+const EXT_MIME_MAP = Object.freeze({
+  mp4: { mimeType: 'video/mp4', type: 'video' },
+  m4v: { mimeType: 'video/mp4', type: 'video' },
+  webm: { mimeType: 'video/webm', type: 'video' },
+  mov: { mimeType: 'video/quicktime', type: 'video' },
+  mp3: { mimeType: 'audio/mpeg', type: 'audio' },
+  mpeg: { mimeType: 'audio/mpeg', type: 'audio' },
+  wav: { mimeType: 'audio/wav', type: 'audio' },
+  ogg: { mimeType: 'audio/ogg', type: 'audio' },
+  oga: { mimeType: 'audio/ogg', type: 'audio' },
+});
+
+export function inferMediaMimeAndType({ url = '', mimeType = '', type = '', file = null, blob = null } = {}) {
+  const rawMime = String(mimeType || file?.type || blob?.type || '').trim().toLowerCase();
+  const rawType = String(type || '').trim().toLowerCase();
+  let resolvedMime = rawMime === 'application/octet-stream' ? '' : rawMime;
+  let inferredType = '';
+
+  if (!resolvedMime) {
+    const candidatePath = String(file?.name || url || '').split(/[?#]/)[0].toLowerCase();
+    const dotIdx = candidatePath.lastIndexOf('.');
+    const ext = dotIdx >= 0 ? candidatePath.slice(dotIdx + 1) : '';
+    if (ext && EXT_MIME_MAP[ext]) {
+      resolvedMime = EXT_MIME_MAP[ext].mimeType;
+      inferredType = EXT_MIME_MAP[ext].type;
+    }
+  }
+
+  let resolvedType = rawType;
+  if (resolvedMime.startsWith('video/') || resolvedType === 'video' || resolvedType === 'gifv' || inferredType === 'video') {
+    resolvedType = 'video';
+    if (!resolvedMime) resolvedMime = 'video/mp4';
+  } else if (resolvedMime.startsWith('audio/') || resolvedType === 'audio' || inferredType === 'audio') {
+    resolvedType = 'audio';
+    if (!resolvedMime) resolvedMime = 'audio/mpeg';
+  } else {
+    resolvedType = resolvedType || 'image';
+  }
+
+  return { mimeType: resolvedMime, type: resolvedType };
+}
+
 function normalizeMediaItem(item, index = 0) {
   if (typeof item === 'string') {
+    const inferred = inferMediaMimeAndType({ url: item });
     return {
       id: `att_${Date.now()}_${index}`,
       url: item,
       previewUrl: item,
       file: null,
       blob: null,
-      mimeType: '',
+      mimeType: inferred.mimeType,
+      type: inferred.type,
       altText: '',
       source: 'sanctuary',
     };
   }
+  const url = item.url || item.previewUrl || '';
+  const inferred = inferMediaMimeAndType({
+    url,
+    mimeType: item.mimeType || item.mime_type,
+    type: item.type,
+    file: item.file,
+    blob: item.blob,
+  });
   return {
     id: item.id || `att_${Date.now()}_${index}`,
-    url: item.url || item.previewUrl || '',
+    url,
     previewUrl: item.previewUrl || item.url || '',
     file: item.file || null,
     blob: item.blob || null,
-    mimeType: item.mimeType || item.file?.type || '',
+    mimeType: inferred.mimeType,
+    type: inferred.type,
     altText: item.altText || '',
     source: item.source || 'sanctuary',
   };
@@ -405,13 +458,15 @@ export async function saveCurrentComposeDraft() {
   const serializedMedia = [];
   for (const att of s.mediaAttachments || []) {
     const rawBlob = att.file || att.blob || null;
+    const inferred = inferMediaMimeAndType(att);
     if (rawBlob) {
       const dataUrl = await blobToDataUrl(rawBlob);
       if (dataUrl) {
         serializedMedia.push({
           id: att.id,
           dataUrl,
-          mimeType: att.mimeType || rawBlob.type || 'image/png',
+          mimeType: inferred.mimeType || 'image/png',
+          type: inferred.type,
           altText: String(att.altText || ''),
           source: 'draft',
         });
@@ -420,7 +475,8 @@ export async function saveCurrentComposeDraft() {
       serializedMedia.push({
         id: att.id,
         url: att.url,
-        mimeType: att.mimeType || '',
+        mimeType: inferred.mimeType,
+        type: inferred.type,
         altText: String(att.altText || ''),
         source: att.source || 'sanctuary',
       });
@@ -468,24 +524,28 @@ export function loadComposeDraft(draft) {
     if (!m) continue;
     if (m.dataUrl) {
       const blob = dataUrlToBlob(m.dataUrl, m.mimeType || 'image/png');
+      const inferred = inferMediaMimeAndType({ url: m.dataUrl, mimeType: m.mimeType, type: m.type, blob });
       hydratedMedia.push({
         id: m.id || `att_${Date.now()}_${i}`,
         blob,
         file: null,
         url: m.dataUrl,
         previewUrl: m.dataUrl,
-        mimeType: m.mimeType || blob?.type || 'image/png',
+        mimeType: inferred.mimeType || 'image/png',
+        type: inferred.type,
         altText: String(m.altText || ''),
         source: 'draft',
       });
     } else if (m.url) {
+      const inferred = inferMediaMimeAndType({ url: m.url, mimeType: m.mimeType, type: m.type });
       hydratedMedia.push({
         id: m.id || `att_${Date.now()}_${i}`,
         blob: null,
         file: null,
         url: m.url,
         previewUrl: m.url,
-        mimeType: m.mimeType || '',
+        mimeType: inferred.mimeType,
+        type: inferred.type,
         altText: String(m.altText || ''),
         source: m.source || 'sanctuary',
       });

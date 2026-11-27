@@ -7,7 +7,7 @@ import { DEFAULT_AVATAR_DATA_URI } from '../constants/avatars.js';
 import { BLUESKY_MAX_GRAPHEMES, MASTODON_MAX_CHARS } from '../constants/endpoints.js';
 import { shrinkImageBlobForCrosspost } from './crosspostImageResize.js';
 import { buildSynthesizedReplyContext, toUnifiedItem } from '../core/schema/unifiedItem.js';
-import { createBskyPost, searchBskyActors, uploadBskyBlob } from '../queries/bluesky.js';
+import { createBskyPost, searchBskyActors, uploadBskyBlob, uploadBskyVideo } from '../queries/bluesky.js';
 import { searchFediverse } from '../queries/fediverse.js';
 import { extractFirstHttpsUrl, fetchLinkPreview } from '../queries/linkPreview.js';
 import { resolveSanctuaryMediaUrl } from '../queries/sanctuary.js';
@@ -147,8 +147,15 @@ async function resolveCrosspostAttachmentBlob(att) {
   const blob = await resolveAttachmentBlob(att);
   if (!blob) return null;
   const shrunk = await shrinkImageBlobForCrosspost(blob);
-  if (shrunk === blob) return { blob, mimeType: att.mimeType || blob.type || '' };
-  return { blob: shrunk, mimeType: 'image/jpeg' };
+  if (shrunk === blob) {
+    const rawMime = String(att.mimeType || blob.type || '').trim();
+    const mimeType = rawMime && rawMime !== 'application/octet-stream'
+      ? rawMime
+      : (att.type === 'video' ? 'video/mp4' : '');
+    const type = att.type || (mimeType.startsWith('video/') ? 'video' : mimeType.startsWith('audio/') ? 'audio' : 'image');
+    return { blob, mimeType, type };
+  }
+  return { blob: shrunk, mimeType: 'image/jpeg', type: 'image' };
 }
 
 /**
@@ -206,6 +213,7 @@ export async function publishOrganicPost({
       file: prepared.blob,
       blob: prepared.blob,
       mimeType: prepared.mimeType,
+      type: prepared.type || att.type || 'image',
     });
   }
 
@@ -258,17 +266,35 @@ export async function publishOrganicPost({
   if (sendBsky && bskyAccount) {
     try {
       const uploadedImages = [];
-      for (const att of preparedAttachments.slice(0, 4)) {
-        if (!att.blob) continue;
-        const uploadedBlob = await uploadBskyBlob({
+      let uploadedVideo = null;
+      const videoAtt = preparedAttachments.find(
+        (att) => att.blob && (att.type === 'video' || String(att.mimeType || att.blob.type || '').startsWith('video/'))
+      );
+      if (videoAtt) {
+        const uploadedVideoBlob = await uploadBskyVideo({
           serviceUrl: bskyAccount.meta.serviceUrl,
+          did: bskyAccount.meta.did,
           accessJwt: bskyAccount.secrets.accessJwt,
           refreshJwt: bskyAccount.secrets.refreshJwt,
           onSessionRefreshed: (tok) => updateAccountTokens(bskyAccount.meta.id, tok),
-          blob: att.blob,
-          mimeType: att.mimeType || att.blob.type || 'image/jpeg',
+          blob: videoAtt.blob,
+          mimeType: videoAtt.mimeType || videoAtt.blob.type || 'video/mp4',
+          name: videoAtt.blob.name || 'video.mp4',
         });
-        uploadedImages.push({ alt: att.altText || '', blob: uploadedBlob });
+        uploadedVideo = { blob: uploadedVideoBlob, alt: videoAtt.altText || '' };
+      } else {
+        for (const att of preparedAttachments.slice(0, 4)) {
+          if (!att.blob) continue;
+          const uploadedBlob = await uploadBskyBlob({
+            serviceUrl: bskyAccount.meta.serviceUrl,
+            accessJwt: bskyAccount.secrets.accessJwt,
+            refreshJwt: bskyAccount.secrets.refreshJwt,
+            onSessionRefreshed: (tok) => updateAccountTokens(bskyAccount.meta.id, tok),
+            blob: att.blob,
+            mimeType: att.mimeType || att.blob.type || 'image/jpeg',
+          });
+          uploadedImages.push({ alt: att.altText || '', blob: uploadedBlob });
+        }
       }
       const replyParentRef = replyTo?.network === 'bluesky'
         ? { uri: replyTo.uri, cid: replyTo.cid }
@@ -281,7 +307,8 @@ export async function publishOrganicPost({
         onSessionRefreshed: (tok) => updateAccountTokens(bskyAccount.meta.id, tok),
         text: cleanText,
         images: uploadedImages,
-        externalEmbed: uploadedImages.length === 0 ? resolvedCard : null,
+        video: uploadedVideo,
+        externalEmbed: !uploadedVideo && uploadedImages.length === 0 ? resolvedCard : null,
         reply: replyParentRef ? { root: replyParentRef, parent: replyParentRef } : null,
         sensitive: Boolean(sensitive),
       });
@@ -1111,6 +1138,7 @@ export function mountComposeModal(hostEl, { onPublished } = {}) {
   }
 
   async function publishAll() {
+    if (composeStore.get().submitting) return;
     clearPendingLinkPreview();
     const s = composeStore.get();
     const consumedDraftId = s.activeDraftId;

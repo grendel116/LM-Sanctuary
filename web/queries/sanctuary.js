@@ -903,7 +903,7 @@ export async function requestSocialBridge(path, payload, { timeoutMs = 8000 } = 
  * Relay a stateless https://graph.threads.net request through the configured Sanctuary node
  * to bypass browser CORS omissions on Threads API endpoints.
  */
-export async function requestThreadsProxy({ url, method = 'GET', body = '', timeoutMs = 15000 } = {}) {
+export async function requestThreadsProxy({ url, method = 'GET', body = '', timeoutMs = 45000 } = {}) {
   if (connectionStore.get().mode !== 'online') return null;
   try {
     return await requestNode('/api/social/threads-proxy', {

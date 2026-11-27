@@ -1,5 +1,6 @@
 import {
   BLUESKY_CHAT_PROXY,
+  BLUESKY_VIDEO_SERVICE,
   DEFAULT_BSKY_SERVICE,
   PUBLIC_BSKY_API,
   normalizeInstanceUrl,
@@ -1773,6 +1774,13 @@ export async function searchBskyFeedGenerators(opts = {}) {
     .filter((f) => f.uri.startsWith('at://'));
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => {
+    const t = setTimeout(resolve, ms);
+    t?.unref?.();
+  });
+}
+
 export async function uploadBskyBlob({
   serviceUrl = DEFAULT_BSKY_SERVICE,
   accessJwt,
@@ -1780,6 +1788,7 @@ export async function uploadBskyBlob({
   onSessionRefreshed,
   blob,
   mimeType,
+  timeoutMs = 60000,
   fetchImpl,
 }) {
   const type = mimeType || blob?.type || 'image/jpeg';
@@ -1792,9 +1801,122 @@ export async function uploadBskyBlob({
     accessJwt,
     refreshJwt,
     onSessionRefreshed,
+    timeoutMs,
     fetchImpl,
   });
   return data?.blob;
+}
+
+/**
+ * Upload a video to Bluesky via the video.bsky.app service-auth transcoding pipeline,
+ * falling back to direct PDS uploadBlob if the PDS does not support getServiceAuth.
+ */
+export async function uploadBskyVideo({
+  serviceUrl = DEFAULT_BSKY_SERVICE,
+  videoServiceUrl = BLUESKY_VIDEO_SERVICE,
+  did = '',
+  accessJwt,
+  refreshJwt,
+  onSessionRefreshed,
+  blob,
+  mimeType = 'video/mp4',
+  name = 'video.mp4',
+  pollDelayMs = 1500,
+  maxPolls = 60,
+  fetchImpl,
+}) {
+  const type = mimeType || blob?.type || 'video/mp4';
+  const pdsOrigin = cleanServiceOrigin(serviceUrl);
+
+  if (did) {
+    let serviceToken = '';
+    try {
+      const pdsHost = new URL(pdsOrigin).hostname;
+      const authRes = await bskyRequest({
+        serviceUrl: pdsOrigin,
+        endpoint: 'com.atproto.server.getServiceAuth',
+        params: {
+          aud: `did:web:${pdsHost}`,
+          lxm: 'com.atproto.repo.uploadBlob',
+          exp: Math.floor(Date.now() / 1000) + 1800,
+        },
+        accessJwt,
+        refreshJwt,
+        onSessionRefreshed,
+        fetchImpl,
+      });
+      serviceToken = String(authRes?.token || '').trim();
+    } catch {
+      serviceToken = '';
+    }
+
+    if (serviceToken) {
+      const videoOrigin = cleanServiceOrigin(videoServiceUrl);
+      const uploadUrl = new URL(`${videoOrigin}/xrpc/app.bsky.video.uploadVideo`);
+      uploadUrl.searchParams.set('did', String(did));
+      uploadUrl.searchParams.set('name', String(name || 'video.mp4'));
+
+      let uploadRes;
+      try {
+        uploadRes = await fetchWrapper(uploadUrl.toString(), {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${serviceToken}`,
+            'Content-Type': type,
+          },
+          body: blob,
+          timeoutMs: 180000,
+          fetchImpl,
+        });
+      } catch (err) {
+        if (
+          err instanceof FetchError
+          && err.status === 409
+          && err.body
+          && (err.body.jobId || err.body.jobStatus || err.body.blob)
+        ) {
+          uploadRes = err.body;
+        } else {
+          throw err;
+        }
+      }
+
+      const initialStatus = uploadRes?.jobStatus || uploadRes;
+      if (initialStatus?.blob) {
+        return initialStatus.blob;
+      }
+      const jobId = String(initialStatus?.jobId || '').trim();
+      if (jobId) {
+        const statusUrl = `${videoOrigin}/xrpc/app.bsky.video.getJobStatus?jobId=${encodeURIComponent(jobId)}`;
+        for (let attempt = 0; attempt < maxPolls; attempt += 1) {
+          if (pollDelayMs > 0) await sleep(pollDelayMs);
+          const statusRes = await fetchWrapper(statusUrl, {
+            headers: { Authorization: `Bearer ${serviceToken}` },
+            fetchImpl,
+          });
+          const job = statusRes?.jobStatus || statusRes;
+          if (job?.blob) {
+            return job.blob;
+          }
+          if (job?.state === 'JOB_STATE_FAILED') {
+            throw new Error(job.error || job.message || 'Bluesky video processing failed');
+          }
+        }
+        throw new Error('Timed out waiting for Bluesky video processing');
+      }
+    }
+  }
+
+  return uploadBskyBlob({
+    serviceUrl: pdsOrigin,
+    accessJwt,
+    refreshJwt,
+    onSessionRefreshed,
+    blob,
+    mimeType: type,
+    timeoutMs: 180000,
+    fetchImpl,
+  });
 }
 
 export async function createBskyPost({
@@ -1806,6 +1928,7 @@ export async function createBskyPost({
   text,
   langs = ['en'],
   images = [],
+  video = null,
   externalEmbed = null,
   reply = null,
   sensitive = false,
@@ -1826,7 +1949,8 @@ export async function createBskyPost({
   if (langs?.length) record.langs = langs;
   if (facets.length) record.facets = facets;
   if (reply) record.reply = reply;
-  if ((sensitive && Array.isArray(images) && images.length > 0) || (Array.isArray(selfLabels) && selfLabels.length > 0)) {
+  const hasMedia = (Array.isArray(images) && images.length > 0) || Boolean(video?.blob);
+  if ((sensitive && hasMedia) || (Array.isArray(selfLabels) && selfLabels.length > 0)) {
     const labelValues = Array.isArray(selfLabels) && selfLabels.length > 0
       ? selfLabels.map((v) => ({ val: String(v).trim() })).filter((v) => v.val)
       : [{ val: 'sexual' }];
@@ -1837,7 +1961,20 @@ export async function createBskyPost({
       };
     }
   }
-  if (Array.isArray(images) && images.length > 0) {
+  if (video?.blob) {
+    const videoEmbed = {
+      $type: 'app.bsky.embed.video',
+      video: video.blob,
+    };
+    if (video.alt) videoEmbed.alt = String(video.alt);
+    if (video.aspectRatio?.width > 0 && video.aspectRatio?.height > 0) {
+      videoEmbed.aspectRatio = {
+        width: Number.parseInt(video.aspectRatio.width, 10),
+        height: Number.parseInt(video.aspectRatio.height, 10),
+      };
+    }
+    record.embed = videoEmbed;
+  } else if (Array.isArray(images) && images.length > 0) {
     record.embed = {
       $type: 'app.bsky.embed.images',
       images: images.slice(0, 4).map((img) => ({

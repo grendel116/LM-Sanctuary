@@ -36,6 +36,7 @@ import {
   replyUnified,
   repostUnified,
   resetModerationCacheForTests,
+  runBridgeRetry,
   searchAccountsAndPosts,
   toggleBlockAuthor,
   translateUnifiedPost,
@@ -48,7 +49,7 @@ import { mountComposeModal, publishOrganicPost } from '../web/app/composeModal.j
 import { mountFeedScreen } from '../web/app/feed.js';
 import { renderPostThreadView } from '../web/app/postThread.js';
 import { mountProfileScreen, openEditMastodonProfileModal, openEditPostDialog } from '../web/app/profile.js';
-import { composeStore, resetCompose } from '../web/state/composeStore.js';
+import { composeStore, prefillFromUserBubble, resetCompose } from '../web/state/composeStore.js';
 import { mountSearchScreen } from '../web/app/search.js';
 import { openAuthorSheetModal } from '../web/components/AuthorSheetModal.js';
 import { createPostCard, getPostActionCapabilities, resolvePostBadgeProtocols, syncPostCardReactions } from '../web/components/PostCard.js';
@@ -7613,5 +7614,205 @@ test('PostCard and Feed show active reply indicator for commented Mastodon & Blu
     resetAuthStoreForTests();
     globalThis.fetch = prevFetch;
     dom.restore();
+  }
+});
+
+test('Video cross-posting attaches video to Mastodon, Bluesky (app.bsky.embed.video), and Threads (VIDEO) without double-posting or IMAGE fallback', async () => {
+  const prevFetch = globalThis.fetch;
+  const calls = [];
+  let threadsPublishAttempts = 0;
+  let threadsSimulatePublishedLag = false;
+
+  globalThis.fetch = async (url, init = {}) => {
+    const u = String(url);
+    const method = (init.method || 'GET').toUpperCase();
+    calls.push({ url: u, method, body: init.body });
+
+    if (u.endsWith('/images/generated/clip.mp4')) {
+      return new Response(new Blob(['fake-mp4-bytes'], { type: 'video/mp4' }), {
+        status: 200,
+        headers: { 'content-type': 'video/mp4' },
+      });
+    }
+    if (u.includes('/api/v2/media') && method === 'POST') {
+      return new Response(
+        JSON.stringify({
+          id: 'm_vid_1',
+          type: 'video',
+          url: 'https://cdn.mastodon.social/media/clip.mp4',
+          preview_url: 'https://cdn.mastodon.social/media/clip.png',
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      );
+    }
+    if (u.endsWith('/api/v1/statuses') && method === 'POST') {
+      return new Response(
+        JSON.stringify({
+          id: 'm_stat_vid_1',
+          uri: 'https://mastodon.social/users/alice/statuses/m_stat_vid_1',
+          url: 'https://mastodon.social/@alice/m_stat_vid_1',
+          content: '<p>Video post</p>',
+          created_at: new Date().toISOString(),
+          account: { id: 'u1', username: 'alice', acct: 'alice@mastodon.social' },
+          media_attachments: [
+            {
+              id: 'm_vid_1',
+              type: 'video',
+              url: 'https://cdn.mastodon.social/media/clip.mp4',
+              preview_url: 'https://cdn.mastodon.social/media/clip.png',
+            },
+          ],
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      );
+    }
+    if (u.includes('com.atproto.server.getServiceAuth')) {
+      return new Response(JSON.stringify({ token: 'svc_vid_jwt' }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+    if (u.includes('video.bsky.app/xrpc/app.bsky.video.uploadVideo')) {
+      return new Response(JSON.stringify({ jobId: 'job_vid_1', state: 'JOB_STATE_CREATED' }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+    if (u.includes('video.bsky.app/xrpc/app.bsky.video.getJobStatus')) {
+      return new Response(
+        JSON.stringify({
+          jobStatus: {
+            jobId: 'job_vid_1',
+            state: 'JOB_STATE_COMPLETED',
+            blob: { $type: 'blob', ref: { $link: 'bafy_vid_cid' }, mimeType: 'video/mp4', size: 14 },
+          },
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      );
+    }
+    if (u.includes('com.atproto.repo.createRecord')) {
+      return new Response(
+        JSON.stringify({ uri: 'at://did:plc:alice/app.bsky.feed.post/b_vid_1', cid: 'cid_b_vid_1' }),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      );
+    }
+    if (u.endsWith('/th_1/threads') && method === 'POST') {
+      return new Response(JSON.stringify({ id: 'th_vid_cont_1' }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+    if (u.includes('/v1.0/th_vid_cont_1?') && method === 'GET') {
+      return new Response(
+        JSON.stringify({
+          id: 'th_vid_cont_1',
+          status: threadsSimulatePublishedLag ? 'PUBLISHED' : 'FINISHED',
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      );
+    }
+    if (u.endsWith('/th_1/threads_publish') && method === 'POST') {
+      threadsPublishAttempts += 1;
+      if (threadsSimulatePublishedLag && threadsPublishAttempts === 1) {
+        return new Response(
+          JSON.stringify({ error: { message: 'Transient error', is_transient: true } }),
+          { status: 500, headers: { 'content-type': 'application/json' } }
+        );
+      }
+      return new Response(JSON.stringify({ id: 'th_vid_pub_1' }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+    return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
+  };
+
+  try {
+    resetMemoryStorageForTests();
+    resetAuthStoreForTests();
+    resetCompose();
+    connectionStore.set({ mode: 'offline', nodeUrl: '' });
+
+    await upsertSocialAccount(
+      { id: 'fediverse:alice@mastodon.social', platform: 'fediverse', instanceUrl: 'https://mastodon.social', handle: 'alice', acct: 'alice@mastodon.social', userId: 'u1' },
+      { accessToken: 'm_tok' }
+    );
+    await upsertSocialAccount(
+      { id: 'bluesky:did:plc:alice', platform: 'bluesky', serviceUrl: 'https://bsky.social', did: 'did:plc:alice', handle: 'alice.bsky.social' },
+      { accessJwt: 'b_jwt', refreshJwt: 'b_ref' }
+    );
+    await upsertSocialAccount(
+      { id: 'threads:th_1', platform: 'threads', userId: 'th_1', handle: 'alice', acct: 'alice' },
+      { accessToken: 't_tok' }
+    );
+
+    // 1. Cross-post video from Sanctuary without explicit mimeType (URL-only .mp4)
+    prefillFromUserBubble({
+      text: 'Video post',
+      media: [{ url: 'https://sanctuary.local/images/generated/clip.mp4', source: 'web' }],
+    });
+    const composedMedia = composeStore.get().mediaAttachments;
+    assert.equal(composedMedia[0].type, 'video');
+    assert.equal(composedMedia[0].mimeType, 'video/mp4');
+
+    const pubOut = await publishOrganicPost({
+      text: 'Video post',
+      mediaAttachments: composedMedia,
+    });
+    assert.equal(pubOut.errors.length, 0);
+
+    const bskyCreate = calls.find((c) => c.url.includes('com.atproto.repo.createRecord'));
+    assert.ok(bskyCreate);
+    const bskyRecord = JSON.parse(String(bskyCreate.body)).record;
+    assert.equal(bskyRecord.embed.$type, 'app.bsky.embed.video');
+    assert.equal(bskyRecord.embed.video.ref.$link, 'bafy_vid_cid');
+
+    const threadsCreate = calls.find((c) => c.url.endsWith('/th_1/threads') && c.method === 'POST');
+    assert.ok(threadsCreate);
+    const threadsParams = new URLSearchParams(String(threadsCreate.body));
+    assert.equal(threadsParams.get('media_type'), 'VIDEO');
+    assert.equal(threadsParams.get('video_url'), 'https://cdn.mastodon.social/media/clip.mp4');
+    assert.equal(threadsParams.get('image_url'), null);
+
+    // 2. publishThreadsPost does NOT double-post when threads_publish hits transient error after container is PUBLISHED
+    threadsPublishAttempts = 0;
+    threadsSimulatePublishedLag = true;
+    const lagPub = await publishThreadsPost({
+      userId: 'th_1',
+      accessToken: 't_tok',
+      text: 'No double post',
+      media: [{ url: 'https://cdn.mastodon.social/media/clip.mp4', type: 'video', mimeType: 'video/mp4' }],
+      pollDelayMs: 0,
+    });
+    assert.equal(lagPub.id, 'th_vid_cont_1');
+    assert.equal(threadsPublishAttempts, 1);
+    threadsSimulatePublishedLag = false;
+
+    // 3. runBridgeRetry for Threads preserves VIDEO media_type & video_url
+    calls.length = 0;
+    await enqueueLocalRetry({
+      id: 'retry_threads_vid_test',
+      operation: 'publish',
+      protocol: 'threads',
+      payload: {
+        canonicalId: 'mastodon:m_stat_vid_1',
+        mastodonStatusId: 'm_stat_vid_1',
+        textParts: ['Retried video'],
+        mastodonMediaUrls: ['https://cdn.mastodon.social/media/clip.mp4'],
+      },
+      lastError: 'Temporary error',
+    });
+    await runBridgeRetry('retry_threads_vid_test');
+    const retryCreate = calls.find((c) => c.url.endsWith('/th_1/threads') && c.method === 'POST');
+    assert.ok(retryCreate);
+    const retryParams = new URLSearchParams(String(retryCreate.body));
+    assert.equal(retryParams.get('media_type'), 'VIDEO');
+    assert.equal(retryParams.get('video_url'), 'https://cdn.mastodon.social/media/clip.mp4');
+    assert.equal(retryParams.get('image_url'), null);
+  } finally {
+    resetCompose();
+    resetMemoryStorageForTests();
+    resetAuthStoreForTests();
+    globalThis.fetch = prevFetch;
   }
 });
