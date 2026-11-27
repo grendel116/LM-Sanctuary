@@ -3965,6 +3965,83 @@ dialog.classic-modal-dialog .modal-card.compose-sheet-card {
   block-size: 100%;
   object-fit: cover;
   display: block;
+  transition: filter 0.18s ease, transform 0.18s ease;
+}
+
+.composer-media-card.is-sensitive .composer-media-thumb {
+  filter: blur(20px) brightness(0.88);
+  transform: scale(1.08);
+}
+
+.compose-sensitive-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-block: 6px 2px;
+  font-size: 0.86rem;
+  color: var(--shell-muted);
+  cursor: pointer;
+  user-select: none;
+}
+
+.compose-sensitive-checkbox {
+  inline-size: 16px;
+  block-size: 16px;
+  accent-color: var(--accent, #9370db);
+  cursor: pointer;
+}
+
+.compose-alt-btn {
+  inline-size: auto;
+  min-inline-size: 36px;
+  padding-inline: 8px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.compose-alt-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.compose-alt-btn:disabled:hover {
+  color: var(--shell-muted);
+  background: transparent;
+}
+
+.compose-alt-btn.is-active,
+.compose-alt-btn.has-alt {
+  color: var(--accent-soft, #cbb5ff);
+  background: var(--accent-bg, rgba(147, 112, 219, 0.2));
+}
+
+.compose-alt-editor-host {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-block: 6px 4px;
+}
+
+.compose-alt-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.compose-alt-badge {
+  flex: 0 0 auto;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  color: var(--shell-muted);
+}
+
+.compose-alt-input {
+  flex: 1 1 auto;
+  min-inline-size: 0;
+  padding: 6px 10px;
+  font-size: 0.84rem;
 }
 
 .composer-media-audio-tile {
@@ -4001,8 +4078,8 @@ dialog.classic-modal-dialog .modal-card.compose-sheet-card {
 }
 
 .emoji-picker-popover {
-  inline-size: min(304px, 92vw);
-  max-block-size: 320px;
+  inline-size: min(348px, 94vw);
+  max-block-size: 360px;
   padding: 10px;
   border-radius: 14px;
   border: 1px solid rgba(255, 255, 255, 0.14);
@@ -4026,15 +4103,46 @@ dialog.classic-modal-dialog .modal-card.compose-sheet-card {
   }
 }
 
+.emoji-picker-top {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
 .emoji-picker-search {
+  flex: 1 1 auto;
+  min-inline-size: 0;
   padding: 7px 10px;
   font-size: 0.84rem;
+}
+
+.emoji-picker-tones {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex: 0 0 auto;
+}
+
+.emoji-picker-tone-btn {
+  inline-size: 24px;
+  block-size: 26px;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  font-size: 0.9rem;
+  cursor: pointer;
+}
+
+.emoji-picker-tone-btn.is-selected,
+.emoji-picker-tone-btn:hover {
+  background: var(--accent-bg, rgba(147, 112, 219, 0.22));
 }
 
 .emoji-picker-cats {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 2px;
   border-block-end: 1px solid var(--shell-hairline);
   padding-block-end: 6px;
 }
@@ -4056,10 +4164,10 @@ dialog.classic-modal-dialog .modal-card.compose-sheet-card {
 
 .emoji-picker-grid {
   display: grid;
-  grid-template-columns: repeat(7, minmax(0, 1fr));
+  grid-template-columns: repeat(8, minmax(0, 1fr));
   gap: 4px;
   overflow-y: auto;
-  max-block-size: 196px;
+  max-block-size: 224px;
 }
 
 .emoji-picker-cell {

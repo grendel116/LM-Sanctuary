@@ -980,12 +980,389 @@ class UpdatePlanStepTool(ToolDefinition[UpdatePlanStepAction, UpdatePlanStepObse
         ]
 
 
+class OpenInBrowserAction(Action):
+    url: str = Field(description="HTTP or HTTPS URL to open in Sanctuary Browser.")
+    split: bool = Field(default=False, description="Open beside the active tab in split view.")
+
+
+class OpenInBrowserObservation(Observation):
+    pass
+
+
+class _OpenInBrowserExecutor(ToolExecutor[OpenInBrowserAction, OpenInBrowserObservation]):
+    def __call__(self, action: OpenInBrowserAction, conversation: Any = None) -> OpenInBrowserObservation:
+        from tools import tools as tools_mod
+
+        fn = getattr(tools_mod.open_in_browser, "__wrapped__", tools_mod.open_in_browser)
+        out = str(fn(action.url, split=action.split) or "")
+        return OpenInBrowserObservation.from_text(out, is_error=out.startswith("Error:"))
+
+
+class OpenInBrowserTool(ToolDefinition[OpenInBrowserAction, OpenInBrowserObservation]):
+    name = "open_in_browser"
+
+    @classmethod
+    def create(cls, conv_state: ConversationState, **params: Any) -> Sequence["OpenInBrowserTool"]:
+        return [
+            cls(
+                action_type=OpenInBrowserAction,
+                observation_type=OpenInBrowserObservation,
+                description="Open an HTTP/HTTPS URL directly in the user's Sanctuary Browser tab.",
+                annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=True),
+                executor=_OpenInBrowserExecutor(),
+            )
+        ]
+
+
+class BrowserActionAction(Action):
+    action: str = Field(default="snapshot", description="list_tabs, snapshot, read, open, navigate, back, forward, close_tab, click, type, select, press, scroll, or wait_text.")
+    url: str = Field(default="", description="URL or search query for open/navigate.")
+    ref: str = Field(default="", description="Element ref like 'e12' from snapshot for click/type/select.")
+    text: str = Field(default="", description="Text to type, select, or wait for.")
+    tab_id: str = Field(default="", description="Optional target tab ID.")
+    direction: str = Field(default="down", description="Scroll direction: down or up.")
+    key: str = Field(default="", description="Keyboard key for press (e.g. Enter, Escape).")
+    clear: bool = Field(default=True, description="Clear input before typing.")
+    split: bool = Field(default=False, description="Open in split view.")
+    new_tab: bool = Field(default=False, description="Open in a new tab.")
+
+
+class BrowserActionObservation(Observation):
+    pass
+
+
+class _BrowserActionExecutor(ToolExecutor[BrowserActionAction, BrowserActionObservation]):
+    def __call__(self, action: BrowserActionAction, conversation: Any = None) -> BrowserActionObservation:
+        from tools import tools as tools_mod
+
+        fn = getattr(tools_mod.browser_action, "__wrapped__", tools_mod.browser_action)
+        out = str(
+            fn(
+                action=action.action,
+                url=action.url,
+                ref=action.ref,
+                text=action.text,
+                tab_id=action.tab_id,
+                direction=action.direction,
+                key=action.key,
+                clear=action.clear,
+                split=action.split,
+                new_tab=action.new_tab,
+            )
+            or ""
+        )
+        return BrowserActionObservation.from_text(out, is_error=out.startswith(("Error:", "Browser Error")))
+
+
+class BrowserActionTool(ToolDefinition[BrowserActionAction, BrowserActionObservation]):
+    name = "browser_action"
+
+    @classmethod
+    def create(cls, conv_state: ConversationState, **params: Any) -> Sequence["BrowserActionTool"]:
+        return [
+            cls(
+                action_type=BrowserActionAction,
+                observation_type=BrowserActionObservation,
+                description="Inspect or interact with live tabs in Sanctuary Browser.",
+                annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=True),
+                executor=_BrowserActionExecutor(),
+            )
+        ]
+
+
+class GenerateLocalImageAction(Action):
+    prompt: str = Field(description="Comma-separated visual tags describing the character, outfit, lighting, and pose.")
+    count: int = Field(default=2, description="Number of portraits to generate (1 or 2).")
+
+
+class GenerateLocalImageObservation(Observation):
+    pass
+
+
+class _GenerateLocalImageExecutor(ToolExecutor[GenerateLocalImageAction, GenerateLocalImageObservation]):
+    def __call__(self, action: GenerateLocalImageAction, conversation: Any = None) -> GenerateLocalImageObservation:
+        from tools import tools as tools_mod
+
+        fn = getattr(tools_mod.generate_local_image, "__wrapped__", tools_mod.generate_local_image)
+        out = str(fn(prompt=action.prompt, count=action.count) or "")
+        return GenerateLocalImageObservation.from_text(out, is_error=out.startswith("Error"))
+
+
+class GenerateLocalImageTool(ToolDefinition[GenerateLocalImageAction, GenerateLocalImageObservation]):
+    name = "generate_local_image"
+
+    @classmethod
+    def create(cls, conv_state: ConversationState, **params: Any) -> Sequence["GenerateLocalImageTool"]:
+        return [
+            cls(
+                action_type=GenerateLocalImageAction,
+                observation_type=GenerateLocalImageObservation,
+                description="Generate character portrait image(s) using ComfyUI with comma-separated visual tags.",
+                annotations=ToolAnnotations(readOnlyHint=True),
+                executor=_GenerateLocalImageExecutor(),
+            )
+        ]
+
+
+class ApplyComfyWorkflowAction(Action):
+    workflow_path: str = Field(description="Path to the ComfyUI workflow JSON file.")
+    parameters: dict[str, Any] = Field(default_factory=dict, description="Placeholder key/value replacements.")
+    save_path: str = Field(description="Destination path for the generated image.")
+
+
+class ApplyComfyWorkflowObservation(Observation):
+    pass
+
+
+class _ApplyComfyWorkflowExecutor(ToolExecutor[ApplyComfyWorkflowAction, ApplyComfyWorkflowObservation]):
+    def __call__(self, action: ApplyComfyWorkflowAction, conversation: Any = None) -> ApplyComfyWorkflowObservation:
+        from tools import tools as tools_mod
+
+        fn = getattr(tools_mod.apply_comfy_workflow, "__wrapped__", tools_mod.apply_comfy_workflow)
+        out = str(fn(action.workflow_path, action.parameters, action.save_path) or "")
+        return ApplyComfyWorkflowObservation.from_text(out, is_error=out.startswith("Error"))
+
+
+class ApplyComfyWorkflowTool(ToolDefinition[ApplyComfyWorkflowAction, ApplyComfyWorkflowObservation]):
+    name = "apply_comfy_workflow"
+
+    @classmethod
+    def create(cls, conv_state: ConversationState, **params: Any) -> Sequence["ApplyComfyWorkflowTool"]:
+        return [
+            cls(
+                action_type=ApplyComfyWorkflowAction,
+                observation_type=ApplyComfyWorkflowObservation,
+                description="Run a ComfyUI workflow template JSON with parameter replacements.",
+                annotations=ToolAnnotations(readOnlyHint=True),
+                executor=_ApplyComfyWorkflowExecutor(),
+            )
+        ]
+
+
+class AddQuestAction(Action):
+    title: str = Field(description="Short title of the quest or scheduled reminder.")
+    notes: str = Field(description="Objectives separated by newlines or commas.")
+    due: str = Field(default="", description="Optional ISO 8601 local date/time YYYY-MM-DDTHH:MM.")
+    location: str = Field(default="", description="Optional location.")
+    reminder_minutes: int = Field(default=15, description="Alert lead time in minutes.")
+    recurrence: str = Field(default="", description="Optional schedule: hourly, daily, weekly, or 5-field cron.")
+    auto_prompt: str = Field(default="", description="Optional self-contained prompt to execute automatically when due.")
+
+
+class AddQuestObservation(Observation):
+    pass
+
+
+class _AddQuestExecutor(ToolExecutor[AddQuestAction, AddQuestObservation]):
+    def __call__(self, action: AddQuestAction, conversation: Any = None) -> AddQuestObservation:
+        from tools import tools as tools_mod
+
+        fn = getattr(tools_mod.add_quest, "__wrapped__", tools_mod.add_quest)
+        out = str(
+            fn(
+                title=action.title,
+                notes=action.notes,
+                due=action.due or None,
+                location=action.location,
+                reminder_minutes=action.reminder_minutes,
+                recurrence=action.recurrence,
+                auto_prompt=action.auto_prompt,
+            )
+            or ""
+        )
+        return AddQuestObservation.from_text(out, is_error=out.startswith("Error"))
+
+
+class AddQuestTool(ToolDefinition[AddQuestAction, AddQuestObservation]):
+    name = "add_quest"
+
+    @classmethod
+    def create(cls, conv_state: ConversationState, **params: Any) -> Sequence["AddQuestTool"]:
+        return [
+            cls(
+                action_type=AddQuestAction,
+                observation_type=AddQuestObservation,
+                description="Create a quest, reminder, or recurring scheduled automation in the user's quest log.",
+                annotations=ToolAnnotations(readOnlyHint=True),
+                executor=_AddQuestExecutor(),
+            )
+        ]
+
+
+class AddJournalEntryAction(Action):
+    keyphrases: str = Field(description="2-4 comma-separated search keywords for this memory.")
+    content: str = Field(description="Permanent biographical fact or milestone (<= 300 chars).")
+
+
+class AddJournalEntryObservation(Observation):
+    pass
+
+
+class _AddJournalEntryExecutor(ToolExecutor[AddJournalEntryAction, AddJournalEntryObservation]):
+    def __call__(self, action: AddJournalEntryAction, conversation: Any = None) -> AddJournalEntryObservation:
+        from tools import tools as tools_mod
+
+        runner = tools_mod.current_runner.get()
+        sess_id = tools_mod.current_session_id.get()
+        speaker_id = tools_mod.current_speaker_id.get()
+        group_meta = getattr(runner, "sessions_group_meta", {}).get(sess_id) if runner else None
+        if group_meta and speaker_id and speaker_id != group_meta.get("host_id"):
+            return AddJournalEntryObservation.from_text(
+                "Error: Journal logging is reserved for the Host program during Group Sessions.",
+                is_error=True,
+            )
+
+        fn = getattr(tools_mod.add_journal_entry, "__wrapped__", tools_mod.add_journal_entry)
+        out = str(fn(action.keyphrases, action.content) or "")
+        return AddJournalEntryObservation.from_text(out, is_error=out.startswith("Error"))
+
+
+class AddJournalEntryTool(ToolDefinition[AddJournalEntryAction, AddJournalEntryObservation]):
+    name = "add_journal_entry"
+
+    @classmethod
+    def create(cls, conv_state: ConversationState, **params: Any) -> Sequence["AddJournalEntryTool"]:
+        return [
+            cls(
+                action_type=AddJournalEntryAction,
+                observation_type=AddJournalEntryObservation,
+                description="Record a permanent biographical fact or major milestone in the program's memory journal.",
+                annotations=ToolAnnotations(readOnlyHint=True),
+                executor=_AddJournalEntryExecutor(),
+            )
+        ]
+
+
+class SearchMusicAction(Action):
+    query: str = Field(description="Artist, track, album, mood, or genre query.")
+    mode: str = Field(default="deep_cuts", description="Discovery mode: deep_cuts, kexp, theme_time, bandcamp, or artist.")
+
+
+class SearchMusicObservation(Observation):
+    pass
+
+
+class _SearchMusicExecutor(ToolExecutor[SearchMusicAction, SearchMusicObservation]):
+    def __call__(self, action: SearchMusicAction, conversation: Any = None) -> SearchMusicObservation:
+        from tools import tools as tools_mod
+
+        fn = getattr(tools_mod.search_music, "__wrapped__", tools_mod.search_music)
+        out = str(fn(action.query, mode=action.mode) or "")
+        return SearchMusicObservation.from_text(out, is_error=out.startswith("Error"))
+
+
+class SearchMusicTool(ToolDefinition[SearchMusicAction, SearchMusicObservation]):
+    name = "search_music"
+
+    @classmethod
+    def create(cls, conv_state: ConversationState, **params: Any) -> Sequence["SearchMusicTool"]:
+        return [
+            cls(
+                action_type=SearchMusicAction,
+                observation_type=SearchMusicObservation,
+                description="Search for music, deep cuts, and obscure recordings via MusicBrainz and crate-digging.",
+                annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=True),
+                executor=_SearchMusicExecutor(),
+            )
+        ]
+
+
+class TuneFeedAlgorithmAction(Action):
+    action: str = Field(default="update", description="get, update, or reset.")
+    discovery_channels: list[str] | None = Field(default=None, description="Replace discovery channels/hashtags/feeds.")
+    discovery_instances: list[str] | None = Field(default=None, description="Replace trusted Mastodon/Lemmy domains.")
+    add_discovery_channels: list[str] | None = Field(default=None, description="Add discovery channels.")
+    add_discovery_instances: list[str] | None = Field(default=None, description="Add trusted domains.")
+    remove_sources: list[str] | None = Field(default=None, description="Sources to remove.")
+
+
+class TuneFeedAlgorithmObservation(Observation):
+    pass
+
+
+class _TuneFeedAlgorithmExecutor(ToolExecutor[TuneFeedAlgorithmAction, TuneFeedAlgorithmObservation]):
+    def __call__(self, action: TuneFeedAlgorithmAction, conversation: Any = None) -> TuneFeedAlgorithmObservation:
+        from tools import tools as tools_mod
+
+        fn = getattr(tools_mod.tune_feed_algorithm, "__wrapped__", tools_mod.tune_feed_algorithm)
+        out = str(
+            fn(
+                action=action.action,
+                discovery_channels=action.discovery_channels,
+                discovery_instances=action.discovery_instances,
+                add_discovery_channels=action.add_discovery_channels,
+                add_discovery_instances=action.add_discovery_instances,
+                remove_sources=action.remove_sources,
+            )
+            or ""
+        )
+        return TuneFeedAlgorithmObservation.from_text(out, is_error=out.startswith("Error:"))
+
+
+class TuneFeedAlgorithmTool(ToolDefinition[TuneFeedAlgorithmAction, TuneFeedAlgorithmObservation]):
+    name = "tune_feed_algorithm"
+
+    @classmethod
+    def create(cls, conv_state: ConversationState, **params: Any) -> Sequence["TuneFeedAlgorithmTool"]:
+        return [
+            cls(
+                action_type=TuneFeedAlgorithmAction,
+                observation_type=TuneFeedAlgorithmObservation,
+                description="Inspect, update, or reset the user's declarative local social feed discovery profile.",
+                annotations=ToolAnnotations(readOnlyHint=True),
+                executor=_TuneFeedAlgorithmExecutor(),
+            )
+        ]
+
+
+_COMPANION_SKILL_TOOL_MAP: dict[str, tuple[str, ...]] = {
+    "web_browsing": ("web_search", "read_webpage", "http_probe", "open_in_browser", "browser_action"),
+    "portrait_generation": ("generate_local_image", "apply_comfy_workflow"),
+    "quest_system": ("add_quest",),
+    "log_journaling": ("add_journal_entry",),
+    "music_discovery": ("search_music", "read_webpage"),
+    "feed_tuning": ("tune_feed_algorithm",),
+}
+_ALL_COMPANION_TOOL_NAMES: tuple[str, ...] = (
+    "web_search",
+    "read_webpage",
+    "http_probe",
+    "open_in_browser",
+    "browser_action",
+    "generate_local_image",
+    "apply_comfy_workflow",
+    "add_quest",
+    "add_journal_entry",
+    "search_music",
+    "tune_feed_algorithm",
+)
+
+
+def _build_companion_tools(matched_skills: Sequence[str] = (), active_story_mode: bool = False) -> list[Tool]:
+    """Select OpenHands tools for `tool_band='companion'` scoped by matched skills."""
+    if active_story_mode:
+        return [
+            Tool(name=GenerateLocalImageTool.name),
+            Tool(name=ApplyComfyWorkflowTool.name),
+            Tool(name=AddJournalEntryTool.name),
+        ]
+
+    names: list[str] = []
+    for skill in matched_skills or ():
+        for t_name in _COMPANION_SKILL_TOOL_MAP.get(str(skill).strip(), ()):
+            if t_name not in names:
+                names.append(t_name)
+    if not names:
+        names = list(_ALL_COMPANION_TOOL_NAMES)
+    return [Tool(name=n) for n in names]
+
+
 _TOOLS_REGISTERED = False
 _REG_LOCK = threading.Lock()
 
 
 def register_sanctuary_openhands_tools() -> None:
-    """Register GitBashTerminalTool (`terminal`), bounded `grep`/`glob`, and Sanctuary web/plan tools."""
+    """Register GitBashTerminalTool (`terminal`), bounded `grep`/`glob`, and Sanctuary web/plan/companion tools."""
     global _TOOLS_REGISTERED
     with _REG_LOCK:
         if _TOOLS_REGISTERED:
@@ -1006,6 +1383,14 @@ def register_sanctuary_openhands_tools() -> None:
         register_tool(ReadWebpageTool.name, ReadWebpageTool)
         register_tool(HttpProbeTool.name, HttpProbeTool)
         register_tool(UpdatePlanStepTool.name, UpdatePlanStepTool)
+        register_tool(OpenInBrowserTool.name, OpenInBrowserTool)
+        register_tool(BrowserActionTool.name, BrowserActionTool)
+        register_tool(GenerateLocalImageTool.name, GenerateLocalImageTool)
+        register_tool(ApplyComfyWorkflowTool.name, ApplyComfyWorkflowTool)
+        register_tool(AddQuestTool.name, AddQuestTool)
+        register_tool(AddJournalEntryTool.name, AddJournalEntryTool)
+        register_tool(SearchMusicTool.name, SearchMusicTool)
+        register_tool(TuneFeedAlgorithmTool.name, TuneFeedAlgorithmTool)
         _TOOLS_REGISTERED = True
 
 
@@ -1052,7 +1437,7 @@ def resolve_openhands_model(model: str | None = None, settings_path: str | None 
 
 
 def _local_openai_base_url() -> str:
-    raw = (LOCAL_SERVER_URL or "http://127.0.0.1:8080/v1/chat/completions").strip()
+    raw = (os.getenv("LOCAL_SERVER_URL") or LOCAL_SERVER_URL or "http://127.0.0.1:1234/v1/chat/completions").strip()
     if raw.endswith("/chat/completions"):
         raw = raw[: -len("/chat/completions")]
     if not raw.rstrip("/").endswith("/v1"):
@@ -1060,30 +1445,64 @@ def _local_openai_base_url() -> str:
     return raw.rstrip("/")
 
 
+def _is_quota_error_text(text: str) -> bool:
+    low = (text or "").lower()
+    return any(
+        tok in low
+        for tok in (
+            "402",
+            "payment required",
+            "insufficient_quota",
+            "insufficient credits",
+            "out of credits",
+            "quota exceeded",
+            "budgetexceeded",
+        )
+    )
+
+
 def resolve_v1_config(
     model: str | None = None,
     subagent: str = "",
     settings_path: str | None = None,
+    *,
+    force_local: bool = False,
 ) -> dict[str, Any]:
     """Resolve OpenHands + `/v1` settings from `v1_client.get_v1_settings()`."""
     path = settings_path or _PROJECT_SETTINGS_PATH
     settings = _read_project_settings(path)
     v1_cfg = v1_client.get_v1_settings(settings_path=path)
-    routing_policy = v1_cfg["routing_policy"]
-    api_key = v1_cfg["api_key"]
-    base_url = v1_cfg["base_url"]
+    routing_policy = v1_cfg.get("routing_policy", "auto")
+    api_key = v1_cfg.get("api_key", "")
+    base_url = v1_cfg.get("base_url", "")
 
     clean_model = (model or "").strip()
-    if routing_policy != "local_only" and clean_model.lower().endswith(".gguf"):
+    is_local = bool(force_local or routing_policy == "local_only")
+    if not is_local and clean_model.lower().endswith(".gguf"):
         raise ValueError(f"Refusing to send local GGUF model '{clean_model}' to Cloud /v1 endpoint {base_url}")
     is_auto_model = not clean_model or clean_model.lower() in ("auto", "default")
     clean_sub = (subagent or "").strip().lower()
 
-    if routing_policy == "local_only":
+    if is_local:
         base_url = _local_openai_base_url()
-        local_name = os.getenv("LOCAL_MODEL_NAME", "").strip() or "local-llm"
+        loaded_name = ""
+        try:
+            from runners import local_server
+
+            getter = getattr(local_server, "get_loaded_model_name", None)
+            if callable(getter):
+                loaded_name = str(getter() or "").strip()
+        except Exception:
+            loaded_name = ""
+        local_name = (
+            (clean_model if not is_auto_model else "")
+            or loaded_name
+            or os.getenv("LOCAL_MODEL_NAME", "").strip()
+            or "local-llm"
+        )
         raw_model, litellm_model = local_name, f"openai/{local_name}"
         fast_litellm_model = ""
+        vision_litellm_model = ""
     else:
         provider = v1_cfg["provider"]
         preset = v1_client.PROVIDER_ROLE_DEFAULTS.get(provider, {})
@@ -1117,6 +1536,12 @@ def resolve_v1_config(
         else:
             fast_litellm_model = ""
 
+        vision_target = v1_cfg.get("vision_model") or preset.get("vision") or ""
+        if vision_target and vision_target != raw_model:
+            _, vision_litellm_model = resolve_openhands_model(vision_target, settings_path=path)
+        else:
+            vision_litellm_model = ""
+
     sec_preset = str(settings.get("security_preset") or "ask_always").strip()
     if sec_preset not in ("ask_always", "auto"):
         sec_preset = "ask_always"
@@ -1129,6 +1554,8 @@ def resolve_v1_config(
         "raw_model": raw_model,
         "litellm_model": litellm_model,
         "fast_litellm_model": fast_litellm_model,
+        "vision_litellm_model": vision_litellm_model,
+        "is_local": is_local,
         "routing_policy": routing_policy,
         "security_preset": sec_preset,
         "folders": settings.get("folders") if isinstance(settings.get("folders"), list) else [],
@@ -1149,30 +1576,33 @@ def build_openhands_llms(
     cfg: dict[str, Any],
     *,
     tier: str = "deep",
+    gear: str = "",
     temperature: float | None = None,
-) -> tuple[LLM, LLM]:
-    """Build `(active_llm, fast_llm)` configured with `/v1` limits and chat_completions mode."""
-    is_local = cfg.get("routing_policy") == "local_only"
+) -> tuple[LLM, LLM, LLM]:
+    """Build `(active_llm, fast_llm, deep_llm)` with distinct `usage_id` keys for `switch_llm()`."""
+    is_local = bool(cfg.get("is_local") or cfg.get("routing_policy") == "local_only")
     api_key = (cfg.get("api_key") or ("local" if is_local else "")) or None
     base_url = cfg.get("base_url") or None
+    eff_gear = (gear or tier or "deep").strip().lower()
 
     if is_local:
         ctx_raw = os.getenv("LOCAL_CONTEXT", "8192")
         local_ctx = int(ctx_raw) if (ctx_raw and ctx_raw.isdigit()) else 8192
-        llm = LLM(
+        local_llm = LLM(
+            usage_id="local_llm",
             model=cfg["litellm_model"],
             api_key=api_key,
             base_url=base_url,
-            native_tool_calling=True,
+            native_tool_calling=False,
             stream=False,
             max_input_tokens=local_ctx,
-            max_output_tokens=min(4096, max(1536, local_ctx // 4)),
+            max_output_tokens=min(3072, max(1024, local_ctx // 5)),
             temperature=temperature,
             reasoning_effort=None,
             capability_overrides={"supports_reasoning_effort": False, "supports_responses_api": False},
             log_completions_to_file=False,
         )
-        return llm, llm
+        return local_llm, local_llm, local_llm
 
     raw_deep = cfg["raw_model"]
     deep_info = v1_client.get_v1_model_info(raw_deep)
@@ -1183,6 +1613,7 @@ def build_openhands_llms(
     }
 
     deep_llm = LLM(
+        usage_id="deep_llm",
         model=cfg["litellm_model"],
         api_key=api_key,
         base_url=base_url,
@@ -1206,6 +1637,7 @@ def build_openhands_llms(
             "supports_reasoning_effort": fast_re is not None,
         }
         fast_llm = LLM(
+            usage_id="fast_llm",
             model=fast_litellm,
             api_key=api_key,
             base_url=base_url,
@@ -1221,8 +1653,30 @@ def build_openhands_llms(
     else:
         fast_llm = deep_llm
 
-    active_llm = fast_llm if tier == "fast" else deep_llm
-    return active_llm, fast_llm
+    vision_litellm = (cfg.get("vision_litellm_model") or "").strip()
+    if eff_gear == "vision" and vision_litellm:
+        raw_vision = vision_litellm.split("/", 1)[-1]
+        vision_info = v1_client.get_v1_model_info(raw_vision)
+        active_llm = LLM(
+            usage_id="vision_llm",
+            model=vision_litellm,
+            api_key=api_key,
+            base_url=base_url,
+            native_tool_calling=True,
+            stream=False,
+            max_input_tokens=vision_info["context_tokens"],
+            max_output_tokens=None if vision_info.get("output_uncapped") else vision_info["max_output_tokens"],
+            temperature=temperature,
+            reasoning_effort=None,
+            capability_overrides={"supports_responses_api": False, "supports_reasoning_effort": False},
+            log_completions_to_file=False,
+        )
+    elif eff_gear == "fast":
+        active_llm = fast_llm
+    else:
+        active_llm = deep_llm
+
+    return active_llm, fast_llm, deep_llm
 
 
 # --- Subagents, Skills, & Read-Only Action Policy ---
@@ -1355,6 +1809,14 @@ _READONLY_TOOL_NAMES = frozenset({
     "read_webpage",
     "http_probe",
     "update_plan_step",
+    "open_in_browser",
+    "browser_action",
+    "generate_local_image",
+    "apply_comfy_workflow",
+    "add_quest",
+    "add_journal_entry",
+    "search_music",
+    "tune_feed_algorithm",
     "ask_user",
     "finish",
 })
@@ -1482,6 +1944,8 @@ def _summarize_action_args(tool_name: str, action: Any) -> dict[str, Any]:
     summary: dict[str, Any] = {}
     for key in (
         "command",
+        "action",
+        "ref",
         "path",
         "pattern",
         "include",
@@ -1489,6 +1953,10 @@ def _summarize_action_args(tool_name: str, action: Any) -> dict[str, Any]:
         "query",
         "url",
         "method",
+        "prompt",
+        "title",
+        "keyphrases",
+        "mode",
         "subagent_type",
         "description",
         "question",
@@ -1602,6 +2070,10 @@ def run_coding_turn(
     path: str = "",
     model: str | None = None,
     tier: str = "deep",
+    gear: str = "",
+    tool_band: str = "coding",
+    matched_skills: Sequence[str] = (),
+    active_story_mode: bool = False,
     subagent: str = "",
     is_plan_turn: bool = False,
     has_active_plan: bool = False,
@@ -1618,96 +2090,173 @@ def run_coding_turn(
 
     clean_task = str(instruction or "").strip()
     if not clean_task:
-        return "Error: Empty coding instruction.", []
+        return "Error: Empty instruction.", []
 
-    cwd, focus_rel, path_warning = tools_mod.resolve_coding_workspace(path)
-    if not os.path.isdir(cwd):
-        return f"Error: Coding workspace does not exist: {cwd}", []
+    eff_band = "companion" if tool_band == "companion" else "coding"
+    raw_gear = (gear or tier or "deep").strip().lower()
+    if raw_gear == "deep_plan":
+        eff_gear = "deep"
+        is_plan_turn = True
+    elif raw_gear in ("local", "fast", "deep", "vision"):
+        eff_gear = raw_gear
+    else:
+        eff_gear = "deep"
 
-    cfg = resolve_v1_config(model=model, subagent=subagent, settings_path=settings_path)
-    if cfg["routing_policy"] != "local_only" and not cfg.get("api_key"):
+    if eff_band == "companion":
+        cwd = SANCTUARY_DIR if os.path.isdir(SANCTUARY_DIR) else os.getcwd()
+        focus_rel, path_warning = "", ""
+    else:
+        cwd, focus_rel, path_warning = tools_mod.resolve_coding_workspace(path)
+        if not os.path.isdir(cwd):
+            return f"Error: Coding workspace does not exist: {cwd}", []
+
+    cfg = resolve_v1_config(
+        model=model,
+        subagent=subagent,
+        settings_path=settings_path,
+        force_local=(eff_gear == "local"),
+    )
+    if not cfg.get("is_local") and not cfg.get("api_key"):
         host = cfg.get("base_url") or "configured /v1 endpoint"
         reason = cfg.get("key_unavailable_reason") or "no Cloud API key configured"
         return f"Error: [OpenHands · {host}] {reason}", []
 
+    cancel_event = threading.Event()
+    if cfg.get("is_local"):
+        from adapters import vram_orchestrator
+
+        local_model_key = cfg["raw_model"] if cfg.get("raw_model") and cfg["raw_model"] != "local-llm" else None
+        if not vram_orchestrator.start_llm(local_model_key, _cancelled=cancel_event):
+            return f"Error: [OpenHands · {cfg['base_url']}] Local LLM server failed to start.", []
+        if not model or str(model).strip().lower() in ("auto", "default", ""):
+            try:
+                from runners import local_server
+
+                getter = getattr(local_server, "get_loaded_model_name", None)
+                loaded_name = str(getter() or "").strip() if callable(getter) else ""
+                if loaded_name:
+                    cfg["raw_model"] = loaded_name
+                    cfg["litellm_model"] = f"openai/{loaded_name}"
+            except Exception:
+                pass
+
     register_sanctuary_openhands_tools()
-    register_sanctuary_subagents(cwd, fast_model=cfg.get("fast_litellm_model") or "")
+    if eff_band == "coding" and (not cfg.get("is_local") or subagent):
+        register_sanctuary_subagents(cwd, fast_model=cfg.get("fast_litellm_model") or "")
 
-    active_llm, fast_llm = build_openhands_llms(cfg, tier=tier, temperature=temperature)
+    active_llm, fast_llm, deep_llm = build_openhands_llms(
+        cfg,
+        gear=eff_gear,
+        temperature=temperature,
+    )
 
-    agent_tools: list[Tool] = [
-        Tool(name=FileEditorTool.name),
-        Tool(name=GrepTool.name),
-        Tool(name=GlobTool.name),
-        Tool(name=TerminalTool.name),
-        Tool(name=TaskTrackerTool.name),
-        Tool(name=WebSearchTool.name),
-        Tool(name=ReadWebpageTool.name),
-        Tool(name=HttpProbeTool.name),
-        Tool(name=AskUserTool.name),
-        Tool(name=TaskToolSet.name),
-    ]
-    if has_active_plan:
-        agent_tools.append(Tool(name=UpdatePlanStepTool.name))
-
-    if subagent:
-        matched_def = next(
-            (d for d in get_registered_agent_definitions() if d.name == subagent),
-            None,
-        )
-        if matched_def is not None and matched_def.tools:
-            agent_tools = [Tool(name=t) for t in matched_def.tools]
-            if all(t.name != AskUserTool.name for t in agent_tools):
-                agent_tools.append(Tool(name=AskUserTool.name))
-
-    suffix_parts: list[str] = [f"Repository root: `{cwd}`."]
-    if focus_rel:
-        suffix_parts.append(f"Primary focus path: `{focus_rel}`.")
-    if path_warning:
-        suffix_parts.append(f"Note: {path_warning}")
-    if is_plan_turn:
+    if eff_band == "companion":
+        agent_tools = _build_companion_tools(matched_skills, active_story_mode)
+        suffix_parts: list[str] = []
+        if persona and persona.strip():
+            suffix_parts.append(persona.strip())
         suffix_parts.append(
-            "PLAN MODE IS ACTIVE: Inspect the codebase read-only using `file_editor` (`view`), `grep`, `glob`, "
-            "`web_search`, and `read_webpage`. Do NOT modify files or run mutating commands. "
-            "Present your final plan wrapped inside a fenced ```sanctuary-plan block so the user can review and click Proceed."
+            "Use your structured OpenHands tools when needed (never write raw `[tool_name(...)]` text tags "
+            "in your reply), then call `finish` with your concise user-facing response in character."
+        )
+        agent_context = AgentContext(
+            system_message_suffix="\n\n".join(suffix_parts),
+            load_project_skills=False,
+            load_user_skills=False,
         )
     else:
-        suffix_parts.append(
-            "Verify touched code via `terminal` (`" + workspace_python(cwd) + "` / `node --test`), "
-            "and call `finish` with your concise user-facing response in character."
+        agent_tools = [
+            Tool(name=FileEditorTool.name),
+            Tool(name=GrepTool.name),
+            Tool(name=GlobTool.name),
+            Tool(name=TerminalTool.name),
+            Tool(name=TaskTrackerTool.name),
+            Tool(name=WebSearchTool.name),
+            Tool(name=ReadWebpageTool.name),
+            Tool(name=HttpProbeTool.name),
+            Tool(name=AskUserTool.name),
+        ]
+        if not cfg.get("is_local"):
+            agent_tools.append(Tool(name=TaskToolSet.name))
+        if has_active_plan:
+            agent_tools.append(Tool(name=UpdatePlanStepTool.name))
+
+        if subagent:
+            matched_def = next(
+                (d for d in get_registered_agent_definitions() if d.name == subagent),
+                None,
+            )
+            if matched_def is not None and matched_def.tools:
+                agent_tools = [Tool(name=t) for t in matched_def.tools]
+                if all(t.name != AskUserTool.name for t in agent_tools):
+                    agent_tools.append(Tool(name=AskUserTool.name))
+
+        suffix_parts = [f"Repository root: `{cwd}`."]
+        if focus_rel:
+            suffix_parts.append(f"Primary focus path: `{focus_rel}`.")
+        if path_warning:
+            suffix_parts.append(f"Note: {path_warning}")
+        if is_plan_turn:
+            suffix_parts.append(
+                "PLAN MODE IS ACTIVE: Inspect the codebase read-only using `file_editor` (`view`), `grep`, `glob`, "
+                "`web_search`, and `read_webpage`. Do NOT modify files or run mutating commands. "
+                "Present your final plan wrapped inside a fenced ```sanctuary-plan block so the user can review and click Proceed."
+            )
+        else:
+            suffix_parts.append(
+                "Verify touched code via `terminal` (`" + workspace_python(cwd) + "` / `node --test`), "
+                "and call `finish` with your concise user-facing response in character."
+            )
+        from core.program_config import load_agents_md
+
+        agents_md = load_agents_md(cwd)
+        if agents_md:
+            suffix_parts.append(f"# WORKSPACE AGENTS.MD\n{agents_md}")
+        if persona and persona.strip():
+            suffix_parts.append(
+                "# COMPANION VOICE (apply ONLY to your final `finish` message and `ask_user` questions; "
+                "during tool calls, act as a direct, decisive software engineer — once you locate the target code, "
+                "edit it immediately with `file_editor` rather than over-exploring)\n"
+                + persona.strip()
+            )
+
+        disabled_skills = compute_disabled_project_skills(
+            cwd, task_query.strip() or clean_task, focus_path=focus_rel, subagent_name=subagent or None
         )
-    from core.program_config import load_agents_md
-
-    agents_md = load_agents_md(cwd)
-    if agents_md:
-        suffix_parts.append(f"# WORKSPACE AGENTS.MD\n{agents_md}")
-    if persona and persona.strip():
-        suffix_parts.append(
-            "# COMPANION VOICE (apply ONLY to your final `finish` message and `ask_user` questions; "
-            "during tool calls, act as a direct, decisive software engineer — once you locate the target code, "
-            "edit it immediately with `file_editor` rather than over-exploring)\n"
-            + persona.strip()
+        agent_context = AgentContext(
+            system_message_suffix="\n".join(suffix_parts),
+            load_project_skills=True,
+            load_user_skills=False,
+            disabled_skills=disabled_skills,
         )
 
-    disabled_skills = compute_disabled_project_skills(
-        cwd, task_query.strip() or clean_task, focus_path=focus_rel, subagent_name=subagent or None
+    condenser = (
+        LLMSummarizingCondenser(llm=fast_llm, max_size=20, keep_first=2)
+        if cfg.get("is_local")
+        else LLMSummarizingCondenser(llm=fast_llm, max_size=240, keep_first=4)
     )
-    agent_context = AgentContext(
-        system_message_suffix="\n".join(suffix_parts),
-        load_project_skills=True,
-        load_user_skills=False,
-        disabled_skills=disabled_skills,
-    )
-
     agent = Agent(
         llm=active_llm,
         persona=None,
         tools=agent_tools,
         agent_context=agent_context,
-        condenser=LLMSummarizingCondenser(llm=fast_llm, max_size=240, keep_first=4),
+        condenser=condenser,
     )
 
-    cancel_event = threading.Event()
+    baton_enabled = bool(
+        not cfg.get("is_local")
+        and eff_band == "coding"
+        and not is_plan_turn
+        and not subagent
+        and fast_llm.model != deep_llm.model
+    )
+    current_llm_role = "fast" if active_llm is fast_llm else "deep"
+    kicked_down = False
+    consecutive_errors = 0
+    readonly_action_streak = 0
+    companion_media_output = ""
+    conversation: Any = None
+
     seen_calls: set[str] = set()
     seen_results: set[str] = set()
     pending_args: dict[str, dict[str, Any]] = {}
@@ -1715,7 +2264,7 @@ def run_coding_turn(
     last_error = ""
 
     def on_event(event: Any) -> None:
-        nonlocal last_error
+        nonlocal last_error, current_llm_role, kicked_down, consecutive_errors, readonly_action_streak, companion_media_output
         if isinstance(event, ActionEvent) and event.action is not None:
             call_id = str(event.tool_call_id or event.id)
             if call_id in seen_calls:
@@ -1724,6 +2273,22 @@ def run_coding_turn(
             t_name = str(event.tool_name or "tool")
             args = _summarize_action_args(event.tool_name, event.action)
             pending_args[call_id] = args
+
+            if is_readonly_action(event):
+                readonly_action_streak += 1
+            else:
+                readonly_action_streak = 0
+            if (
+                baton_enabled
+                and current_llm_role == "fast"
+                and not kicked_down
+                and readonly_action_streak >= 12
+                and conversation is not None
+            ):
+                conversation.switch_llm(deep_llm)
+                current_llm_role = "deep"
+                kicked_down = True
+
             if session_id:
                 with tools_mod.session_tool_calls_lock:
                     lst = tools_mod.session_tool_calls.setdefault(session_id, [])
@@ -1753,6 +2318,48 @@ def run_coding_turn(
                 last_error = out_text
             t_name = str(getattr(event, "tool_name", "error") or "error")
             args = pending_args.pop(call_id, {})
+
+            if t_name != "finish":
+                if is_err:
+                    consecutive_errors += 1
+                    if (
+                        baton_enabled
+                        and current_llm_role == "fast"
+                        and not kicked_down
+                        and consecutive_errors >= 2
+                        and conversation is not None
+                    ):
+                        conversation.switch_llm(deep_llm)
+                        current_llm_role = "deep"
+                        kicked_down = True
+                else:
+                    consecutive_errors = 0
+                    if (
+                        baton_enabled
+                        and current_llm_role == "deep"
+                        and not kicked_down
+                        and not has_active_plan
+                        and conversation is not None
+                        and (
+                            t_name == "task_tracker"
+                            or (t_name == "file_editor" and args.get("command") in ("create", "str_replace", "insert"))
+                        )
+                    ):
+                        conversation.switch_llm(fast_llm)
+                        current_llm_role = "fast"
+
+            if (
+                eff_band == "companion"
+                and not is_err
+                and t_name in ("generate_local_image", "apply_comfy_workflow")
+                and out_text
+                and conversation is not None
+            ):
+                companion_media_output = out_text
+                try:
+                    conversation.pause()
+                except Exception:
+                    pass
 
             if session_id:
                 with tools_mod.session_tool_calls_lock:
@@ -1803,7 +2410,6 @@ def run_coding_turn(
     except Exception:
         cancelled_sessions = set()
 
-    conversation: Any = None
     run_entry: dict[str, Any] | None = None
     final_text = ""
     exec_status = ConversationExecutionStatus.FINISHED
@@ -1829,6 +2435,21 @@ def run_coding_turn(
                 raise InterruptedError("Coding session cancelled by user request.")
 
             exec_status = conversation.state.execution_status
+            if companion_media_output and exec_status == ConversationExecutionStatus.PAUSED:
+                final_text = companion_media_output
+                exec_status = ConversationExecutionStatus.FINISHED
+                break
+
+            if exec_status == ConversationExecutionStatus.STUCK:
+                if baton_enabled and current_llm_role == "fast" and not kicked_down:
+                    conversation.switch_llm(deep_llm)
+                    current_llm_role = "deep"
+                    kicked_down = True
+                    conversation.send_message(
+                        "Execution got stuck on the fast model. Diagnose the root cause, verify carefully, and call `finish` with your response."
+                    )
+                    continue
+
             if exec_status == ConversationExecutionStatus.WAITING_FOR_CONFIRMATION:
                 pending = ConversationState.get_unmatched_actions(conversation.state.events)
                 mutating = [act for act in pending if not is_readonly_action(act)]
@@ -1836,6 +2457,10 @@ def run_coding_turn(
                     readonly_streak += 1
                     if not is_plan_turn and max_steps >= 20 and readonly_streak >= 12:
                         readonly_streak = 0
+                        if baton_enabled and current_llm_role == "fast" and not kicked_down:
+                            conversation.switch_llm(deep_llm)
+                            current_llm_role = "deep"
+                            kicked_down = True
                         conversation.reject_pending_actions(
                             "Exploration limit reached (12 consecutive read-only batches without editing). "
                             "Stop searching — apply your changes now with `file_editor`, run targeted verification "
@@ -1891,6 +2516,8 @@ def run_coding_turn(
     except Exception as exc:
         if cancel_event.is_set() or (session_id and session_id in cancelled_sessions):
             raise InterruptedError("Coding session cancelled by user request.") from exc
+        if not cfg.get("is_local") and cfg.get("api_key") and _is_quota_error_text(str(exc)):
+            v1_client.mark_quota_exhausted(cfg["api_key"])
         return f"Error: [OpenHands] {type(exc).__name__}: {exc}", recorded_pairs
     finally:
         if run_entry is not None:
@@ -1905,16 +2532,24 @@ def run_coding_turn(
         raise InterruptedError("Coding session cancelled by user request.")
 
     if exec_status in (ConversationExecutionStatus.ERROR, ConversationExecutionStatus.STUCK):
+        err_detail = final_text or last_error or "Agent stopped before finishing."
+        if not cfg.get("is_local") and cfg.get("api_key") and _is_quota_error_text(err_detail):
+            v1_client.mark_quota_exhausted(cfg["api_key"])
         return (
-            f"Error: [OpenHands {exec_status.value}] {final_text or last_error or 'Agent stopped before finishing.'}",
+            f"Error: [OpenHands {exec_status.value}] {err_detail}",
             recorded_pairs,
         )
     if not final_text:
+        if companion_media_output:
+            return companion_media_output, recorded_pairs
         return (
             f"Error: [OpenHands {exec_status.value}] {last_error or 'No final response produced before iteration limit.'}",
             recorded_pairs,
         )
     return final_text, recorded_pairs
+
+
+run_turn = run_coding_turn
 
 
 def _create_isolated_worktree(repo_root: str) -> tuple[str, str]:

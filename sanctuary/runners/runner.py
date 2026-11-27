@@ -30,15 +30,9 @@ from utils.utils import (
     THINK_TAG_PATTERN as THINK_TAG_RE,
     _build_tool_calls_pair,
     _build_vector_query,
-    _drop_dangling_called_line,
-    _execute_emulated_tool,
-    _extract_tool_calls,
     _get_databank_contexts,
     _get_safe_local_path,
-    _has_dangling_called_line,
-    _normalize_tool_name,
     _run_async_in_background_thread,
-    _strip_tool_calls,
     is_real_user_msg,
     strip_story,
 )
@@ -460,20 +454,6 @@ def _extract_fenced_sanctuary_plan(text: str) -> str:
     return text[nl + 1 : end].strip()
 
 
-def _execute_native_tool_call(tool_name: str, args_dict: dict) -> tuple[dict, str]:
-    """Execute a native JSON tool_call through the normalized Sanctuary tool registry."""
-    normalized_name = _normalize_tool_name(tool_name)
-    kwargs = dict(args_dict) if isinstance(args_dict, dict) else {}
-    func = getattr(tools, normalized_name, None)
-    if not func:
-        return {"args": [], "kwargs": kwargs}, f"Error: Tool '{normalized_name}' not found."
-    try:
-        output = func(**kwargs)
-    except Exception as exc:
-        output = f"Error executing tool: {exc}"
-    return {"args": [], "kwargs": kwargs}, str(output)
-
-
 def _assess_cloud_gear_escalation(
     history: list,
     new_message_text: str,
@@ -874,27 +854,6 @@ class BaseProgramRunner:
         cleaned = THINK_TAG_RE.sub("", text)
         return CHANNEL_TAG_RE.sub("", cleaned).strip()
 
-    def _filter_story_mode_matches(self, matches: list, text: str, program_name: str) -> tuple[list, str]:
-        from core.program_config import is_story_mode
-
-        if not matches or not is_story_mode(program_name):
-            return matches, text
-
-        story_allowed = {
-            "generate_local_image",
-            "generate_program_portrait",
-            "generate_general_image",
-            "apply_comfy_workflow",
-            "add_journal_entry",
-        }
-        disallowed = [m for m in matches if m.group(1) not in story_allowed]
-        for m in disallowed:
-            text = text.replace(m.group(0), "")
-
-        text = re.sub(r"\n{3,}", "\n\n", text).strip()
-        filtered_matches = [m for m in matches if m.group(1) in story_allowed]
-        return filtered_matches, text
-
     async def _execute_local_llm_loop(
         self,
         session_id: str,
@@ -907,17 +866,12 @@ class BaseProgramRunner:
         speaker_id: str = None,
         shared_post: dict | None = None,
     ) -> tuple[str, list, str | None]:
-        max_iterations = 8
-        iteration = 0
         all_tool_calls = []
         turn_image_budget = [MAX_IMAGES_PER_ROW]
         final_response_text = ""
-        completed_final_turn = False
         created_bot_msg_id: str | None = None
         target_model = model if (model and model != "local-llm") else os.getenv("LOCAL_MODEL_NAME")
 
-        # Prompt layout, ordered for prefix caching: static system prompt -> memory chronicle -> chat history
-        # -> latest user turn carrying every per-turn block (inversion, time, lore, recall, skills).
         sys_instructions = self._get_system_instructions(session_id, speaker_id=speaker_id)
         memory_block = self._get_memory_block(session_id)
         turn_directive = self._get_turn_inversion_directive(session_id, inversion_directive)
@@ -931,8 +885,8 @@ class BaseProgramRunner:
         if is_plan_turn:
             plan_rule = (
                 "[PLAN MODE ACTIVE]: The user requested `/plan`. Inspect the repository read-only using "
-                "`list_dir`, `grep_search`, and `read_file` first, then present the plan inside a ```sanctuary-plan fenced block "
-                "so the user can review and click Proceed. Do NOT modify files or run mutating commands in this turn."
+                "`file_editor` (`view`), `grep`, `glob`, `web_search`, and `read_webpage` first, then present the plan "
+                "inside a ```sanctuary-plan fenced block so the user can review and click Proceed. Do NOT modify files or run mutating commands in this turn."
             )
             turn_directive = f"{turn_directive}\n{plan_rule}".strip() if turn_directive else plan_rule
 
@@ -956,36 +910,54 @@ class BaseProgramRunner:
         elif not is_plan_turn and not active_story_mode and has_active_plan(mem_meta):
             approved_plan_md = (mem_meta.get("coding_state") or {}).get("plan_markdown", "")
 
+        prefetched_results: list[tuple[str, dict, str]] = []
         if not is_plan_turn and not active_story_mode:
             history_snapshot = self.sessions_history.get(session_id, [])
             prefetch_urls = _resolve_turn_webpage_urls(history_snapshot, new_message_text, shared_post=shared_post)
             if prefetch_urls:
                 tools.current_speaker_id.set(speaker_id)
                 loop = asyncio.get_running_loop()
-                pre_results = []
                 for url in prefetch_urls:
                     if session_id in cancelled_sessions:
                         raise asyncio.CancelledError("Session cancelled by user request.")
-                    escaped_url = url.replace('"', '\\"')
-                    parsed_args, output = await loop.run_in_executor(
+                    output = await loop.run_in_executor(
                         None,
                         contextvars.copy_context().run,
-                        _execute_emulated_tool,
-                        "read_webpage",
-                        f'url="{escaped_url}"',
+                        tools.read_webpage,
+                        url,
                     )
-                    t_args = (parsed_args or {}).get("kwargs") or {"url": url}
-                    pre_results.append(("read_webpage", t_args, output))
-                    all_tool_calls.extend(_build_tool_calls_pair("read_webpage", t_args, output, len(all_tool_calls)))
-                if pre_results:
+                    t_args = {"url": url}
+                    prefetched_results.append(("read_webpage", t_args, str(output)))
+                    all_tool_calls.extend(_build_tool_calls_pair("read_webpage", t_args, str(output), len(all_tool_calls)))
+                if prefetched_results:
                     adapter.append_assistant_message("", all_tool_calls, invocation_id, intermediate=True, speaker_id=speaker_id)
-                    adapter.append_tool_events(pre_results, invocation_id)
+                    adapter.append_tool_events(prefetched_results, invocation_id)
 
         from core import v1_client
         from core.transmission import TransmissionController
 
         history_now = self.sessions_history.get(session_id, [])
         utterance = _extract_user_utterance(new_message_text, shared_post=shared_post, history=history_now)
+        if isinstance(adapter, OsHistoryAdapter) and utterance and not getattr(adapter, "_skills_retrieved", False):
+            try:
+                from core.skill_retriever import retrieve_matched_skill_records
+
+                adapter.matched_skill_records = retrieve_matched_skill_records(
+                    query=utterance,
+                    story_active=active_story_mode,
+                    threshold=0.38,
+                    top_k=2,
+                    query_vector=getattr(adapter, "query_vector", None),
+                )
+                adapter._skills_retrieved = True
+            except Exception as se:
+                print(f"[skills] Retrieval error: {se}")
+
+        matched_skill_names = tuple(
+            str(r.get("name") or "").strip()
+            for r in (getattr(adapter, "matched_skill_records", None) or ())
+            if isinstance(r, dict) and r.get("name")
+        )
         cloud_cfg = v1_client.get_v1_settings()
         transmission = TransmissionController(
             utterance=utterance,
@@ -997,518 +969,385 @@ class BaseProgramRunner:
             has_active_research=bool(all_tool_calls),
             has_active_plan=(has_active_plan(mem_meta) and not active_story_mode),
             routing_policy=cloud_cfg.get("routing_policy", "auto"),
+            matched_skills=matched_skill_names,
         )
 
-        while iteration < max_iterations:
-            iteration += 1
-            # --- STAGE 1: PREPROCESSING & SINGLE-PASS TRANSMISSION SHIFT ---
-            img_data_url = (
-                adapter.get_latest_image_data_url()
-                if iteration == 1 and hasattr(adapter, "get_latest_image_data_url")
-                else ""
-            )
-            has_vision_attachment = bool(img_data_url and not os.getenv("LOCAL_MMPROJ", "").strip())
-            est_tokens = (
-                adapter.estimate_turn_tokens()
-                if hasattr(adapter, "estimate_turn_tokens")
-                else 0
-            )
-            cloud_reason = v1_client.v1_unavailable_reason()
-            if iteration == 1 and cloud_reason and not active_story_mode:
-                print(f"[Transmission] Cloud unavailable ({cloud_reason}); staying on local LLM.", flush=True)
-            shift = transmission.shift(
-                iteration=iteration,
-                estimated_tokens=est_tokens,
-                local_budget=adapter._get_chat_budget(),
-                has_vision_attachment=has_vision_attachment,
-                cloud_available=not cloud_reason,
-            )
-            eff_directive = (
-                f"{turn_directive}\n\n{shift.directive}".strip()
-                if shift.directive and turn_directive
-                else (shift.directive or turn_directive)
-            )
-            if cloud_reason.startswith("vault locked") and transmission.throttle_tier:
-                vault_note = "Note for this reply: Cloud research is unavailable because the Sanctuary Vault is locked; briefly tell the user to unlock the vault for cloud research."
-                eff_directive = f"{eff_directive}\n\n{vault_note}".strip() if eff_directive else vault_note
-            if shift.gear != "openhands":
-                messages = adapter.get_openai_messages(
-                    sys_instructions,
-                    rag_context,
-                    memory_context=memory_block,
-                    turn_directive=eff_directive,
-                    cloud_gear=(shift.gear != "park"),
-                )
-                if (
-                    iteration == 1
-                    and not active_story_mode
-                    and any(r.get("name") == "auto_programming" for r in (getattr(adapter, "matched_skill_records", None) or []))
-                ):
-                    transmission.coding_engaged = True
-                    shift = transmission.shift(
-                        iteration=iteration,
-                        estimated_tokens=est_tokens,
-                        local_budget=adapter._get_chat_budget(),
-                        has_vision_attachment=has_vision_attachment,
-                        cloud_available=not cloud_reason,
-                    )
+        img_data_url = (
+            adapter.get_latest_image_data_url()
+            if hasattr(adapter, "get_latest_image_data_url")
+            else ""
+        )
+        has_vision_attachment = bool(img_data_url and not os.getenv("LOCAL_MMPROJ", "").strip())
+        est_tokens = adapter.estimate_turn_tokens() if hasattr(adapter, "estimate_turn_tokens") else 0
+        cloud_reason = v1_client.v1_unavailable_reason()
+        vault_locked = cloud_reason.startswith("vault locked")
+        if cloud_reason and not active_story_mode:
+            print(f"[Transmission] Cloud unavailable ({cloud_reason}).", flush=True)
 
-            if shift.gear == "openhands":
-                from core import openhands_harness
-                from core.banned_words import replace_banned_words_async
-                from core.plan_state import format_coding_state_block
-                from core.program_config import compile_coding_voice_instructions, replace_placeholders
+        shift = transmission.shift(
+            iteration=1,
+            estimated_tokens=est_tokens,
+            local_budget=adapter._get_chat_budget(),
+            has_vision_attachment=has_vision_attachment,
+            cloud_available=not cloud_reason,
+            vault_locked=vault_locked,
+        )
+        eff_directive = (
+            f"{turn_directive}\n\n{shift.directive}".strip()
+            if shift.directive and turn_directive
+            else (shift.directive or turn_directive)
+        )
+        if vault_locked and transmission.throttle_tier:
+            vault_note = (
+                "Note for this reply: Cloud research is unavailable because the Sanctuary Vault is locked; "
+                "briefly tell the user to unlock the vault for cloud research."
+            )
+            eff_directive = f"{eff_directive}\n\n{vault_note}".strip() if eff_directive else vault_note
 
-                temperature = self._load_temperature_setting()
+        temperature = self._load_temperature_setting()
+        url = LOCAL_SERVER_URL
+        headers = get_local_server_headers()
+        from variables.settings import DISABLED_THINKING
+        from core.banned_words import get_logit_bias_dict, replace_banned_words_async
+
+        logit_bias = get_logit_bias_dict(url)
+        loop = asyncio.get_running_loop()
+
+        if shift.tool_band in ("companion", "coding"):
+            from core import openhands_harness
+            from core.plan_state import format_coding_state_block
+            from core.program_config import compile_coding_voice_instructions, replace_placeholders
+
+            if shift.tool_band == "coding":
                 voice_inst = compile_coding_voice_instructions(speaker_id or self.program_id)
                 persona_parts = [voice_inst.strip()] if voice_inst and voice_inst.strip() else []
                 if memory_block and memory_block.strip():
                     persona_parts.append(memory_block.strip())
-                if turn_directive and turn_directive.strip() and not is_plan_turn:
-                    persona_parts.append(turn_directive.strip())
+                if eff_directive and eff_directive.strip() and not is_plan_turn:
+                    persona_parts.append(eff_directive.strip())
+                persona_text = "\n\n".join(persona_parts)
+            else:
+                persona_parts = [sys_instructions.strip()] if sys_instructions and sys_instructions.strip() else []
+                if memory_block and memory_block.strip():
+                    persona_parts.append(memory_block.strip())
+                if rag_context and rag_context.strip():
+                    persona_parts.append(f"<knowledge_base>\n{rag_context.strip()}\n</knowledge_base>")
+                if getattr(adapter, "matched_skill_records", None):
+                    from core.skill_retriever import format_skill_records
+
+                    formatted_skills = format_skill_records(adapter.matched_skill_records)
+                    if formatted_skills:
+                        persona_parts.append(formatted_skills)
+                if eff_directive and eff_directive.strip():
+                    persona_parts.append(eff_directive.strip())
                 persona_text = "\n\n".join(persona_parts)
 
-                prior_turns = []
-                for m in self.sessions_history.get(session_id, [])[:-1]:
-                    if (
-                        isinstance(m, dict)
-                        and m.get("role") in ("user", "program")
-                        and not _is_hidden_turn_artifact(m)
-                        and not str(m.get("id") or "").startswith(("sys_", "port_", "quest_"))
-                    ):
-                        clean_m = replace_placeholders(str(m.get("text") or "").strip())
-                        if m.get("role") == "program" and "[list_" in clean_m:
-                            clean_m = "\n".join(
-                                ln for ln in clean_m.splitlines() if not ln.lstrip().startswith("[list_")
-                            ).strip()
-                        if clean_m:
-                            role_label = "user" if m.get("role") == "user" else "assistant"
-                            prior_turns.append(f"{role_label}: {clean_m[:2400]}")
-                prior_turns = prior_turns[-6:]
+            prior_turns = []
+            for m in self.sessions_history.get(session_id, [])[:-1]:
+                if (
+                    isinstance(m, dict)
+                    and m.get("role") in ("user", "program")
+                    and not _is_hidden_turn_artifact(m)
+                    and not str(m.get("id") or "").startswith(("sys_", "port_", "quest_"))
+                ):
+                    clean_m = replace_placeholders(str(m.get("text") or "").strip())
+                    if m.get("role") == "program" and "[list_" in clean_m:
+                        clean_m = "\n".join(
+                            ln for ln in clean_m.splitlines() if not ln.lstrip().startswith("[list_")
+                        ).strip()
+                    if clean_m:
+                        role_label = "user" if m.get("role") == "user" else "assistant"
+                        prior_turns.append(f"{role_label}: {clean_m[:2400]}")
+            prior_turns = prior_turns[-6:]
 
-                oh_instruction = replace_placeholders(new_message_text or "").strip()
-                if has_active_plan(mem_meta) or is_proceed_turn:
-                    coding_state_blk = format_coding_state_block(mem_meta)
-                    if coding_state_blk:
-                        oh_instruction = f"{coding_state_blk}\n\n{oh_instruction}"
+            oh_instruction = replace_placeholders(new_message_text or "").strip()
+            if shift.tool_band == "coding" and (has_active_plan(mem_meta) or is_proceed_turn):
+                coding_state_blk = format_coding_state_block(mem_meta)
+                if coding_state_blk:
+                    oh_instruction = f"{coding_state_blk}\n\n{oh_instruction}"
+
+            prefix_blocks: list[str] = []
+            if prior_turns:
+                prefix_blocks.append("Recent conversation context:\n" + "\n\n".join(prior_turns))
+            if shift.tool_band == "coding":
                 prior_files = _collect_prior_coding_files(history_now)
-                prefix_blocks: list[str] = []
-                if prior_turns:
-                    prefix_blocks.append("Recent conversation context:\n" + "\n\n".join(prior_turns))
                 if prior_files:
                     prefix_blocks.append("Previously inspected/edited paths: " + ", ".join(prior_files))
-                if prefix_blocks:
-                    oh_instruction = "\n\n".join(prefix_blocks) + "\n\nCurrent request:\n" + oh_instruction
+            if prefetched_results:
+                pre_txt = "\n\n".join(
+                    f"[Prefetched {t_name} ({t_args.get('url', '')})]\n{t_out[:3000]}"
+                    for t_name, t_args, t_out in prefetched_results
+                )
+                prefix_blocks.append(pre_txt)
+            if prefix_blocks:
+                oh_instruction = "\n\n".join(prefix_blocks) + "\n\nCurrent request:\n" + oh_instruction
 
-                recent_user_queries = "\n".join(
-                    str(m.get("text") or "")[:500]
-                    for m in history_now[-6:]
-                    if isinstance(m, dict) and m.get("role") == "user" and not _is_hidden_turn_artifact(m)
-                ).strip()
+            recent_user_queries = "\n".join(
+                str(m.get("text") or "")[:500]
+                for m in history_now[-6:]
+                if isinstance(m, dict) and m.get("role") == "user" and not _is_hidden_turn_artifact(m)
+            ).strip()
 
-                def _on_oh_progress(tc_pairs: list[dict]) -> None:
-                    adapter.append_assistant_message("", tc_pairs, invocation_id, intermediate=True, speaker_id=speaker_id)
+            def _on_oh_progress(tc_pairs: list[dict]) -> None:
+                adapter.append_assistant_message("", all_tool_calls + tc_pairs, invocation_id, intermediate=True, speaker_id=speaker_id)
 
-                tools.current_speaker_id.set(speaker_id)
-                sess_token = tools.current_session_id.set(session_id)
-                runner_token = tools.current_runner.set(self)
-                plan_token = tools.current_plan_mode.set(is_plan_turn)
-                approved_token = tools.current_approved_plan.set(approved_plan_md)
-                loop = asyncio.get_running_loop()
-                try:
-                    final_response_text, all_tool_calls = await loop.run_in_executor(
-                        None,
-                        contextvars.copy_context().run,
-                        lambda: openhands_harness.run_coding_turn(
-                            oh_instruction,
-                            session_id=session_id,
-                            persona=persona_text,
-                            tier="fast" if shift.cloud_tier == "fast" else "deep",
-                            is_plan_turn=is_plan_turn,
-                            has_active_plan=has_active_plan(mem_meta),
-                            temperature=temperature,
-                            on_progress=_on_oh_progress,
-                            task_query=recent_user_queries or utterance,
-                        ),
-                    )
-                except InterruptedError as cancel_exc:
-                    raise asyncio.CancelledError("Session cancelled by user request.") from cancel_exc
-                finally:
-                    tools.current_approved_plan.reset(approved_token)
-                    tools.current_plan_mode.reset(plan_token)
-                    tools.current_runner.reset(runner_token)
-                    tools.current_session_id.reset(sess_token)
-
-                if session_id in cancelled_sessions:
-                    raise asyncio.CancelledError("Session cancelled by user request.")
-
-                final_response_text = self._sanitize_thinking_tags(final_response_text or "")
-                if final_response_text and not final_response_text.startswith("Error:"):
-                    async def _oh_rw(prompt: str, model: str = None, temperature: float = 0.4, **kwargs) -> str:
-                        if not cloud_reason:
-                            try:
-                                rw = await loop.run_in_executor(
-                                    None,
-                                    lambda: v1_client.chat_completion_step([{"role": "user", "content": prompt}], tier="fast"),
-                                )
-                                return self._sanitize_thinking_tags(rw.get("content", ""))
-                            except Exception:
-                                return ""
-                        return ""
-
-                    final_response_text = await replace_banned_words_async(
-                        text=final_response_text,
-                        llm_call_func=_oh_rw,
-                        target_model=target_model,
-                    )
-
-                bot_msg = adapter.append_assistant_message(final_response_text, all_tool_calls, invocation_id, speaker_id=speaker_id)
-                if bot_msg and isinstance(bot_msg, dict) and "text" in bot_msg:
-                    final_response_text = bot_msg["text"]
-                created_bot_msg_id = bot_msg.get("id") if isinstance(bot_msg, dict) else None
-                final_response_text = self._ensure_images_are_embedded(final_response_text)
-                new_fenced_plan = _extract_fenced_sanctuary_plan(final_response_text)
-                if new_fenced_plan:
-                    stage_plan(self._get_memory_meta(session_id), new_fenced_plan)
-                    self._save_session_to_disk(session_id)
-                prog = getattr(self, "sessions_program", {}).get(session_id) or getattr(self, "program_id", None) or get_active_program()
-                self.trigger_memory_pipeline(session_id=session_id, active_model=target_model or "", program_id=prog)
-                return final_response_text, all_tool_calls, created_bot_msg_id
-            if is_proceed_turn and iteration == 1 and not approved_plan_md:
-                for hist_msg in reversed(messages):
-                    if hist_msg.get("role") == "assistant":
-                        extracted = _extract_fenced_sanctuary_plan(str(hist_msg.get("content") or ""))
-                        if extracted:
-                            approved_plan_md = extracted
-                            break
-
-            # --- STAGE 2: MODEL EXECUTION PASS ---
-            temperature = self._load_temperature_setting()
-            url = LOCAL_SERVER_URL
-            headers = get_local_server_headers()
-
-            ctx_raw = os.getenv("LOCAL_CONTEXT", "8192")
-            active_ctx = int(ctx_raw) if (ctx_raw and ctx_raw.isdigit()) else 8192
-            max_tokens_limit = max(1536, min(4096, active_ctx // 6))
-
-            from variables.settings import is_thinking_enabled, DISABLED_THINKING
-            from core.banned_words import get_logit_bias_dict
-
-            payload = {
-                "messages": messages,
-                "temperature": temperature,
-                "max_tokens": max_tokens_limit,
-                "cache_prompt": True,
-            }
-            if not is_thinking_enabled() and isinstance(DISABLED_THINKING, dict):
-                payload.update(DISABLED_THINKING)
-            if target_model:
-                payload["model"] = target_model
-
-            logit_bias = get_logit_bias_dict(url)
-            if logit_bias:
-                payload["logit_bias"] = logit_bias
-
-            bot_response_text = ""
-            native_tool_calls: list[dict] = []
-            truncated_tool_call = False
-            used_cloud_gear = False
-            primary_skill = (
-                adapter.matched_skill_records[0]
-                if getattr(adapter, "matched_skill_records", None)
-                else None
-            )
-
-            async def _invoke_cloud_gear(
-                cloud_msgs: list[dict],
-                cloud_tier: str = "fast",
-                native_tools: list[dict] | None = None,
-                timeout_s: float = 60.0,
-                reasoning_effort: str | None = None,
-            ) -> dict:
-                loop = asyncio.get_running_loop()
-                is_sensitive = bool(getattr(adapter, "has_sensitive_context", False))
-                return await loop.run_in_executor(
+            tools.current_speaker_id.set(speaker_id)
+            sess_token = tools.current_session_id.set(session_id)
+            runner_token = tools.current_runner.set(self)
+            budget_token = tools.current_turn_image_budget.set(turn_image_budget)
+            plan_token = tools.current_plan_mode.set(is_plan_turn)
+            approved_token = tools.current_approved_plan.set(approved_plan_md)
+            try:
+                final_response_text, oh_tool_calls = await loop.run_in_executor(
                     None,
-                    lambda: v1_client.chat_completion_step(
-                        cloud_msgs,
-                        tier=cloud_tier,
+                    contextvars.copy_context().run,
+                    lambda: openhands_harness.run_turn(
+                        oh_instruction,
+                        session_id=session_id,
+                        persona=persona_text,
+                        gear=shift.gear,
+                        tool_band=shift.tool_band,
+                        matched_skills=matched_skill_names,
+                        active_story_mode=active_story_mode,
+                        is_plan_turn=is_plan_turn,
+                        has_active_plan=(has_active_plan(mem_meta) and shift.tool_band == "coding"),
                         temperature=temperature,
-                        max_tokens=0,
-                        skill_record=primary_skill,
-                        sensitive=is_sensitive,
-                        tools=native_tools,
-                        reasoning_effort=reasoning_effort,
-                        timeout=timeout_s,
+                        max_iterations=(50 if shift.tool_band == "coding" else 12),
+                        on_progress=_on_oh_progress,
+                        task_query=recent_user_queries or utterance,
                     ),
                 )
+            except InterruptedError as cancel_exc:
+                raise asyncio.CancelledError("Session cancelled by user request.") from cancel_exc
+            finally:
+                tools.current_approved_plan.reset(approved_token)
+                tools.current_plan_mode.reset(plan_token)
+                tools.current_turn_image_budget.reset(budget_token)
+                tools.current_runner.reset(runner_token)
+                tools.current_session_id.reset(sess_token)
 
-            if shift.gear == "vision" and img_data_url:
-                vision_msgs = [dict(m) for m in messages]
-                for m_idx in range(len(vision_msgs) - 1, -1, -1):
-                    if vision_msgs[m_idx].get("role") == "user":
-                        prev_c = vision_msgs[m_idx].get("content", "")
-                        text_part = prev_c if isinstance(prev_c, str) else ""
-                        vision_msgs[m_idx] = {
-                            "role": "user",
-                            "content": [
-                                {"type": "text", "text": text_part},
-                                {"type": "image_url", "image_url": {"url": img_data_url}},
-                            ],
-                        }
-                        break
-                try:
-                    step_res = await _invoke_cloud_gear(vision_msgs, cloud_tier="vision", native_tools=shift.native_tools, timeout_s=60.0)
-                    bot_response_text = step_res.get("content", "")
-                    native_tool_calls = step_res.get("tool_calls") or []
-                    truncated_tool_call = bool(step_res.get("truncated_tool_call"))
-                    used_cloud_gear = bool(bot_response_text or native_tool_calls)
-                    if not bot_response_text and not native_tool_calls and not truncated_tool_call:
-                        bot_response_text = (
-                            f"Error: [Gear vision · {step_res.get('model') or '?'} @ {cloud_cfg['base_url']}] "
-                            f"Empty response (finish_reason={step_res.get('finish_reason') or 'none'})."
-                        )
-                except Exception as vision_exc:
-                    bot_response_text = f"Error: [Gear vision · {cloud_cfg['base_url']}] {vision_exc}"
+            if session_id in cancelled_sessions:
+                raise asyncio.CancelledError("Session cancelled by user request.")
 
-            elif shift.gear in ("first", "second") and shift.cloud_tier:
-                try:
-                    step_res = await _invoke_cloud_gear(
-                        messages,
-                        cloud_tier=shift.cloud_tier,
-                        native_tools=shift.native_tools,
-                        timeout_s=90.0 if shift.gear == "second" else 60.0,
-                    )
-                    bot_response_text = step_res.get("content", "")
-                    native_tool_calls = step_res.get("tool_calls") or []
-                    truncated_tool_call = bool(step_res.get("truncated_tool_call"))
-                    if bot_response_text or native_tool_calls:
-                        used_cloud_gear = True
-                        print(
-                            f"[Transmission] gear={shift.gear} phase={shift.phase} tier={shift.cloud_tier} "
-                            f"reason={shift.reason} load={shift.engine_load}",
-                            flush=True,
-                        )
-                    elif not truncated_tool_call:
-                        bot_response_text = (
-                            f"Error: [Gear {shift.gear} ({shift.cloud_tier}) · {step_res.get('model') or '?'} @ {cloud_cfg['base_url']}] "
-                            f"Empty response (finish_reason={step_res.get('finish_reason') or 'none'})."
-                        )
-                except Exception as upscale_exc:
-                    bot_response_text = f"Error: [Gear {shift.gear} ({shift.cloud_tier}) · {cloud_cfg['base_url']}] {upscale_exc}"
+            all_tool_calls.extend(oh_tool_calls)
+            final_response_text = self._sanitize_thinking_tags(final_response_text or "")
+            if shift.tool_band == "companion":
+                image_tools = {"generate_local_image", "apply_comfy_workflow"}
+                if any(tc.get("name") in image_tools for tc in oh_tool_calls if isinstance(tc, dict)):
+                    msg_lower = new_message_text.lower()
+                    if any(k in msg_lower for k in ("portrait", "draw", "picture", "image", "photo", "selfie")):
+                        final_response_text = ""
+                elif final_response_text and not final_response_text.startswith("Error:"):
+                    group_meta = getattr(self, "sessions_group_meta", {}).get(session_id)
+                    final_response_text = clean_group_speaker_response(final_response_text, speaker_id, group_meta)
 
-            else:
-                local_error_msg = ""
-                local_payload = {**payload, "messages": messages}
-                try:
-                    response = await self._post_llm_request(url, local_payload, headers, timeout=120.0, session_id=session_id)
-                    if response.status_code == 200:
-                        bot_response_text = response.json()["choices"][0]["message"]["content"]
-                    else:
-                        local_error_msg = f"Error: [Gear park · {url}] HTTP {response.status_code}: {response.text[:300]}"
-                    print(f"[DEBUG STATUS] {response.status_code}", flush=True)
-                except asyncio.CancelledError:
-                    raise
-                except Exception as e:
-                    local_error_msg = f"Error: [Gear park · {url}] Could not connect to local LLM ({type(e).__name__}: {e})."
-
-                if not bot_response_text and not native_tool_calls:
-                    bot_response_text = local_error_msg or f"Error: [Gear park · {url}] Empty local LLM response."
-
-            # --- STAGE 3: POST-PROCESSING (TOOLS & CLEANUP) ---
-            bot_response_text = self._sanitize_thinking_tags(bot_response_text)
-
-            matches = _extract_tool_calls(bot_response_text)
-            matches, bot_response_text = self._filter_story_mode_matches(matches, bot_response_text, speaker_id or self.program_id)
-
-            if shift.halt_tools:
-                bot_response_text = _drop_dangling_called_line(_strip_tool_calls(bot_response_text, matches))
-                if not bot_response_text.strip():
-                    bot_response_text = (
-                        "I hit repeated tool errors and stopped so I don't make things worse. "
-                        "Can you check the tool calls above?"
-                    )
-                native_tool_calls = []
-                matches = []
-            elif not matches and not native_tool_calls and _has_dangling_called_line(bot_response_text):
-                truncated_tool_call = True
-                bot_response_text = _drop_dangling_called_line(bot_response_text)
-
-            if matches or native_tool_calls:
-                if session_id in cancelled_sessions:
-                    raise asyncio.CancelledError("Session cancelled by user request.")
-
-                clean_text = _strip_tool_calls(bot_response_text, matches)
-
-                tools.current_speaker_id.set(speaker_id)
-                sess_token = tools.current_session_id.set(session_id)
-                runner_token = tools.current_runner.set(self)
-                budget_token = tools.current_turn_image_budget.set(turn_image_budget)
-                plan_token = tools.current_plan_mode.set(is_plan_turn)
-                write_token = tools.current_write_disengaged.set(shift.write_disengaged)
-                approved_token = tools.current_approved_plan.set(approved_plan_md)
-                loop = asyncio.get_running_loop()
-                try:
-                    exec_tasks = [
-                        loop.run_in_executor(
-                            None,
-                            contextvars.copy_context().run,
-                            _execute_emulated_tool,
-                            m.group(1),
-                            m.group(2),
-                        )
-                        for m in matches
-                    ]
-                    for nt in native_tool_calls:
-                        exec_tasks.append(
-                            loop.run_in_executor(
+            if final_response_text and not final_response_text.startswith("Error:"):
+                async def _oh_rw(prompt: str, model: str = None, temperature: float = 0.4, **kwargs) -> str:
+                    if not cloud_reason:
+                        try:
+                            rw = await loop.run_in_executor(
                                 None,
-                                contextvars.copy_context().run,
-                                _execute_native_tool_call,
-                                nt["name"],
-                                nt.get("args") or {},
+                                lambda: v1_client.chat_completion_step([{"role": "user", "content": prompt}], tier="fast"),
                             )
-                        )
-                    raw_results = await asyncio.gather(*exec_tasks)
-                finally:
-                    tools.current_approved_plan.reset(approved_token)
-                    tools.current_write_disengaged.reset(write_token)
-                    tools.current_plan_mode.reset(plan_token)
-                    tools.current_turn_image_budget.reset(budget_token)
-                    tools.current_runner.reset(runner_token)
-                    tools.current_session_id.reset(sess_token)
+                            return self._sanitize_thinking_tags(rw.get("content", ""))
+                        except Exception:
+                            return ""
+                    return ""
 
-                if session_id in cancelled_sessions:
-                    raise asyncio.CancelledError("Session cancelled by user request.")
-
-                call_names = [_normalize_tool_name(m.group(1)) for m in matches] + [
-                    _normalize_tool_name(nt["name"]) for nt in native_tool_calls
-                ]
-                results = [
-                    (t_name, parsed_args["kwargs"], output)
-                    for t_name, (parsed_args, output) in zip(call_names, raw_results)
-                ]
-
-                # Check guest tool restrictions for group sessions
-                group_meta = self.sessions_group_meta.get(session_id)
-                if group_meta and speaker_id and speaker_id != group_meta.get("host_id"):
-                    # Guest program speaking: block add_journal_entry to avoid contaminating host memory
-                    filtered_results = []
-                    for t_name, t_args, t_output in results:
-                        if t_name == "add_journal_entry":
-                            t_output = "Error: Journal logging is reserved for the Host program during Group Sessions."
-                        filtered_results.append((t_name, t_args, t_output))
-                    results = filtered_results
-
-                tool_calls = []
-                for idx, (t_name, t_args, t_output) in enumerate(results):
-                    tool_calls.extend(_build_tool_calls_pair(t_name, t_args, t_output, len(all_tool_calls) + idx))
-                all_tool_calls.extend(tool_calls)
-
-                # Terminal / side-effect tools that do not require continued LLM turn
-                terminal_tools = {
-                    "add_journal_entry",
-                    "add_quest",
-                    "generate_local_image",
-                    "generate_program_portrait",
-                    "generate_general_image",
-                    "apply_comfy_workflow",
-                    "generate_video_from_image",
-                }
-                if all(t_name in terminal_tools for t_name, _, _ in results):
-                    final_response_text = clean_text
-                    image_tools = {
-                        "generate_local_image",
-                        "generate_program_portrait",
-                        "generate_general_image",
-                        "apply_comfy_workflow",
-                    }
-                    if any(t_name in image_tools for t_name, _, _ in results):
-                        msg_lower = new_message_text.lower()
-                        is_portrait_turn = any(k in msg_lower for k in ("portrait", "draw", "picture", "image", "photo", "selfie", "generate_program_portrait", "generate_local_image"))
-                        if is_portrait_turn:
-                            final_response_text = ""
-                    bot_msg = adapter.append_assistant_message(final_response_text, all_tool_calls, invocation_id, speaker_id=speaker_id)
-                    if bot_msg and isinstance(bot_msg, dict) and "text" in bot_msg:
-                        final_response_text = bot_msg["text"]
-                    created_bot_msg_id = bot_msg.get("id") if isinstance(bot_msg, dict) else None
-                    completed_final_turn = True
-                    break
-
-                transmission.record_tool_results(results)
-
-                adapter.append_assistant_message("", tool_calls, invocation_id, intermediate=True, speaker_id=speaker_id)
-                adapter.append_tool_events(results, invocation_id)
-
-                continue
-            elif truncated_tool_call and iteration < max_iterations:
-                trunc_notice = (
-                    "Your tool call was cut off by output length before closing. "
-                    "Re-issue with a shorter, targeted call."
+                final_response_text = await replace_banned_words_async(
+                    text=final_response_text,
+                    llm_call_func=_oh_rw,
+                    target_model=target_model,
                 )
-                adapter.append_assistant_message(bot_response_text.strip(), [], invocation_id, intermediate=True, speaker_id=speaker_id)
-                adapter.append_tool_events([("system", {}, trunc_notice)], invocation_id)
-                continue
-            else:
-                group_meta = getattr(self, "sessions_group_meta", {}).get(session_id)
-                bot_response_text = clean_group_speaker_response(bot_response_text, speaker_id, group_meta)
 
-                clean_text = bot_response_text.strip()
-                if clean_text:
-                    from core.banned_words import replace_banned_words_async
-
-                    async def _llm_rewrite_wrapper(prompt: str, model: str = None, temperature: float = 0.4, **kwargs) -> str:
-                        if used_cloud_gear:
-                            try:
-                                rw_step = await _invoke_cloud_gear([{"role": "user", "content": prompt}], cloud_tier="fast")
-                                return self._sanitize_thinking_tags(rw_step.get("content", ""))
-                            except Exception:
-                                return ""
-                        rw_payload = {
-                            "messages": [{"role": "user", "content": prompt}],
-                            "temperature": temperature,
-                            "max_tokens": kwargs.get("max_tokens", 128),
-                            "cache_prompt": False,
-                        }
-                        if isinstance(DISABLED_THINKING, dict):
-                            rw_payload.update(DISABLED_THINKING)
-                        if model:
-                            rw_payload["model"] = model
-                        if logit_bias:
-                            rw_payload["logit_bias"] = logit_bias
-                        res = await self._post_llm_request(url, rw_payload, headers, timeout=15.0, session_id=session_id)
-                        if res.status_code == 200:
-                            raw_rw = res.json()["choices"][0]["message"].get("content", "")
-                            return self._sanitize_thinking_tags(raw_rw)
-                        return ""
-
-                    clean_text = await replace_banned_words_async(
-                        text=clean_text,
-                        llm_call_func=_llm_rewrite_wrapper,
-                        target_model=target_model,
-                    )
-                    final_response_text = clean_text
-
-                if session_id in cancelled_sessions:
-                    raise asyncio.CancelledError("Session cancelled by user request.")
-
-                bot_msg = adapter.append_assistant_message(final_response_text, all_tool_calls, invocation_id, speaker_id=speaker_id)
-                if bot_msg and isinstance(bot_msg, dict) and "text" in bot_msg:
-                    final_response_text = bot_msg["text"]
-                created_bot_msg_id = bot_msg.get("id") if isinstance(bot_msg, dict) else None
-                completed_final_turn = True
-                break
-
-        if not completed_final_turn:
-            bot_msg = adapter.append_assistant_message(
-                final_response_text or f"Error: Tool loop exhausted {max_iterations} iterations without producing a final reply.",
-                all_tool_calls,
-                invocation_id,
-                speaker_id=speaker_id,
-            )
+            bot_msg = adapter.append_assistant_message(final_response_text, all_tool_calls, invocation_id, speaker_id=speaker_id)
             if bot_msg and isinstance(bot_msg, dict) and "text" in bot_msg:
                 final_response_text = bot_msg["text"]
             created_bot_msg_id = bot_msg.get("id") if isinstance(bot_msg, dict) else None
+            final_response_text = self._ensure_images_are_embedded(final_response_text)
+            if isinstance(session_id, str) and session_id.endswith("_voice"):
+                final_response_text = strip_story(final_response_text)
+            new_fenced_plan = _extract_fenced_sanctuary_plan(final_response_text)
+            if new_fenced_plan:
+                stage_plan(self._get_memory_meta(session_id), new_fenced_plan)
+                self._save_session_to_disk(session_id)
+            prog = getattr(self, "sessions_program", {}).get(session_id) or getattr(self, "program_id", None) or get_active_program()
+            self.trigger_memory_pipeline(session_id=session_id, active_model=target_model or "", program_id=prog)
+            return final_response_text, all_tool_calls, created_bot_msg_id
+
+        # --- Zero-tool direct completion pass (`tool_band == "none"`) ---
+        messages = adapter.get_openai_messages(
+            sys_instructions,
+            rag_context,
+            memory_context=memory_block,
+            turn_directive=eff_directive,
+            cloud_gear=(shift.gear != "local"),
+        )
+        ctx_raw = os.getenv("LOCAL_CONTEXT", "8192")
+        active_ctx = int(ctx_raw) if (ctx_raw and ctx_raw.isdigit()) else 8192
+        max_tokens_limit = max(1536, min(4096, active_ctx // 6))
+
+        from variables.settings import is_thinking_enabled
+
+        payload = {
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens_limit,
+            "cache_prompt": True,
+        }
+        if not is_thinking_enabled() and isinstance(DISABLED_THINKING, dict):
+            payload.update(DISABLED_THINKING)
+        if target_model:
+            payload["model"] = target_model
+        if logit_bias:
+            payload["logit_bias"] = logit_bias
+
+        bot_response_text = ""
+        used_cloud_gear = False
+        primary_skill = (
+            adapter.matched_skill_records[0]
+            if getattr(adapter, "matched_skill_records", None)
+            else None
+        )
+
+        async def _invoke_cloud_gear(
+            cloud_msgs: list[dict],
+            cloud_tier: str = "fast",
+            timeout_s: float = 60.0,
+            reasoning_effort: str | None = None,
+        ) -> dict:
+            is_sensitive = bool(getattr(adapter, "has_sensitive_context", False))
+            return await loop.run_in_executor(
+                None,
+                lambda: v1_client.chat_completion_step(
+                    cloud_msgs,
+                    tier=cloud_tier,
+                    temperature=temperature,
+                    max_tokens=0,
+                    skill_record=primary_skill,
+                    sensitive=is_sensitive,
+                    tools=None,
+                    reasoning_effort=reasoning_effort,
+                    timeout=timeout_s,
+                ),
+            )
+
+        if vault_locked and shift.gear != "local":
+            bot_response_text = f"Error: [Gear {shift.gear} · {cloud_cfg['base_url']}] {cloud_reason}"
+        elif shift.gear == "vision" and img_data_url:
+            vision_msgs = [dict(m) for m in messages]
+            for m_idx in range(len(vision_msgs) - 1, -1, -1):
+                if vision_msgs[m_idx].get("role") == "user":
+                    prev_c = vision_msgs[m_idx].get("content", "")
+                    text_part = prev_c if isinstance(prev_c, str) else ""
+                    vision_msgs[m_idx] = {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": text_part},
+                            {"type": "image_url", "image_url": {"url": img_data_url}},
+                        ],
+                    }
+                    break
+            try:
+                step_res = await _invoke_cloud_gear(vision_msgs, cloud_tier="vision", timeout_s=60.0)
+                if step_res.get("truncated_tool_call") and not step_res.get("content"):
+                    step_res = await _invoke_cloud_gear(vision_msgs, cloud_tier="vision", timeout_s=60.0, reasoning_effort="low")
+                bot_response_text = step_res.get("content", "")
+                used_cloud_gear = bool(bot_response_text)
+                if not bot_response_text:
+                    bot_response_text = (
+                        f"Error: [Gear vision · {step_res.get('model') or '?'} @ {cloud_cfg['base_url']}] "
+                        f"Empty response (finish_reason={step_res.get('finish_reason') or 'none'})."
+                    )
+            except Exception as vision_exc:
+                bot_response_text = f"Error: [Gear vision · {cloud_cfg['base_url']}] {vision_exc}"
+        elif shift.gear in ("fast", "deep", "vision"):
+            cloud_tier = "deep_recovery" if shift.reason == "kickdown" else ("fast" if shift.gear == "vision" else shift.gear)
+            timeout_s = 90.0 if shift.gear == "deep" else 60.0
+            try:
+                step_res = await _invoke_cloud_gear(messages, cloud_tier=cloud_tier, timeout_s=timeout_s)
+                if step_res.get("truncated_tool_call") and not step_res.get("content"):
+                    step_res = await _invoke_cloud_gear(messages, cloud_tier=cloud_tier, timeout_s=timeout_s, reasoning_effort="low")
+                bot_response_text = step_res.get("content", "")
+                if bot_response_text:
+                    used_cloud_gear = True
+                    print(
+                        f"[Transmission] gear={shift.gear} phase={shift.phase} tier={cloud_tier} "
+                        f"reason={shift.reason} load={shift.engine_load}",
+                        flush=True,
+                    )
+                else:
+                    bot_response_text = (
+                        f"Error: [Gear {shift.gear} ({cloud_tier}) · {step_res.get('model') or '?'} @ {cloud_cfg['base_url']}] "
+                        f"Empty response (finish_reason={step_res.get('finish_reason') or 'none'})."
+                    )
+            except Exception as upscale_exc:
+                bot_response_text = f"Error: [Gear {shift.gear} ({cloud_tier}) · {cloud_cfg['base_url']}] {upscale_exc}"
+        else:
+            local_error_msg = ""
+            local_payload = {**payload, "messages": messages}
+            try:
+                response = await self._post_llm_request(url, local_payload, headers, timeout=120.0, session_id=session_id)
+                if response.status_code == 200:
+                    bot_response_text = response.json()["choices"][0]["message"]["content"]
+                else:
+                    local_error_msg = f"Error: [Gear local · {url}] HTTP {response.status_code}: {response.text[:300]}"
+                print(f"[DEBUG STATUS] {response.status_code}", flush=True)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                local_error_msg = f"Error: [Gear local · {url}] Could not connect to local LLM ({type(e).__name__}: {e})."
+
+            if not bot_response_text:
+                bot_response_text = local_error_msg or f"Error: [Gear local · {url}] Empty local LLM response."
+
+        bot_response_text = self._sanitize_thinking_tags(bot_response_text)
+        group_meta = getattr(self, "sessions_group_meta", {}).get(session_id)
+        bot_response_text = clean_group_speaker_response(bot_response_text, speaker_id, group_meta)
+
+        clean_text = bot_response_text.strip()
+        if clean_text and not clean_text.startswith("Error:"):
+            async def _llm_rewrite_wrapper(prompt: str, model: str = None, temperature: float = 0.4, **kwargs) -> str:
+                if used_cloud_gear:
+                    try:
+                        rw_step = await _invoke_cloud_gear([{"role": "user", "content": prompt}], cloud_tier="fast")
+                        return self._sanitize_thinking_tags(rw_step.get("content", ""))
+                    except Exception:
+                        return ""
+                rw_payload = {
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": temperature,
+                    "max_tokens": kwargs.get("max_tokens", 128),
+                    "cache_prompt": False,
+                }
+                if isinstance(DISABLED_THINKING, dict):
+                    rw_payload.update(DISABLED_THINKING)
+                if model:
+                    rw_payload["model"] = model
+                if logit_bias:
+                    rw_payload["logit_bias"] = logit_bias
+                res = await self._post_llm_request(url, rw_payload, headers, timeout=15.0, session_id=session_id)
+                if res.status_code == 200:
+                    raw_rw = res.json()["choices"][0]["message"].get("content", "")
+                    return self._sanitize_thinking_tags(raw_rw)
+                return ""
+
+            clean_text = await replace_banned_words_async(
+                text=clean_text,
+                llm_call_func=_llm_rewrite_wrapper,
+                target_model=target_model,
+            )
+            final_response_text = clean_text
+        else:
+            final_response_text = clean_text
+
+        if session_id in cancelled_sessions:
+            raise asyncio.CancelledError("Session cancelled by user request.")
+
+        bot_msg = adapter.append_assistant_message(final_response_text, all_tool_calls, invocation_id, speaker_id=speaker_id)
+        if bot_msg and isinstance(bot_msg, dict) and "text" in bot_msg:
+            final_response_text = bot_msg["text"]
+        created_bot_msg_id = bot_msg.get("id") if isinstance(bot_msg, dict) else None
 
         final_response_text = self._ensure_images_are_embedded(final_response_text)
         if isinstance(session_id, str) and session_id.endswith("_voice"):

@@ -1808,6 +1808,8 @@ export async function createBskyPost({
   images = [],
   externalEmbed = null,
   reply = null,
+  sensitive = false,
+  selfLabels = [],
   resolveMentions = true,
   fetchImpl,
 }) {
@@ -1824,6 +1826,17 @@ export async function createBskyPost({
   if (langs?.length) record.langs = langs;
   if (facets.length) record.facets = facets;
   if (reply) record.reply = reply;
+  if ((sensitive && Array.isArray(images) && images.length > 0) || (Array.isArray(selfLabels) && selfLabels.length > 0)) {
+    const labelValues = Array.isArray(selfLabels) && selfLabels.length > 0
+      ? selfLabels.map((v) => ({ val: String(v).trim() })).filter((v) => v.val)
+      : [{ val: 'sexual' }];
+    if (labelValues.length > 0) {
+      record.labels = {
+        $type: 'com.atproto.label.defs#selfLabels',
+        values: labelValues,
+      };
+    }
+  }
   if (Array.isArray(images) && images.length > 0) {
     record.embed = {
       $type: 'app.bsky.embed.images',

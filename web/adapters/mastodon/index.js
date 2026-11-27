@@ -52,6 +52,7 @@ export class MastodonAdapter extends SocialAdapter {
       accessToken: this.accessToken,
       status: draft,
       spoilerText: options.spoilerText || '',
+      sensitive: Boolean(options.sensitive),
       visibility: options.visibility || 'public',
       mediaIds,
       inReplyToId: options.inReplyToId || null,

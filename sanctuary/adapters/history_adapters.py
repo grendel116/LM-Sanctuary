@@ -46,6 +46,7 @@ class OsHistoryAdapter:
         self.query_vector = query_vector
         self._cached_post_injection = None
         self.matched_skill_records = []
+        self._skills_retrieved = False
         self.has_sensitive_context = False
 
     def get_latest_image_data_url(self) -> str:
@@ -549,13 +550,15 @@ class OsHistoryAdapter:
                     format_skill_records,
                     retrieve_matched_skill_records,
                 )
-                self.matched_skill_records = retrieve_matched_skill_records(
-                    query=retrieval_query,
-                    story_active=story_active,
-                    threshold=0.38,
-                    top_k=2,
-                    query_vector=self.query_vector,
-                )
+                if not getattr(self, "_skills_retrieved", False):
+                    self.matched_skill_records = retrieve_matched_skill_records(
+                        query=retrieval_query,
+                        story_active=story_active,
+                        threshold=0.38,
+                        top_k=2,
+                        query_vector=self.query_vector,
+                    )
+                    self._skills_retrieved = True
                 skills = format_skill_records(self.matched_skill_records)
                 if skills:
                     post_blocks.append(skills)

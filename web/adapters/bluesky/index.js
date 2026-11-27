@@ -88,17 +88,20 @@ export class BlueskyAdapter extends SocialAdapter {
       images: uploadedImages,
       externalEmbed,
       reply: options.reply || null,
+      sensitive: Boolean(options.sensitive),
     });
     const uri = created?.uri || '';
     const cid = created?.cid || '';
     const rkey = uri.split('/').pop() || '';
     const resolvedFacets = Array.isArray(created?.facets) ? created.facets : [];
+    const hasSensitiveMedia = Boolean(options.sensitive && uploadedImages.length > 0);
     return {
       id: `bluesky:${uri || cid}`,
       protocol: 'bluesky',
       url: this.handle && rkey ? `https://bsky.app/profile/${this.handle}/post/${rkey}` : '',
       content_html: renderBskyRichTextToHtml(draft, resolvedFacets),
       content_text: String(draft || ''),
+      ...(hasSensitiveMedia ? { sensitive: true } : {}),
       date_published: new Date().toISOString(),
       author: {
         id: this.did,
@@ -113,6 +116,7 @@ export class BlueskyAdapter extends SocialAdapter {
         bluesky: {
           uri,
           cid,
+          ...(hasSensitiveMedia ? { labels: ['sexual'] } : {}),
           ...(resolvedFacets.length > 0 ? { facets: resolvedFacets } : {}),
           ...(options.reply ? { reply: options.reply } : {}),
         },

@@ -632,14 +632,15 @@ export function createPostMediaGrid(media = [], { onExpand, sensitiveWarning = '
   return wrapSensitiveMediaGrid(doc, gridEl, warningText);
 }
 
-export function createComposerMediaEditor(attachments = [], { onRemove } = {}) {
+export function createComposerMediaEditor(attachments = [], { onRemove, sensitive = false } = {}) {
   const doc = globalThis.document;
+  const isSensitive = Boolean(sensitive);
   const strip = doc.createElement('div');
-  strip.className = 'composer-media-strip';
+  strip.className = `composer-media-strip${isSensitive ? ' is-sensitive' : ''}`;
 
   for (const att of attachments) {
     const card = doc.createElement('div');
-    card.className = `composer-media-card${attachments.length === 1 ? ' is-single' : ''}`;
+    card.className = `composer-media-card${attachments.length === 1 ? ' is-single' : ''}${isSensitive ? ' is-sensitive' : ''}`;
 
     const previewUrl = att.previewUrl || att.url || '';
     const mime = String(att.mimeType || '');
@@ -663,7 +664,7 @@ export function createComposerMediaEditor(attachments = [], { onRemove } = {}) {
         const img = doc.createElement('img');
         img.className = 'composer-media-thumb';
         img.src = previewUrl;
-        img.alt = 'Attached media';
+        img.alt = att.altText || 'Attached media';
         card.appendChild(img);
       }
     }

@@ -160,7 +160,8 @@ class PlanPersistenceTests(unittest.TestCase):
             has_vision_attachment=False,
             cloud_available=True,
         )
-        self.assertEqual(decision.gear, "openhands")
+        self.assertEqual(decision.gear, "fast")
+        self.assertEqual(decision.tool_band, "coding")
         self.assertEqual(decision.phase, "coding")
         self.assertFalse(decision.write_disengaged)
 

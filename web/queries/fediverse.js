@@ -1712,6 +1712,7 @@ export async function publishStatus({
   accessToken,
   status,
   spoilerText = '',
+  sensitive = false,
   visibility = 'public',
   mediaIds = [],
   inReplyToId = null,
@@ -1726,6 +1727,7 @@ export async function publishStatus({
     visibility,
   };
   if (spoilerText) payload.spoiler_text = spoilerText;
+  if (sensitive) payload.sensitive = true;
   if (Array.isArray(mediaIds) && mediaIds.length > 0) payload.media_ids = mediaIds;
   if (inReplyToId) payload.in_reply_to_id = inReplyToId;
   if (language) payload.language = language;

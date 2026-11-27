@@ -66,28 +66,73 @@ class TestTransmissionAndCloudHistory(unittest.TestCase):
             d_park = casual_ctrl.shift(
                 iteration=1, estimated_tokens=400, local_budget=4096, has_vision_attachment=False, cloud_available=True
             )
-            self.assertEqual(d_park.gear, "park")
+            self.assertEqual(d_park.gear, "local")
+            self.assertEqual(d_park.tool_band, "none")
 
             d_load = casual_ctrl.shift(
                 iteration=1, estimated_tokens=3200, local_budget=4096, has_vision_attachment=False, cloud_available=True
             )
-            self.assertEqual(d_load.gear, "second")
-            self.assertTrue(any(t["function"]["name"] == "web_search" for t in (d_load.native_tools or [])))
+            self.assertEqual(d_load.gear, "deep")
+            self.assertEqual(d_load.tool_band, "none")
 
         with mock.patch("core.transmission.score_utterance_pedals", return_value={"coding_intent": 0.85, "casual": 0.1}):
             ctrl = TransmissionController(utterance="Fix the bug in app.js", routing_policy="eco_flash")
             d_code = ctrl.shift(iteration=1, estimated_tokens=1000, local_budget=4096, has_vision_attachment=False, cloud_available=True)
-            self.assertEqual(d_code.gear, "openhands")
+            self.assertEqual(d_code.gear, "fast")
+            self.assertEqual(d_code.tool_band, "coding")
             self.assertEqual(d_code.phase, "coding")
-            self.assertEqual(d_code.cloud_tier, "fast")
             self.assertFalse(d_code.write_disengaged)
 
             plan_ctrl = TransmissionController(utterance="/plan Fix the bug in app.js", is_plan_turn=True)
             d_plan = plan_ctrl.shift(iteration=1, estimated_tokens=1000, local_budget=4096, has_vision_attachment=False, cloud_available=True)
-            self.assertEqual(d_plan.gear, "openhands")
+            self.assertEqual(d_plan.gear, "deep")
+            self.assertEqual(d_plan.tool_band, "coding")
             self.assertEqual(d_plan.phase, "planning")
-            self.assertEqual(d_plan.cloud_tier, "deep_plan")
             self.assertTrue(d_plan.write_disengaged)
+
+    def test_gears_are_strictly_models_and_vault_locked_fails_closed(self) -> None:
+        valid_gears = {"local", "fast", "deep", "vision"}
+        with mock.patch("core.transmission.score_utterance_pedals", return_value={"coding_intent": 0.85, "casual": 0.1}):
+            d_proceed = TransmissionController(utterance="Proceed with the implementation plan", is_proceed_turn=True).shift(
+                estimated_tokens=500, local_budget=4096, has_vision_attachment=False, cloud_available=True
+            )
+            self.assertEqual((d_proceed.gear, d_proceed.tool_band), ("fast", "coding"))
+
+            d_active = TransmissionController(utterance="continue", has_active_plan=True).shift(
+                estimated_tokens=500, local_budget=4096, has_vision_attachment=False, cloud_available=True
+            )
+            self.assertEqual((d_active.gear, d_active.tool_band), ("fast", "coding"))
+
+            d_no_cloud = TransmissionController(utterance="Fix bug in app.py").shift(
+                estimated_tokens=500, local_budget=4096, has_vision_attachment=False, cloud_available=False, vault_locked=False
+            )
+            self.assertEqual((d_no_cloud.gear, d_no_cloud.tool_band), ("local", "coding"))
+
+            d_locked = TransmissionController(utterance="Fix bug in app.py").shift(
+                estimated_tokens=500, local_budget=4096, has_vision_attachment=False, cloud_available=False, vault_locked=True
+            )
+            self.assertEqual((d_locked.gear, d_locked.tool_band), ("deep", "coding"))
+
+            for dec in (d_proceed, d_active, d_no_cloud, d_locked):
+                self.assertIn(dec.gear, valid_gears)
+
+        with mock.patch("core.transmission.score_utterance_pedals", return_value={"casual": 0.8, "coding_intent": 0.1}):
+            d_quest = TransmissionController(utterance="Remind me tomorrow", matched_skills=("quest_system",)).shift(
+                estimated_tokens=300, local_budget=4096, has_vision_attachment=False, cloud_available=True
+            )
+            self.assertEqual((d_quest.gear, d_quest.tool_band), ("fast", "companion"))
+
+            d_widget = TransmissionController(utterance="Show me a slider widget", matched_skills=("generative_ui",)).shift(
+                estimated_tokens=300, local_budget=4096, has_vision_attachment=False, cloud_available=True
+            )
+            self.assertEqual((d_widget.gear, d_widget.tool_band), ("local", "none"))
+
+        from tools import coding_tools
+
+        runner_src = (SANCTUARY_DIR / "runners" / "runner.py").read_text(encoding="utf-8")
+        self.assertNotIn("_extract_tool_calls", runner_src)
+        self.assertNotIn("_execute_emulated_tool", runner_src)
+        self.assertFalse(hasattr(coding_tools, "WEB_BAND_SCHEMAS"))
 
     def test_cloud_gear_history_budget_preserves_large_file_reads(self) -> None:
         runner = BaseProgramRunner.__new__(BaseProgramRunner)
@@ -395,7 +440,8 @@ class TestRunnerEndToEndInProcessOpenHands(unittest.TestCase):
                 has_vision_attachment=False,
                 cloud_available=True,
             )
-            self.assertEqual(decision.gear, "openhands")
+            self.assertEqual(decision.gear, "deep")
+            self.assertEqual(decision.tool_band, "coding")
             self.assertEqual(decision.phase, "coding")
             self.assertFalse(decision.write_disengaged)
 
@@ -414,7 +460,8 @@ class TestRunnerEndToEndInProcessOpenHands(unittest.TestCase):
                 has_vision_attachment=False,
                 cloud_available=True,
             )
-            self.assertEqual(fix_decision.gear, "openhands")
+            self.assertEqual(fix_decision.gear, "deep")
+            self.assertEqual(fix_decision.tool_band, "coding")
 
         with mock.patch(
             "core.transmission.score_utterance_pedals",
@@ -431,7 +478,193 @@ class TestRunnerEndToEndInProcessOpenHands(unittest.TestCase):
                 has_vision_attachment=False,
                 cloud_available=True,
             )
-            self.assertEqual(casual_decision.gear, "park")
+            self.assertEqual(casual_decision.gear, "local")
+            self.assertEqual(casual_decision.tool_band, "none")
+
+    def test_orchestrator_baton_fast_to_deep_kickdown_and_deep_to_fast_handoff(self) -> None:
+        tmp = Path(tempfile.mkdtemp(prefix="baton_e2e_"))
+        target = tmp / "calc.py"
+        target.write_text("VAL = 1\n", encoding="utf-8")
+        mode = {"name": "kickdown"}
+        seen_models: list[str] = []
+
+        class MockBatonHandler(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                return
+
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length", "0") or "0")
+                body = json.loads(self.rfile.read(length).decode("utf-8"))
+                seen_models.append(str(body.get("model") or ""))
+                step = len(seen_models)
+                if mode["name"] == "kickdown":
+                    if step in (1, 2):
+                        msg = {
+                            "role": "assistant",
+                            "content": None,
+                            "tool_calls": [{
+                                "id": f"err_{step}",
+                                "type": "function",
+                                "function": {"name": "terminal", "arguments": json.dumps({"command": "exit 1"})},
+                            }],
+                        }
+                    else:
+                        msg = {
+                            "role": "assistant",
+                            "content": None,
+                            "tool_calls": [{
+                                "id": f"fin_{step}",
+                                "type": "function",
+                                "function": {"name": "finish", "arguments": json.dumps({"message": "Recovered on deep model."})},
+                            }],
+                        }
+                else:
+                    if step == 1:
+                        msg = {
+                            "role": "assistant",
+                            "content": None,
+                            "tool_calls": [{
+                                "id": "ed_1",
+                                "type": "function",
+                                "function": {
+                                    "name": "file_editor",
+                                    "arguments": json.dumps({
+                                        "command": "str_replace",
+                                        "path": str(target),
+                                        "old_str": "VAL = 1",
+                                        "new_str": "VAL = 2",
+                                    }),
+                                },
+                            }],
+                        }
+                    else:
+                        msg = {
+                            "role": "assistant",
+                            "content": None,
+                            "tool_calls": [{
+                                "id": "fin_handoff",
+                                "type": "function",
+                                "function": {"name": "finish", "arguments": json.dumps({"message": "Finished on fast executor."})},
+                            }],
+                        }
+
+                raw = json.dumps({
+                    "id": f"cmpl-{step}",
+                    "object": "chat.completion",
+                    "created": 1,
+                    "model": body.get("model"),
+                    "choices": [{"index": 0, "finish_reason": "tool_calls", "message": msg}],
+                }).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), MockBatonHandler)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        ps = tmp / "project_settings.json"
+        ps.write_text(
+            json.dumps({
+                "greenpt_api_key": "sk-baton",
+                "greenpt_base_url": f"http://127.0.0.1:{srv.server_address[1]}/v1",
+                "routing_policy": "auto",
+                "openhands_model": "glm-5.3",
+                "cloud_fast_model": "glm-5.3-flash",
+                "security_preset": "auto",
+            }),
+            encoding="utf-8",
+        )
+        try:
+            with (
+                mock.patch.object(v1_client, "_SETTINGS_PATH", str(ps)),
+                mock.patch.object(openhands_harness, "_PROJECT_SETTINGS_PATH", str(ps)),
+                mock.patch.object(tools_mod, "resolve_coding_workspace", return_value=(str(tmp), "", "")),
+                mock.patch.object(tools_mod, "get_project_folders", return_value=[str(tmp)]),
+            ):
+                out1, _ = openhands_harness.run_turn(
+                    "Run tests and fix",
+                    session_id="baton_kick",
+                    gear="fast",
+                    tool_band="coding",
+                    has_active_plan=True,
+                    settings_path=str(ps),
+                )
+                self.assertIn("Recovered on deep model", out1)
+                self.assertEqual(seen_models[:3], ["glm-5.3-flash", "glm-5.3-flash", "glm-5.3"])
+
+                seen_models.clear()
+                mode["name"] = "handoff"
+                out2, _ = openhands_harness.run_turn(
+                    "Update VAL to 2",
+                    session_id="baton_hand",
+                    gear="deep",
+                    tool_band="coding",
+                    has_active_plan=False,
+                    settings_path=str(ps),
+                )
+                self.assertIn("Finished on fast executor", out2)
+                self.assertEqual(seen_models[:2], ["glm-5.3", "glm-5.3-flash"])
+        finally:
+            srv.shutdown()
+            srv.server_close()
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_vault_locked_coding_fails_closed_without_calling_local_llm(self) -> None:
+        runner = BaseProgramRunner.__new__(BaseProgramRunner)
+        runner._lock = threading.RLock()
+        runner.program_id = "sebile"
+        runner.sessions_history = {"s_vlock": [{"id": "usr_1", "role": "user", "text": "Fix bug in app.py"}]}
+        runner.sessions_group_meta = {}
+        runner.sessions_memory_state = {}
+        runner._memory_pipeline_sessions = set()
+        runner.trigger_memory_pipeline = lambda **kw: None
+        runner._get_system_instructions = lambda sid, speaker_id=None: "You are Sebile."
+        runner._get_memory_block = lambda sid: ""
+        runner._get_turn_inversion_directive = lambda sid, inv: ""
+        runner._load_temperature_setting = lambda: 0.2
+        runner._sanitize_thinking_tags = lambda t: t or ""
+        runner._ensure_images_are_embedded = lambda t: t
+        runner._post_llm_request = mock.AsyncMock(side_effect=AssertionError("Local LLM must not run when vault is locked"))
+
+        class _StubAdapter:
+            matched_skill_records = []
+            _skills_retrieved = True
+            has_sensitive_context = False
+
+            def _get_chat_budget(self):
+                return 4096
+
+            def estimate_turn_tokens(self):
+                return 200
+
+            def get_latest_image_data_url(self):
+                return ""
+
+            def append_assistant_message(self, text, tool_calls, inv, intermediate=False, speaker_id=None):
+                return {"id": "prgm_1", "text": text}
+
+        with (
+            mock.patch("core.v1_client.v1_unavailable_reason", return_value="vault locked: unlock the Sanctuary Vault to use Cloud /v1"),
+            mock.patch("core.v1_client.get_v1_settings", return_value={
+                "api_key": "",
+                "key_unavailable_reason": "vault locked: unlock the Sanctuary Vault to use Cloud /v1",
+                "base_url": "https://api.greenpt.ai/v1",
+                "provider": "greenpt",
+                "routing_policy": "auto",
+                "fast_model": "",
+                "private_model": "",
+                "vision_model": "",
+            }),
+            mock.patch("core.program_config.is_story_mode", return_value=False),
+            mock.patch("core.transmission.score_utterance_pedals", return_value={"coding_intent": 0.9, "casual": 0.1}),
+        ):
+            final_text, _, _ = asyncio.run(
+                runner._execute_local_llm_loop("s_vlock", _StubAdapter(), "local-llm", "", "", "Fix bug in app.py", "inv_1")
+            )
+            self.assertTrue(final_text.startswith("Error:"))
+            self.assertIn("vault locked", final_text)
+            runner._post_llm_request.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -8,7 +8,7 @@ SANCTUARY_DIR = Path(__file__).resolve().parents[1]
 if str(SANCTUARY_DIR) not in sys.path:
     sys.path.insert(0, str(SANCTUARY_DIR))
 
-from tools.coding_tools import WEB_BAND_SCHEMAS, http_probe  # noqa: E402
+from tools.coding_tools import http_probe  # noqa: E402
 
 
 class HttpProbeTests(unittest.TestCase):
@@ -43,10 +43,11 @@ class HttpProbeTests(unittest.TestCase):
         self.assertFalse(out.startswith("Error:"))
 
     def test_registered_in_web_band_and_tools_module(self):
-        names = {s["function"]["name"] for s in WEB_BAND_SCHEMAS}
-        self.assertIn("http_probe", names)
+        from core import openhands_harness
         import tools.tools as tools_mod
 
+        openhands_harness.register_sanctuary_openhands_tools()
+        self.assertEqual(openhands_harness.HttpProbeTool.name, "http_probe")
         self.assertTrue(callable(getattr(tools_mod, "http_probe", None)))
 
 

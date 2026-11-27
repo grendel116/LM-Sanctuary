@@ -7,6 +7,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
+os.environ.setdefault("AUTO_START_LOCAL_LLM", "false")
+os.environ.setdefault("SANCTUARY_SKIP_PREWARM", "true")
+
 SANCTUARY_DIR = Path(__file__).resolve().parents[1]
 if str(SANCTUARY_DIR) not in sys.path:
     sys.path.insert(0, str(SANCTUARY_DIR))
@@ -32,7 +35,8 @@ class HarnessGearingTests(unittest.TestCase):
             has_vision_attachment=False,
             cloud_available=True,
         )
-        self.assertEqual(decision.gear, "openhands")
+        self.assertEqual(decision.gear, "deep")
+        self.assertEqual(decision.tool_band, "coding")
         self.assertEqual(decision.phase, "planning")
         self.assertTrue(decision.write_disengaged)
 
@@ -123,7 +127,7 @@ class HarnessGearingTests(unittest.TestCase):
             final_text, _, _ = asyncio.run(
                 runner._execute_local_llm_loop("s_nofallback", _StubAdapter(), "local-llm", "", "", "Compare distributed architectures", "inv_1")
             )
-            self.assertIn("[Gear second", final_text)
+            self.assertIn("[Gear deep", final_text)
             self.assertIn("HTTP 502 Bad Gateway", final_text)
             runner._post_llm_request.assert_not_called()
 

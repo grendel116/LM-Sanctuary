@@ -31,8 +31,11 @@ import {
   removeThreadItem,
   resetCompose,
   saveCurrentComposeDraft,
+  setComposeAltTextOpen,
   setComposeLinkCard,
+  setComposeSensitive,
   setComposeText,
+  updateMediaAltText,
   updateThreadItem,
 } from '../state/composeStore.js';
 
@@ -157,6 +160,7 @@ export async function publishOrganicPost({
   threadItems = [],
   replyTo = null,
   spoilerText = '',
+  sensitive = false,
   visibility = 'public',
   language = 'en',
   linkCard = null,
@@ -212,6 +216,7 @@ export async function publishOrganicPost({
       text: cleanText,
       mediaAttachments: preparedAttachments,
       visibility: visibility || 'public',
+      sensitive: Boolean(sensitive),
     });
     return { results: replied ? [replied] : [], errors: [] };
   }
@@ -223,6 +228,7 @@ export async function publishOrganicPost({
       threadItems: extraPosts,
       visibility: visibility || 'public',
       spoilerText,
+      sensitive: Boolean(sensitive),
       language,
       linkCard,
       dismissLinkCard,
@@ -277,6 +283,7 @@ export async function publishOrganicPost({
         images: uploadedImages,
         externalEmbed: uploadedImages.length === 0 ? resolvedCard : null,
         reply: replyParentRef ? { root: replyParentRef, parent: replyParentRef } : null,
+        sensitive: Boolean(sensitive),
       });
       results.push(created);
 
@@ -689,6 +696,27 @@ export function mountComposeModal(hostEl, { onPublished } = {}) {
   const mediaHostEl = doc.createElement('div');
   mediaHostEl.className = 'compose-media-host';
 
+  const altEditorHostEl = doc.createElement('div');
+  altEditorHostEl.className = 'compose-alt-editor-host';
+  altEditorHostEl.hidden = true;
+
+  const sensitiveRow = doc.createElement('label');
+  sensitiveRow.className = 'compose-sensitive-row';
+  sensitiveRow.hidden = true;
+
+  const sensitiveCheckbox = doc.createElement('input');
+  sensitiveCheckbox.type = 'checkbox';
+  sensitiveCheckbox.id = 'compose-sensitive-checkbox';
+  sensitiveCheckbox.className = 'compose-sensitive-checkbox';
+  sensitiveCheckbox.addEventListener('change', () => {
+    setComposeSensitive(sensitiveCheckbox.checked);
+  });
+
+  const sensitiveLabel = doc.createElement('span');
+  sensitiveLabel.className = 'compose-sensitive-label';
+  sensitiveLabel.textContent = 'Mark media as sensitive';
+  sensitiveRow.append(sensitiveCheckbox, sensitiveLabel);
+
   const linkPreviewHostEl = doc.createElement('div');
   linkPreviewHostEl.className = 'compose-link-preview-host';
 
@@ -757,8 +785,22 @@ export function mountComposeModal(hostEl, { onPublished } = {}) {
     onSelectEmoji: insertEmojiAtCursor,
   });
 
-  inlineTools.append(attachBtn, emojiPicker.triggerBtn, emojiPicker.panel, fileInput);
-  editorCol.append(authorLine, mainLbl, textarea, mentionMenuEl, mediaHostEl, linkPreviewHostEl, inlineTools);
+  const altBtn = doc.createElement('button');
+  altBtn.type = 'button';
+  altBtn.className = 'compose-tool-icon-btn compose-alt-btn';
+  altBtn.setAttribute('aria-label', 'Add alt text');
+  altBtn.setAttribute('aria-pressed', 'false');
+  altBtn.title = 'Add alt text to attached media';
+  altBtn.textContent = 'ALT';
+  altBtn.disabled = true;
+  altBtn.addEventListener('click', () => {
+    const cur = composeStore.get();
+    if (cur.mediaAttachments.length === 0) return;
+    setComposeAltTextOpen(!cur.altTextOpen);
+  });
+
+  inlineTools.append(attachBtn, emojiPicker.triggerBtn, emojiPicker.panel, altBtn, fileInput);
+  editorCol.append(authorLine, mainLbl, textarea, mentionMenuEl, mediaHostEl, altEditorHostEl, sensitiveRow, linkPreviewHostEl, inlineTools);
   mainUnit.append(avatarCol, editorCol);
 
   const threadExtraList = doc.createElement('div');
@@ -1082,6 +1124,7 @@ export function mountComposeModal(hostEl, { onPublished } = {}) {
         threadItems: s.threadItems,
         replyTo: s.replyTo,
         spoilerText: s.spoilerText,
+        sensitive: Boolean(s.sensitive),
         visibility: s.visibility,
         language: s.language,
         linkCard: s.mediaAttachments.length === 0 ? s.linkCard : null,
@@ -1303,16 +1346,76 @@ export function mountComposeModal(hostEl, { onPublished } = {}) {
     const ready = (s.text.trim().length > 0 || s.mediaAttachments.length > 0) && !overMastodonLimit && !s.submitting;
     publishBtn.classList.toggle('is-ready', ready);
 
-    const nextMediaSig = s.mediaAttachments.map((m) => `${m.id}:${m.previewUrl || m.url || ''}`).join('|');
+    const hasMedia = s.mediaAttachments.length > 0;
+    const nextMediaSig = `${s.sensitive ? '1' : '0'}:${s.mediaAttachments.map((m) => `${m.id}:${m.previewUrl || m.url || ''}`).join('|')}`;
     if (nextMediaSig !== lastMediaSignature) {
       lastMediaSignature = nextMediaSig;
       mediaHostEl.replaceChildren(
-        s.mediaAttachments.length > 0
+        hasMedia
           ? createComposerMediaEditor(s.mediaAttachments, {
               onRemove: removeMediaAttachment,
+              sensitive: Boolean(s.sensitive),
             })
           : doc.createTextNode('')
       );
+    }
+
+    sensitiveRow.hidden = !hasMedia;
+    sensitiveCheckbox.checked = Boolean(hasMedia && s.sensitive);
+
+    const anyAltFilled = hasMedia && s.mediaAttachments.some((m) => String(m.altText || '').trim().length > 0);
+    altBtn.disabled = !hasMedia;
+    altBtn.classList.toggle('is-active', Boolean(hasMedia && s.altTextOpen));
+    altBtn.classList.toggle('has-alt', anyAltFilled);
+    altBtn.setAttribute('aria-pressed', hasMedia && s.altTextOpen ? 'true' : 'false');
+    altBtn.textContent = anyAltFilled ? 'ALT ✓' : 'ALT';
+
+    if (!hasMedia || !s.altTextOpen) {
+      altEditorHostEl.hidden = true;
+      altEditorHostEl.replaceChildren();
+    } else {
+      altEditorHostEl.hidden = false;
+      const existingRows = new Map(
+        [...altEditorHostEl.querySelectorAll('.compose-alt-row')].map((row) => [row.dataset.attId, row])
+      );
+      const nextIds = new Set(s.mediaAttachments.map((m) => m.id));
+      for (const [id, row] of existingRows.entries()) {
+        if (!nextIds.has(id)) row.remove();
+      }
+      s.mediaAttachments.forEach((att, idx) => {
+        let row = existingRows.get(att.id);
+        if (!row) {
+          row = doc.createElement('div');
+          row.className = 'compose-alt-row';
+          row.dataset.attId = att.id;
+
+          const badge = doc.createElement('span');
+          badge.className = 'compose-alt-badge';
+
+          const altIn = doc.createElement('input');
+          altIn.type = 'text';
+          altIn.className = 'onboarding-input compose-alt-input';
+          altIn.maxLength = 1000;
+          altIn.setAttribute('aria-label', `Alt text for attachment ${idx + 1}`);
+          altIn.placeholder = s.mediaAttachments.length > 1
+            ? `Describe image ${idx + 1} for screen readers...`
+            : 'Describe this media for screen readers...';
+          altIn.addEventListener('input', () => {
+            updateMediaAltText(att.id, altIn.value);
+          });
+
+          row.append(badge, altIn);
+          altEditorHostEl.appendChild(row);
+        }
+        const badge = row.querySelector('.compose-alt-badge');
+        if (badge) {
+          badge.textContent = s.mediaAttachments.length > 1 ? `ALT #${idx + 1}` : 'ALT';
+        }
+        const altIn = row.querySelector('.compose-alt-input');
+        if (altIn && altIn.value !== (att.altText || '')) {
+          altIn.value = att.altText || '';
+        }
+      });
     }
 
     syncLinkPreviewForState(s);

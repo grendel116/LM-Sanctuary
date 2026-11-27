@@ -1,9 +1,8 @@
-"""Non-coding web/plan primitives and OpenAI tool schemas (zero regex)."""
+"""Non-coding web/plan primitives (zero regex)."""
 
 from __future__ import annotations
 
 from contextlib import nullcontext
-from typing import Any
 from urllib.parse import urlparse
 
 import requests
@@ -82,48 +81,3 @@ def update_plan_step(step: int, status: str, note: str = "") -> str:
         if not res.startswith("Error:") and hasattr(runner, "_save_session_to_disk"):
             runner._save_session_to_disk(sess_id)
     return res
-
-
-def _fn_schema(name: str, description: str, properties: dict[str, Any], required: list[str]) -> dict[str, Any]:
-    return {
-        "type": "function",
-        "function": {
-            "name": name,
-            "description": description,
-            "parameters": {
-                "type": "object",
-                "properties": properties,
-                "required": required,
-            },
-        },
-    }
-
-
-WEB_BAND_SCHEMAS: list[dict[str, Any]] = [
-    _fn_schema(
-        "read_webpage",
-        "Fetch and extract readable Markdown from a URL.",
-        {"url": {"type": "string", "description": "HTTP or HTTPS URL."}},
-        ["url"],
-    ),
-    _fn_schema(
-        "web_search",
-        "Search the web for documentation or current information.",
-        {"query": {"type": "string", "description": "Search query."}},
-        ["query"],
-    ),
-    _fn_schema(
-        "http_probe",
-        "Send one unauthenticated GET/HEAD/OPTIONS request and return the HTTP status, key headers, and body.",
-        {
-            "url": {"type": "string", "description": "HTTP or HTTPS URL to probe."},
-            "method": {"type": "string", "description": "GET (default), HEAD, or OPTIONS."},
-            "headers": {
-                "type": "object",
-                "description": "Optional extra request headers (no Authorization/Cookie).",
-                "additionalProperties": {"type": "string"},
-            },
-        },
-        ["url"],
-    ),
-]

@@ -3,11 +3,19 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
 
-from tools.coding_tools import WEB_BAND_SCHEMAS
-
-_WEB_TOOL_NAMES = frozenset({"read_webpage", "web_search", "open_in_browser", "browser_action", "http_probe"})
+_COMPANION_TOOL_SKILLS = frozenset({
+    "web_browsing",
+    "portrait_generation",
+    "quest_system",
+    "log_journaling",
+    "music_discovery",
+    "feed_tuning",
+})
+_STORY_TOOL_SKILLS = frozenset({
+    "portrait_generation",
+    "log_journaling",
+})
 
 TURN_SEMANTIC_POLES: dict[str, tuple[str, ...]] = {
     "coding_intent": (
@@ -77,21 +85,19 @@ def score_utterance_pedals(utterance: str) -> dict[str, float]:
 
 @dataclass(frozen=True)
 class ShiftDecision:
-    """Computed transmission gear, cloud tier, engaged tool bands, and directive."""
+    """Computed model gear, engaged OpenHands tool band, phase, and turn directive."""
 
-    gear: str  # "park" | "first" | "second" | "vision" | "openhands"
-    cloud_tier: str | None
-    phase: str  # "idle" | "planning" | "coding" | "cruising"
-    reason: str
+    gear: str  # "local" | "fast" | "deep" | "vision"
+    tool_band: str = "none"  # "none" | "companion" | "coding"
+    phase: str = "idle"  # "idle" | "planning" | "coding" | "cruising"
+    reason: str = ""
     write_disengaged: bool = False
-    halt_tools: bool = False
-    native_tools: list[dict[str, Any]] | None = None
     directive: str = ""
     engine_load: float = 0.0
 
 
 class TransmissionController:
-    """Monitors prompt throttle and token load to route between Local Park, Cloud Web/Chat, and In-Process OpenHands."""
+    """Monitors prompt throttle and token load to select model gear (`local|fast|deep|vision`) and OpenHands `tool_band`."""
 
     def __init__(
         self,
@@ -105,6 +111,7 @@ class TransmissionController:
         has_active_research: bool = False,
         has_active_plan: bool = False,
         routing_policy: str = "auto",
+        matched_skills: tuple[str, ...] | list[str] = (),
     ) -> None:
         self.utterance = (utterance or "").strip()
         self.is_plan_turn = bool(is_plan_turn)
@@ -115,14 +122,21 @@ class TransmissionController:
         self.has_active_research = bool(has_active_research)
         self.has_active_plan = bool(has_active_plan)
         self.routing_policy = (routing_policy or "auto").strip().lower()
+        self.matched_skills = tuple(str(s).strip() for s in (matched_skills or ()) if str(s).strip())
 
         self.coding_engaged = False
+        self.companion_engaged = any(
+            s in (_STORY_TOOL_SKILLS if self.active_story_mode else _COMPANION_TOOL_SKILLS)
+            for s in self.matched_skills
+        )
         self.web_engaged = bool(has_active_research)
         self.kickdown = bool(prior_tool_error)
         self.throttle_tier: str | None = None
         self.throttle_reason: str = ""
 
         self._assess_initial_throttle()
+        if not self.active_story_mode and "auto_programming" in self.matched_skills:
+            self.coding_engaged = True
 
     def _assess_initial_throttle(self) -> None:
         if self.active_story_mode:
@@ -180,53 +194,66 @@ class TransmissionController:
             self.throttle_tier = "fast"
             self.throttle_reason = "accuracy_or_research"
 
-    def record_tool_results(self, results: list[tuple[str, dict[str, Any], str]]) -> None:
-        for tool_name, _, _ in results:
-            if tool_name in _WEB_TOOL_NAMES:
-                self.web_engaged = True
-            elif tool_name == "delegate_coding":
-                self.coding_engaged = True
-
     def shift(
         self,
         *,
-        iteration: int,
+        iteration: int = 1,
         estimated_tokens: int,
         local_budget: int,
         has_vision_attachment: bool,
         cloud_available: bool,
+        vault_locked: bool = False,
     ) -> ShiftDecision:
         budget = max(1024, int(local_budget or 4096))
         engine_load = round(estimated_tokens / float(budget), 3)
 
         if self.active_story_mode:
             return ShiftDecision(
-                gear="park",
-                cloud_tier=None,
+                gear="local",
+                tool_band="companion" if self.companion_engaged else "none",
                 phase="idle",
                 reason="story_mode",
                 engine_load=engine_load,
             )
 
         if self.is_plan_turn or self.is_proceed_turn or self.has_active_plan or self.coding_engaged:
-            tier = (
-                "deep_plan"
-                if self.is_plan_turn
-                else ("fast" if self.routing_policy == "eco_flash" else "deep")
-            )
+            tool_band = "coding"
+        elif self.companion_engaged:
+            tool_band = "companion"
+        else:
+            tool_band = "none"
+
+        force_local = (self.routing_policy == "local_only") or (not cloud_available and not vault_locked)
+
+        if tool_band == "coding":
+            if force_local:
+                gear = "local"
+                reason = "local_only" if self.routing_policy == "local_only" else "cloud_unavailable_local"
+            elif self.is_plan_turn:
+                gear = "deep"
+                reason = "plan_architect"
+            elif self.routing_policy == "eco_flash":
+                gear = "fast"
+                reason = "eco_flash"
+            elif (self.is_proceed_turn or self.has_active_plan) and not self.prior_tool_error:
+                gear = "fast"
+                reason = "plan_executor"
+            else:
+                gear = "deep"
+                reason = "kickdown" if self.prior_tool_error else "coding_architect"
             return ShiftDecision(
-                gear="openhands",
-                cloud_tier=tier,
+                gear=gear,
+                tool_band="coding",
                 phase="planning" if self.is_plan_turn else "coding",
-                reason="openhands_in_process",
+                reason=reason,
                 write_disengaged=self.is_plan_turn,
                 engine_load=engine_load,
             )
 
-        if not cloud_available or self.routing_policy == "local_only":
+        if force_local:
             return ShiftDecision(
-                gear="park",
-                cloud_tier=None,
+                gear="local",
+                tool_band=tool_band,
                 phase="idle",
                 reason="local_only_or_cloud_unavailable",
                 engine_load=engine_load,
@@ -235,20 +262,18 @@ class TransmissionController:
         if has_vision_attachment and iteration == 1:
             return ShiftDecision(
                 gear="vision",
-                cloud_tier="vision",
+                tool_band=tool_band,
                 phase="idle",
                 reason="vision_attachment",
-                native_tools=list(WEB_BAND_SCHEMAS),
                 engine_load=engine_load,
             )
 
         if self.kickdown:
             return ShiftDecision(
-                gear="second",
-                cloud_tier="deep_recovery",
+                gear="deep",
+                tool_band=tool_band,
                 phase="cruising",
                 reason="kickdown",
-                native_tools=list(WEB_BAND_SCHEMAS),
                 directive=(
                     "# HIGH-PRECISION ESCALATION DIRECTIVE\n"
                     "The user is signaling urgency, frustration, or correcting an earlier mistake. "
@@ -260,11 +285,10 @@ class TransmissionController:
 
         if engine_load >= 0.70 or self.throttle_tier == "deep":
             return ShiftDecision(
-                gear="second",
-                cloud_tier="deep",
+                gear="deep",
+                tool_band=tool_band,
                 phase="cruising",
                 reason="high_load_or_complex" if engine_load >= 0.70 else (self.throttle_reason or "complex_topic"),
-                native_tools=list(WEB_BAND_SCHEMAS),
                 directive=(
                     "# DEPTH & ACCURACY DIRECTIVE\n"
                     "This turn involves a complex topic or requires verified factual accuracy. "
@@ -273,20 +297,19 @@ class TransmissionController:
                 engine_load=engine_load,
             )
 
-        if self.throttle_tier == "fast" or self.web_engaged:
+        if self.throttle_tier == "fast" or self.web_engaged or (tool_band == "companion" and self.routing_policy != "local_only"):
             return ShiftDecision(
-                gear="first",
-                cloud_tier="fast",
+                gear="fast",
+                tool_band=tool_band,
                 phase="cruising",
-                reason=self.throttle_reason or "web_research",
-                native_tools=list(WEB_BAND_SCHEMAS),
+                reason=self.throttle_reason or ("companion_tools" if tool_band == "companion" else "web_research"),
                 engine_load=engine_load,
             )
 
         return ShiftDecision(
-            gear="park",
-            cloud_tier=None,
+            gear="local",
+            tool_band="none",
             phase="idle",
-            reason="casual_park",
+            reason="casual_local",
             engine_load=engine_load,
         )

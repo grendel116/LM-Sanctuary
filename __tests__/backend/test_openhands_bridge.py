@@ -368,9 +368,181 @@ def verify_grep_single_file_and_readonly_shell():
     assert "COMPANION VOICE" in (agent.agent_context.system_message_suffix or "")
 
 
+def verify_local_gguf_non_native_condenser_and_402_bridge() -> None:
+    tmp = Path(tempfile.mkdtemp(prefix="oh_local_gguf_"))
+    repo = tmp / "repo"
+    repo.mkdir(parents=True)
+    target = repo / "app.py"
+    target.write_text("X = 1\n", encoding="utf-8")
+
+    local_requests: list[dict] = []
+    cloud_requests: list[dict] = []
+    mode = {"kind": "local"}
+
+    class MockServerHandler(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            return
+
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length", "0") or "0")
+            body = json.loads(self.rfile.read(length).decode("utf-8"))
+            if mode["kind"] == "local":
+                local_requests.append(body)
+                if len(local_requests) == 1:
+                    content = (
+                        "<function=file_editor>\n"
+                        "<parameter=command>str_replace</parameter>\n"
+                        f"<parameter=path>{target}</parameter>\n"
+                        "<parameter=old_str>X = 1</parameter>\n"
+                        "<parameter=new_str>X = 2</parameter>\n"
+                        "</function>"
+                    )
+                else:
+                    content = (
+                        "<function=finish>\n"
+                        "<parameter=message>Local edit done.</parameter>\n"
+                        "</function>"
+                    )
+                raw = json.dumps({
+                    "id": f"loc-{len(local_requests)}",
+                    "object": "chat.completion",
+                    "created": 1,
+                    "model": body.get("model"),
+                    "choices": [{"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": content}}],
+                }).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+            elif mode["kind"] == "companion":
+                cloud_requests.append(body)
+                msg = {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [{
+                        "id": "comp_fin",
+                        "type": "function",
+                        "function": {"name": "finish", "arguments": json.dumps({"message": "Quest noted."})},
+                    }],
+                }
+                raw = json.dumps({
+                    "id": "cmp-1",
+                    "object": "chat.completion",
+                    "created": 1,
+                    "model": body.get("model"),
+                    "choices": [{"index": 0, "finish_reason": "tool_calls", "message": msg}],
+                }).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+            else:
+                raw = json.dumps({"error": {"message": "HTTP 402 Payment Required: insufficient credits"}}).encode("utf-8")
+                self.send_response(402)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), MockServerHandler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    mock_base = f"http://127.0.0.1:{srv.server_address[1]}/v1"
+    ps = tmp / "project_settings.json"
+    ps.write_text(
+        json.dumps({
+            "greenpt_api_key": "sk-bridge-402",
+            "greenpt_base_url": mock_base,
+            "routing_policy": "auto",
+            "openhands_model": "glm-5.3",
+            "cloud_fast_model": "glm-5.3-flash",
+            "security_preset": "auto",
+        }),
+        encoding="utf-8",
+    )
+
+    captured_agents: list[object] = []
+    orig_conv = openhands_harness.Conversation
+
+    def _spy_conv(*args, **kwargs):
+        if "agent" in kwargs:
+            captured_agents.append(kwargs["agent"])
+        return orig_conv(*args, **kwargs)
+
+    def _fake_start_llm(model_key=None, _cancelled=None):
+        os.environ["LOCAL_CONTEXT"] = "16384"
+        return True
+
+    try:
+        v1_client.clear_quota_cooldown()
+        with (
+            mock.patch.object(v1_client, "_SETTINGS_PATH", str(ps)),
+            mock.patch.object(openhands_harness, "_PROJECT_SETTINGS_PATH", str(ps)),
+            mock.patch.object(openhands_harness, "_local_openai_base_url", return_value=mock_base),
+            mock.patch.object(openhands_harness, "Conversation", side_effect=_spy_conv),
+            mock.patch("adapters.vram_orchestrator.start_llm", side_effect=_fake_start_llm) as m_start,
+            mock.patch.object(tools_mod, "resolve_coding_workspace", return_value=(str(repo), "", "")),
+            mock.patch.object(tools_mod, "get_project_folders", return_value=[str(repo)]),
+        ):
+            # 1. Local GGUF coding via NonNativeToolCallingMixin + max_size=20 condenser + no TaskToolSet
+            out_local, _ = openhands_harness.run_turn(
+                "Update X to 2",
+                session_id="oh_local_sess",
+                gear="local",
+                tool_band="coding",
+                path=str(repo),
+                settings_path=str(ps),
+            )
+            assert m_start.called
+            assert "Local edit done." in out_local
+            assert target.read_text(encoding="utf-8") == "X = 2\n"
+            assert local_requests and "tools" not in local_requests[0]
+            local_agent = captured_agents[0]
+            assert local_agent.llm.native_tool_calling is False
+            assert local_agent.condenser.max_size == 20
+            assert local_agent.condenser.keep_first == 2
+            assert all(t.name != "task" for t in local_agent.tools)
+
+            # 2. Companion tool_band exposes quest tool without coding tools
+            mode["kind"] = "companion"
+            out_comp, _ = openhands_harness.run_turn(
+                "Remind me to water plants",
+                session_id="oh_comp_sess",
+                gear="fast",
+                tool_band="companion",
+                matched_skills=("quest_system",),
+                settings_path=str(ps),
+            )
+            assert "Quest noted." in out_comp
+            tool_names_sent = {t["function"]["name"] for t in (cloud_requests[0].get("tools") or [])}
+            assert "add_quest" in tool_names_sent
+            assert "file_editor" not in tool_names_sent
+            assert "terminal" not in tool_names_sent
+
+            # 3. HTTP 402 quota cooldown bridge
+            mode["kind"] = "402"
+            out_402, _ = openhands_harness.run_turn(
+                "Run cloud task",
+                session_id="oh_402_sess",
+                gear="deep",
+                tool_band="coding",
+                path=str(repo),
+                settings_path=str(ps),
+            )
+            assert out_402.startswith("Error:")
+            assert v1_client.is_quota_exhausted("sk-bridge-402") is True
+    finally:
+        v1_client.clear_quota_cooldown()
+        srv.shutdown()
+        srv.server_close()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 if __name__ == "__main__":
     verify_in_process_architecture_and_cleanup()
     verify_readonly_action_and_skills_filtering()
     verify_plan_readonly_ask_always_and_isolate_worktree()
     verify_grep_single_file_and_readonly_shell()
+    verify_local_gguf_non_native_condenser_and_402_bridge()
     print("ALL test_openhands_bridge CHECKS PASSED")

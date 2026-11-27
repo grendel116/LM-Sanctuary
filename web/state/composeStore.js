@@ -23,6 +23,8 @@ function createInitialComposeState() {
     text: '',
     spoilerText: '',
     contentWarningOpen: false,
+    sensitive: false,
+    altTextOpen: false,
     visibility: 'public',
     language: 'en',
     mediaAttachments: [],
@@ -83,6 +85,8 @@ export function openCompose(patch = {}) {
       nextPatch.text = '';
       nextPatch.spoilerText = '';
       nextPatch.contentWarningOpen = false;
+      nextPatch.sensitive = false;
+      nextPatch.altTextOpen = false;
     }
   }
   composeStore.set({
@@ -144,6 +148,8 @@ export function prefillFromUserBubble({
     text: String(text || ''),
     spoilerText: '',
     contentWarningOpen: false,
+    sensitive: false,
+    altTextOpen: false,
     visibility: 'public',
     mediaAttachments: nextMedia,
     threadItems: [],
@@ -172,6 +178,8 @@ export function prefillReply(post) {
     text: mentionPrefix,
     spoilerText: post?._meta?.mastodon?.spoilerText || post?.spoilerText || '',
     contentWarningOpen: Boolean(post?._meta?.mastodon?.spoilerText || post?.spoilerText),
+    sensitive: false,
+    altTextOpen: false,
     visibility: post?._meta?.mastodon?.visibility || post?.visibility || 'public',
     mediaAttachments: [],
     threadItems: [],
@@ -215,6 +223,14 @@ export function setContentWarningOpen(open) {
   }));
 }
 
+export function setComposeSensitive(sensitive) {
+  composeStore.set({ sensitive: Boolean(sensitive) });
+}
+
+export function setComposeAltTextOpen(open) {
+  composeStore.set({ altTextOpen: Boolean(open) });
+}
+
 export function setVisibility(visibility) {
   composeStore.set({ visibility });
 }
@@ -243,9 +259,13 @@ export function updateMediaAltText(attachmentId, altText) {
 }
 
 export function removeMediaAttachment(attachmentId) {
-  composeStore.set((prev) => ({
-    mediaAttachments: prev.mediaAttachments.filter((att) => att.id !== attachmentId),
-  }));
+  composeStore.set((prev) => {
+    const nextMedia = prev.mediaAttachments.filter((att) => att.id !== attachmentId);
+    return {
+      mediaAttachments: nextMedia,
+      ...(nextMedia.length === 0 ? { sensitive: false, altTextOpen: false } : {}),
+    };
+  });
 }
 
 export function addThreadItem(initialText = '') {
@@ -392,6 +412,7 @@ export async function saveCurrentComposeDraft() {
           id: att.id,
           dataUrl,
           mimeType: att.mimeType || rawBlob.type || 'image/png',
+          altText: String(att.altText || ''),
           source: 'draft',
         });
       }
@@ -400,6 +421,7 @@ export async function saveCurrentComposeDraft() {
         id: att.id,
         url: att.url,
         mimeType: att.mimeType || '',
+        altText: String(att.altText || ''),
         source: att.source || 'sanctuary',
       });
     }
@@ -417,6 +439,7 @@ export async function saveCurrentComposeDraft() {
       spoilerText: String(it.spoilerText || ''),
     })),
     spoilerText: String(s.spoilerText || ''),
+    sensitive: Boolean(s.sensitive),
     visibility: s.visibility || 'public',
     language: s.language || 'en',
     linkCard: s.linkCard ? { ...s.linkCard } : null,
@@ -452,7 +475,7 @@ export function loadComposeDraft(draft) {
         url: m.dataUrl,
         previewUrl: m.dataUrl,
         mimeType: m.mimeType || blob?.type || 'image/png',
-        altText: '',
+        altText: String(m.altText || ''),
         source: 'draft',
       });
     } else if (m.url) {
@@ -463,7 +486,7 @@ export function loadComposeDraft(draft) {
         url: m.url,
         previewUrl: m.url,
         mimeType: m.mimeType || '',
-        altText: '',
+        altText: String(m.altText || ''),
         source: m.source || 'sanctuary',
       });
     }
@@ -482,6 +505,8 @@ export function loadComposeDraft(draft) {
       : [],
     spoilerText: String(draft.spoilerText || ''),
     contentWarningOpen: Boolean(draft.spoilerText),
+    sensitive: Boolean(draft.sensitive),
+    altTextOpen: hydratedMedia.some((m) => Boolean(m.altText)),
     visibility: draft.visibility || 'public',
     language: draft.language || 'en',
     linkCard: draft.linkCard ? { ...draft.linkCard } : null,

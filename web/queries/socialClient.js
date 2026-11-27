@@ -918,6 +918,7 @@ async function publishBskySegments({
   resolvedCard = null,
   rootRef = null,
   parentRef = null,
+  sensitive = false,
 }) {
   const rawMedia = Array.isArray(media) ? media : [];
   const chunks = (Array.isArray(textParts) ? textParts : []).flatMap((p) => splitTextClean(p, 300));
@@ -932,6 +933,7 @@ async function publishBskySegments({
     try {
       res = await bsky.publish(chunks[i], isRootStart ? rawMedia : [], {
         reply: curParent ? { root: curRoot || curParent, parent: curParent } : null,
+        ...(isRootStart ? { sensitive: Boolean(sensitive) } : {}),
         ...(isRootStart && rawMedia.length === 0 && resolvedCard ? { externalEmbed: resolvedCard } : {}),
       });
     } catch (err) {
@@ -1011,6 +1013,7 @@ export async function publishUnified({
   threadItems = [],
   visibility = 'public',
   spoilerText = '',
+  sensitive = false,
   language = 'en',
   linkCard = null,
   dismissLinkCard = false,
@@ -1053,6 +1056,7 @@ export async function publishUnified({
     const published = await masto.publish(rawParts[i], i === 0 ? normalizedMedia : [], {
       visibility,
       spoilerText: i === 0 ? spoilerText : '',
+      sensitive: i === 0 ? Boolean(sensitive) : false,
       inReplyToId: parentMastoId,
       language,
     });
@@ -1081,7 +1085,7 @@ export async function publishUnified({
   if (!isDirectDm && bsky) {
     bridgeProtocols.push('bluesky');
     bridgeJobs.push(
-      publishBskySegments({ bsky, textParts: rawParts, media: normalizedMedia, resolvedCard })
+      publishBskySegments({ bsky, textParts: rawParts, media: normalizedMedia, resolvedCard, sensitive })
     );
   }
   if (!isDirectDm && threads) {
@@ -1216,19 +1220,19 @@ export async function publishUnified({
 /**
  * Route a reply through the target UnifiedItem's originating protocol adapter.
  */
-export async function replyUnified({ targetItem, text, mediaAttachments = [], visibility = 'public' }) {
+export async function replyUnified({ targetItem, text, mediaAttachments = [], visibility = 'public', sensitive = false }) {
   const item = toUnifiedItem(targetItem);
   const { masto, bsky, threads } = await getClientAdapters();
   if (item.protocol === 'bluesky') {
     if (!bsky) throw new Error('Connect Bluesky bridge to reply to Bluesky posts.');
-    return bsky.reply(item, text, mediaAttachments);
+    return bsky.reply(item, text, mediaAttachments, { sensitive: Boolean(sensitive) });
   }
   if (item.protocol === 'threads') {
     if (!threads) throw new Error('Connect Threads bridge to reply to Threads posts.');
     return threads.reply(item, text, mediaAttachments);
   }
   if (!masto) throw new Error('Connect Mastodon to reply.');
-  return masto.reply(item, text, mediaAttachments, { visibility });
+  return masto.reply(item, text, mediaAttachments, { visibility, sensitive: Boolean(sensitive) });
 }
 
 /**

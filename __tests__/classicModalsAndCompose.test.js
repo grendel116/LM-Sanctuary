@@ -934,7 +934,7 @@ test('composeModal simplifies media previews without alt inputs, provides emoji 
     const ctrl = mountComposeModal(host);
     openCompose({ text: 'Draft note ' });
 
-    // 1. Simplified image preview has zero alt-text inputs and corner remove works
+    // 1. Default image preview hides alt input until ALT button is clicked, and corner remove works
     const fakeImgBlob = new Blob([new Uint8Array([137, 80, 78, 71])], { type: 'image/png' });
     addMediaAttachment({
       blob: fakeImgBlob,
@@ -944,14 +944,18 @@ test('composeModal simplifies media previews without alt inputs, provides emoji 
       source: 'local-file',
     });
     assert.ok(ctrl.dialog.querySelector('.composer-media-strip .composer-media-card.is-single'));
-    assert.equal(ctrl.dialog.querySelector('.composer-alt-input'), null);
-    assert.equal(ctrl.dialog.textContent.includes('Alt description'), false);
+    assert.equal(ctrl.dialog.querySelector('.compose-alt-input'), null);
+    const sensitiveRow = ctrl.dialog.querySelector('.compose-sensitive-row');
+    const sensitiveCheckbox = ctrl.dialog.querySelector('#compose-sensitive-checkbox');
+    assert.ok(sensitiveRow && !sensitiveRow.hidden);
+    assert.equal(sensitiveCheckbox.checked, false);
     const remBtn = ctrl.dialog.querySelector('.composer-media-remove');
     assert.ok(remBtn);
     remBtn.click();
     assert.equal(composeStore.get().mediaAttachments.length, 0);
+    assert.equal(sensitiveRow.hidden, true);
 
-    // Re-attach media and add thread item for draft roundtrip
+    // Re-attach media, mark sensitive, add alt text via ALT button next to emoji, and add thread item for draft roundtrip
     addMediaAttachment({
       blob: fakeImgBlob,
       url: 'blob:local-preview-2',
@@ -959,19 +963,47 @@ test('composeModal simplifies media previews without alt inputs, provides emoji 
       mimeType: 'image/png',
       source: 'local-file',
     });
+    sensitiveCheckbox.checked = true;
+    sensitiveCheckbox.dispatchEvent(new Event('change', { bubbles: true }));
+    assert.equal(composeStore.get().sensitive, true);
+    assert.ok(ctrl.dialog.querySelector('.composer-media-card.is-sensitive'));
+
+    const altBtn = ctrl.dialog.querySelector('.compose-alt-btn');
+    assert.ok(altBtn && !altBtn.disabled);
+    const toolChildren = [...ctrl.dialog.querySelector('.compose-inline-tools').children];
+    assert.ok(toolChildren.indexOf(altBtn) > toolChildren.indexOf(ctrl.dialog.querySelector('.compose-emoji-btn')));
+    altBtn.click();
+    const altInput = ctrl.dialog.querySelector('.compose-alt-input');
+    assert.ok(altInput);
+    altInput.value = 'Thanksgiving dinner table';
+    altInput.dispatchEvent(new Event('input', { bubbles: true }));
+    assert.equal(composeStore.get().mediaAttachments[0].altText, 'Thanksgiving dinner table');
+    assert.equal(altBtn.textContent, 'ALT ✓');
     addThreadItem('Follow-up draft line');
 
-    // 2. Emoji picker sits next to Attach Media, searches keywords, and inserts emoji at caret
+    // 2. Emoji picker sits next to Attach Media, exposes all 9 Unicode categories + skin tones, and inserts emoji at caret
     const emojiBtn = ctrl.dialog.querySelector('.compose-emoji-btn');
     assert.ok(emojiBtn);
     assert.equal(emojiBtn.getAttribute('aria-haspopup'), null);
     emojiBtn.click();
     const popover = ctrl.dialog.querySelector('.emoji-picker-popover');
     assert.ok(popover && !popover.hidden);
+    assert.equal(popover.querySelectorAll('.emoji-picker-cat-btn').length, 9);
+    const toneBtns = popover.querySelectorAll('.emoji-picker-tone-btn');
+    assert.equal(toneBtns.length, 6);
+    toneBtns[3].click();
     const searchIn = popover.querySelector('.emoji-picker-search');
     assert.equal(searchIn.getAttribute('autocorrect'), 'off');
     assert.equal(searchIn.getAttribute('autocapitalize'), 'none');
     assert.equal(searchIn.getAttribute('spellcheck'), 'false');
+    searchIn.value = 'turkey';
+    searchIn.dispatchEvent(new Event('input', { bubbles: true }));
+    const turkeyCell = [...popover.querySelectorAll('.emoji-picker-cell')].find((c) => c.textContent === '🦃');
+    assert.ok(turkeyCell);
+    searchIn.value = 'canada';
+    searchIn.dispatchEvent(new Event('input', { bubbles: true }));
+    const canadaCell = [...popover.querySelectorAll('.emoji-picker-cell')].find((c) => c.textContent === '🇨🇦');
+    assert.ok(canadaCell);
     searchIn.value = 'fire';
     searchIn.dispatchEvent(new Event('input', { bubbles: true }));
     const cells = [...popover.querySelectorAll('.emoji-picker-cell')];
@@ -2972,6 +3004,94 @@ test('crosspostImageResize shrinks >950KB images via canvas/JPEG ladder, skips s
   } finally {
     globalThis.URL.createObjectURL = prevCreateObjectUrl;
     globalThis.URL.revokeObjectURL = prevRevokeObjectUrl;
+    globalThis.fetch = prevFetch;
+    resetAuthStoreForTests();
+    resetMemoryStorageForTests();
+    dom.restore();
+  }
+});
+
+test('publishOrganicPost forwards sensitive flag to Mastodon status and Bluesky selfLabels', async () => {
+  const dom = installMockDom();
+  const prevFetch = globalThis.fetch;
+  const requests = [];
+  globalThis.fetch = async (url, init) => {
+    requests.push({ url: String(url), method: init?.method || 'GET', body: String(init?.body || '') });
+    if (String(url).includes('/api/v2/media')) {
+      return new Response(JSON.stringify({ id: 'med_sens', url: 'https://mastodon.social/m_sens.png' }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+    if (String(url).includes('/api/v1/statuses')) {
+      return new Response(JSON.stringify({ id: 'st_sens', content: '<p>Sensitive</p>', sensitive: true, account: { id: 'a1', acct: 'alice@mastodon.social' } }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+    if (String(url).includes('com.atproto.repo.uploadBlob')) {
+      return new Response(JSON.stringify({ blob: { $type: 'blob', ref: { $link: 'bafysens' }, mimeType: 'image/png', size: 120 } }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+    if (String(url).includes('com.atproto.repo.createRecord')) {
+      return new Response(JSON.stringify({ uri: 'at://did:plc:123/app.bsky.feed.post/sens1', cid: 'cid_sens' }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+    return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
+  };
+
+  try {
+    resetMemoryStorageForTests();
+    resetAuthStoreForTests();
+    resetCompose();
+    await upsertSocialAccount(
+      {
+        id: 'fediverse:alice@mastodon.social',
+        platform: 'fediverse',
+        instanceUrl: 'https://mastodon.social',
+        handle: 'alice',
+        acct: 'alice@mastodon.social',
+        displayName: 'Alice',
+        userId: '1',
+      },
+      { accessToken: 'tok_fedi' }
+    );
+    await upsertSocialAccount(
+      {
+        id: 'bluesky:did:plc:123',
+        platform: 'bluesky',
+        serviceUrl: 'https://bsky.social',
+        did: 'did:plc:123',
+        handle: 'alice.bsky.social',
+        displayName: 'Alice Bsky',
+      },
+      { accessJwt: 'jwt_a', refreshJwt: 'jwt_r' }
+    );
+
+    const blob = new Blob([new Uint8Array([137, 80, 78, 71])], { type: 'image/png' });
+    await publishOrganicPost({
+      text: 'Marked sensitive',
+      sensitive: true,
+      mediaAttachments: [{ file: blob, mimeType: 'image/png', altText: 'Blurred artwork' }],
+    });
+
+    const mastoStatusReq = requests.find((r) => r.url.includes('/api/v1/statuses'));
+    assert.ok(mastoStatusReq);
+    assert.equal(JSON.parse(mastoStatusReq.body).sensitive, true);
+
+    const bskyRecReq = requests.find((r) => r.url.includes('com.atproto.repo.createRecord'));
+    assert.ok(bskyRecReq);
+    const bskyRecord = JSON.parse(bskyRecReq.body).record;
+    assert.deepEqual(bskyRecord.labels, {
+      $type: 'com.atproto.label.defs#selfLabels',
+      values: [{ val: 'sexual' }],
+    });
+    assert.equal(bskyRecord.embed.images[0].alt, 'Blurred artwork');
+  } finally {
     globalThis.fetch = prevFetch;
     resetAuthStoreForTests();
     resetMemoryStorageForTests();
