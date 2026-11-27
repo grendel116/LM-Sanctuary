@@ -153,6 +153,20 @@ def run_tests():
         readme_text = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
         assert "AGPL-3.0" in readme_text
 
+        # 6. DataBankManager.clean_html extracts page title & scopes Google Docs /pub to #contents
+        from core.skills.vectorized_databank.databank import DataBankManager
+
+        dbm = DataBankManager.__new__(DataBankManager)
+        cleaned = dbm.clean_html(
+            "<html><head><title>Moon Heart - Google Docs</title></head>"
+            "<body><div id='header'>Published using Google Docs Report abuse</div>"
+            "<div id='contents'><p>Charter for the Moon Heart</p><p>Preamble paragraph.</p></div>"
+            "</body></html>"
+        )
+        assert getattr(dbm, "_last_scraped_title", "") == "Moon Heart"
+        assert "Published using Google Docs" not in cleaned
+        assert "Charter for the Moon Heart\n\nPreamble paragraph." == cleaned
+
         print("SERVER_BROWSER_VAULT_VERIFIED")
     finally:
         social_vault.DATA_DIR = original_data_dir

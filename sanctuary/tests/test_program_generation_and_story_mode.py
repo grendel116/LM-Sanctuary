@@ -102,6 +102,42 @@ class ProgramGenerationAndStoryModeTests(unittest.TestCase):
         self.assertEqual(data["description"], generated_payload["description"])
         self.assertTrue(data["mes_example"].startswith("<START>"))
         self.assertEqual(captured["json"]["max_tokens"], 3072)
+        self.assertEqual(captured["json"]["response_format"]["type"], "json_schema")
+
+    def test_generate_character_json_repairs_unescaped_quotes_and_newlines_in_mes_example(self):
+        malformed_raw = '''{
+  "description": "Mally is a lifelong friend of {{user}} who possesses zero social inhibition.",
+  "personality": "Blunt, impulsive, affectionate.",
+  "scenario": "Mally invited {{user}} to a party.",
+  "first_mes": "*Mally grins.* Hey there!",
+  "mes_example": "<START>\\n{user}: Mally, you're dancing on the table.\\n{char}: *Giggles* It's a connection!",\\n<START>\\n{user}: Too much?\\n{char}: *Licks lips* Maybe.",
+  "system_prompt": "Write in a direct tone.",
+  "image_positive": "brown hair, braid",
+  "image_negative": "extra limbs",
+  "main_color": "#8B4513",
+  "inversion": {
+    "intimate": "Needy and vocal.",
+    "excited": "Hyperactive and giggly.",
+    "intense": "Focused on sensory experiences.",
+    "sad": "Clingy and vulnerable."
+  }
+}'''
+
+        def fake_post(url, json=None, headers=None, timeout=None):
+            return SimpleNamespace(
+                status_code=200,
+                json=lambda: {"choices": [{"message": {"content": malformed_raw}}]},
+            )
+
+        with (
+            patch("adapters.vram_orchestrator.start_llm"),
+            patch.object(programs_routes.httpx, "post", side_effect=fake_post),
+        ):
+            card = programs_routes.generate_character_json("Mally", "A blunt friend", "", "", "", "")
+
+        self.assertIn("lifelong friend", card["data"]["description"])
+        self.assertIn("<START>", card["data"]["mes_example"])
+        self.assertIn("Maybe.", card["data"]["mes_example"])
 
     def test_generate_character_json_raises_when_local_and_cloud_fail(self):
         with (

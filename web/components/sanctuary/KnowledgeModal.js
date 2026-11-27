@@ -238,6 +238,7 @@ export function openKnowledgeModal({
           return;
         }
       }
+      scrapeBtn.disabled = true;
       setLoading(true, `Scraping and indexing '${url}'...`);
       try {
         await scrapeDatabankUrl(url);
@@ -245,6 +246,7 @@ export function openKnowledgeModal({
       } catch (err) {
         showAlert('Scraping Failed', err?.message || 'Could not scrape URL.');
       } finally {
+        scrapeBtn.disabled = false;
         setLoading(false);
         void loadTab();
       }
@@ -302,8 +304,12 @@ export function openKnowledgeModal({
         const row = doc.createElement('div');
         row.className = 'file-list-entry';
         const info = doc.createElement('div');
+        info.style.minWidth = '0';
+        info.style.flex = '1';
         const titleEl = doc.createElement('div');
         titleEl.style.fontWeight = '500';
+        titleEl.style.overflowWrap = 'anywhere';
+        titleEl.style.wordBreak = 'break-word';
         titleEl.textContent = f.name || f.title || f.id;
         const meta = doc.createElement('div');
         meta.className = 'classic-card-subtext';

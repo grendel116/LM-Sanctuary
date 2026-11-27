@@ -1547,6 +1547,160 @@ def generate_character_theme(main_color, accent_color_a=None, accent_color_b=Non
     }
 
 
+def _extract_card_json_dict(raw_response: str) -> dict:
+    """Parse character card JSON from an LLM response, repairing unescaped multiline strings and inner quotes."""
+    if not raw_response:
+        return {}
+    cleaned = st.THINKING_STRIP_RE.sub("", raw_response).strip()
+    start = cleaned.find("{")
+    end = cleaned.rfind("}")
+    if start == -1 or end <= start:
+        return {}
+    candidate = cleaned[start : end + 1]
+
+    for attempt in (candidate, _repair_json_string_literals(candidate)):
+        try:
+            result = json.loads(attempt, strict=False)
+            if isinstance(result, dict):
+                return result
+        except Exception:
+            continue
+    return {}
+
+
+def _repair_json_string_literals(src: str) -> str:
+    """Repair unescaped double quotes and literal newlines inside JSON string values."""
+    out: list[str] = []
+    n = len(src)
+    i = 0
+    in_string = False
+    is_key = False
+
+    while i < n:
+        ch = src[i]
+        if not in_string:
+            if ch == "{":
+                is_key = True
+                out.append(ch)
+            elif ch == ":":
+                is_key = False
+                out.append(ch)
+            elif ch == ",":
+                is_key = True
+                out.append(ch)
+            elif ch == '"':
+                in_string = True
+                out.append(ch)
+            else:
+                out.append(ch)
+            i += 1
+            continue
+
+        if ch == "\\":
+            if i + 1 < n:
+                out.append(ch)
+                out.append(src[i + 1])
+                i += 2
+            else:
+                out.append("\\\\")
+                i += 1
+            continue
+
+        if ch == "\n":
+            out.append("\\n")
+            i += 1
+            continue
+        if ch == "\r":
+            i += 1
+            continue
+
+        if ch == '"':
+            j = i + 1
+            while j < n and src[j] in " \t\r\n":
+                j += 1
+            next_ch = src[j] if j < n else ""
+            if is_key:
+                closes = next_ch == ":"
+            elif next_ch in ("}", "]"):
+                closes = True
+            elif next_ch == ",":
+                k = j + 1
+                while k < n and src[k] in " \t\r\n":
+                    k += 1
+                after_comma = src[k] if k < n else ""
+                if after_comma == '"':
+                    m = k + 1
+                    while m < n:
+                        if src[m] == "\\":
+                            m += 2
+                            continue
+                        if src[m] in ('"', "\n"):
+                            break
+                        m += 1
+                    if m < n and src[m] == '"':
+                        p = m + 1
+                        while p < n and src[p] in " \t\r\n":
+                            p += 1
+                        closes = p < n and src[p] == ":"
+                    else:
+                        closes = False
+                else:
+                    closes = after_comma in ("}", "]")
+            else:
+                closes = False
+
+            if closes:
+                in_string = False
+                out.append('"')
+            else:
+                out.append('\\"')
+            i += 1
+            continue
+
+        out.append(ch)
+        i += 1
+
+    return "".join(out)
+
+
+_CHARA_CARD_JSON_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "description": {"type": "string"},
+        "personality": {"type": "string"},
+        "scenario": {"type": "string"},
+        "first_mes": {"type": "string"},
+        "mes_example": {"type": "string"},
+        "system_prompt": {"type": "string"},
+        "image_positive": {"type": "string"},
+        "image_negative": {"type": "string"},
+        "main_color": {"type": "string"},
+        "inversion": {
+            "type": "object",
+            "properties": {
+                "intimate": {"type": "string"},
+                "excited": {"type": "string"},
+                "intense": {"type": "string"},
+                "sad": {"type": "string"},
+            },
+            "required": ["intimate", "excited", "intense", "sad"],
+        },
+    },
+    "required": [
+        "description",
+        "personality",
+        "scenario",
+        "first_mes",
+        "mes_example",
+        "system_prompt",
+        "image_positive",
+        "image_negative",
+        "main_color",
+        "inversion",
+    ],
+}
+
+
 def generate_character_json(
         name, description, personality, scenario, first_mes, model
     ):
@@ -1563,12 +1717,12 @@ First message hint: {first_mes or 'not specified'}
 
 Output a single JSON object with EXACTLY these keys:
 {{
-  "description": "2-3 short paragraphs: backstory, motivations, relationships, quirks, and how they treat {{user}}. No physical appearance.",
+  "description": "2-3 short paragraphs: backstory, motivations, relationships, quirks, and how they treat {{{{user}}}}. No physical appearance.",
   "personality": "5-8 comma-separated traits, then one sentence on speech style (vocabulary, rhythm, verbal habits).",
-  "scenario": "2-3 sentences setting the current situation and why {{char}} and {{user}} are together.",
-  "first_mes": "In-character opening, 2-4 sentences, first person, with one *italic action* and a hook {{user}} can respond to.",
-  "mes_example": "Two short example exchanges in this exact format: <START>\\n{{user}}: ...\\n{{char}}: *action* dialogue (each {{char}} line 1-3 sentences).",
-  "system_prompt": "2-3 sentence response-style directive (tone, length, what {{char}} never does).",
+  "scenario": "2-3 sentences setting the current situation and why {{{{char}}}} and {{{{user}}}} are together.",
+  "first_mes": "In-character opening, 2-4 sentences, first person, with one *italic action* and a hook {{{{user}}}} can respond to.",
+  "mes_example": "Two short example exchanges in a single JSON string: <START>\\n{{{{user}}}}: ...\\n{{{{char}}}}: *action* dialogue\\n<START>\\n{{{{user}}}}: ...\\n{{{{char}}}}: *action* dialogue (each {{{{char}}}} line 1-3 sentences, no unescaped double quotes).",
+  "system_prompt": "2-3 sentence response-style directive (tone, length, what {{{{char}}}} never does).",
   "image_positive": "Comma-separated tags for intrinsic physical traits only: hair color/style, eye color, face/skin, body build, and simple base garments (e.g. silver hair, purple eyes, fair skin, simple tunic). Do not include weapons, armor, accessories, quality buzzwords, backgrounds, poses, or narrative items.",
   "image_negative": "Comma-separated tags for undesired physical traits and rendering artifacts (e.g. extra limbs, bad anatomy, deformed, mutated hands). Do not include story, armor, or narrative elements.",
   "main_color": "#9370db",
@@ -1581,7 +1735,8 @@ Output a single JSON object with EXACTLY these keys:
 }}
 
 Directives:
-- Output only valid JSON.
+- Output only valid JSON. Escape any double quotes inside string values with \\".
+- Use double-brace placeholders {{{{user}}}} and {{{{char}}}} exactly as written.
 - For main_color, provide an appropriate 6-character hex color code beginning with # that visually fits the character."""
 
         raw_response = None
@@ -1610,6 +1765,14 @@ Directives:
             ],
             "temperature": 0.4,
             "max_tokens": 3072,
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "character_card",
+                    "strict": True,
+                    "schema": _CHARA_CARD_JSON_SCHEMA,
+                },
+            },
         }
 
         try:
@@ -1634,7 +1797,10 @@ Directives:
         except Exception as e:
             print(f"Error calling local model for card generation: {e}")
 
-        if not raw_response:
+        # 2. JSON Parsing (with Cloud fallback if local returned nothing or invalid JSON)
+        parsed = _extract_card_json_dict(raw_response) if raw_response else {}
+
+        if not parsed or not str(parsed.get("description") or "").strip():
             try:
                 from core import v1_client
                 if not v1_client.v1_unavailable_reason():
@@ -1645,31 +1811,15 @@ Directives:
                         max_tokens=3072,
                         timeout=120.0,
                     )
-                    raw_response = (step.get("content") or "").strip() or None
+                    cloud_raw = (step.get("content") or "").strip() or None
+                    if cloud_raw:
+                        parsed = _extract_card_json_dict(cloud_raw)
             except Exception as e:
                 print(f"Cloud fallback for card generation failed: {e}")
 
-        # 2. JSON Parsing
-        parsed = {}
-        if raw_response:
-            try:
-                cleaned = raw_response.strip()
-
-                # Remove reasoning/thinking tags
-                cleaned = st.THINKING_STRIP_RE.sub("", cleaned).strip()
-
-                # Isolate raw JSON block
-                match = re.search(r"\{[\s\S]*\}", cleaned)
-                if match:
-                    cleaned = match.group(0)
-
-                result = json.loads(cleaned)
-                if isinstance(result, dict):
-                    parsed = result
-            except Exception as e:
-                print(f"Failed to parse card JSON: {e}. Raw response: {raw_response}")
-
         if not parsed or not str(parsed.get("description") or "").strip():
+            if raw_response:
+                print(f"Failed to parse card JSON. Raw response: {raw_response}")
             raise RuntimeError(
                 "Character generation failed: the language model returned no usable card (is the local model loaded or Cloud enabled?)."
             )

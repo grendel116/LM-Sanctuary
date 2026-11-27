@@ -5979,11 +5979,14 @@ select.glass-select option {
 }
 
 .loading-state-card.is-inline {
-  margin: 0;
+  margin: 0 0 12px 0;
   padding: 10px 14px;
   flex-direction: row;
   justify-content: flex-start;
   gap: 10px;
+  max-width: 100%;
+  box-sizing: border-box;
+  overflow: hidden;
   border-radius: 10px;
   border: 1px solid var(--shell-hairline);
   background: rgba(255, 255, 255, 0.04);
@@ -6000,6 +6003,10 @@ select.glass-select option {
 .loading-state-label {
   color: var(--shell-muted);
   line-height: 1.4;
+  min-width: 0;
+  flex: 1;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 progress.loading-spinner:indeterminate::-webkit-progress-bar {

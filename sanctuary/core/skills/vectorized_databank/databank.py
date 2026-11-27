@@ -69,27 +69,73 @@ class DataBankManager:
     def clean_html(self, html_content: str) -> str:
         """Parses HTML and extracts clean readable text, removing boilerplate markup."""
         soup = BeautifulSoup(html_content, 'html.parser')
-        
+
+        raw_title = soup.title.get_text(" ", strip=True) if soup.title else ""
+        if raw_title:
+            for suffix in (" - Google Docs", " – Google Docs"):
+                if raw_title.endswith(suffix):
+                    raw_title = raw_title[: -len(suffix)].strip()
+            self._last_scraped_title = raw_title
+
         for element in soup(["script", "style", "nav", "header", "footer", "form", "noscript", "aside"]):
             element.decompose()
-            
-        text = soup.get_text(separator=' ')
+
+        # Google Docs published (/pub) pages put the actual document inside #contents
+        # while #header / #footer carry "Published using Google Docs / Report abuse" boilerplate.
+        gdoc_contents = soup.find(id="contents")
+        root = gdoc_contents if gdoc_contents is not None else soup
+
+        block_texts = []
+        for blk in root.find_all(["h1", "h2", "h3", "h4", "h5", "h6", "p", "li", "blockquote", "pre"]):
+            line = " ".join(blk.get_text(separator=" ").split()).strip()
+            if line:
+                block_texts.append(line)
+
+        if block_texts:
+            return "\n\n".join(block_texts)
+
+        text = root.get_text(separator=" ")
         lines = (line.strip() for line in text.splitlines())
         chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
-        clean_text = '\n'.join(chunk for chunk in chunks if chunk)
-        
+        clean_text = "\n".join(chunk for chunk in chunks if chunk)
+
         return clean_text
 
     def scrape_url(self, url: str) -> str:
         """Fetches a webpage locally first, escalating to Cloud `/v1/tools/crawl/scrape` when JS/blocked."""
+        import re
         from utils.url_privacy import strip_tracking_params
 
+        self._last_scraped_title = ""
         clean_url = strip_tracking_params(url)
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
+
+        # Direct Google Docs share/edit links (/document/d/<ID>/edit) serve a JS editor shell;
+        # fetch their plain-text export endpoint first and grab the HTML title if available.
+        gdoc_match = re.match(r"^https?://docs\.google\.com/document/d/(?!e/)([a-zA-Z0-9_-]+)", clean_url)
+        if gdoc_match:
+            doc_id = gdoc_match.group(1)
+            try:
+                html_res = requests.get(clean_url, headers=headers, timeout=10)
+                if html_res.status_code == 200:
+                    self.clean_html(html_res.text)
+            except Exception:
+                pass
+            try:
+                txt_res = requests.get(
+                    f"https://docs.google.com/document/d/{doc_id}/export?format=txt",
+                    headers=headers,
+                    timeout=12,
+                )
+                if txt_res.status_code == 200 and len(txt_res.text.strip()) >= 40:
+                    return txt_res.text.lstrip("\ufeff").strip()
+            except Exception:
+                pass
+
         static_text = ""
         try:
-            headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-            }
             res = requests.get(clean_url, headers=headers, timeout=12)
             if res.status_code == 200:
                 static_text = self.clean_html(res.text)
@@ -267,7 +313,8 @@ class DataBankManager:
 
     def ingest_url(self, url: str) -> str:
         clean_text = self.scrape_url(url)
-        name = url.split("://")[-1].strip("/")
+        scraped_title = getattr(self, "_last_scraped_title", "").strip()
+        name = scraped_title if scraped_title else url.split("://")[-1].strip("/")
         if len(name) > 60:
             name = name[:57] + "..."
         return self.ingest_text(clean_text, name, "url")
