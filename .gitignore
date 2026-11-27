@@ -136,7 +136,7 @@ sanctuary/core/comfy_engine/**/*.webp
 sanctuary/core/comfy_engine/**/*.gif
 sanctuary/core/comfy_engine/**/*.bmp
 
-# Stage 2 Desktop Browser (Sval / Firefox ESR build artifacts & profile)
+# Stage 2 Desktop Browser (Firefox ESR build artifacts & profile)
 browser-desktop/build/
 browser-desktop/dist/
 gecko_profile/

@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: AGPL-3.0-only WITH AdditionRef-sval-app-store */
+/* SPDX-License-Identifier: AGPL-3.0-or-later */
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -388,7 +388,7 @@ test('deriveAccentTokens computes yellow-hued tokens & bubble variables; deleted
   }
 });
 
-test('SanctuaryWindowHost uses real gBrowser tabs with Sval quick-peek panels, pins shellTab, watches progress & TabOpen, and routes target=_blank / openLinkIn / stepHistory', async () => {
+test('SanctuaryWindowHost uses real gBrowser tabs with Sanctuary managed panels, pins shellTab, watches progress & TabOpen, and routes target=_blank / openLinkIn / stepHistory', async () => {
   const dom = installMockDom();
   const prevChromeUtils = globalThis.ChromeUtils;
   const prevServices = globalThis.Services;
@@ -619,7 +619,7 @@ test('SanctuaryWindowHost uses real gBrowser tabs with Sval quick-peek panels, p
     const primaryPanel = gBrowser.getPanel(primaryBrowser);
     assert.ok(primaryTab && primaryBrowser && primaryPanel);
     assert.equal(primaryTab.hidden, true);
-    assert.equal(primaryTab.getAttribute('sval-quick-peek'), 'true');
+    assert.equal(primaryTab.getAttribute('sanctuary-managed-tab'), 'true');
     assert.equal(primaryPanel.classList.contains('sanctuary-active-tab-panel'), true);
     assert.equal(primaryPanel.style.left, '70px');
     assert.equal(primaryPanel.style.top, '90px');
@@ -645,11 +645,11 @@ test('SanctuaryWindowHost uses real gBrowser tabs with Sval quick-peek panels, p
     fakeWin.gBrowser.appendStatusPanel();
     assert.equal(statusPanel.parentNode, browserRoot, 'gBrowser.appendStatusPanel does not pull #statuspanel back into #tabbrowser-tabbox');
 
-    // Inactive / modal layout clears data-sanctuary-browser-active & panel active class/sval-quick-peek
+    // Inactive / modal layout clears data-sanctuary-browser-active & panel active class/sanctuary-managed-tab
     SanctuaryWindowHost.syncLayout(fakeWin, mockParentActor, { active: true, overlayOpen: true, panes: [] });
     assert.equal(doc.documentElement.getAttribute('data-sanctuary-browser-active'), null);
     assert.equal(primaryPanel.classList.contains('sanctuary-active-tab-panel'), false);
-    assert.equal(primaryTab.getAttribute('sval-quick-peek'), null);
+    assert.equal(primaryTab.getAttribute('sanctuary-managed-tab'), null);
     assert.equal(primaryBrowser.docShellIsActive, false);
 
     SanctuaryWindowHost.syncLayout(fakeWin, mockParentActor, {
@@ -659,7 +659,7 @@ test('SanctuaryWindowHost uses real gBrowser tabs with Sval quick-peek panels, p
       panes: [{ tabId: 'tab-1', pane: 'primary', x: 70, y: 90, width: 920, height: 800 }],
     });
     assert.equal(primaryPanel.classList.contains('sanctuary-active-tab-panel'), true);
-    assert.equal(primaryTab.getAttribute('sval-quick-peek'), 'true');
+    assert.equal(primaryTab.getAttribute('sanctuary-managed-tab'), 'true');
 
     // TabSelect restores shellTab selection
     gBrowser.selectedTab = primaryTab;
@@ -903,7 +903,7 @@ test('gecko-desktop Clip to Data Bank and Ask Sanctuary use extractTabContent an
   }
 });
 
-test('executeBrowserAgentCommand drives Sval actOnTab and SettingsModal collapses Search Settings to Browser Search Engine', async () => {
+test('executeBrowserAgentCommand drives Sanctuary actOnTab and SettingsModal collapses Search Settings to Browser Search Engine', async () => {
   const dom = installMockDom();
   const prevFetch = globalThis.fetch;
   const prevHost = globalThis.sanctuaryBrowserHost;
@@ -981,7 +981,7 @@ test('executeBrowserAgentCommand drives Sval actOnTab and SettingsModal collapse
     assert.equal(activatedBrowser, true);
     assert.equal(openRes.url, 'https://www.ecosia.org/search?q=greenpt');
 
-    // 2. Sebile inspects live Sval DOM snapshot and clicks [e14]
+    // 2. Sebile inspects live Sanctuary DOM snapshot and clicks [e14]
     const snapRes = await executeBrowserAgentCommand({ action: 'snapshot', args: {} });
     assert.equal(snapRes.ok, true);
     assert.match(snapRes.snapshot, /Welcome — GreenPT Docs.*\[e14\]/);
@@ -1596,6 +1596,92 @@ test('Browser address bar shows search-as-you-type dropdown with bookmarks, pref
     resetBrowserStoreForTests();
     resetConnectionStoreForTests();
     resetMemoryStorageForTests();
+    dom.restore();
+  }
+});
+
+test('SanctuaryAgentPageParent and SanctuaryAgentPageChild build DOM snapshots, detect CAPTCHA challenges, and drive click/type/select/press/scroll/waitForText', async () => {
+  const dom = installMockDom();
+  const prevParentBase = globalThis.JSWindowActorParent;
+  const prevChildBase = globalThis.JSWindowActorChild;
+  globalThis.JSWindowActorParent = class {};
+  globalThis.JSWindowActorChild = class {};
+
+  try {
+    const { SanctuaryAgentPageParent, pageActor } = await import(
+      '../browser-desktop/chrome/browser/components/sanctuary/SanctuaryAgentPageParent.sys.mjs'
+    );
+    const { SanctuaryAgentPageChild } = await import(
+      '../browser-desktop/chrome/browser/components/sanctuary/SanctuaryAgentPageChild.sys.mjs'
+    );
+
+    const doc = dom.document;
+    const heading = doc.createElement('h1');
+    heading.textContent = 'Sanctuary Docs';
+    const link = doc.createElement('a');
+    link.setAttribute('href', 'https://example.org/docs');
+    link.textContent = 'Read Guide';
+    let linkClicked = 0;
+    link.click = () => { linkClicked += 1; };
+    const input = doc.createElement('input');
+    input.setAttribute('type', 'text');
+    input.setAttribute('placeholder', 'Search docs');
+    input.value = '';
+    doc.body.append(heading, link, input);
+
+    const child = new SanctuaryAgentPageChild();
+    Object.defineProperty(child, 'contentWindow', {
+      value: {
+        document: doc,
+        innerWidth: 1280,
+        innerHeight: 800,
+        getComputedStyle: () => ({ display: 'block', visibility: 'visible', opacity: '1' }),
+        setTimeout: (fn, ms) => setTimeout(fn, ms),
+        scrollBy: () => {},
+        Event: globalThis.Event,
+        KeyboardEvent: globalThis.Event,
+        MouseEvent: globalThis.Event,
+      },
+    });
+    Object.defineProperty(child, 'document', { value: doc });
+
+    const parent = new SanctuaryAgentPageParent();
+    parent.sendQuery = (name, data) => child.receiveMessage({ name, data });
+
+    const fakeBrowser = {
+      browsingContext: {
+        currentWindowGlobal: {
+          getActor: (name) => (name === 'SanctuaryAgentPage' ? parent : null),
+        },
+      },
+    };
+
+    const actor = pageActor(fakeBrowser);
+    const chall = await actor.challenge();
+    assert.equal(chall.frames.length, 0);
+    assert.equal(chall.markers.turnstile, false);
+
+    const snap = await actor.snapshot({});
+    assert.equal(snap.refs, 3);
+    assert.match(snap.text, /heading "Sanctuary Docs" \[e1\]/);
+    assert.match(snap.text, /link "Read Guide" \[e2\]/);
+    assert.match(snap.text, /textbox "Search docs" \[e3\]/);
+
+    await actor.click({ ref: 'e2' });
+    assert.equal(linkClicked, 1);
+
+    const typed = await actor.type({ ref: 'e3', text: 'sovereign gecko', clear: true });
+    assert.equal(typed.value, 'sovereign gecko');
+    assert.equal(input.value, 'sovereign gecko');
+
+    const textRes = await actor.text({ offset: 0, chunk: 500 });
+    assert.ok(textRes.text.includes('Sanctuary Docs'));
+
+    const waitRes = await actor.waitForText({ text: 'sanctuary docs', timeoutMs: 300 });
+    assert.equal(waitRes.found, true);
+  } finally {
+    globalThis.JSWindowActorParent = prevParentBase;
+    globalThis.JSWindowActorChild = prevChildBase;
     dom.restore();
   }
 });

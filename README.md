@@ -64,6 +64,6 @@ python sanctuary/app.py       # Web server at http://localhost:5000
 
 ## License
 
-Copyright (C) 2026 Davy & Sebile. Licensed under **AGPL-3.0-only** with the [Sval App Store Permission](./LICENSES/AdditionRef-sval-app-store.txt) (section 7). Based in part on [Sval](https://gitlab.com/sval-browser/sval), Mozilla Gecko (`MPL-2.0`), [SillyTavern](https://github.com/SillyTavern/SillyTavern), and [ComfyUI](https://github.com/comfyanonymous/ComfyUI) (`GPL-3.0`, combined via AGPL Section 13). Not affiliated with or endorsed by any of them.
+Copyright (C) 2026 Davy & Sebile. Licensed under **AGPL-3.0-or-later**. Combines Mozilla Gecko (`MPL-2.0`), [SillyTavern](https://github.com/SillyTavern/SillyTavern) (`AGPL-3.0`), and [ComfyUI](https://github.com/comfyanonymous/ComfyUI) (`GPL-3.0`, combined via AGPL Section 13). Not affiliated with or endorsed by any of them.
 
 Free software, no warranty. See [LICENSING.md](./LICENSING.md) for the full multi-license breakdown.

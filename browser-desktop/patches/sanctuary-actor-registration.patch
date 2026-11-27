@@ -2,7 +2,7 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
-LM-Sanctuary: Register browser/components/sanctuary, SanctuaryHost actor, and window mount.
+LM-Sanctuary: Register browser/components/sanctuary, SanctuaryHost & SanctuaryAgentPage actors, and window mount.
 
 diff --git a/browser/components/moz.build b/browser/components/moz.build
 --- a/browser/components/moz.build
@@ -18,8 +18,7 @@ diff --git a/browser/components/moz.build b/browser/components/moz.build
 diff --git a/browser/components/BrowserGlue.sys.mjs b/browser/components/BrowserGlue.sys.mjs
 --- a/browser/components/BrowserGlue.sys.mjs
 +++ b/browser/components/BrowserGlue.sys.mjs
-@@ -759,7 +759,34 @@ BrowserGlue.prototype = {
-   },
+@@ -759,6 +759,44 @@ BrowserGlue.prototype = {
  
    // the first browser window has finished initializing
    _onFirstWindowLoaded: function BG__onFirstWindowLoaded(aWindow) {
@@ -42,6 +41,17 @@ diff --git a/browser/components/BrowserGlue.sys.mjs b/browser/components/Browser
 +          },
 +          allFrames: false,
 +        },
++        SanctuaryAgentPage: {
++          parent: {
++            esModuleURI:
++              "moz-src:///browser/components/sanctuary/SanctuaryAgentPageParent.sys.mjs",
++          },
++          child: {
++            esModuleURI:
++              "moz-src:///browser/components/sanctuary/SanctuaryAgentPageChild.sys.mjs",
++          },
++          remoteTypes: ["web", "webIsolated", "webCOOP+COEP", "file"],
++        },
 +      });
 +    } catch (ex) {
 +      console.error("SanctuaryHost actor registration failed:", ex);
@@ -56,16 +66,16 @@ diff --git a/browser/components/BrowserGlue.sys.mjs b/browser/components/Browser
 diff --git a/browser/modules/BrowserDOMWindow.sys.mjs b/browser/modules/BrowserDOMWindow.sys.mjs
 --- a/browser/modules/BrowserDOMWindow.sys.mjs
 +++ b/browser/modules/BrowserDOMWindow.sys.mjs
-@@ -13,6 +13,8 @@ ChromeUtils.defineESModuleGetters(lazy, {
-   SvalPrivateJars: "moz-src:///browser/components/sval/SvalPrivateJars.sys.mjs",
-   SvalAgentRouting:
-     "moz-src:///browser/components/sval/SvalAgentRouting.sys.mjs",
+@@ -10,6 +10,8 @@ import { XPCOMUtils } from "resource://gre/modules/XPCOMUtils.sys.mjs";
+ let lazy = {};
+ 
+ ChromeUtils.defineESModuleGetters(lazy, {
 +  SanctuaryWindowHost:
 +    "moz-src:///browser/components/sanctuary/SanctuaryWindowHost.sys.mjs",
    NimbusFeatures: "resource://nimbus/ExperimentAPI.sys.mjs",
+   TaskbarTabsUtils: "resource:///modules/taskbartabs/TaskbarTabsUtils.sys.mjs",
    URILoadingHelper: "resource:///modules/URILoadingHelper.sys.mjs",
- });
-@@ -43,6 +45,8 @@ ChromeUtils.defineLazyGetter(lazy, "ReferrerInfo", () =>
+@@ -41,6 +43,8 @@ ChromeUtils.defineLazyGetter(lazy, "ReferrerInfo", () =>
   * @implements {nsIBrowserDOMWindow}
   */
  export class BrowserDOMWindow {
@@ -74,7 +84,7 @@ diff --git a/browser/modules/BrowserDOMWindow.sys.mjs b/browser/modules/BrowserD
    /**
     * @type {Window}
     */
-@@ -187,6 +191,19 @@ export class BrowserDOMWindow {
+@@ -183,6 +187,19 @@ export class BrowserDOMWindow {
      aTriggeringPrincipal,
      aPolicyContainer
    ) {
@@ -94,7 +104,7 @@ diff --git a/browser/modules/BrowserDOMWindow.sys.mjs b/browser/modules/BrowserD
      return this.#getContentWindowOrOpenURI(
        null,
        aOpenWindowInfo,
-@@ -213,6 +230,19 @@ export class BrowserDOMWindow {
+@@ -209,6 +226,19 @@ export class BrowserDOMWindow {
        console.error("openURI should only be called with a valid URI");
        throw Components.Exception("", Cr.NS_ERROR_FAILURE);
      }
@@ -114,10 +124,10 @@ diff --git a/browser/modules/BrowserDOMWindow.sys.mjs b/browser/modules/BrowserD
      return this.#getContentWindowOrOpenURI(
        aURI,
        aOpenWindowInfo,
-@@ -449,6 +479,18 @@ export class BrowserDOMWindow {
-     if (svalRouted !== undefined) {
-       return svalRouted;
-     }
+@@ -433,6 +463,18 @@ export class BrowserDOMWindow {
+    * @type {nsIBrowserDOMWindow["createContentWindowInFrame"]}
+    */
+   createContentWindowInFrame(aURI, aParams, aWhere, aFlags, aName) {
 +    const sanctuaryRouted = lazy.SanctuaryWindowHost.routeContentWindowInFrame(
 +      this.win,
 +      aURI,
@@ -133,7 +143,7 @@ diff --git a/browser/modules/BrowserDOMWindow.sys.mjs b/browser/modules/BrowserD
      // Passing a null-URI to only create the content window,
      // and pass true for aSkipLoad to prevent loading of
      // about:blank
-@@ -466,6 +508,18 @@ export class BrowserDOMWindow {
+@@ -450,6 +492,18 @@ export class BrowserDOMWindow {
     * @type {nsIBrowserDOMWindow["openURIInFrame"]}
     */
    openURIInFrame(aURI, aParams, aWhere, aFlags, aName) {
@@ -155,17 +165,17 @@ diff --git a/browser/modules/BrowserDOMWindow.sys.mjs b/browser/modules/BrowserD
 diff --git a/browser/modules/URILoadingHelper.sys.mjs b/browser/modules/URILoadingHelper.sys.mjs
 --- a/browser/modules/URILoadingHelper.sys.mjs
 +++ b/browser/modules/URILoadingHelper.sys.mjs
-@@ -13,6 +13,8 @@ ChromeUtils.defineESModuleGetters(lazy, {
-   SvalPrivateJars: "moz-src:///browser/components/sval/SvalPrivateJars.sys.mjs",
-   SvalAgentRouting:
-     "moz-src:///browser/components/sval/SvalAgentRouting.sys.mjs",
+@@ -9,6 +9,8 @@ import { PrivateBrowsingUtils } from "resource://gre/modules/PrivateBrowsingUtil
+ const lazy = {};
+ 
+ ChromeUtils.defineESModuleGetters(lazy, {
 +  SanctuaryWindowHost:
 +    "moz-src:///browser/components/sanctuary/SanctuaryWindowHost.sys.mjs",
+   AboutNewTab: "resource:///modules/AboutNewTab.sys.mjs",
    BrowserWindowTracker: "resource:///modules/BrowserWindowTracker.sys.mjs",
  });
- 
-@@ -474,6 +476,9 @@ export const URILoadingHelper = {
-     if (lazy.SvalAgentRouting.routeLinkOpen(window, url, where, params)) {
+@@ -466,6 +468,9 @@ export const URILoadingHelper = {
+     if (!where || !url) {
        return;
      }
 +    if (lazy.SanctuaryWindowHost.routeLinkOpen(window, url, where, params)) {

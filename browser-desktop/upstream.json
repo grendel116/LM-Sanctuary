@@ -1,6 +1,4 @@
 {
-  "sval_remote": "https://gitlab.com/sval-browser/sval.git",
-  "sval_branch": "main",
   "firefox_remote": "https://github.com/mozilla-firefox/firefox.git",
   "firefox_tag": "FIREFOX_153_7_0esr_RELEASE",
   "firefox_rev": "9aecd40e03ebf6e866e32a0a3001488ed751228d",
@@ -10,44 +8,5 @@
   "app_vendor": "LMSanctuary",
   "distribution_id": "io.github.grendel116.sanctuary",
   "keepassxc_extension_id": "keepassxc-browser@keepassxc.org",
-  "native_messaging_host_id": "org.keepassxc.keepassxc_browser",
-  "excluded_sval_patches": [
-    "about-dialog-describe-sval.patch",
-    "about-dialog-sval-card.patch",
-    "feedback-page-opens-sval-form.patch",
-    "sval-app-vendor.patch",
-    "sval-home-page.patch",
-    "package-sval-files.patch",
-    "package-sval-mcp.patch",
-    "package-sval-folder.patch",
-    "quick-peek-popup-notifications.patch",
-    "quick-peek-dialog-waits-for-focus.patch",
-    "quick-peek-click.patch",
-    "peek-downloads-button.patch",
-    "view-menu-sval-card.patch",
-    "update-url-sval-feed.patch",
-    "maintenance-service-sval-certificates.patch",
-    "update-service-name.patch",
-    "helper-names.patch",
-    "installer-publisher.patch",
-    "windows-own-progids.patch",
-    "backport-bug-1705365-nested-cocoa-loop-wakeup.patch",
-    "backport-bug-2064718-tab-permission-removal-every-process.patch",
-    "tab-permission-removal-site-key.patch",
-    "backport-bug-2080226-classifier-client-after-shutdown.patch",
-    "webrtc-prompt-always-allow.patch",
-    "agent-tab-device-prompts.patch"
-  ],
-  "pruned_sval_paths": [
-    "branding/sval",
-    "chrome/browser/components/sval/SvalQuickPeek.sys.mjs",
-    "chrome/browser/components/sval/SvalQuickPeekTab.sys.mjs",
-    "chrome/browser/components/sval/SvalPeek.sys.mjs",
-    "chrome/browser/components/sval/SvalFeedback.sys.mjs",
-    "chrome/browser/components/sval/SvalFeedbackForm.sys.mjs"
-  ],
-  "forbidden_endpoints": [
-    "download.sval.app",
-    "feedback.sval.app"
-  ]
+  "native_messaging_host_id": "org.keepassxc.keepassxc_browser"
 }

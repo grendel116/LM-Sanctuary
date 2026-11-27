@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: AGPL-3.0-only WITH AdditionRef-sval-app-store */
+/* SPDX-License-Identifier: AGPL-3.0-or-later */
 
 /**
  * Exposes window.sanctuaryBrowserHost exclusively to LM-Sanctuary's trusted shell origin.
@@ -35,7 +35,7 @@ export class SanctuaryHostChild extends JSWindowActorChild {
     return (
       href.startsWith("about:privatebrowsing") ||
       docUri.startsWith("about:privatebrowsing") ||
-      href === "chrome://browser/content/sval/home/private.html"
+      href === "chrome://browser/content/sanctuary/private/private.html"
     );
   }
 

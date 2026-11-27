@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: AGPL-3.0-only WITH AdditionRef-sval-app-store */
+/* SPDX-License-Identifier: AGPL-3.0-or-later */
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -41,12 +41,12 @@ test('urlPrivacy resolves prefixes, strips trackers, and enforces no-default sea
 
   // Prefix shortcuts work without configuring a general search engine
   assert.deepEqual(
-    resolveAddressBarInput('github:sval-browser/sval', { searchConfig: { engine: '' } }),
+    resolveAddressBarInput('github:grendel116/LM-Sanctuary', { searchConfig: { engine: '' } }),
     {
       kind: 'prefix_search',
       prefix: 'github',
-      query: 'sval-browser/sval',
-      url: 'https://github.com/search?q=sval-browser%2Fsval',
+      query: 'grendel116/LM-Sanctuary',
+      url: 'https://github.com/search?q=grendel116%2FLM-Sanctuary',
     }
   );
   assert.equal(
@@ -58,8 +58,8 @@ test('urlPrivacy resolves prefixes, strips trackers, and enforces no-default sea
     'http://localhost:5000/api/health'
   );
   assert.equal(
-    resolveAddressBarInput('sval.app/features/?utm_medium=social', { searchConfig: { engine: '' } }).url,
-    'https://sval.app/features/'
+    resolveAddressBarInput('example.org/features/?utm_medium=social', { searchConfig: { engine: '' } }).url,
+    'https://example.org/features/'
   );
 
   // Plain search queries require explicit search engine configuration
@@ -76,8 +76,8 @@ test('urlPrivacy resolves prefixes, strips trackers, and enforces no-default sea
     'https://www.ecosia.org/search?q=renewable%20web'
   );
   assert.equal(
-    resolveAddressBarInput('@gh sval', { searchConfig: { engine: '' } }).url,
-    'https://github.com/search?q=sval'
+    resolveAddressBarInput('@gh sanctuary', { searchConfig: { engine: '' } }).url,
+    'https://github.com/search?q=sanctuary'
   );
   assert.deepEqual(
     resolveAddressBarInput('dialectical materialism', {

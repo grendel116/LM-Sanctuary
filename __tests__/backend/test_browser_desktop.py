@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 import shutil
 import subprocess
@@ -22,7 +21,7 @@ import desktop as sanctuary_desktop  # noqa: E402
 
 
 def run_tests() -> None:
-    # 1. Verify all tracked templates & zero forbidden endpoints
+    # 1. Verify all tracked templates
     bootstrap_gecko.verify_desktop_templates(REPO_ROOT)
 
     tmp_preflight = Path(tempfile.mkdtemp(prefix="sanctuary_mb_preflight_"))
@@ -44,122 +43,71 @@ def run_tests() -> None:
     finally:
         shutil.rmtree(tmp_preflight, ignore_errors=True)
 
-    # 2. Verify synthetic Sval + Firefox ESR tree staging & auditing
+    # 2. Verify synthetic Firefox ESR tree staging & auditing
     tmp_root = Path(tempfile.mkdtemp(prefix="sanctuary_stage2_test_"))
     try:
-        sval_dir = tmp_root / "sval"
         ff_dir = tmp_root / "firefox"
-        (sval_dir / "patches").mkdir(parents=True)
-        (sval_dir / "branding" / "sval").mkdir(parents=True)
-        (sval_dir / "chrome" / "browser" / "components" / "sval").mkdir(parents=True)
         (ff_dir / "browser").mkdir(parents=True)
 
-        (sval_dir / "patches" / "series").write_text(
-            "\n".join([
-                "# Comment",
-                "sval-component-dir.patch",
-                "sval-app-vendor.patch",
-                "feedback-page-opens-sval-form.patch",
-                "about-dialog-describe-sval.patch",
-            ]) + "\n",
-            encoding="utf-8",
-        )
-        (sval_dir / "branding" / "sval" / "moz.build").write_text("# sval\n", encoding="utf-8")
-        sval_comp = sval_dir / "chrome" / "browser" / "components" / "sval"
-        (sval_comp / "moz.build").write_text(
-            'MOZ_SRC_FILES += [\n  "SvalBlocking.sys.mjs",\n  "SvalQuickPeek.sys.mjs",\n  "SvalPasswordManager.sys.mjs",\n]\n',
-            encoding="utf-8",
-        )
-        (sval_comp / "jar.mn").write_text(
-            'browser.jar:\n  content/browser/sval/home/mark.svg (/browser/branding/sval/content/mark.svg)\n',
-            encoding="utf-8",
-        )
-        (sval_comp / "SvalHome.worker.mjs").write_text(
-            'import initWasm, {\n  greetUser,\n} from "chrome://browser/content/sval/sval_core.mjs";\n',
-            encoding="utf-8",
-        )
-        (sval_comp / "SvalBlocking.sys.mjs").write_text("export const SvalBlocking = {};\n", encoding="utf-8")
-        (sval_comp / "SvalPasswordManager.sys.mjs").write_text(
-            'export const EXT = "keepassxc-browser@keepassxc.org";\n',
-            encoding="utf-8",
-        )
-        (sval_comp / "SvalQuickPeek.sys.mjs").write_text("export const SvalQuickPeek = {};\n", encoding="utf-8")
-        (sval_comp / "SvalQuickPeekTab.sys.mjs").write_text("export const SvalQuickPeekTab = {};\n", encoding="utf-8")
-        (sval_comp / "SvalFeedbackForm.sys.mjs").write_text(
-            'export const REPORT = "https://feedback.sval.app/report";\nexport const DL = "https://download.sval.app/";\n',
-            encoding="utf-8",
-        )
+        result = bootstrap_gecko.stage_overlay_tree(ff_dir, mode="artifact", repo_root=REPO_ROOT)
+        assert result["series_count"] == 2, result
 
-        # Pre-existing stale branding/sval should be wiped on stage
-        (ff_dir / "browser" / "branding" / "sval").mkdir(parents=True)
-        (ff_dir / "browser" / "branding" / "sval" / "old.txt").write_text("stale", encoding="utf-8")
-
-        result = bootstrap_gecko.stage_overlay_tree(sval_dir, ff_dir, mode="artifact", repo_root=REPO_ROOT)
-        assert result["series_count"] == 3, result
-
-        series_text = (ff_dir / ".sanctuary-sval-series").read_text(encoding="utf-8")
-        assert "sval-component-dir.patch" in series_text
+        series_text = (ff_dir / ".sanctuary-patch-series").read_text(encoding="utf-8")
+        assert "sanctuary:sanctuary-actor-registration.patch" in series_text
         assert "sanctuary:sanctuary-app-vendor.patch" in series_text
-        assert "feedback-page-opens-sval-form.patch" not in series_text
-        assert "sval-app-vendor.patch\n" not in series_text
 
-        staged_moz_build = (ff_dir / "browser" / "components" / "sval" / "moz.build").read_text(encoding="utf-8")
-        assert "SvalQuickPeek.sys.mjs" not in staged_moz_build
-        assert "SvalBlocking.sys.mjs" in staged_moz_build
+        staged_moz_build = (ff_dir / "browser" / "components" / "sanctuary" / "moz.build").read_text(encoding="utf-8")
+        assert 'JAR_MANIFESTS += ["jar.mn"]' in staged_moz_build
+        assert '"SanctuaryAgentPageParent.sys.mjs"' in staged_moz_build
+        assert '"SanctuaryAgentPageChild.sys.mjs"' in staged_moz_build
         assert (ff_dir / "browser" / "branding" / "lm-sanctuary" / "default128.png").is_file()
         assert (ff_dir / "browser" / "branding" / "lm-sanctuary" / "firefox.ico").is_file()
         assert (ff_dir / "browser" / "branding" / "lm-sanctuary" / "pref" / "firefox-branding.js").is_file()
         assert (ff_dir / "browser" / "branding" / "lm-sanctuary" / "firefox.VisualElementsManifest.xml").is_file()
-        staged_jar = (ff_dir / "browser" / "components" / "sval" / "jar.mn").read_text(encoding="utf-8")
-        assert "/browser/branding/sval/" not in staged_jar
-        assert "/browser/branding/lm-sanctuary/" in staged_jar
-        staged_core = (ff_dir / "browser" / "components" / "sval" / "sval_core.mjs").read_text(encoding="utf-8")
-        assert "export function greetUser()" in staged_core
-        assert (ff_dir / "browser" / "components" / "sval" / "sval_core_bg.wasm").read_bytes()[:4] == b"\x00asm"
-        assert (ff_dir / "browser" / "components" / "sanctuary" / "SanctuaryHostChild.sys.mjs").is_file()
-        priv_home = (ff_dir / "browser" / "components" / "sval" / "home" / "private.html").read_text(encoding="utf-8")
-        assert "Sanctuary Browser Private Browsing" in priv_home
-        assert "starfield" not in priv_home
-        assert (ff_dir / "browser" / "components" / "sval" / "home" / "private.css").is_file()
-        assert (ff_dir / "browser" / "components" / "sval" / "home" / "private.js").is_file()
-        assert (ff_dir / "browser" / "components" / "sval" / "home" / "favicon-private.svg").is_file()
-        assert "content/browser/sval/home/private.css" in staged_jar
-        assert "content/browser/sval/home/private.js" in staged_jar
+        staged_jar = (ff_dir / "browser" / "components" / "sanctuary" / "jar.mn").read_text(encoding="utf-8")
+        assert "chrome://browser/content/sanctuary/private/private.html" in staged_jar
         assert "chrome://browser/skin/privatebrowsing/favicon.svg" in staged_jar
+        assert (ff_dir / "browser" / "components" / "sanctuary" / "SanctuaryHostChild.sys.mjs").is_file()
+        assert (ff_dir / "browser" / "components" / "sanctuary" / "SanctuaryAgentPageParent.sys.mjs").is_file()
+        assert (ff_dir / "browser" / "components" / "sanctuary" / "SanctuaryAgentPageChild.sys.mjs").is_file()
+        priv_home = (ff_dir / "browser" / "components" / "sanctuary" / "private" / "private.html").read_text(encoding="utf-8")
+        assert "Sanctuary Browser Private Browsing" in priv_home
+        assert "chrome://browser/content/sanctuary/private/private.css" in priv_home
+        assert (ff_dir / "browser" / "components" / "sanctuary" / "private" / "private.css").is_file()
+        assert (ff_dir / "browser" / "components" / "sanctuary" / "private" / "private.js").is_file()
+        assert (ff_dir / "browser" / "components" / "sanctuary" / "private" / "favicon-private.svg").is_file()
         staged_mozconfig = (ff_dir / "mozconfig").read_text(encoding="utf-8")
         assert "--enable-artifact-builds" in staged_mozconfig
         assert "--with-app-name=firefox" in staged_mozconfig
 
-        # Verify locale brand scrubber replaces user-facing Sval strings while preserving Ellm Tree copyright
-        scrubbed_props = bootstrap_gecko._scrub_brand_locale_text(
-            "chrome/en-US/locale/browser/appstrings.properties",
-            "connectionFailure=Sval can’t establish a connection to %S.\n",
-        )
-        assert "Sanctuary Browser can’t establish" in scrubbed_props
-        assert "Sval" not in scrubbed_props
-        scrubbed_about = bootstrap_gecko._scrub_brand_locale_text(
-            "localization/en-US/sval/about.ftl",
-            "about-sval-description = Sval blocks trackers.\nabout-sval-copyright = © 2026 Ellm Tree, Inc.\n",
-        )
-        assert "Sanctuary Browser blocks trackers." in scrubbed_about
-        assert "© 2026 Ellm Tree, Inc." in scrubbed_about
-
-        # Verify upstream.txt Firefox ESR security pin sync
-        fake_sval_pin = tmp_root / "sval_pin_check"
-        fake_sval_pin.mkdir(parents=True)
-        (fake_sval_pin / "upstream.txt").write_text(
-            "# renovate: datasource=github-tags depName=mozilla-firefox/firefox tag=FIREFOX_153_8_0esr_RELEASE\n"
-            "UPSTREAM_REF=1111111111111111111111111111111111111111\n",
-            encoding="utf-8",
-        )
-        fake_cfg = {"firefox_rev": "0" * 40, "firefox_tag": "FIREFOX_153_7_0esr_RELEASE"}
-        synced_pin = bootstrap_gecko.sync_upstream_firefox_pin(
-            fake_sval_pin,
-            fake_cfg,
-            upstream_json_path=tmp_root / "nonexistent_upstream.json",
-        )
-        assert synced_pin["firefox_rev"] == "1" * 40
-        assert synced_pin["firefox_tag"] == "FIREFOX_153_8_0esr_RELEASE"
+        # Verify local patches apply cleanly against stock Firefox ESR 153 checkout when present
+        local_ff_repo = DESKTOP_DIR / "build" / "firefox"
+        cfg = bootstrap_gecko.load_upstream_config()
+        if (local_ff_repo / ".git").exists():
+            patch_check_dir = tmp_root / "patch_apply_check"
+            patch_check_dir.mkdir(parents=True)
+            subprocess.run(["git", "init", "-q"], cwd=str(patch_check_dir), check=True)
+            for rel_target in (
+                "browser/moz.configure",
+                "browser/components/moz.build",
+                "browser/components/BrowserGlue.sys.mjs",
+                "browser/modules/BrowserDOMWindow.sys.mjs",
+                "browser/modules/URILoadingHelper.sys.mjs",
+            ):
+                raw_file = subprocess.run(
+                    ["git", "show", f"{cfg['firefox_rev']}:{rel_target}"],
+                    cwd=str(local_ff_repo),
+                    capture_output=True,
+                    check=True,
+                ).stdout
+                dest_target = patch_check_dir / rel_target
+                dest_target.parent.mkdir(parents=True, exist_ok=True)
+                dest_target.write_bytes(raw_file)
+            for patch_file in sorted((DESKTOP_DIR / "patches").glob("*.patch")):
+                bootstrap_gecko._apply_patch_file(patch_file, patch_check_dir)
+            patched_bdw = (patch_check_dir / "browser" / "modules" / "BrowserDOMWindow.sys.mjs").read_text(encoding="utf-8")
+            assert "SanctuaryWindowHost" in patched_bdw
+            assert "Sval" not in patched_bdw
 
         # Check find_gecko_binary prioritizes sanctuary-browser.exe and falls back cleanly
         fake_repo = tmp_root / "repo_bin_check"

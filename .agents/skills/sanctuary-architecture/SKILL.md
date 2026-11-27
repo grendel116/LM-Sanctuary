@@ -15,6 +15,6 @@ description: Core architectural map, Root Code Focus rules, OpenAI-compatible /v
   - Engineering skills (`.agents/skills/*/SKILL.md`) & custom subagents (`.agents/agents/*.md`): Auto-loaded by OpenHands `AgentContext(load_project_skills=True)`.
 - **Frontend (`web/`) & Tests (`__tests__/`)**:
   - Vanilla ES modules (`web/app/browser.js`, `web/state/browserStore.js`, `web/app/feed.js`, `web/queries/feedHarvester.js`, `web/components/sanctuary/MessageRow.js`, `ToolApprovalCard.js`, `SettingsModal.js`, `web/app/programThread.js`, `web/assets/css/shell.css`, `sanctuary.css`).
-  - Embedded Gecko/Sval desktop browser host: `browser-desktop/`.
+  - Embedded Gecko desktop browser host: `browser-desktop/`.
   - Backend Flask routes: `sanctuary/routes/` (`system.py`, `chat.py`, `browser_vault.py`, `programs.py`, `social_bridge.py`).
   - Verify backend changes with `.venv/Scripts/python.exe __tests__/backend/test_*.py` (or `.venv/bin/python` on Linux) and frontend changes with `node --test __tests__/*.test.js`.

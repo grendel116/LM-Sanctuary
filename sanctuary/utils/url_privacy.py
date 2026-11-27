@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: AGPL-3.0-only WITH AdditionRef-sval-app-store
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Privacy URL normalization helpers (tracking-parameter stripping) for Sanctuary backend tools and routes."""
 
 from __future__ import annotations

@@ -1,6 +1,10 @@
-# SPDX-License-Identifier: AGPL-3.0-only WITH AdditionRef-sval-app-store
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+JAR_MANIFESTS += ["jar.mn"]
 
 MOZ_SRC_FILES += [
+    "SanctuaryAgentPageChild.sys.mjs",
+    "SanctuaryAgentPageParent.sys.mjs",
     "SanctuaryHostChild.sys.mjs",
     "SanctuaryHostParent.sys.mjs",
     "SanctuaryWindowHost.sys.mjs",

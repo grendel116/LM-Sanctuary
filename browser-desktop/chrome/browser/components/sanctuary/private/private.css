@@ -1,11 +1,4 @@
-/* SPDX-License-Identifier: AGPL-3.0-only WITH AdditionRef-sval-app-store */
-
-@font-face {
-  font-family: "SanctuaryOutfit";
-  src: url("chrome://browser/content/sval/home/Outfit.ttf") format("truetype");
-  font-weight: 100 900;
-  font-display: swap;
-}
+/* SPDX-License-Identifier: AGPL-3.0-or-later */
 
 :root {
   color-scheme: dark;
@@ -33,7 +26,7 @@ body {
   padding: 0;
   background: var(--bg);
   color: var(--text);
-  font-family: "SanctuaryOutfit", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
 
 body {

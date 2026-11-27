@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: AGPL-3.0-only WITH AdditionRef-sval-app-store
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """API routes for the in-app KDBX 4.0 credential vault & KeePassXC-protocol service."""
 
 from __future__ import annotations

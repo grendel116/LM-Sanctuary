@@ -1,5 +1,5 @@
-# SPDX-License-Identifier: AGPL-3.0-only WITH AdditionRef-sval-app-store
-"""Bootstrap, stage, audit, and build LM-Sanctuary's desktop Sval / Firefox ESR Gecko host."""
+# SPDX-License-Identifier: AGPL-3.0-or-later
+"""Bootstrap, stage, audit, and build LM-Sanctuary's desktop Firefox ESR Gecko host."""
 
 from __future__ import annotations
 
@@ -22,69 +22,21 @@ REPO_ROOT = DESKTOP_DIR.parent
 UPSTREAM_JSON = DESKTOP_DIR / "upstream.json"
 BUILD_DIR = DESKTOP_DIR / "build"
 
-_TEXT_SUFFIXES = frozenset({
-    ".js", ".mjs", ".sys.mjs", ".ftl", ".properties", ".html", ".xhtml",
-    ".css", ".json", ".ini", ".in", ".j2", ".sh", ".desktop", ".build", ".mn", ".txt", ".md",
-})
 _ICON_SIZES = (16, 32, 48, 64, 128)
 
 
 def load_upstream_config(path: Path = UPSTREAM_JSON) -> dict[str, Any]:
     cfg = json.loads(Path(path).read_text(encoding="utf-8"))
     for key in (
-        "sval_remote",
         "firefox_remote",
         "firefox_rev",
         "app_name",
         "app_basename",
         "app_displayname",
-        "excluded_sval_patches",
-        "pruned_sval_paths",
-        "forbidden_endpoints",
     ):
         if key not in cfg:
             raise ValueError(f"upstream.json missing required key: {key}")
     return cfg
-
-
-def _is_text_file(path: Path) -> bool:
-    name = path.name.lower()
-    if name.endswith(".sys.mjs"):
-        return True
-    return path.suffix.lower() in _TEXT_SUFFIXES
-
-
-def _scrub_forbidden_endpoints(root_dir: Path, forbidden: Iterable[str]) -> list[Path]:
-    touched: list[Path] = []
-    endpoints = [str(e) for e in forbidden if e]
-    if not endpoints or not root_dir.exists():
-        return touched
-    for item in root_dir.rglob("*"):
-        if not item.is_file() or not _is_text_file(item):
-            continue
-        text = item.read_text(encoding="utf-8", errors="ignore")
-        updated = text
-        for ep in endpoints:
-            if ep in updated:
-                updated = updated.replace(f"https://{ep}/report", "")
-                updated = updated.replace(f"https://{ep}", "")
-                updated = updated.replace(f"http://{ep}", "")
-                updated = updated.replace(ep, "")
-        if updated != text:
-            item.write_text(updated, encoding="utf-8")
-            touched.append(item)
-    return touched
-
-
-def _prune_sval_moz_build(moz_build_path: Path, pruned_basenames: set[str]) -> None:
-    if not moz_build_path.is_file():
-        return
-    kept = []
-    for line in moz_build_path.read_text(encoding="utf-8").splitlines(keepends=True):
-        if any(name in line for name in pruned_basenames):
-            continue
-        kept.append(line)
-    moz_build_path.write_text("".join(kept), encoding="utf-8")
 
 
 def _write_resized_or_copy(src: Path, dest: Path, size: tuple[int, int] | None = None, pil_image: Any = None) -> None:
@@ -554,7 +506,7 @@ def build_pe_version_info_bytes(
     product_name: str = "Sanctuary Browser",
     internal_name: str = "Sanctuary Browser",
     company_name: str = "",
-    legal_copyright: str = "© 2026 Ellm Tree, Inc. & Mozilla Contributors (AGPL-3.0 / MPL-2.0)",
+    legal_copyright: str = "© 2026 Davy & Sebile and Mozilla Contributors (AGPL-3.0-or-later / MPL-2.0)",
     existing_raw: bytes | None = None,
 ) -> bytes:
     """Build a Win32 VS_VERSIONINFO (RT_VERSION) binary payload with Sanctuary Browser metadata."""
@@ -694,274 +646,31 @@ def patch_windows_pe_icons(target_dir: Path, ico_path: Path | None = None) -> li
     return patched
 
 
-def _scrub_brand_locale_text(rel_name: str, text: str) -> str:
-    """Replace user-facing Sval brand strings in .ftl / .properties while preserving copyright & SPDX lines."""
-    out_lines: list[str] = []
-    is_sval_about = rel_name.replace("\\", "/").endswith("sval/about.ftl")
-    for line in text.splitlines(keepends=True):
-        stripped = line.lstrip()
-        if not stripped or stripped.startswith("#") or "SPDX-License-Identifier" in line:
-            out_lines.append(line)
-            continue
-        if "Ellm Tree" in line or stripped.startswith("about-sval-copyright"):
-            out_lines.append(line)
-            continue
-        if "=" in line:
-            lhs, rhs = line.split("=", 1)
-            rhs = rhs.replace("Sval Home", "Sanctuary Home").replace("Sval View", "Sanctuary View")
-            rhs = re.sub(r"\bSval\b", "Sanctuary Browser", rhs)
-            if is_sval_about:
-                rhs = re.sub(r"\bLM-Sanctuary\b", "Sanctuary Browser", rhs)
-            out_lines.append(f"{lhs}={rhs}")
-        else:
-            updated = line.replace("Sval Home", "Sanctuary Home").replace("Sval View", "Sanctuary View")
-            updated = re.sub(r"\bSval\b", "Sanctuary Browser", updated)
-            out_lines.append(updated)
-    return "".join(out_lines)
-
-
-def scrub_user_facing_brand_locales(ff_path: Path) -> int:
-    """Scrub user-facing Sval strings from Firefox/Toolkit locale files after upstream patches apply."""
-    touched = 0
-    targets: list[Path] = []
-    sval_locales = ff_path / "browser" / "components" / "sval" / "locales"
-    if sval_locales.is_dir():
-        targets.extend(sval_locales.rglob("*.ftl"))
-    for rel in (
-        "browser/locales/en-US/chrome/browser/appstrings.properties",
-        "toolkit/locales/en-US/toolkit/branding/brandings.ftl",
-    ):
-        cand = ff_path / rel
-        if cand.is_file():
-            targets.append(cand)
-    for path in targets:
-        orig = path.read_text(encoding="utf-8", errors="ignore")
-        updated = _scrub_brand_locale_text(path.as_posix(), orig)
-        if updated != orig:
-            path.write_text(updated, encoding="utf-8")
-            touched += 1
-    return touched
-
-
-def _rewrite_sval_jar_and_engine_stubs(ff_path: Path) -> None:
-    sval_dir = ff_path / "browser" / "components" / "sval"
-    if not sval_dir.is_dir():
-        return
-
-    private_src_dir = DESKTOP_DIR / "chrome" / "browser" / "components" / "sanctuary" / "private"
-    home_dest_dir = sval_dir / "home"
-    if private_src_dir.is_dir():
-        home_dest_dir.mkdir(parents=True, exist_ok=True)
-        for priv_file in private_src_dir.iterdir():
-            if priv_file.is_file():
-                shutil.copy2(priv_file, home_dest_dir / priv_file.name)
-
-    jar_mn = sval_dir / "jar.mn"
-    if jar_mn.is_file():
-        text = jar_mn.read_text(encoding="utf-8")
-        updated = text.replace(
-            "/browser/branding/sval/src/masters/04-wordmark-light-on-dark.svg",
-            "/browser/branding/lm-sanctuary/content/about-wordmark.svg",
-        )
-        updated = re.sub(
-            r"/browser/branding/sval/[^\s)]+",
-            "/browser/branding/lm-sanctuary/content/about-logo.svg",
-            updated,
-        )
-        sanctuary_private_entries = [
-            (
-                "chrome://browser/content/sval/home/favicon-private.svg",
-                "% override chrome://browser/skin/privatebrowsing/favicon.svg chrome://browser/content/sval/home/favicon-private.svg",
-            ),
-            ("content/browser/sval/home/private.html", "    content/browser/sval/home/private.html (home/private.html)"),
-            ("content/browser/sval/home/private.css", "    content/browser/sval/home/private.css (home/private.css)"),
-            ("content/browser/sval/home/private.js", "    content/browser/sval/home/private.js (home/private.js)"),
-            ("content/browser/sval/home/favicon-private.svg", "    content/browser/sval/home/favicon-private.svg (home/favicon-private.svg)"),
-        ]
-        missing_entries = [line for marker, line in sanctuary_private_entries if marker not in updated]
-        if missing_entries and "browser.jar:" in updated:
-            updated = updated.replace(
-                "browser.jar:",
-                "browser.jar:\n" + "\n".join(missing_entries),
-                1,
-            )
-        if updated != text:
-            jar_mn.write_text(updated, encoding="utf-8")
-
-    logo_svg = ff_path / "browser" / "branding" / "lm-sanctuary" / "content" / "about-logo.svg"
-    glyph_svg = sval_dir / "sval-glyph.svg"
-    if logo_svg.is_file() and glyph_svg.is_file():
-        shutil.copy2(logo_svg, glyph_svg)
-
-    home_html = sval_dir / "home" / "home.html"
-    if home_html.is_file():
-        p_txt = home_html.read_text(encoding="utf-8")
-        home_html.write_text(re.sub(r"\bSval\b", "Sanctuary Browser", p_txt), encoding="utf-8")
-
-    scrub_user_facing_brand_locales(ff_path)
-
-    # Match Sval sync-files.sh stubbing when its Rust/WASM engine artifacts are absent.
-    worker_imports: set[str] = set()
-    for worker in sval_dir.glob("*.worker.mjs"):
-        w_text = worker.read_text(encoding="utf-8", errors="ignore")
-        match = re.search(
-            r"import\s+initWasm\s*,\s*\{([\s\S]*?)\}\s+from\s+[\"']chrome://browser/content/sval/sval_core\.mjs[\"'];",
-            w_text,
-        )
-        if not match:
-            continue
-        for token in match.group(1).split(","):
-            name = re.sub(r"\s+as\s+.*$", "", token.strip()).strip()
-            if name and name not in ("SvalDocument", "SyncOutcome", "initSync"):
-                worker_imports.add(name)
-
-    core_mjs = sval_dir / "sval_core.mjs"
-    if not core_mjs.exists():
-        lines = [
-            "/* eslint-disable -- generated stub when Sval WASM engine is not built */",
-            'const MESSAGE = "sval: the engine artifact is not built";',
-            "function unavailable() {",
-            '  throw Object.assign(new Error(MESSAGE), { code: "engine_not_built" });',
-            "}",
-            "export class SvalDocument {",
-            "  constructor() { unavailable(); }",
-            "  static loadJson() { unavailable(); }",
-            "}",
-            "export class SyncOutcome {}",
-            "export function initSync() { unavailable(); }",
-            "export default function () { unavailable(); }",
-        ]
-        for fn_name in sorted(worker_imports):
-            lines.append(f"export function {fn_name}() {{ unavailable(); }}")
-        core_mjs.write_text("\n".join(lines) + "\n", encoding="utf-8")
-
-    core_wasm = sval_dir / "sval_core_bg.wasm"
-    if not core_wasm.exists():
-        core_wasm.write_bytes(b"\x00asm\x01\x00\x00\x00")
-
-    sval_manifest = sval_dir / "sval.manifest"
-    if sval_manifest.is_file():
-        kept_manifest = [
-            line
-            for line in sval_manifest.read_text(encoding="utf-8").splitlines(keepends=True)
-            if not line.strip()
-            or line.lstrip().startswith("#")
-            or any(sym in line for sym in ("SvalBlocking.", "SvalPageRules.", "SvalScriptlets."))
-        ]
-        sval_manifest.write_text("".join(kept_manifest), encoding="utf-8")
-
-    # Replace static top-level imports of pruned Sval modules with inert stubs so
-    # remaining Sval components never throw ChromeUtils import errors.
-    stub_replacements = (
-        (
-            re.compile(r'import\s+\{\s*isQuickPeek\s*\}\s+from\s+"moz-src:///browser/components/sval/SvalQuickPeekTab\.sys\.mjs";'),
-            'const isQuickPeek = tab => tab?.hasAttribute?.("sval-quick-peek") === true;',
-        ),
-        (
-            re.compile(r'import\s+\{\s*SvalQuickPeek\s*\}\s+from\s+"moz-src:///browser/components/sval/SvalQuickPeek\.sys\.mjs";'),
-            "const SvalQuickPeek = { mountLinkItem() {}, tabOf: () => null, close() {}, openClick: () => false, open() {} };",
-        ),
-        (
-            re.compile(r'import\s+\{\s*SvalPeek\s*\}\s+from\s+"moz-src:///browser/components/sval/SvalPeek\.sys\.mjs";'),
-            "const SvalPeek = { isOpening: () => false, isPeek: () => false, mount() {}, loadWindow() {}, startWindow() {}, windows: () => [], closeAll() {} };",
-        ),
-        (
-            re.compile(r'import\s+\{\s*SYNC_RULES\s+as\s+PEEK_RULES\s*\}\s+from\s+"moz-src:///browser/components/sval/SvalPeek\.sys\.mjs";'),
-            "const PEEK_RULES = [];",
-        ),
-        (
-            re.compile(r'import\s+\{\s*SvalFeedbackForm\s*\}\s+from\s+"moz-src:///browser/components/sval/SvalFeedbackForm\.sys\.mjs";'),
-            "const SvalFeedbackForm = { mountWindow() {}, open: async () => false, toggle() {}, report: async () => false };",
-        ),
-        (
-            re.compile(r'import\s+\{\s*HELP_MENU_ITEM_ID\s+as\s+FEEDBACK_ITEM_ID\s*\}\s+from\s+"moz-src:///browser/components/sval/SvalFeedbackForm\.sys\.mjs";'),
-            'const FEEDBACK_ITEM_ID = "sval-help-send-feedback";',
-        ),
-    )
-    for mod in sval_dir.glob("*.sys.mjs"):
-        src = mod.read_text(encoding="utf-8", errors="ignore")
-        patched = src
-        for pat, rep in stub_replacements:
-            patched = pat.sub(rep, patched)
-        if patched != src:
-            mod.write_text(patched, encoding="utf-8")
-
-
-def _should_prune(rel_chrome_path: Path, pruned_prefixes: Iterable[str]) -> bool:
-    posix_path = f"chrome/{rel_chrome_path.as_posix()}"
-    for prefix in pruned_prefixes:
-        clean_prefix = str(prefix).strip("/")
-        if posix_path == clean_prefix or posix_path.startswith(f"{clean_prefix}/"):
-            return True
-    return False
-
-
 def stage_overlay_tree(
-    sval_dir: Path,
     firefox_dir: Path,
     *,
     mode: str = "artifact",
     repo_root: Path = REPO_ROOT,
     config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Copy filtered Sval chrome + LM-Sanctuary branding/actors/mozconfig onto firefox_dir."""
+    """Copy LM-Sanctuary branding, native actors, and mozconfig onto stock firefox_dir."""
     if mode not in ("artifact", "gecko"):
         raise ValueError(f"Invalid mode: {mode}")
     cfg = config or load_upstream_config()
-    sval_path = Path(sval_dir)
     ff_path = Path(firefox_dir)
-    excluded_patches = set(cfg["excluded_sval_patches"])
-    pruned_paths = list(cfg["pruned_sval_paths"])
 
-    # 1. Compute combined patch series
-    kept_series: list[str] = []
-    sval_series = sval_path / "patches" / "series"
-    if sval_series.is_file():
-        for raw_line in sval_series.read_text(encoding="utf-8").splitlines():
-            line = raw_line.strip()
-            if not line or line.startswith("#") or line in excluded_patches:
-                continue
-            kept_series.append(line)
-    for local_patch in sorted((DESKTOP_DIR / "patches").glob("*.patch")):
-        kept_series.append(f"sanctuary:{local_patch.name}")
-    (ff_path / ".sanctuary-sval-series").write_text("\n".join(kept_series) + "\n", encoding="utf-8")
+    # 1. Record LM-Sanctuary patch series
+    kept_series = [f"sanctuary:{p.name}" for p in sorted((DESKTOP_DIR / "patches").glob("*.patch"))]
+    (ff_path / ".sanctuary-patch-series").write_text("\n".join(kept_series) + "\n", encoding="utf-8")
 
-    # 2. Remove any stock Sval branding directory
-    stale_sval_branding = ff_path / "browser" / "branding" / "sval"
-    if stale_sval_branding.exists():
-        shutil.rmtree(stale_sval_branding)
-
-    # 3. Copy Sval chrome files, dropping Quick Peek / Feedback / pruned paths
-    sval_chrome = sval_path / "chrome"
-    copied_chrome = 0
-    if sval_chrome.is_dir():
-        for src_file in sval_chrome.rglob("*"):
-            if not src_file.is_file() or src_file.name == ".gitkeep":
-                continue
-            rel = src_file.relative_to(sval_chrome)
-            if _should_prune(rel, pruned_paths):
-                continue
-            dest_file = ff_path / rel
-            dest_file.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(src_file, dest_file)
-            copied_chrome += 1
-
-    # 4. Update Sval moz.build and scrub any leftover vendor endpoints
-    _prune_sval_moz_build(
-        ff_path / "browser" / "components" / "sval" / "moz.build",
-        {Path(p).name for p in pruned_paths if p.endswith(".mjs")},
-    )
-    scrubbed = _scrub_forbidden_endpoints(ff_path / "browser", cfg["forbidden_endpoints"])
-
-    # 5. Stage LM-Sanctuary branding + resized icons & rewrite Sval jar/engine stubs
+    # 2. Stage LM-Sanctuary branding + resized icons
     dest_branding = ff_path / "browser" / "branding" / "lm-sanctuary"
     if dest_branding.exists():
         shutil.rmtree(dest_branding)
     shutil.copytree(DESKTOP_DIR / "branding" / "lm-sanctuary", dest_branding)
     _materialize_branding_icons(dest_branding, repo_root=repo_root, ff_path=ff_path)
-    _rewrite_sval_jar_and_engine_stubs(ff_path)
 
-    # 6. Stage LM-Sanctuary native chrome actors
+    # 3. Stage LM-Sanctuary native chrome actors & private browsing jar manifest
     dest_sanctuary = ff_path / "browser" / "components" / "sanctuary"
     if dest_sanctuary.exists():
         shutil.rmtree(dest_sanctuary)
@@ -970,7 +679,7 @@ def stage_overlay_tree(
         dest_sanctuary,
     )
 
-    # 7. Write combined mozconfig
+    # 4. Write combined mozconfig
     base_moz = (DESKTOP_DIR / "mozconfig").read_text(encoding="utf-8").rstrip()
     frag_moz = (DESKTOP_DIR / f"mozconfig.{mode}").read_text(encoding="utf-8").lstrip()
     (ff_path / "mozconfig").write_text(f"{base_moz}\n\n{frag_moz}", encoding="utf-8")
@@ -978,43 +687,25 @@ def stage_overlay_tree(
     audit_staged_tree(ff_path, config=cfg)
     return {
         "series_count": len(kept_series),
-        "copied_chrome": copied_chrome,
-        "scrubbed_files": [str(p) for p in scrubbed],
     }
 
 
 def audit_staged_tree(firefox_dir: Path, *, config: dict[str, Any] | None = None) -> None:
-    cfg = config or load_upstream_config()
+    _ = config or load_upstream_config()
     ff_path = Path(firefox_dir)
-    if (ff_path / "browser" / "branding" / "sval").exists():
-        raise AssertionError("Staged tree must not contain branding/sval")
-
-    for forbidden_name in (
-        "SvalQuickPeek.sys.mjs",
-        "SvalQuickPeekTab.sys.mjs",
-        "SvalPeek.sys.mjs",
-        "SvalFeedbackForm.sys.mjs",
-        "SvalFeedback.sys.mjs",
-    ):
-        matches = list((ff_path / "browser").rglob(forbidden_name))
-        if matches:
-            raise AssertionError(f"Pruned Sval module still present: {matches}")
-
-    endpoints = [str(e) for e in cfg["forbidden_endpoints"] if e]
-    for item in (ff_path / "browser").rglob("*"):
-        if not item.is_file() or not _is_text_file(item):
-            continue
-        txt = item.read_text(encoding="utf-8", errors="ignore")
-        for ep in endpoints:
-            if ep in txt:
-                raise AssertionError(f"Forbidden endpoint {ep} found in {item}")
 
     required_files = [
-        ff_path / "browser" / "components" / "sval" / "SvalBlocking.sys.mjs",
-        ff_path / "browser" / "components" / "sval" / "SvalPasswordManager.sys.mjs",
+        ff_path / "browser" / "components" / "sanctuary" / "moz.build",
+        ff_path / "browser" / "components" / "sanctuary" / "jar.mn",
+        ff_path / "browser" / "components" / "sanctuary" / "SanctuaryAgentPageChild.sys.mjs",
+        ff_path / "browser" / "components" / "sanctuary" / "SanctuaryAgentPageParent.sys.mjs",
         ff_path / "browser" / "components" / "sanctuary" / "SanctuaryHostChild.sys.mjs",
         ff_path / "browser" / "components" / "sanctuary" / "SanctuaryHostParent.sys.mjs",
         ff_path / "browser" / "components" / "sanctuary" / "SanctuaryWindowHost.sys.mjs",
+        ff_path / "browser" / "components" / "sanctuary" / "private" / "private.html",
+        ff_path / "browser" / "components" / "sanctuary" / "private" / "private.css",
+        ff_path / "browser" / "components" / "sanctuary" / "private" / "private.js",
+        ff_path / "browser" / "components" / "sanctuary" / "private" / "favicon-private.svg",
         ff_path / "browser" / "branding" / "lm-sanctuary" / "moz.build",
     ]
     for req in required_files:
@@ -1023,7 +714,7 @@ def audit_staged_tree(firefox_dir: Path, *, config: dict[str, Any] | None = None
 
 
 def verify_desktop_templates(repo_root: Path = REPO_ROOT) -> None:
-    cfg = load_upstream_config()
+    _ = load_upstream_config()
     required = [
         DESKTOP_DIR / "mozconfig",
         DESKTOP_DIR / "mozconfig.artifact",
@@ -1032,6 +723,9 @@ def verify_desktop_templates(repo_root: Path = REPO_ROOT) -> None:
         DESKTOP_DIR / "patches" / "sanctuary-app-vendor.patch",
         DESKTOP_DIR / "patches" / "sanctuary-actor-registration.patch",
         DESKTOP_DIR / "chrome" / "browser" / "components" / "sanctuary" / "moz.build",
+        DESKTOP_DIR / "chrome" / "browser" / "components" / "sanctuary" / "jar.mn",
+        DESKTOP_DIR / "chrome" / "browser" / "components" / "sanctuary" / "SanctuaryAgentPageChild.sys.mjs",
+        DESKTOP_DIR / "chrome" / "browser" / "components" / "sanctuary" / "SanctuaryAgentPageParent.sys.mjs",
         DESKTOP_DIR / "chrome" / "browser" / "components" / "sanctuary" / "SanctuaryHostChild.sys.mjs",
         DESKTOP_DIR / "chrome" / "browser" / "components" / "sanctuary" / "SanctuaryHostParent.sys.mjs",
         DESKTOP_DIR / "chrome" / "browser" / "components" / "sanctuary" / "SanctuaryWindowHost.sys.mjs",
@@ -1070,18 +764,6 @@ def verify_desktop_templates(repo_root: Path = REPO_ROOT) -> None:
     child_src = (DESKTOP_DIR / "chrome" / "browser" / "components" / "sanctuary" / "SanctuaryHostChild.sys.mjs").read_text(encoding="utf-8")
     if "win.location?.origin === allowedOrigin" not in child_src or "browser.sanctuary.shellUrl" not in child_src:
         raise AssertionError("SanctuaryHostChild.sys.mjs must gate injection by shell origin pref")
-
-    endpoints = [str(e) for e in cfg["forbidden_endpoints"] if e]
-    for sub in ("branding", "chrome", "patches", "packaging"):
-        for item in (DESKTOP_DIR / sub).rglob("*"):
-            if not item.is_file():
-                continue
-            txt = item.read_text(encoding="utf-8", errors="ignore")
-            for ep in endpoints:
-                if ep in txt:
-                    raise AssertionError(f"Forbidden endpoint {ep} in template {item}")
-            if sub == "packaging" and "sval.app" in txt:
-                raise AssertionError(f"sval.app URL found in packaging template {item}")
 
     print("DESKTOP_TEMPLATES_VERIFIED")
 
@@ -1164,8 +846,8 @@ def _apply_patch_file(patch_path: Path, ff_dir: Path) -> None:
         raise RuntimeError(f"Failed to apply patch: {patch_path.name} (exit {res3.returncode})")
 
 
-def _rewrite_omni_jar_entries(jar_path: Path, replacements: dict[str, bytes], text_scrub_suffixes: tuple[str, ...] = (".ftl", ".properties")) -> int:
-    """Update and scrub entries inside a Gecko omni.ja archive using mozpack.mozjar or zipfile."""
+def _rewrite_omni_jar_entries(jar_path: Path, replacements: dict[str, bytes]) -> int:
+    """Update entries inside a Gecko omni.ja archive using mozpack.mozjar or zipfile."""
     if not jar_path.is_file():
         return 0
     mozbuild_py = BUILD_DIR / "firefox" / "python" / "mozbuild"
@@ -1192,11 +874,6 @@ def _rewrite_omni_jar_entries(jar_path: Path, replacements: dict[str, bytes], te
             seen.add(name)
             orig_bytes = entry.read()
             new_bytes = replacements.get(name, orig_bytes)
-            if name not in replacements and name.endswith(text_scrub_suffixes):
-                decoded = orig_bytes.decode("utf-8", errors="ignore")
-                scrubbed = _scrub_brand_locale_text(name, decoded)
-                if scrubbed != decoded:
-                    new_bytes = scrubbed.encode("utf-8")
             if new_bytes != orig_bytes:
                 changed += 1
             items.append((name, new_bytes, bool(entry.compressed)))
@@ -1219,11 +896,6 @@ def _rewrite_omni_jar_entries(jar_path: Path, replacements: dict[str, bytes], te
     out_items: list[tuple[str, bytes, int]] = []
     for name, (info, orig_bytes) in raw_map.items():
         new_bytes = replacements.get(name, orig_bytes)
-        if name not in replacements and name.endswith(text_scrub_suffixes):
-            decoded = orig_bytes.decode("utf-8", errors="ignore")
-            scrubbed = _scrub_brand_locale_text(name, decoded)
-            if scrubbed != decoded:
-                new_bytes = scrubbed.encode("utf-8")
         if new_bytes != orig_bytes:
             changed += 1
         out_items.append((name, new_bytes, info.compress_type))
@@ -1240,7 +912,7 @@ def _rewrite_omni_jar_entries(jar_path: Path, replacements: dict[str, bytes], te
 
 
 def rebrand_packaged_dist(target_dir: Path, repo_root: Path = REPO_ROOT) -> dict[str, int]:
-    """Sync Sanctuary Browser brand files, host actors, and scrubbed locales into a packaged dist folder."""
+    """Sync Sanctuary Browser brand files and host actors into a packaged dist folder."""
     dist_path = Path(target_dir)
     desktop_root = repo_root / "browser-desktop"
     branding_root = desktop_root / "branding" / "lm-sanctuary"
@@ -1255,7 +927,13 @@ def rebrand_packaged_dist(target_dir: Path, repo_root: Path = REPO_ROOT) -> dict
                 ini_file.write_text(updated_ini, encoding="utf-8")
 
     root_replacements: dict[str, bytes] = {}
-    for mod_name in ("SanctuaryWindowHost.sys.mjs", "SanctuaryHostParent.sys.mjs", "SanctuaryHostChild.sys.mjs"):
+    for mod_name in (
+        "SanctuaryWindowHost.sys.mjs",
+        "SanctuaryHostParent.sys.mjs",
+        "SanctuaryHostChild.sys.mjs",
+        "SanctuaryAgentPageParent.sys.mjs",
+        "SanctuaryAgentPageChild.sys.mjs",
+    ):
         src_mod = sanctuary_comp / mod_name
         if src_mod.is_file():
             root_replacements[f"moz-src/browser/components/sanctuary/{mod_name}"] = src_mod.read_bytes()
@@ -1267,10 +945,11 @@ def rebrand_packaged_dist(target_dir: Path, repo_root: Path = REPO_ROOT) -> dict
         (branding_root / "content" / "about-wordmark.svg", "chrome/browser/content/branding/about-wordmark.svg"),
         (branding_root / "content" / "about-wordmark.svg", "chrome/browser/content/branding/firefox-wordmark.svg"),
         (branding_root / "content" / "about-logo.svg", "chrome/browser/content/branding/about-logo.svg"),
-        (sanctuary_comp / "private" / "private.html", "chrome/browser/content/browser/sval/home/private.html"),
-        (sanctuary_comp / "private" / "private.css", "chrome/browser/content/browser/sval/home/private.css"),
-        (sanctuary_comp / "private" / "private.js", "chrome/browser/content/browser/sval/home/private.js"),
-        (sanctuary_comp / "private" / "favicon-private.svg", "chrome/browser/content/browser/sval/home/favicon-private.svg"),
+        (sanctuary_comp / "private" / "private.html", "chrome/browser/content/browser/sanctuary/private/private.html"),
+        (sanctuary_comp / "private" / "private.html", "chrome/browser/content/browser/aboutPrivateBrowsing.html"),
+        (sanctuary_comp / "private" / "private.css", "chrome/browser/content/browser/sanctuary/private/private.css"),
+        (sanctuary_comp / "private" / "private.js", "chrome/browser/content/browser/sanctuary/private/private.js"),
+        (sanctuary_comp / "private" / "favicon-private.svg", "chrome/browser/content/browser/sanctuary/private/favicon-private.svg"),
         (branding_root / "pref" / "00-lm-sanctuary-prefs.js", "defaults/preferences/firefox-branding.js"),
         (branding_root / "pref" / "00-lm-sanctuary-prefs.js", "defaults/preferences/00-lm-sanctuary-prefs.js"),
     )
@@ -1283,43 +962,11 @@ def rebrand_packaged_dist(target_dir: Path, repo_root: Path = REPO_ROOT) -> dict
     return {"omni_changed": omni_changed, "browser_omni_changed": browser_omni_changed}
 
 
-def sync_upstream_firefox_pin(sval_dir: Path, cfg: dict[str, Any], upstream_json_path: Path = UPSTREAM_JSON) -> dict[str, str]:
-    """Align firefox_rev & firefox_tag with Sval's upstream.txt security point-release pin when present."""
-    upstream_txt = Path(sval_dir) / "upstream.txt"
-    if not upstream_txt.is_file():
-        return {"firefox_rev": str(cfg["firefox_rev"]), "firefox_tag": str(cfg.get("firefox_tag", ""))}
-    raw = upstream_txt.read_text(encoding="utf-8", errors="ignore")
-    ref_match = re.search(r"(?m)^UPSTREAM_REF=([0-9a-fA-F]{40})\s*$", raw)
-    tag_match = re.search(r"tag=(FIREFOX_[A-Za-z0-9_]+)", raw)
-    changed = False
-    if ref_match and ref_match.group(1) != cfg.get("firefox_rev"):
-        cfg["firefox_rev"] = ref_match.group(1)
-        changed = True
-    if tag_match and tag_match.group(1) != cfg.get("firefox_tag"):
-        cfg["firefox_tag"] = tag_match.group(1)
-        changed = True
-    if changed and upstream_json_path.is_file():
-        upstream_json_path.write_text(json.dumps(cfg, indent=2) + "\n", encoding="utf-8")
-    return {"firefox_rev": str(cfg["firefox_rev"]), "firefox_tag": str(cfg.get("firefox_tag", ""))}
-
-
 def run_full_build(mode: str, run_bootstrap: bool = False) -> None:
     check_host_build_prereqs()
     cfg = load_upstream_config()
     BUILD_DIR.mkdir(parents=True, exist_ok=True)
-    sval_dir = BUILD_DIR / "sval"
     ff_dir = BUILD_DIR / "firefox"
-
-    if not sval_dir.exists():
-        _run(
-            ["git", "-c", "core.longpaths=true", "clone", "--depth=1", "--branch", cfg["sval_branch"], cfg["sval_remote"], str(sval_dir)],
-            BUILD_DIR,
-        )
-    else:
-        _run(["git", "-c", "core.longpaths=true", "fetch", "origin", cfg["sval_branch"]], sval_dir)
-        _run(["git", "-c", "core.longpaths=true", "reset", "--hard", f"origin/{cfg['sval_branch']}"], sval_dir)
-
-    sync_upstream_firefox_pin(sval_dir, cfg)
 
     if not ff_dir.exists():
         _run(["git", "-c", "core.longpaths=true", "clone", "--depth=1", cfg["firefox_remote"], str(ff_dir)], BUILD_DIR)
@@ -1335,25 +982,11 @@ def run_full_build(mode: str, run_bootstrap: bool = False) -> None:
         # Bootstrap before writing mozconfig because `mach bootstrap` overwrites mozconfig.
         _run([bash_bin, "-lc", f"./mach --no-interactive bootstrap --application-choice={shlex.quote(app_choice)}"], ff_dir)
 
-    stage_overlay_tree(sval_dir, ff_dir, mode=mode, repo_root=REPO_ROOT, config=cfg)
-
-    excluded = set(cfg["excluded_sval_patches"])
-    sval_path_series = sval_dir / "patches" / "series"
-    if sval_path_series.is_file():
-        for raw_line in sval_path_series.read_text(encoding="utf-8").splitlines():
-            line = raw_line.strip()
-            if not line or line.startswith("#") or line in excluded:
-                continue
-            patch_file = sval_dir / "patches" / line
-            if patch_file.is_file():
-                _apply_patch_file(patch_file, ff_dir)
+    stage_overlay_tree(ff_dir, mode=mode, repo_root=REPO_ROOT, config=cfg)
 
     for local_patch in sorted((DESKTOP_DIR / "patches").glob("*.patch")):
         _apply_patch_file(local_patch, ff_dir)
 
-    scrub_user_facing_brand_locales(ff_dir)
-    _scrub_forbidden_endpoints(ff_dir / "browser", cfg["forbidden_endpoints"])
-    _scrub_forbidden_endpoints(ff_dir / "build", cfg["forbidden_endpoints"])
     audit_staged_tree(ff_dir, config=cfg)
 
     _run([bash_bin, "-lc", "./mach --no-interactive configure && ./mach --no-interactive build && ./mach --no-interactive package"], ff_dir)
@@ -1371,7 +1004,6 @@ def main() -> int:
     parser.add_argument("--patch-pe-icons", default="")
     parser.add_argument("--rebrand-dist", default="")
     parser.add_argument("--bootstrap", action="store_true")
-    parser.add_argument("--sval-dir", default="")
     parser.add_argument("--firefox-dir", default="")
     parser.add_argument("--mode", choices=("artifact", "gecko"), default="artifact")
     args = parser.parse_args()
@@ -1389,9 +1021,9 @@ def main() -> int:
         print(f"PATCHED_PE_ICONS:{len(patched)}")
         return 0
     if args.stage_only:
-        if not args.sval_dir or not args.firefox_dir:
-            parser.error("--stage-only requires --sval-dir and --firefox-dir")
-        stage_overlay_tree(Path(args.sval_dir), Path(args.firefox_dir), mode=args.mode)
+        if not args.firefox_dir:
+            parser.error("--stage-only requires --firefox-dir")
+        stage_overlay_tree(Path(args.firefox_dir), mode=args.mode)
         print("DESKTOP_OVERLAY_STAGED")
         return 0
 

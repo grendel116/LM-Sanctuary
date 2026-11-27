@@ -148,16 +148,10 @@ def run_tests():
 
         # 5. License & trademark compliance checks
         assert (REPO_ROOT / "LICENSING.md").is_file()
-        assert (REPO_ROOT / "LICENSES" / "AdditionRef-sval-app-store.txt").is_file()
+        assert (REPO_ROOT / "LICENSES" / "GPL-3.0.txt").is_file()
         assert (REPO_ROOT / "LICENSES" / "MPL-2.0.txt").is_file()
         readme_text = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
-        assert "AGPL-3.0-only" in readme_text
-        for rel in ("web", "sanctuary"):
-            for p in (REPO_ROOT / rel).rglob("*"):
-                if p.is_file() and p.suffix in (".js", ".py", ".html", ".json"):
-                    txt = p.read_text(encoding="utf-8", errors="ignore")
-                    assert "download.sval.app" not in txt, str(p)
-                    assert "feedback.sval.app" not in txt, str(p)
+        assert "AGPL-3.0" in readme_text
 
         print("SERVER_BROWSER_VAULT_VERIFIED")
     finally:

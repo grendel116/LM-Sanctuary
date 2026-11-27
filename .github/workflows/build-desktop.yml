@@ -1,11 +1,11 @@
-# SPDX-License-Identifier: AGPL-3.0-only WITH AdditionRef-sval-app-store
+# SPDX-License-Identifier: AGPL-3.0-or-later
 name: Build Desktop Browser
 
 on:
   workflow_dispatch:
     inputs:
       mode:
-        description: Gecko build mode (gecko compiles native Sval adblock-rust; artifact uses prebuilt binaries)
+        description: Gecko build mode (gecko compiles full native libxul; artifact uses prebuilt Gecko binaries)
         required: true
         default: gecko
         type: choice
@@ -74,7 +74,7 @@ jobs:
           restore-keys: |
             mozbuild-linux-${{ runner.os }}-
 
-      - name: Bootstrap, stage Sval overlay, build, and package
+      - name: Bootstrap, stage Sanctuary overlay, build, and package
         run: |
           python3 browser-desktop/bootstrap_gecko.py --bootstrap --mode "$BUILD_MODE"
           TAR_PATH=$(ls browser-desktop/build/firefox/objdir-sanctuary-"$BUILD_MODE"/dist/lm-sanctuary-*.tar.xz | head -n 1)
@@ -114,7 +114,7 @@ jobs:
           restore-keys: |
             mozbuild-win-${{ runner.os }}-
 
-      - name: Bootstrap, stage Sval overlay, and build via MozillaBuild
+      - name: Bootstrap, stage Sanctuary overlay, and build via MozillaBuild
         shell: pwsh
         run: |
           git config --global core.longpaths true

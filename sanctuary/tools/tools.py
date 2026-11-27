@@ -558,7 +558,7 @@ def browser_action(
     if clean_action in ("click", "type", "select") and not clean_ref:
         return f"Error: `ref` (e.g. 'e4' from `browser_action(action=\"snapshot\")`) is required for `{clean_action}`."
 
-    # Sval §0073 Write Gate: confirm with user before acting on page controls when security_preset == ask_always
+    # Sanctuary Write Gate: confirm with user before acting on page controls when security_preset == ask_always
     if clean_action in ("click", "type", "select", "press"):
         gate_details = {"action": clean_action}
         if clean_ref:

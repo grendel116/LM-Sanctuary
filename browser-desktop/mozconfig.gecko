@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: AGPL-3.0-only WITH AdditionRef-sval-app-store
+# SPDX-License-Identifier: AGPL-3.0-or-later
 # Full C++ / Rust Gecko release build fragment (with custom vendor, profile dir, and adblock engine).
 
 ac_add_options --with-user-appdir=.lm-sanctuary

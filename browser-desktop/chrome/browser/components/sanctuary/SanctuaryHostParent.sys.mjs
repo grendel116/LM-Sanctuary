@@ -1,11 +1,11 @@
-/* SPDX-License-Identifier: AGPL-3.0-only WITH AdditionRef-sval-app-store */
+/* SPDX-License-Identifier: AGPL-3.0-or-later */
 
 import { SanctuaryWindowHost } from "moz-src:///browser/components/sanctuary/SanctuaryWindowHost.sys.mjs";
 
 const KEEPASSXC_EXTENSION_ID = "keepassxc-browser@keepassxc.org";
 
 /**
- * Parent actor bridging LM-Sanctuary's trusted shell window to native Gecko tabs & Sval protections.
+ * Parent actor bridging LM-Sanctuary's trusted shell window to native Gecko tabs & protections.
  */
 export class SanctuaryHostParent extends JSWindowActorParent {
   #topChromeWindow() {
@@ -16,13 +16,21 @@ export class SanctuaryHostParent extends JSWindowActorParent {
     const level = ["off", "balanced", "strict"].includes(privacy.shieldLevel)
       ? privacy.shieldLevel
       : "balanced";
-    Services.prefs.setStringPref("browser.sval.adblock.level", level);
+    Services.prefs.setStringPref("browser.sanctuary.adblock.level", level);
+    Services.prefs.setStringPref(
+      "browser.contentblocking.category",
+      level === "strict" ? "strict" : "standard"
+    );
+    Services.prefs.setBoolPref("privacy.trackingprotection.enabled", level !== "off");
+    Services.prefs.setBoolPref("privacy.trackingprotection.socialtracking.enabled", level !== "off");
+    Services.prefs.setBoolPref("privacy.trackingprotection.cryptomining.enabled", level !== "off");
+    Services.prefs.setBoolPref("privacy.trackingprotection.fingerprinting.enabled", level !== "off");
     Services.prefs.setBoolPref("privacy.globalprivacycontrol.enabled", privacy.sendGpc !== false);
 
     const overrides = privacy.siteOverrides && typeof privacy.siteOverrides === "object"
       ? privacy.siteOverrides
       : {};
-    const siteBranch = "browser.sval.javascript.site.";
+    const siteBranch = "browser.sanctuary.javascript.site.";
     const activeHosts = new Map();
     for (const [host, rule] of Object.entries(overrides)) {
       const cleanHost = String(host || "").trim().toLowerCase();
@@ -49,7 +57,7 @@ export class SanctuaryHostParent extends JSWindowActorParent {
       try {
         Services.prefs.setStringPref(siteBranch + cleanHost, jsEnabled ? "allow" : "block");
       } catch {
-        // Ignore Sval JS policy pref failures
+        // Ignore Sanctuary JS policy pref failures
       }
       try {
         const uri = Services.io.newURI(`https://${cleanHost}/`);

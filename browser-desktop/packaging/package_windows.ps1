@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: AGPL-3.0-only WITH AdditionRef-sval-app-store
+# SPDX-License-Identifier: AGPL-3.0-or-later
 param(
   [switch]$VerifyOnly,
   [ValidateSet("artifact", "gecko")]

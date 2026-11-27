@@ -1,0 +1,9 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+browser.jar:
+% override chrome://browser/content/aboutPrivateBrowsing.html chrome://browser/content/sanctuary/private/private.html
+% override chrome://browser/skin/privatebrowsing/favicon.svg chrome://browser/content/sanctuary/private/favicon-private.svg
+    content/browser/sanctuary/private/private.html (private/private.html)
+    content/browser/sanctuary/private/private.css (private/private.css)
+    content/browser/sanctuary/private/private.js (private/private.js)
+    content/browser/sanctuary/private/favicon-private.svg (private/favicon-private.svg)

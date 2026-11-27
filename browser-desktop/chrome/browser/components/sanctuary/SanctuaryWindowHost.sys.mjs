@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: AGPL-3.0-only WITH AdditionRef-sval-app-store */
+/* SPDX-License-Identifier: AGPL-3.0-or-later */
 
 const lazy = {};
 ChromeUtils.defineESModuleGetters(lazy, {
@@ -7,9 +7,7 @@ ChromeUtils.defineESModuleGetters(lazy, {
 
 const WINDOW_STATES = new WeakMap();
 let observerInstalled = false;
-let svalStarted = false;
-let cachedReadLog = null;
-let attemptedReadLog = false;
+let sanctuaryModulesStarted = false;
 let hostTabSeq = 0;
 
 function nextHostTabId() {
@@ -17,44 +15,20 @@ function nextHostTabId() {
   return `tab_host_${Date.now().toString(36)}_${hostTabSeq}`;
 }
 
-function startSvalModules() {
-  if (svalStarted) {
+function startSanctuaryModules() {
+  if (sanctuaryModulesStarted) {
     return;
   }
-  svalStarted = true;
+  sanctuaryModulesStarted = true;
   try {
-    const { SvalJavascript } = ChromeUtils.importESModule(
-      "moz-src:///browser/components/sval/SvalJavascript.sys.mjs"
-    );
-    SvalJavascript?.start?.();
-  } catch {
-    // SvalJavascript unavailable in minimal test harness
-  }
-  try {
-    const { start: startFingerprinting } = ChromeUtils.importESModule(
-      "moz-src:///browser/components/sval/SvalFingerprinting.sys.mjs"
-    );
-    startFingerprinting?.();
-  } catch {
-    // SvalFingerprinting unavailable in minimal test harness
-  }
-  try {
-    const { SvalSiteProtections } = ChromeUtils.importESModule(
-      "moz-src:///browser/components/sval/SvalSiteProtections.sys.mjs"
-    );
-    SvalSiteProtections?.start?.();
-  } catch {
-    // SvalSiteProtections unavailable in minimal test harness
-  }
-  try {
-    ChromeUtils.registerWindowActor("SvalAgentPage", {
+    ChromeUtils.registerWindowActor("SanctuaryAgentPage", {
       parent: {
         esModuleURI:
-          "moz-src:///browser/components/sval/SvalAgentPageParent.sys.mjs",
+          "moz-src:///browser/components/sanctuary/SanctuaryAgentPageParent.sys.mjs",
       },
       child: {
         esModuleURI:
-          "moz-src:///browser/components/sval/SvalAgentPageChild.sys.mjs",
+          "moz-src:///browser/components/sanctuary/SanctuaryAgentPageChild.sys.mjs",
       },
       remoteTypes: ["web", "webIsolated", "webCOOP+COEP", "file"],
     });
@@ -78,32 +52,9 @@ function startSvalModules() {
   }
 }
 
-function getBlockedCountForBrowser(win, browser) {
+function getBlockedCountForBrowser(_win, browser) {
   if (!browser) {
     return 0;
-  }
-  if (!attemptedReadLog) {
-    attemptedReadLog = true;
-    try {
-      const mod = ChromeUtils.importESModule(
-        "moz-src:///browser/components/sval/SvalProtectionButton.sys.mjs"
-      );
-      if (typeof mod?.readLog === "function") {
-        cachedReadLog = mod.readLog;
-      }
-    } catch {
-      cachedReadLog = null;
-    }
-  }
-  if (cachedReadLog) {
-    try {
-      const log = cachedReadLog(win, browser);
-      if (log && typeof log === "object") {
-        return Number(log.blocked || 0) + Number(log.ads || 0) + Number(log.fingerprinting || 0);
-      }
-    } catch {
-      // Fall through to raw content-blocking log inspection
-    }
   }
   try {
     const raw = typeof browser.getContentBlockingLog === "function" ? browser.getContentBlockingLog() : "";
@@ -476,7 +427,7 @@ function hideManagedTabStripEntry(win, tab) {
 }
 
 function showManagedPanel(rec, { leftPx, topPx, widthPx, heightPx }) {
-  rec.tab?.setAttribute?.("sval-quick-peek", "true");
+  rec.tab?.setAttribute?.("sanctuary-managed-tab", "true");
   const panel = rec.panel;
   if (panel) {
     panel.hidden = false;
@@ -499,7 +450,7 @@ function showManagedPanel(rec, { leftPx, topPx, widthPx, heightPx }) {
 }
 
 function hideManagedPanel(rec) {
-  rec.tab?.removeAttribute?.("sval-quick-peek");
+  rec.tab?.removeAttribute?.("sanctuary-managed-tab");
   const panel = rec.panel;
   if (panel) {
     panel.classList?.remove?.("sanctuary-active-tab-panel");
@@ -1049,7 +1000,7 @@ export const SanctuaryWindowHost = {
     if (!win?.document) {
       return;
     }
-    startSvalModules();
+    startSanctuaryModules();
     const state = getState(win);
     if (state.mounted) {
       if (isPrivateWindow(win) && state.pendingPrivateUrl) {
@@ -1279,7 +1230,7 @@ export const SanctuaryWindowHost = {
       }
       rec.panel = resolvePanelForTab(win, tab, rec.browser) || rec.panel;
       if (state.active && !state.overlayOpen && state.activePanes.some(p => p.tabId === tabId)) {
-        tab.setAttribute?.("sval-quick-peek", "true");
+        tab.setAttribute?.("sanctuary-managed-tab", "true");
         if (rec.browser) {
           rec.browser.docShellIsActive = true;
           rec.browser.renderLayers = true;
@@ -1785,7 +1736,7 @@ export const SanctuaryWindowHost = {
     if (!win) {
       return { ok: false, error: "no_window", message: "No browser window available." };
     }
-    startSvalModules();
+    startSanctuaryModules();
     const state = getState(win);
     let rec = tabId ? state.tabs.get(tabId) : null;
     if (!rec) {
@@ -1815,7 +1766,7 @@ export const SanctuaryWindowHost = {
     let pageActorFn = null;
     try {
       const mod = ChromeUtils.importESModule(
-        "moz-src:///browser/components/sval/SvalAgentPageParent.sys.mjs"
+        "moz-src:///browser/components/sanctuary/SanctuaryAgentPageParent.sys.mjs"
       );
       pageActorFn = mod?.pageActor || null;
     } catch {
@@ -1836,7 +1787,7 @@ export const SanctuaryWindowHost = {
           snapshot: fallback?.text || "",
         };
       }
-      return { ok: false, error: "actor_unavailable", message: "SvalAgentPage actor is not available." };
+      return { ok: false, error: "actor_unavailable", message: "SanctuaryAgentPage actor is not available." };
     }
 
     try {
