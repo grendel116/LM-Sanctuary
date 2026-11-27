@@ -619,7 +619,7 @@ class OsHistoryAdapter:
         if story_active:
             post_blocks.append(replace_placeholders(
                 "# STORY MODE REMINDER\n"
-                "Write this reply as a lengthy story passage: 3–6 full paragraphs with vivid scene detail and a plot development. "
+                "Write a vivid, unhurried story passage that advances the plot. "
                 "Do not write {{user}}'s actions, words, or thoughts."
             ))
 

@@ -124,14 +124,11 @@ def get_message_formatting(story_mode: bool) -> str:
     """Returns the standardized message formatting directive for system instructions."""
     if story_mode:
         return (
-            "\n\n# STORY MODE (MANDATORY — overrides earlier reply length)\n"
-            "Tell an immersive, lengthy story with {{user}}, in {{char}}'s own voice.\n"
-            "- Length: write 3–6 full paragraphs per reply. Never answer in a single line.\n"
-            "- Narration in *italics*, present tense: setting, sensory detail, atmosphere, body language, and other characters' actions and dialogue.\n"
-            "- Dialogue in plain text without quotation marks. Use **bold** only for emphasis.\n"
-            "- Advance the plot every reply with a development, complication, discovery, or choice. Vary pacing between action, dialogue, and quiet moments.\n"
-            "- Never write {{user}}'s dialogue, thoughts, or decisions. End each reply at a moment where {{user}} can act.\n"
-            "- Earlier short replies predate Story Mode; do not imitate their length.\n"
+            "\n\n# STORY MODE (MANDATORY)\n"
+            "Tell an immersive story with {{user}} in {{char}}'s voice, writing full, unhurried passages rather than brief replies.\n"
+            "- Narration in *italics*, present tense: scene detail, atmosphere, body language, and other characters' actions.\n"
+            "- Dialogue in plain text without quotation marks; use **bold** only for emphasis.\n"
+            "- Advance the plot each reply and leave room for {{user}} to act—never write {{user}}'s dialogue, thoughts, or decisions.\n"
         )
     return (
         "\n\n# MESSAGE FORMAT (MANDATORY)\n"

@@ -148,11 +148,11 @@ class ProgramGenerationAndStoryModeTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 programs_routes.generate_character_json("Nova", "A pilot", "", "", "", "")
 
-    def test_story_mode_formatting_requests_lengthy_storytelling(self):
+    def test_story_mode_formatting_requests_unhurried_storytelling(self):
         story_fmt = program_config.get_message_formatting(True)
         normal_fmt = program_config.get_message_formatting(False)
         self.assertIn("STORY MODE", story_fmt)
-        self.assertIn("3–6 full paragraphs", story_fmt)
+        self.assertNotIn("paragraphs", story_fmt)
         self.assertNotIn("third person", story_fmt)
         self.assertNotIn("STORY MODE", normal_fmt)
 
@@ -198,8 +198,10 @@ class ProgramGenerationAndStoryModeTests(unittest.TestCase):
                 msgs_story = OsHistoryAdapter(runner, sid, None, None, None).get_openai_messages("System prompt", "")
             last_user_story = [m for m in msgs_story if m.get("role") == "user"][-1]["content"]
             self.assertIn("STORY MODE REMINDER", last_user_story)
+            self.assertNotIn("paragraphs", last_user_story)
 
-            msgs_normal = OsHistoryAdapter(runner, sid, None, None, None).get_openai_messages("System prompt", "")
+            with patch("core.program_config.is_story_mode", return_value=False):
+                msgs_normal = OsHistoryAdapter(runner, sid, None, None, None).get_openai_messages("System prompt", "")
             last_user_normal = [m for m in msgs_normal if m.get("role") == "user"][-1]["content"]
             self.assertNotIn("STORY MODE REMINDER", last_user_normal)
 
