@@ -3123,7 +3123,6 @@ test('clearLearnedTasteMemory survives concurrent hydrateFeedTuning and Settings
         });
       }
       if (s.includes('/api/project_settings')) return jsonResponse({});
-      if (s.includes('/api/openhands/server')) return jsonResponse({ running: false, port: 8091 });
       return jsonResponse({});
     };
 

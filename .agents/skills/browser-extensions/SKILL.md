@@ -2,7 +2,7 @@
 name: browser-extensions
 title: Browser Extensions & Sanctuary Gecko Host
 description: Build and debug Manifest V3 WebExtensions (Chrome & Firefox) and Sanctuary's embedded Gecko desktop host components safely.
-triggers: extension, webextension, manifest.json, content script, service worker, background script, side panel, gecko, tabbrowser, SanctuaryWindowHost, omni.ja
+triggers: [extension, webextension, manifest.json, content script, service worker, background script, side panel, gecko, tabbrowser, SanctuaryWindowHost, omni.ja]
 ---
 # Browser Extensions & Gecko Host Best Practices
 

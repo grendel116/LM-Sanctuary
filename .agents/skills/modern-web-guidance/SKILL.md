@@ -2,7 +2,7 @@
 name: modern-web-guidance
 title: Modern Web Guidance
 description: Search and retrieve up-to-date Chrome, Firefox, Edge, and MDN web platform best practices before implementing HTML, CSS, accessibility, security, or client-side JS features.
-triggers: html, css, dom, modal, dialog, popover, accordion, details, dark mode, accessibility, aria, csp, sanitize, iframe, form, web component, animation
+triggers: [html, css, dom, modal, dialog, popover, accordion, details, dark mode, accessibility, aria, csp, sanitize, iframe, form, web component, animation]
 ---
 # Modern Web Guidance
 

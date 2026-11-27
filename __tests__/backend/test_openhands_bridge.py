@@ -56,6 +56,7 @@ def verify_in_process_architecture_and_cleanup() -> None:
     ):
         assert utils_mod._normalize_tool_name(alias) == "delegate_coding", alias
 
+    assert openhands_harness.GitBashTerminalTool.name == "terminal"
     assert openhands_harness.resolve_openhands_model("auto") == ("glm-5.3", "openai/glm-5.3")
     assert openhands_harness.resolve_openhands_model("flash") == ("glm-5.3-flash", "openai/glm-5.3-flash")
     assert openhands_harness.resolve_openhands_model("kimi") == ("kimi-k3.1-pro", "openai/kimi-k3.1-pro")
@@ -84,8 +85,29 @@ def verify_readonly_action_and_skills_filtering() -> None:
     disabled = openhands_harness.compute_disabled_project_skills(
         str(REPO_ROOT), "Fix Python backend bug in runner.py", focus_path="sanctuary/runners/runner.py"
     )
-    assert "sanctuary_architecture" not in disabled
     assert "sanctuary-architecture" not in disabled
+
+    from openhands.sdk.skills import load_project_skills
+
+    loaded_names = {s.name for s in load_project_skills(str(REPO_ROOT))}
+    for expected in (
+        "browser-extensions",
+        "git-and-forge",
+        "modern-web-guidance",
+        "multi-agent-workflow",
+        "sanctuary-architecture",
+    ):
+        assert expected in loaded_names, f"Missing project skill {expected} in {sorted(loaded_names)}"
+    assert "gemini:sanctuary/core/programs/sebile" not in loaded_names
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        ps = Path(tmpdir) / "project_settings.json"
+        ps.write_text(json.dumps({"routing_policy": "auto", "openhands_model": "glm-5.3"}), encoding="utf-8")
+        try:
+            openhands_harness.resolve_v1_config(model="llm/foo.gguf", settings_path=str(ps))
+            raise AssertionError("Expected ValueError for .gguf model under non-local_only routing_policy")
+        except ValueError:
+            pass
 
 
 def verify_plan_readonly_ask_always_and_isolate_worktree() -> None:

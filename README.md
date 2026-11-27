@@ -16,7 +16,7 @@ Chats, memories, bookmarks, and passwords stay on your hardware. Local, federate
 
 * **Social feeds you control** — Read and post on Mastodon and the Fediverse; optionally crosspost to Bluesky and Threads. **Following** stays in time order. The **Feed** tab ranks posts locally: Bluesky custom feeds, #hashtags, trusted servers, Interested / Not Interested, export as JSON. All notifications in one place.
 * **Local AI chat, voice & creative tools** — Chat or voice-call AI Programs on your PC, generate images locally, keep quests and journals, import SillyTavern cards and lorebooks.
-* **Coding & web research** — Your AI can search the web, read pages, edit files, and run commands. By default (**Always Ask**), nothing touches your project without your OK.
+* **Coding & web research** — Your AI can search the web, read pages, plan changes (`/plan`), edit files, and run commands via the built-in OpenHands + Git Bash harness. By default (**Always Ask**), nothing touches your project without your OK.
 * **Private browser & one-password vault** — Split view, reader mode, ad & tracker blocking, encrypted bookmarks. Lock logins, social accounts, chats, journals, and cloud keys behind one master password in a `.kdbx` vault (KeePassXC / KeePassDX compatible).
 
 ---
@@ -45,7 +45,7 @@ python sanctuary/app.py       # Web server at http://localhost:5000
 
 * **Chat models**: `.gguf` files in `sanctuary/models/llm/` (LM Studio models auto-detected).
 * **Image models**: Stable Diffusion / SDXL checkpoints in `sanctuary/models/checkpoints/`.
-* **Cloud fallback**: add an OpenAI-compatible endpoint and key in **Settings → Project**.
+* **Cloud `/v1` & coding**: add any OpenAI-compatible `/v1` endpoint and key in **Settings → Project** for automatic gear-shifting and OpenHands coding.
 
 | Model | File | VRAM | Best For |
 | :--- | :--- | :--- | :--- |

@@ -312,12 +312,25 @@ class TestRunnerEndToEndInProcessOpenHands(unittest.TestCase):
             ):
                 adapter = StubAdapter(runner, "e2e")
                 final_text, all_tcs, _ = asyncio.run(
-                    runner._execute_local_llm_loop("e2e", adapter, "local-llm", "", "", "Fix GREETING in hello.py", "inv_1")
+                    runner._execute_local_llm_loop(
+                        "e2e",
+                        adapter,
+                        "llm/Gemma-4-31B-Abliterated-Uncensored.i1-Q4_K_M.gguf",
+                        "",
+                        "",
+                        "Fix GREETING in hello.py",
+                        "inv_1",
+                    )
                 )
                 self.assertIn("Updated hello.py", final_text)
                 self.assertEqual(target.read_text(encoding="utf-8"), "GREETING = 'new'\n")
+                self.assertEqual(openhands_harness.GitBashTerminalTool.name, "terminal")
+                self.assertEqual(seen_payloads[0]["model"], "glm-5.3")
+                self.assertEqual(seen_payloads[0].get("reasoning_effort"), "medium")
                 tool_names = [tc["name"] for tc in all_tcs if tc.get("type") == "call"]
                 self.assertEqual(tool_names, ["openhands:file_editor", "openhands:file_editor", "openhands:terminal", "openhands:finish"])
+                term_resp = next(tc["response"] for tc in all_tcs if tc.get("type") == "response" and tc.get("name") == "openhands:terminal")
+                self.assertNotIn("not found", term_resp.lower())
         finally:
             srv.shutdown()
             srv.server_close()

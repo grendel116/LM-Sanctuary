@@ -186,17 +186,6 @@ test('UserModal and SettingsModal use classic native <dialog> without ARIA dialo
         { status: 200, headers: { 'content-type': 'application/json' } }
       );
     }
-    if (u.includes('/api/openhands/server')) {
-      return new Response(
-        JSON.stringify({
-          running: false,
-          port: 8091,
-          openai_base_url: 'http://127.0.0.1:8091/v1',
-          model_id: 'openhands_greenpt',
-        }),
-        { status: 200, headers: { 'Content-Type': 'application/json' } }
-      );
-    }
     if (u.includes('/api/project_settings')) {
       return new Response(
         JSON.stringify({
@@ -206,9 +195,6 @@ test('UserModal and SettingsModal use classic native <dialog> without ARIA dialo
           greenpt_api_key: '',
           greenpt_base_url: 'https://api.greenpt.ai/v1',
           openhands_model: 'glm-5.3',
-          openhands_mode: 'cli',
-          openhands_server_port: 8091,
-          openhands_auto_start_server: false,
           search_engine: 'web_crawling',
           tts_voice: 'af_heart',
         }),
@@ -307,8 +293,7 @@ test('UserModal and SettingsModal use classic native <dialog> without ARIA dialo
     const apiKeyInput = settingsDialog.querySelector('#project-greenpt-api-key');
     const baseUrlInput = settingsDialog.querySelector('#project-greenpt-base-url');
     const modelInput = settingsDialog.querySelector('#project-openhands-model');
-    const modeSelect = settingsDialog.querySelector('#project-openhands-mode');
-    assert.ok(apiKeyInput && baseUrlInput && modelInput && modeSelect);
+    assert.ok(apiKeyInput && baseUrlInput && modelInput);
     assert.equal(apiKeyInput.type, 'password');
 
     apiKeyInput.value = 'sk_greenpt_test_saved_key';
@@ -317,8 +302,6 @@ test('UserModal and SettingsModal use classic native <dialog> without ARIA dialo
     baseUrlInput.dispatchEvent(new Event('change'));
     modelInput.value = 'glm-5.3-flash';
     modelInput.dispatchEvent(new Event('change'));
-    modeSelect.value = 'server';
-    modeSelect.dispatchEvent(new Event('change'));
     await new Promise((r) => setTimeout(r, 25));
 
     const projectBodies = savedBodies
@@ -326,10 +309,9 @@ test('UserModal and SettingsModal use classic native <dialog> without ARIA dialo
       .map((b) => JSON.parse(b.body));
     assert.ok(projectBodies.some((p) => p.greenpt_api_key === 'sk_greenpt_test_saved_key'));
     assert.ok(projectBodies.some((p) => p.greenpt_base_url === 'https://api.us.greenpt.ai/v1'));
-    assert.ok(projectBodies.some((p) => p.openhands_model === 'glm-5.3-flash'));
     assert.ok(
       projectBodies.some(
-        (p) => p.openhands_mode === 'server' && !Object.prototype.hasOwnProperty.call(p, 'greenpt_api_key')
+        (p) => p.openhands_model === 'glm-5.3-flash' && !Object.prototype.hasOwnProperty.call(p, 'greenpt_api_key')
       )
     );
 

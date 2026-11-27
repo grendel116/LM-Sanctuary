@@ -2,7 +2,7 @@
 name: sanctuary-architecture
 title: LM-Sanctuary Architecture & Customizations
 description: Core architectural map, Root Code Focus rules, OpenAI-compatible /v1 compliance, and skill/subagent conventions for LM-Sanctuary.
-triggers: sanctuary, cloud, skill.md, databank, runner.py, openhands_job, MessageRow, programThread
+triggers: [sanctuary, cloud, skill.md, databank, runner.py, openhands_harness, MessageRow, programThread]
 ---
 # LM-Sanctuary Architecture Guide
 

@@ -2,7 +2,7 @@
 name: git-and-forge
 title: Git & Cooperative Code Forges
 description: Safe local git operations and remote forge workflows across GitHub (gh) and Forgejo/Codeberg/Gitea (tea / REST) with explicit user confirmation.
-triggers: git, commit, branch, pull request, pr, merge, github, gh, codeberg, forgejo, gitea, tea, push, diff
+triggers: [git, commit, branch, pull request, pr, merge, github, gh, codeberg, forgejo, gitea, tea, push, diff]
 ---
 # Git & Cooperative Code Forges
 

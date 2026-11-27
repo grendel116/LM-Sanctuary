@@ -5,14 +5,12 @@ import { formatApiErrorMessage } from '../../queries/fetch/fetchWrapper.js';
 import {
   browseKeePassXCFile,
   browseWorkspaceFolder,
-  controlOpenHandsServer,
   deleteKeePassXCEntry,
   exportKeePassXCVaultUrl,
   fetchKeePassXCEntries,
   fetchKeePassXCLogins,
   fetchKeePassXCStatus,
   fetchNativeModels,
-  fetchOpenHandsServerStatus,
   fetchProjectSettings,
   loadNativeLlm,
   lockKeePassXC,
@@ -204,7 +202,6 @@ export function openSettingsModal({
   let nodeStatusRefs = null;
   let currentTemp = Number.isFinite(Number(temperature)) ? Number(temperature) : 0.95;
   let nativeInfo = null;
-  let openHandsServerInfo = null;
   let vaultStatus = null;
   let vaultEntries = { logins: [], api_keys: [] };
   let vaultFeedback = '';
@@ -220,9 +217,6 @@ export function openSettingsModal({
     cloud_fast_model: '',
     cloud_vision_model: '',
     cloud_private_model: '',
-    openhands_mode: 'auto',
-    openhands_server_port: 8091,
-    openhands_auto_start_server: false,
     searxng_url: '',
     browser_search_engine: '',
     browser_custom_search_url: '',
@@ -1274,7 +1268,7 @@ export function openSettingsModal({
     const modelRow = makeSettingRow(
       'project-openhands-model',
       'OpenHands Coding Model',
-      'Lead coding model (researcher and verifier subagents tier to flash when supported).',
+      'Lead model for the in-process OpenHands coding harness (researcher/verifier subagents use the fast model when available).',
       modelWrap,
     );
 
@@ -1312,101 +1306,6 @@ export function openSettingsModal({
       visionModelIn,
     );
 
-    const ohModeSelect = doc.createElement('select');
-    ohModeSelect.id = 'project-openhands-mode';
-    ohModeSelect.className = 'onboarding-input';
-    ohModeSelect.style.width = '200px';
-    [
-      ['auto', 'Auto (Warm Server or CLI)'],
-      ['cli', 'Headless CLI Subprocess'],
-      ['server', 'OpenHands HTTP Server (/v1)'],
-    ].forEach(([val, label]) => {
-      const opt = doc.createElement('option');
-      opt.value = val;
-      opt.textContent = label;
-      ohModeSelect.appendChild(opt);
-    });
-    ohModeSelect.value = ['auto', 'cli', 'server'].includes(projectSettings.openhands_mode)
-      ? projectSettings.openhands_mode
-      : 'auto';
-    ohModeSelect.addEventListener('change', async () => {
-      const nextMode = ['auto', 'cli', 'server'].includes(ohModeSelect.value)
-        ? ohModeSelect.value
-        : 'auto';
-      await patchProjectSettings({ openhands_mode: nextMode });
-    });
-    const ohModeRow = makeSettingRow(
-      'project-openhands-mode',
-      'OpenHands Execution Mode',
-      'Auto uses the warm /v1 server if running, otherwise an isolated headless CLI worker.',
-      ohModeSelect,
-    );
-
-    const serverControls = doc.createElement('div');
-    serverControls.style.display = 'flex';
-    serverControls.style.alignItems = 'center';
-    serverControls.style.gap = '8px';
-    serverControls.style.flexWrap = 'wrap';
-    serverControls.style.justifyContent = 'flex-end';
-
-    const autoStartLbl = doc.createElement('label');
-    autoStartLbl.style.display = 'inline-flex';
-    autoStartLbl.style.alignItems = 'center';
-    autoStartLbl.style.gap = '4px';
-    autoStartLbl.style.fontSize = '12px';
-    const autoStartChk = doc.createElement('input');
-    autoStartChk.type = 'checkbox';
-    autoStartChk.id = 'project-openhands-auto-start';
-    autoStartChk.checked = Boolean(projectSettings.openhands_auto_start_server);
-    autoStartChk.addEventListener('change', async () => {
-      await patchProjectSettings({ openhands_auto_start_server: Boolean(autoStartChk.checked) });
-    });
-    const autoStartTxt = doc.createElement('span');
-    autoStartTxt.textContent = 'Auto-start';
-    autoStartLbl.append(autoStartChk, autoStartTxt);
-
-    const serverToggleBtn = doc.createElement('button');
-    serverToggleBtn.type = 'button';
-    serverToggleBtn.id = 'openhands-server-toggle-btn';
-    serverToggleBtn.className = 'pill-btn-subtle';
-
-    const serverRow = makeSettingRow(
-      'project-openhands-auto-start',
-      'OpenHands HTTP Server (/v1)',
-      '',
-      serverControls,
-      'openhands-server-status',
-    );
-    const serverSubEl = serverRow._subEl;
-
-    const renderServerStatus = () => {
-      const port = openHandsServerInfo?.port || projectSettings.openhands_server_port || 8091;
-      const isRunning = Boolean(openHandsServerInfo?.running);
-      const endpoint = openHandsServerInfo?.openai_base_url || `http://127.0.0.1:${port}/v1`;
-      const modelId = openHandsServerInfo?.model_id || 'openhands_greenpt';
-      serverSubEl.textContent = isRunning
-        ? `Running · ${endpoint} (${modelId})`
-        : `Stopped · port ${port}`;
-      serverToggleBtn.textContent = isRunning ? 'Stop Server' : 'Start Server';
-    };
-    renderServerStatus();
-
-    serverToggleBtn.addEventListener('click', async () => {
-      const isRunning = Boolean(openHandsServerInfo?.running);
-      serverToggleBtn.disabled = true;
-      serverSubEl.textContent = isRunning ? 'Stopping server...' : 'Starting server...';
-      try {
-        const res = await controlOpenHandsServer(isRunning ? 'stop' : 'start');
-        if (res && typeof res === 'object') openHandsServerInfo = res;
-      } catch (err) {
-        serverSubEl.textContent = `Error: ${err?.message || 'request failed'}`;
-      } finally {
-        serverToggleBtn.disabled = false;
-        renderServerStatus();
-      }
-    });
-    serverControls.append(autoStartLbl, serverToggleBtn);
-
     const advDetails = doc.createElement('details');
     advDetails.className = 'advanced-openhands-disclosure';
     advDetails.style.marginTop = '8px';
@@ -1414,7 +1313,7 @@ export function openSettingsModal({
     advSummary.className = 'classic-card-subtext';
     advSummary.style.cssText = 'cursor: pointer; user-select: none; padding: 6px 0; font-weight: 500;';
     advSummary.textContent = 'Advanced OpenHands & Model Overrides';
-    advDetails.append(advSummary, modelRow, fastModelRow, visionModelRow, ohModeRow, serverRow);
+    advDetails.append(advSummary, modelRow, fastModelRow, visionModelRow);
 
     progBlock.append(ph, secRow, revRow, apiKeyRow, baseUrlRow, routingRow, advDetails);
 
@@ -2138,10 +2037,9 @@ export function openSettingsModal({
   async function loadNodeData() {
     if (connectionStore.get().mode !== 'online') return;
     try {
-      const [nat, proj, ohSrv, vStat] = await Promise.all([
+      const [nat, proj, vStat] = await Promise.all([
         Promise.resolve().then(() => fetchNativeModels()).catch(() => null),
         Promise.resolve().then(() => fetchProjectSettings()).catch(() => null),
-        Promise.resolve().then(() => fetchOpenHandsServerStatus()).catch(() => null),
         Promise.resolve().then(() => fetchKeePassXCStatus()).catch(() => null),
       ]);
       if (closed) return;
@@ -2157,7 +2055,6 @@ export function openSettingsModal({
           if (!dirtyFields.has(k)) projectSettings[k] = v;
         }
       }
-      if (ohSrv && !ohSrv.error) openHandsServerInfo = ohSrv;
       renderBody();
     } catch {
       // Non-fatal in offline/dormant state

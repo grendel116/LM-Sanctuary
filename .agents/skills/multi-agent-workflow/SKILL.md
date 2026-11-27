@@ -2,7 +2,7 @@
 name: multi-agent-workflow
 title: Multi-Agent Swarm & Staged Workflows
 description: Coordinate parallel or staged multi-agent software engineering using OpenHands TaskToolSet subagents, shared Markdown boards, and git worktrees.
-triggers: swarm, subagent, parallel, workflow, pipeline, fan out, multi-agent, researcher, implementer, verifier, worktree
+triggers: [swarm, subagent, parallel, workflow, pipeline, fan out, multi-agent, researcher, implementer, verifier, worktree]
 ---
 # Multi-Agent Swarm & Staged Workflows
 

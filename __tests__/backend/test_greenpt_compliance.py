@@ -192,17 +192,17 @@ def verify_all_skills_are_greenpt_and_agentskills_compliant() -> None:
     # Verify ported open-source workspace skills for OpenHands
     ws_skills_root = REPO_ROOT / ".agents" / "skills"
     expected_ws_skills = {
-        "modern_web_guidance",
-        "browser_extensions",
-        "multi_agent_workflow",
-        "git_and_forge",
-        "sanctuary_architecture",
+        "modern-web-guidance",
+        "browser-extensions",
+        "multi-agent-workflow",
+        "git-and-forge",
+        "sanctuary-architecture",
     }
     for sname in expected_ws_skills:
         sfile = ws_skills_root / sname / "SKILL.md"
         assert sfile.is_file(), f"Missing workspace skill: {sfile}"
         meta, body = skill_retriever._parse_skill_frontmatter(sfile.read_text(encoding="utf-8"))
-        assert meta.get("name") in (sname, sname.replace("_", "-"))
+        assert meta.get("name") == sname
         assert 1 <= len(meta.get("description", "")) <= 500
         assert len(body) >= 50
         assert "gstatic.com" not in body
@@ -236,10 +236,13 @@ def verify_greenpt_endpoints_and_fallbacks() -> None:
             encoding="utf-8",
         )
 
+        from utils import social_vault
+
         with (
             mock.patch.object(v1_client, "_SETTINGS_PATH", str(settings_file)),
             mock.patch.object(v1_client, "_SKILL_SYNC_CACHE_PATH", str(sync_cache_file)),
             mock.patch.object(v1_client, "supports_coop_extensions", return_value=True),
+            mock.patch.object(social_vault, "DATA_DIR", tmp / "vault_data"),
         ):
             v1_client.clear_quota_cooldown()
 
@@ -379,24 +382,10 @@ def verify_subagent_tiering_auto_mode_and_user_choice_escalation() -> None:
         def _run_escalated_decide():
             token = tools_mod.current_session_id.set("choice_sess")
             try:
-                with mock.patch("requests.post") as m_post:
-                    m_post.return_value = mock.Mock(
-                        status_code=200,
-                        json=lambda: {
-                            "choices": [
-                                {"message": {"content": "[ESCALATE_TO_USER] Let Davy pick the forge."}}
-                            ]
-                        },
-                    )
-                    decision_box["result"] = openhands_job._sebile_decide(
-                        question="Which forge should we push to?",
-                        options=["Codeberg (coop)", "GitHub"],
-                        kind="ask_user",
-                        program_id="sebile",
-                        cwd=str(tmp),
-                        instruction="Configure git remote",
-                        config=lead_cfg,
-                    )
+                decision_box["result"] = tools_mod.request_user_choice(
+                    question="Which forge should we push to?",
+                    options=["Codeberg (coop)", "GitHub"],
+                )
             finally:
                 tools_mod.current_session_id.reset(token)
 
@@ -424,9 +413,9 @@ def verify_subagent_tiering_auto_mode_and_user_choice_escalation() -> None:
 
         t.join(timeout=5.0)
         assert decision_box.get("result") == {
-            "action": "answer",
+            "status": "approved",
             "option_index": 0,
-            "text": "Codeberg (coop)",
+            "answer_text": "Codeberg (coop)",
         }
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -447,11 +436,14 @@ def verify_quest_scheduler_and_cron() -> None:
         (prog_dir / "sebile.json").write_text("{}", encoding="utf-8")
         fired: list[tuple] = []
 
+        from utils import social_vault
+
         with (
             mock.patch.object(quest_manager, "PROGRAMS_DIR", str(tmp)),
             mock.patch("core.quest_manager.get_active_program", return_value="sebile"),
             mock.patch("runners.program.get_active_program", return_value="sebile"),
             mock.patch("runners.program.get_active_session", return_value="default"),
+            mock.patch.object(social_vault, "DATA_DIR", tmp / "vault_data"),
         ):
             past_due = base - timedelta(minutes=5)
             q = quest_manager.add_quest(

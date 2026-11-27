@@ -22,7 +22,7 @@ LM-Sanctuary is sovereign free software combining LM-Sanctuary's Fediverse/compa
   - `Cropper.js` (`web/assets/vendor/cropper.min.js`): `MIT` (Copyright (c) 2015–present, Chen Fengyuan)
   - `Highlight.js` (`web/assets/vendor/highlight.min.js`): `BSD-3-Clause` (Copyright (c) 2006–2023, Highlight.js contributors)
   - `@capacitor/*`: `MIT`
-  - Workspace skill `.agents/skills/modern_web_guidance`: `Apache-2.0` / `CC-BY-4.0`
+  - Workspace skill `.agents/skills/modern-web-guidance`: `Apache-2.0` / `CC-BY-4.0`
 
 ## Attribution & Non-Affiliation Notice
 

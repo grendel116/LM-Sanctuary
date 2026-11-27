@@ -354,6 +354,8 @@ def _build_bash_tool_description(working_dir: str) -> str:
 class GitBashTerminalTool(TerminalTool):
     """OpenHands TerminalTool backed by GitBashTerminalExecutor."""
 
+    name = "terminal"
+
     @classmethod
     def create(
         cls,
@@ -531,6 +533,8 @@ def register_sanctuary_openhands_tools() -> None:
     """Register GitBashTerminalTool (`terminal`) and Sanctuary web/plan tools with OpenHands SDK."""
     global _TOOLS_REGISTERED
     with _REG_LOCK:
+        if _TOOLS_REGISTERED:
+            return
         # Ensure built-in OpenHands tool modules are imported before overriding `terminal`
         _ = (FileEditorTool.name, GrepTool.name, GlobTool.name, AskUserTool.name, TaskToolSet.name)
         register_tool(TerminalTool.name, GitBashTerminalTool)
@@ -606,6 +610,8 @@ def resolve_v1_config(
     base_url = v1_cfg["base_url"]
 
     clean_model = (model or "").strip()
+    if routing_policy != "local_only" and clean_model.lower().endswith(".gguf"):
+        raise ValueError(f"Refusing to send local GGUF model '{clean_model}' to Cloud /v1 endpoint {base_url}")
     is_auto_model = not clean_model or clean_model.lower() in ("auto", "default")
     clean_sub = (subagent or "").strip().lower()
 
@@ -700,16 +706,17 @@ def build_openhands_llms(
             temperature=temperature,
             reasoning_effort=None,
             capability_overrides={"supports_reasoning_effort": False, "supports_responses_api": False},
-            log_completions=False,
+            log_completions_to_file=False,
         )
         return llm, llm
 
     raw_deep = cfg["raw_model"]
     deep_info = v1_client.get_v1_model_info(raw_deep)
     deep_re = "medium" if _supports_reasoning(raw_deep, deep_info) else None
-    deep_caps: dict[str, Any] = {"supports_responses_api": False}
-    if deep_re is None:
-        deep_caps["supports_reasoning_effort"] = False
+    deep_caps: dict[str, Any] = {
+        "supports_responses_api": False,
+        "supports_reasoning_effort": deep_re is not None,
+    }
 
     deep_llm = LLM(
         model=cfg["litellm_model"],
@@ -722,7 +729,7 @@ def build_openhands_llms(
         temperature=temperature,
         reasoning_effort=deep_re,
         capability_overrides=deep_caps,
-        log_completions=False,
+        log_completions_to_file=False,
     )
 
     fast_litellm = (cfg.get("fast_litellm_model") or "").strip()
@@ -730,9 +737,10 @@ def build_openhands_llms(
         raw_fast = fast_litellm.split("/", 1)[-1]
         fast_info = v1_client.get_v1_model_info(raw_fast)
         fast_re = "low" if _supports_reasoning(raw_fast, fast_info) else None
-        fast_caps: dict[str, Any] = {"supports_responses_api": False}
-        if fast_re is None:
-            fast_caps["supports_reasoning_effort"] = False
+        fast_caps: dict[str, Any] = {
+            "supports_responses_api": False,
+            "supports_reasoning_effort": fast_re is not None,
+        }
         fast_llm = LLM(
             model=fast_litellm,
             api_key=api_key,
@@ -744,7 +752,7 @@ def build_openhands_llms(
             temperature=temperature,
             reasoning_effort=fast_re,
             capability_overrides=fast_caps,
-            log_completions=False,
+            log_completions_to_file=False,
         )
     else:
         fast_llm = deep_llm
@@ -756,8 +764,12 @@ def build_openhands_llms(
 # --- Subagents, Skills, & Read-Only Action Policy ---
 
 
+_ACTIVE_FAST_MODEL: str = ""
+
+
 def register_sanctuary_subagents(cwd: str, fast_model: str = "") -> list[str]:
     """Register project, Sanctuary built-in, user, and SDK default subagents."""
+    global _ACTIVE_FAST_MODEL
     register_sanctuary_openhands_tools()
     registered: list[str] = []
     work_dir = cwd if (cwd and os.path.isdir(cwd)) else None
@@ -771,7 +783,7 @@ def register_sanctuary_subagents(cwd: str, fast_model: str = "") -> list[str]:
             ):
                 registered.append(agent_def.name)
 
-    clean_fast = (fast_model or "").strip()
+    _ACTIVE_FAST_MODEL = (fast_model or "").strip()
     for spec in _SANCTUARY_BUILTIN_SUBAGENTS:
         agent_def = AgentDefinition(
             name=spec["name"],
@@ -780,16 +792,17 @@ def register_sanctuary_subagents(cwd: str, fast_model: str = "") -> list[str]:
             system_prompt=spec["system_prompt"],
         )
         base_factory = agent_definition_to_factory(agent_def, work_dir=work_dir)
-        model_override = clean_fast if (spec.get("tier") == "fast" and clean_fast) else ""
+        is_fast_tier = spec.get("tier") == "fast"
 
-        def _make_tiered_factory(_base=base_factory, _override=model_override):
-            if not _override:
+        def _make_tiered_factory(_base=base_factory, _is_fast=is_fast_tier):
+            if not _is_fast:
                 return _base
 
             def _factory(parent_llm: Any) -> Any:
+                override = _ACTIVE_FAST_MODEL
                 tiered_llm = (
-                    parent_llm.model_copy(update={"model": _override})
-                    if getattr(parent_llm, "model", "") != _override
+                    parent_llm.model_copy(update={"model": override})
+                    if override and getattr(parent_llm, "model", "") != override
                     else parent_llm
                 )
                 return _base(tiered_llm)
@@ -859,12 +872,12 @@ def compute_disabled_project_skills(
             if line.lower().startswith("name:"):
                 skill_name = line.split(":", 1)[1].strip().strip("'\"") or entry
             elif line.lower().startswith("triggers:"):
-                raw_trigs = line.split(":", 1)[1].strip()
-                triggers = [t.strip().lower() for t in raw_trigs.split(",") if t.strip()]
+                raw_trigs = line.split(":", 1)[1].strip().strip("[]")
+                triggers = [t.strip().strip("'\"").lower() for t in raw_trigs.split(",") if t.strip().strip("'\"")]
 
-        if skill_name in ("sanctuary-architecture", "sanctuary_architecture") or not triggers:
+        if skill_name == "sanctuary-architecture" or not triggers:
             continue
-        if leaf_subagent and skill_name in ("multi-agent-workflow", "multi_agent_workflow"):
+        if leaf_subagent and skill_name == "multi-agent-workflow":
             disabled.append(skill_name)
             continue
         if not any(trig in haystack for trig in triggers):

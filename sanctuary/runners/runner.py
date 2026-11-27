@@ -1011,7 +1011,6 @@ class BaseProgramRunner:
                             oh_instruction,
                             session_id=session_id,
                             persona=persona_text,
-                            model=target_model if (target_model and target_model != "local-llm") else None,
                             tier="fast" if shift.cloud_tier == "fast" else "deep",
                             is_plan_turn=is_plan_turn,
                             has_active_plan=has_active_plan(mem_meta),
@@ -1145,18 +1144,8 @@ class BaseProgramRunner:
                             ],
                         }
                         break
-                from core.transmission import tool_bands
-
-                coding_now = transmission.coding_engaged or any(
-                    r.get("name") == "auto_programming"
-                    for r in (getattr(adapter, "matched_skill_records", None) or [])
-                )
-                vision_tools = tool_bands(
-                    write=coding_now and not is_plan_turn,
-                    plan_active=has_active_plan(mem_meta),
-                )
                 try:
-                    step_res = await _invoke_cloud_gear(vision_msgs, cloud_tier="vision", native_tools=vision_tools, timeout_s=60.0)
+                    step_res = await _invoke_cloud_gear(vision_msgs, cloud_tier="vision", native_tools=shift.native_tools, timeout_s=60.0)
                     bot_response_text = step_res.get("content", "")
                     native_tool_calls = step_res.get("tool_calls") or []
                     truncated_tool_call = bool(step_res.get("truncated_tool_call"))
@@ -1223,8 +1212,8 @@ class BaseProgramRunner:
                 bot_response_text = _drop_dangling_called_line(_strip_tool_calls(bot_response_text, matches))
                 if not bot_response_text.strip():
                     bot_response_text = (
-                        f"I hit the same tool error twice (`{transmission.strike_tracker.tripped_on}`) and stopped "
-                        "so I don't make things worse. Can you check the tool calls above?"
+                        "I hit repeated tool errors and stopped so I don't make things worse. "
+                        "Can you check the tool calls above?"
                     )
                 native_tool_calls = []
                 matches = []

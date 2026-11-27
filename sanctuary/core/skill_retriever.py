@@ -118,7 +118,7 @@ def _get_skill_registry() -> list:
 
             # Parse triggers as comma separated lowercase list
             triggers_raw = metadata.get("triggers", "")
-            triggers = [t.strip().lower() for t in triggers_raw.split(",") if t.strip()]
+            triggers = [t.strip().strip("'\"").lower() for t in triggers_raw.strip("[]").split(",") if t.strip().strip("'\"")]
 
             raw_name = metadata.get("name", os.path.basename(root))
             record = {
