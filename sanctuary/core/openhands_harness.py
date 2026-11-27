@@ -1367,6 +1367,12 @@ def register_sanctuary_openhands_tools() -> None:
     with _REG_LOCK:
         if _TOOLS_REGISTERED:
             return
+        # Strip OpenHands' 7,500-char OOC Flask tutorial from non-native tool calling prompts.
+        import openhands.sdk.llm.mixins.fn_call_converter as _fcc
+
+        _fcc.IN_CONTEXT_LEARNING_EXAMPLE_PREFIX = lambda _tools: ""
+        _fcc.IN_CONTEXT_LEARNING_EXAMPLE_SUFFIX = ""
+
         # Ensure built-in OpenHands tool modules are imported before overriding `terminal`/`grep`/`glob`
         _ = (
             FileEditorTool.name,
@@ -1457,6 +1463,34 @@ def _is_quota_error_text(text: str) -> bool:
             "out of credits",
             "quota exceeded",
             "budgetexceeded",
+        )
+    )
+
+
+def _is_cloud_baton_downshift_error(text: str) -> bool:
+    """Return True when a Cloud gear error should auto-downshift the baton to the local model."""
+    if _is_quota_error_text(text):
+        return True
+    low = (text or "").lower()
+    return any(
+        tok in low
+        for tok in (
+            "internalservererror",
+            "status_code=500",
+            "status_code=502",
+            "status_code=503",
+            "status_code=504",
+            "http 500",
+            "http 502",
+            "http 503",
+            "http 504",
+            "502 bad gateway",
+            "503 service unavailable",
+            "504 gateway timeout",
+            "apiconnectionerror",
+            "serviceunavailableerror",
+            "timeout",
+            "timed out",
         )
     )
 
@@ -1600,6 +1634,10 @@ def build_openhands_llms(
             temperature=temperature,
             reasoning_effort=None,
             capability_overrides={"supports_reasoning_effort": False, "supports_responses_api": False},
+            num_retries=1,
+            retry_min_wait=1,
+            retry_max_wait=4,
+            retry_multiplier=1.0,
             log_completions_to_file=False,
         )
         return local_llm, local_llm, local_llm
@@ -1624,6 +1662,10 @@ def build_openhands_llms(
         temperature=temperature,
         reasoning_effort=deep_re,
         capability_overrides=deep_caps,
+        num_retries=2,
+        retry_min_wait=2,
+        retry_max_wait=8,
+        retry_multiplier=2.0,
         log_completions_to_file=False,
     )
 
@@ -1648,6 +1690,10 @@ def build_openhands_llms(
             temperature=temperature,
             reasoning_effort=fast_re,
             capability_overrides=fast_caps,
+            num_retries=2,
+            retry_min_wait=2,
+            retry_max_wait=8,
+            retry_multiplier=2.0,
             log_completions_to_file=False,
         )
     else:
@@ -1669,6 +1715,10 @@ def build_openhands_llms(
             temperature=temperature,
             reasoning_effort=None,
             capability_overrides={"supports_responses_api": False, "supports_reasoning_effort": False},
+            num_retries=2,
+            retry_min_wait=2,
+            retry_max_wait=8,
+            retry_multiplier=2.0,
             log_completions_to_file=False,
         )
     elif eff_gear == "fast":
@@ -2214,9 +2264,10 @@ def run_coding_turn(
             suffix_parts.append(f"# WORKSPACE AGENTS.MD\n{agents_md}")
         if persona and persona.strip():
             suffix_parts.append(
-                "# COMPANION VOICE (apply ONLY to your final `finish` message and `ask_user` questions; "
-                "during tool calls, act as a direct, decisive software engineer — once you locate the target code, "
-                "edit it immediately with `file_editor` rather than over-exploring)\n"
+                "# COMPANION IDENTITY & VOICE (MANDATORY)\n"
+                "Stay strictly in character in every `finish` message, `ask_user` question, and direct reply. "
+                "When you locate the target code, edit it immediately with `file_editor` rather than over-exploring, "
+                "and report back in character — never as a generic assistant.\n"
                 + persona.strip()
             )
 
@@ -2237,7 +2288,10 @@ def run_coding_turn(
     )
     agent = Agent(
         llm=active_llm,
-        persona=None,
+        persona=persona.strip() or None,
+        include_default_tools=["FinishTool"],
+        security_policy_filename="",
+        system_prompt_kwargs={"llm_security_analyzer": False},
         tools=agent_tools,
         agent_context=agent_context,
         condenser=condenser,

@@ -1117,6 +1117,42 @@ class BaseProgramRunner:
                         task_query=recent_user_queries or utterance,
                     ),
                 )
+                if (
+                    shift.gear != "local"
+                    and not vault_locked
+                    and not oh_tool_calls
+                    and session_id not in cancelled_sessions
+                    and isinstance(final_response_text, str)
+                    and final_response_text.startswith("Error:")
+                    and (
+                        v1_client.is_quota_exhausted(cloud_cfg.get("api_key"))
+                        or openhands_harness._is_cloud_baton_downshift_error(final_response_text)
+                    )
+                ):
+                    print(
+                        f"[Transmission] Cloud gear '{shift.gear}' failed ({final_response_text[:120]}); "
+                        f"downshifting baton to local.",
+                        flush=True,
+                    )
+                    final_response_text, oh_tool_calls = await loop.run_in_executor(
+                        None,
+                        contextvars.copy_context().run,
+                        lambda: openhands_harness.run_turn(
+                            oh_instruction,
+                            session_id=session_id,
+                            persona=persona_text,
+                            gear="local",
+                            tool_band=shift.tool_band,
+                            matched_skills=matched_skill_names,
+                            active_story_mode=active_story_mode,
+                            is_plan_turn=is_plan_turn,
+                            has_active_plan=(has_active_plan(mem_meta) and shift.tool_band == "coding"),
+                            temperature=temperature,
+                            max_iterations=(50 if shift.tool_band == "coding" else 12),
+                            on_progress=_on_oh_progress,
+                            task_query=recent_user_queries or utterance,
+                        ),
+                    )
             except InterruptedError as cancel_exc:
                 raise asyncio.CancelledError("Session cancelled by user request.") from cancel_exc
             finally:
@@ -1232,6 +1268,23 @@ class BaseProgramRunner:
                 ),
             )
 
+        async def _invoke_local_gear(local_msgs: list[dict]) -> str:
+            local_error_msg = ""
+            local_payload = {**payload, "messages": local_msgs}
+            text = ""
+            try:
+                response = await self._post_llm_request(url, local_payload, headers, timeout=120.0, session_id=session_id)
+                if response.status_code == 200:
+                    text = response.json()["choices"][0]["message"]["content"]
+                else:
+                    local_error_msg = f"Error: [Gear local · {url}] HTTP {response.status_code}: {response.text[:300]}"
+                print(f"[DEBUG STATUS] {response.status_code}", flush=True)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                local_error_msg = f"Error: [Gear local · {url}] Could not connect to local LLM ({type(e).__name__}: {e})."
+            return text or local_error_msg or f"Error: [Gear local · {url}] Empty local LLM response."
+
         if vault_locked and shift.gear != "local":
             bot_response_text = f"Error: [Gear {shift.gear} · {cloud_cfg['base_url']}] {cloud_reason}"
         elif shift.gear == "vision" and img_data_url:
@@ -1284,22 +1337,35 @@ class BaseProgramRunner:
             except Exception as upscale_exc:
                 bot_response_text = f"Error: [Gear {shift.gear} ({cloud_tier}) · {cloud_cfg['base_url']}] {upscale_exc}"
         else:
-            local_error_msg = ""
-            local_payload = {**payload, "messages": messages}
-            try:
-                response = await self._post_llm_request(url, local_payload, headers, timeout=120.0, session_id=session_id)
-                if response.status_code == 200:
-                    bot_response_text = response.json()["choices"][0]["message"]["content"]
-                else:
-                    local_error_msg = f"Error: [Gear local · {url}] HTTP {response.status_code}: {response.text[:300]}"
-                print(f"[DEBUG STATUS] {response.status_code}", flush=True)
-            except asyncio.CancelledError:
-                raise
-            except Exception as e:
-                local_error_msg = f"Error: [Gear local · {url}] Could not connect to local LLM ({type(e).__name__}: {e})."
+            bot_response_text = await _invoke_local_gear(messages)
 
-            if not bot_response_text:
-                bot_response_text = local_error_msg or f"Error: [Gear local · {url}] Empty local LLM response."
+        if (
+            shift.gear != "local"
+            and not vault_locked
+            and not used_cloud_gear
+            and session_id not in cancelled_sessions
+            and isinstance(bot_response_text, str)
+            and bot_response_text.startswith("Error:")
+        ):
+            from core import openhands_harness as _oh_downshift
+
+            if (
+                v1_client.is_quota_exhausted(cloud_cfg.get("api_key"))
+                or _oh_downshift._is_cloud_baton_downshift_error(bot_response_text)
+            ):
+                print(
+                    f"[Transmission] Zero-tool Cloud gear '{shift.gear}' failed ({bot_response_text[:120]}); "
+                    f"downshifting baton to local.",
+                    flush=True,
+                )
+                local_messages = adapter.get_openai_messages(
+                    sys_instructions,
+                    rag_context,
+                    memory_context=memory_block,
+                    turn_directive=eff_directive,
+                    cloud_gear=False,
+                )
+                bot_response_text = await _invoke_local_gear(local_messages)
 
         bot_response_text = self._sanitize_thinking_tags(bot_response_text)
         group_meta = getattr(self, "sessions_group_meta", {}).get(session_id)

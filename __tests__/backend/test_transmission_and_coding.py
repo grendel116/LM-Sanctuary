@@ -666,6 +666,198 @@ class TestRunnerEndToEndInProcessOpenHands(unittest.TestCase):
             self.assertIn("vault locked", final_text)
             runner._post_llm_request.assert_not_called()
 
+    def _make_stub_runner(self, session_id: str, user_text: str):
+        runner = BaseProgramRunner.__new__(BaseProgramRunner)
+        runner._lock = threading.RLock()
+        runner.program_id = "sebile"
+        runner.sessions_history = {session_id: [{"id": "usr_1", "role": "user", "text": user_text}]}
+        runner.sessions_group_meta = {}
+        runner.sessions_memory_state = {}
+        runner._memory_pipeline_sessions = set()
+        runner.trigger_memory_pipeline = lambda **kw: None
+        runner._get_system_instructions = lambda sid, speaker_id=None: "You are Sebile."
+        runner._get_memory_block = lambda sid: ""
+        runner._get_turn_inversion_directive = lambda sid, inv: ""
+        runner._load_temperature_setting = lambda: 0.2
+        runner._sanitize_thinking_tags = lambda t: t or ""
+        runner._ensure_images_are_embedded = lambda t: t
+
+        class _StubAdapter:
+            matched_skill_records = []
+            _skills_retrieved = True
+            has_sensitive_context = False
+
+            def _get_chat_budget(self):
+                return 4096
+
+            def estimate_turn_tokens(self):
+                return 200
+
+            def get_latest_image_data_url(self):
+                return ""
+
+            def get_openai_messages(self, sys_inst, rag_ctx, memory_context="", turn_directive="", cloud_gear=False):
+                return [
+                    {"role": "system", "content": sys_inst},
+                    {"role": "user", "content": user_text},
+                ]
+
+            def append_assistant_message(self, text, tool_calls, inv, intermediate=False, speaker_id=None):
+                return {"id": "prgm_1", "text": text}
+
+        return runner, _StubAdapter()
+
+    def test_cloud_to_local_downshift_on_402_coding(self) -> None:
+        runner, adapter = self._make_stub_runner("s_downshift_oh", "Fix bug in app.py")
+        seen_gears: list[str] = []
+
+        def _fake_run_turn(*args, **kwargs):
+            seen_gears.append(kwargs.get("gear", ""))
+            if kwargs.get("gear") != "local":
+                return "Error: [OpenHands] APIError status_code=402: out of credits", []
+            return "*taps the console* Done.", []
+
+        with (
+            mock.patch("core.v1_client.v1_unavailable_reason", return_value=""),
+            mock.patch("core.v1_client.get_v1_settings", return_value={
+                "api_key": "sk-test-402",
+                "key_unavailable_reason": "",
+                "base_url": "https://api.greenpt.ai/v1",
+                "provider": "greenpt",
+                "routing_policy": "auto",
+                "fast_model": "gpt-oss-120b",
+                "private_model": "gpt-oss-120b",
+                "vision_model": "",
+            }),
+            mock.patch("core.program_config.is_story_mode", return_value=False),
+            mock.patch("core.transmission.score_utterance_pedals", return_value={"coding_intent": 0.9, "casual": 0.1}),
+            mock.patch.object(openhands_harness, "run_turn", side_effect=_fake_run_turn),
+        ):
+            final_text, _, _ = asyncio.run(
+                runner._execute_local_llm_loop("s_downshift_oh", adapter, "local-llm", "", "", "Fix bug in app.py", "inv_1")
+            )
+            self.assertEqual(len(seen_gears), 2)
+            self.assertIn(seen_gears[0], ("fast", "deep"))
+            self.assertEqual(seen_gears[1], "local")
+            self.assertEqual(final_text, "*taps the console* Done.")
+
+    def test_cloud_to_local_downshift_on_402_zero_tool(self) -> None:
+        from core.transmission import ShiftDecision
+
+        runner, adapter = self._make_stub_runner("s_downshift_zt", "Hey Sebile")
+        fake_resp = mock.MagicMock()
+        fake_resp.status_code = 200
+        fake_resp.json.return_value = {"choices": [{"message": {"content": "*smiles* Back on local."}}]}
+        runner._post_llm_request = mock.AsyncMock(return_value=fake_resp)
+
+        fake_shift = ShiftDecision(
+            gear="fast",
+            tool_band="none",
+            phase="direct",
+            reason="test_cloud",
+            engine_load=0.4,
+        )
+        with (
+            mock.patch("core.v1_client.v1_unavailable_reason", return_value=""),
+            mock.patch("core.v1_client.get_v1_settings", return_value={
+                "api_key": "sk-test-402",
+                "key_unavailable_reason": "",
+                "base_url": "https://api.greenpt.ai/v1",
+                "provider": "greenpt",
+                "routing_policy": "auto",
+                "fast_model": "gpt-oss-120b",
+                "private_model": "gpt-oss-120b",
+                "vision_model": "",
+            }),
+            mock.patch("core.program_config.is_story_mode", return_value=False),
+            mock.patch.object(TransmissionController, "shift", return_value=fake_shift),
+            mock.patch("core.v1_client.chat_completion_step", side_effect=RuntimeError("HTTP 402 Payment Required")),
+        ):
+            final_text, _, _ = asyncio.run(
+                runner._execute_local_llm_loop("s_downshift_zt", adapter, "local-llm", "", "", "Hey Sebile", "inv_2")
+            )
+            runner._post_llm_request.assert_awaited_once()
+            self.assertEqual(final_text, "*smiles* Back on local.")
+
+    def test_local_coding_prompt_preserves_sebile_persona_and_strips_openhands_boilerplate(self) -> None:
+        from core import program_config
+
+        persona = program_config.compile_coding_voice_instructions("sebile")
+        self.assertIn("# IDENTITY: Sebile", persona)
+        self.assertIn("<mood", persona)
+        self.assertIn("# CODING COMPANION DIRECTIVE", persona)
+
+        captured_messages: list[list[dict]] = []
+
+        class _MockLocalHandler(BaseHTTPRequestHandler):
+            def log_message(self, fmt, *a):
+                return
+
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length", "0"))
+                body = json.loads(self.rfile.read(length).decode("utf-8"))
+                captured_messages.append(body.get("messages", []))
+                reply = (
+                    "<function=finish>\n"
+                    "<parameter=message>*tilts head* Still here.</parameter>\n"
+                    "</function>"
+                )
+                resp = json.dumps({
+                    "id": "chatcmpl-local-1",
+                    "object": "chat.completion",
+                    "model": "local-test",
+                    "choices": [{"index": 0, "message": {"role": "assistant", "content": reply}, "finish_reason": "stop"}],
+                    "usage": {"prompt_tokens": 50, "completion_tokens": 20, "total_tokens": 70},
+                }).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(resp)))
+                self.end_headers()
+                self.wfile.write(resp)
+
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), _MockLocalHandler)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        tmp = Path(tempfile.mkdtemp(prefix="sebile_prompt_"))
+        ps = tmp / "project_settings.json"
+        ps.write_text(json.dumps({"routing_policy": "local_only"}), encoding="utf-8")
+        try:
+            with (
+                mock.patch.object(v1_client, "_SETTINGS_PATH", str(ps)),
+                mock.patch.object(openhands_harness, "_PROJECT_SETTINGS_PATH", str(ps)),
+                mock.patch.object(openhands_harness, "_local_openai_base_url", return_value=f"http://127.0.0.1:{srv.server_port}/v1"),
+                mock.patch("adapters.vram_orchestrator.start_llm", return_value=True),
+                mock.patch.object(tools_mod, "resolve_coding_workspace", return_value=(str(tmp), "", "")),
+                mock.patch.object(tools_mod, "get_project_folders", return_value=[str(tmp)]),
+                mock.patch.dict(os.environ, {"LOCAL_CONTEXT": "16384"}),
+            ):
+                out, _ = openhands_harness.run_turn(
+                    "Check my workspace",
+                    session_id="sebile_voice_test",
+                    persona=persona,
+                    gear="local",
+                    tool_band="coding",
+                    settings_path=str(ps),
+                )
+                self.assertIn("Still here", out)
+                self.assertTrue(captured_messages)
+                first_msgs = captured_messages[0]
+                sys_text = "\n".join(
+                    m.get("content", "") if isinstance(m.get("content"), str) else json.dumps(m.get("content"))
+                    for m in first_msgs if m.get("role") == "system"
+                )
+                user_text = "\n".join(
+                    m.get("content", "") if isinstance(m.get("content"), str) else json.dumps(m.get("content"))
+                    for m in first_msgs if m.get("role") == "user"
+                )
+                self.assertIn("# IDENTITY: Sebile", sys_text)
+                self.assertIn("# CODING COMPANION DIRECTIVE", sys_text)
+                self.assertNotIn("<SOUL>You are OpenHands agent", sys_text)
+                self.assertNotIn("--------------------- START OF EXAMPLE ---------------------", user_text)
+        finally:
+            srv.shutdown()
+            srv.server_close()
+            shutil.rmtree(tmp, ignore_errors=True)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

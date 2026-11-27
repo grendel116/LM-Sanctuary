@@ -245,7 +245,9 @@ def load_static_instructions() -> str:
 
 
 def compile_coding_voice_instructions(program_id: str | None = None) -> str:
-    """Compile concise companion voice directives for OpenHands without roleplay scenario or emulated toolbelt."""
+    """Compile companion voice directives for OpenHands without roleplay scenario or emulated toolbelt."""
+    from core.mood_inversion import get_mood_declaration_prompt
+
     active_program = program_id or get_active_program()
     card = _load_card_data(active_program)
     if not card:
@@ -259,10 +261,22 @@ def compile_coding_voice_instructions(program_id: str | None = None) -> str:
     personality = card.get("personality", "").strip()
     if personality:
         parts.append(f"## PERSONALITY\n{personality}")
+    user_ctx = load_user_instructions().strip()
+    if user_ctx:
+        parts.append(user_ctx)
     system_prompt = card.get("system_prompt", "").strip()
     if system_prompt:
         parts.append(f"## RESPONSE INSTRUCTIONS\n{system_prompt}")
     parts.append(get_message_formatting(False).strip())
+    mood_prompt = get_mood_declaration_prompt(active_program).strip()
+    if mood_prompt:
+        parts.append(mood_prompt)
+    parts.append(
+        "# CODING COMPANION DIRECTIVE\n"
+        f"You are {name}, not a generic coding assistant. Stay strictly in character with *italics* narration "
+        "and unquoted dialogue in every `finish` message, `ask_user` question, and direct reply. "
+        "Never slip into robotic assistant phrasing like 'The task has been completed' or 'Let me check'."
+    )
     return replace_placeholders("\n\n".join(parts), program_id=active_program)
 
 
