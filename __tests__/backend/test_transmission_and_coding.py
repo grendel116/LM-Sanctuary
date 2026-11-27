@@ -328,13 +328,110 @@ class TestRunnerEndToEndInProcessOpenHands(unittest.TestCase):
                 self.assertEqual(seen_payloads[0]["model"], "glm-5.3")
                 self.assertEqual(seen_payloads[0].get("reasoning_effort"), "medium")
                 tool_names = [tc["name"] for tc in all_tcs if tc.get("type") == "call"]
-                self.assertEqual(tool_names, ["openhands:file_editor", "openhands:file_editor", "openhands:terminal", "openhands:finish"])
-                term_resp = next(tc["response"] for tc in all_tcs if tc.get("type") == "response" and tc.get("name") == "openhands:terminal")
+                self.assertEqual(tool_names, ["file_editor", "file_editor", "terminal", "finish"])
+                term_resp = next(tc["response"] for tc in all_tcs if tc.get("type") == "response" and tc.get("name") == "terminal")
                 self.assertNotIn("not found", term_resp.lower())
+                user_msgs = [str(m.get("content") or "") for m in seen_payloads[0]["messages"] if m.get("role") == "user"]
+                self.assertFalse(any("# WORKSPACE AGENTS.MD" in u for u in user_msgs))
+                sys_msgs = "\n".join(str(m.get("content") or "") for m in seen_payloads[0]["messages"] if m.get("role") == "system")
+                self.assertIn("# WORKSPACE AGENTS.MD", sys_msgs)
+                self.assertIn("No pathetic building", sys_msgs)
+                self.assertNotIn("<REPO_CONTEXT>", sys_msgs)
+                disabled_for_upload = openhands_harness.compute_disabled_project_skills(
+                    str(REPO_ROOT),
+                    "Hi Sebile. Can you code an improvement on uploading images to posts for cross-posting?",
+                )
+                for unrelated in ("browser-extensions", "modern-web-guidance", "multi-agent-workflow"):
+                    self.assertIn(unrelated, disabled_for_upload)
         finally:
             srv.shutdown()
             srv.server_close()
             shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_prior_coding_turn_keeps_followup_in_openhands_until_casual_pivot(self):
+        from runners.runner import _collect_prior_coding_files, _has_prior_coding_turn
+
+        history = [
+            {"id": "first_mes_1", "role": "program", "text": "Hello!"},
+            {"id": "usr_1", "role": "user", "text": "Can you improve image resizing?"},
+            {
+                "id": "prgm_1",
+                "role": "program",
+                "text": "Should I go ahead with that?",
+                "tool_calls": [
+                    {
+                        "type": "call",
+                        "id": "c1",
+                        "name": "openhands:file_editor",
+                        "args": {"command": "view", "path": "web/app/composeModal.js"},
+                    }
+                ],
+            },
+            {"id": "usr_2", "role": "user", "text": "Yes, let's resize for Bluesky and use that for everything."},
+        ]
+        self.assertTrue(_has_prior_coding_turn(history))
+        self.assertEqual(_collect_prior_coding_files(history), ["web/app/composeModal.js"])
+
+        # Even if a failed plain-text turn landed after the coding turn, the 2nd-most-recent program turn is detected.
+        recovered_history = [
+            *history,
+            {"id": "prgm_2", "role": "program", "text": "Sorry, I had a hiccup.", "tool_calls": []},
+            {"id": "usr_3", "role": "user", "text": "Try again please"},
+        ]
+        self.assertTrue(_has_prior_coding_turn(recovered_history))
+
+        with mock.patch(
+            "core.transmission.score_utterance_pedals",
+            return_value={"coding_intent": 0.083, "urgency_or_correction": 0.131, "casual": 0.049},
+        ):
+            ctrl = TransmissionController(
+                utterance="Yes, let's resize for Bluesky and use that for everything.",
+                prior_coding_turn=True,
+            )
+            decision = ctrl.shift(
+                iteration=1,
+                estimated_tokens=600,
+                local_budget=4096,
+                has_vision_attachment=False,
+                cloud_available=True,
+            )
+            self.assertEqual(decision.gear, "openhands")
+            self.assertEqual(decision.phase, "coding")
+            self.assertFalse(decision.write_disengaged)
+
+        with mock.patch(
+            "core.transmission.score_utterance_pedals",
+            return_value={"coding_intent": 0.25, "urgency_or_correction": 0.72, "casual": 0.05},
+        ):
+            fix_ctrl = TransmissionController(
+                utterance="That broke the test, fix it",
+                prior_coding_turn=True,
+            )
+            fix_decision = fix_ctrl.shift(
+                iteration=1,
+                estimated_tokens=600,
+                local_budget=4096,
+                has_vision_attachment=False,
+                cloud_available=True,
+            )
+            self.assertEqual(fix_decision.gear, "openhands")
+
+        with mock.patch(
+            "core.transmission.score_utterance_pedals",
+            return_value={"coding_intent": -0.02, "casual": 0.90},
+        ):
+            casual_ctrl = TransmissionController(
+                utterance="Hey, how was your evening? How are you feeling tonight?",
+                prior_coding_turn=True,
+            )
+            casual_decision = casual_ctrl.shift(
+                iteration=1,
+                estimated_tokens=300,
+                local_budget=4096,
+                has_vision_attachment=False,
+                cloud_available=True,
+            )
+            self.assertEqual(casual_decision.gear, "park")
 
 
 if __name__ == "__main__":

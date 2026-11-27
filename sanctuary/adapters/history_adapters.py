@@ -471,21 +471,6 @@ class OsHistoryAdapter:
         post_injection = self._cached_post_injection
         if turn_directive:
             post_injection = f"{post_injection}\n\n{turn_directive}" if post_injection else turn_directive
-        if (
-            not story_active
-            and "# WORKSPACE AGENTS.MD" not in post_injection
-            and ("# RESEARCH PROTOCOL" in (turn_directive or "") or (cloud_gear and in_tool_loop))
-        ):
-            from core.program_config import get_program_name, load_agents_md
-
-            agents_md = load_agents_md()
-            if agents_md:
-                prog_name = get_program_name(active_prog)
-                agents_block = (
-                    f"# WORKSPACE AGENTS.MD\n{agents_md}\n\n"
-                    f"Keep your natural personality and voice as {prog_name} while following these engineering directives."
-                )
-                post_injection = f"{post_injection}\n\n{agents_block}" if post_injection else agents_block
 
         msgs = self._build_tiered_messages(
             system_content=system_content,
@@ -622,42 +607,9 @@ class OsHistoryAdapter:
                 from core.plan_state import format_coding_state_block
 
                 meta = self.runner_obj._get_memory_meta(self.session_id)
-                coding_names = {
-                    "list_dir",
-                    "read_file",
-                    "grep_search",
-                    "trace_symbol",
-                    "http_probe",
-                    "edit_file",
-                    "write_file",
-                    "run_command",
-                    "update_plan_step",
-                    "delegate_coding",
-                }
-                recent_coding = any(
-                    tc.get("name") in coding_names
-                    for m in filtered_history[-8:]
-                    for tc in (m.get("tool_calls") or [])
-                )
                 coding_block = format_coding_state_block(meta)
                 if coding_block:
                     post_blocks.append(coding_block)
-                coding_context_active = (
-                    stripped_user.lower().startswith("/plan")
-                    or recent_coding
-                    or bool(coding_block)
-                    or any(r.get("name") == "auto_programming" for r in (self.matched_skill_records or []))
-                )
-                if coding_context_active:
-                    from core.program_config import get_program_name, load_agents_md
-
-                    agents_md = load_agents_md()
-                    if agents_md:
-                        prog_name = get_program_name(active_prog)
-                        post_blocks.append(
-                            f"# WORKSPACE AGENTS.MD\n{agents_md}\n\n"
-                            f"Keep your natural personality and voice as {prog_name} while following these engineering directives."
-                        )
             except Exception as ce:
                 print(f"[plan_state] Post-injection error: {ce}", flush=True)
 

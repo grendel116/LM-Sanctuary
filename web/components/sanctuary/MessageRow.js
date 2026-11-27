@@ -762,7 +762,7 @@ function resolveFileTypeBadge(target) {
 }
 
 function summarizeTerminalCommand(rawCmd) {
-  let cmd = String(rawCmd || '').replace(/\s+/g, ' ').trim();
+  let cmd = String(rawCmd || '').replace(/\s*2>\/dev\/null\b/g, '').replace(/\s+/g, ' ').trim();
   if (!cmd) return 'command';
   cmd = cmd.replace(/^&\s+/, '');
   cmd = cmd.replace(/(?:[A-Za-z]:)?(?:[\\/][^\\/\s]+)*[\\/]python(?:\.exe)?\b/gi, 'python');
@@ -776,15 +776,29 @@ function summarizeTerminalCommand(rawCmd) {
   const pipeFirst = primary.split(/\s+\|\s+/)[0].trim();
 
   if (/^(?:Select-String|rg|grep)\b/i.test(pipeFirst)) {
-    const patMatch = pipeFirst.match(/(?:-Pattern|-e)\s+["']([^"']{1,36})["']/i)
-      || pipeFirst.match(/^(?:rg|grep)\s+(?:-[A-Za-z]+\s+)*["']([^"']{1,36})["']/i);
-    const pathMatch = pipeFirst.match(/-Path\s+["']?([^\s"';|]+)["']?/i);
-    const pat = patMatch ? patMatch[1] : '';
+    const patMatch = pipeFirst.match(/(?:-Pattern|-e)\s+["']([^"']{1,64})["']/i)
+      || pipeFirst.match(/^(?:rg|grep)\s+(?:-[A-Za-z]+\s+)*["']([^"']{1,64})["']/i);
+    let pathMatch = pipeFirst.match(/-Path\s+["']?([^\s"';|]+)["']?/i);
+    if (!pathMatch && patMatch) {
+      const afterPat = pipeFirst.slice((patMatch.index || 0) + patMatch[0].length).trim();
+      const trailMatch = afterPat.match(/^["']?([^\s"'-][^\s"']*)["']?/);
+      if (trailMatch) pathMatch = trailMatch;
+    }
+    const rawPat = patMatch ? patMatch[1].replace(/\\\\\|/g, '|').replace(/\\\|/g, '|') : '';
+    const pat = rawPat.length > 32 ? `${rawPat.slice(0, 29)}…` : rawPat;
     const fileHint = pathMatch ? formatToolTargetPath(pathMatch[1]) : '';
     if (pat) {
       return fileHint ? `search "${pat}" in ${fileHint}` : `search "${pat}"`;
     }
     return fileHint ? `search ${fileHint}` : 'search files';
+  }
+
+  const sedMatch = pipeFirst.match(/^sed\s+-n\s+["']?(\d+)(?:,(\d+))?p["']?\s+["']?([^\s"';|]+)["']?/i);
+  if (sedMatch) {
+    const start = sedMatch[1];
+    const end = sedMatch[2];
+    const fileHint = formatToolTargetPath(sedMatch[3]);
+    return `read ${fileHint}${end ? ` #L${start}-${end}` : ` #L${start}`}`;
   }
 
   if (/^(?:Get-ChildItem|ls|dir)\b/i.test(pipeFirst)) {
@@ -831,6 +845,13 @@ function parseToolResultCount(toolName, responseText) {
   if (!trimmed || trimmed === 'No search results found.' || trimmed === 'No search results found' || trimmed.startsWith('Error')) {
     return trimmed ? 0 : null;
   }
+  const foundFilesMatch = /^Found\s+(\d+)\s+file\(s\)/i.exec(trimmed);
+  if (foundFilesMatch) {
+    return Number(foundFilesMatch[1]);
+  }
+  if (/^No files found\b/i.test(trimmed)) {
+    return 0;
+  }
   try {
     if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
       const parsed = JSON.parse(trimmed);
@@ -853,18 +874,18 @@ function parseToolResultCount(toolName, responseText) {
 
 function formatToolLogDescriptor(tool, { live = false } = {}) {
   const rawName = String(tool?.name || 'tool');
-  const name = rawName.replace(/^(?:openhands|antigravity):/, '');
+  const name = rawName.replace(/^(?:openhands|antigravity):/i, '');
   const args = tool?.args || {};
   let category = 'other';
   let icon = getLogIconSvg('gear');
   let action = 'Ran';
-  let target = rawName;
+  let target = name;
   let suffix = '';
   let isMutation = true;
 
   if (name === 'file_editor') {
     const cmd = String(args.command || 'view').toLowerCase();
-    target = formatToolTargetPath(args.path || '') || rawName;
+    target = formatToolTargetPath(args.path || '') || name;
     if (cmd === 'view') {
       category = 'file';
       icon = getLogIconSvg('file');
@@ -882,9 +903,14 @@ function formatToolLogDescriptor(tool, { live = false } = {}) {
         : (isCreate ? 'Created' : 'Edited');
       const added = args.file_text
         ? String(args.file_text).split('\n').length
-        : (args.new_str ? String(args.new_str).split('\n').length : 0);
-      const removed = args.old_str ? String(args.old_str).split('\n').length : 0;
+        : (args.new_str
+          ? String(args.new_str).split('\n').length
+          : Number(args.file_lines || args.new_lines || 0));
+      const removed = args.old_str
+        ? String(args.old_str).split('\n').length
+        : Number(args.old_lines || 0);
       if (added || removed) suffix = ` +${added} -${removed}`;
+      else if (args.insert_line) suffix = ` @L${args.insert_line}`;
     }
   } else if (name === 'read_file' || name === 'view_file' || name === 'read_webpage') {
     category = 'file';
@@ -896,12 +922,44 @@ function formatToolLogDescriptor(tool, { live = false } = {}) {
     const end = args.EndLine || args.end_line || '';
     if (start && end) suffix = ` #L${start}-${end}`;
     else if (start) suffix = ` #L${start}`;
+  } else if (name === 'glob') {
+    category = 'folder';
+    icon = getLogIconSvg('folder');
+    action = live && (!tool.status || tool.status === 'running') ? 'Finding' : 'Matched';
+    const pat = String(args.pattern || '*').trim();
+    const pathHint = args.path ? ` in ${formatToolTargetPath(args.path)}` : '';
+    target = `${pat}${pathHint}`;
+    isMutation = false;
+    if (tool.response) {
+      const count = parseToolResultCount(name, tool.response);
+      if (count !== null) {
+        suffix = ` ${count} file${count === 1 ? '' : 's'}`;
+      }
+    }
   } else if (name === 'get_workspace_structure' || name === 'list_dir' || name === 'find_files') {
     category = 'folder';
     icon = getLogIconSvg('folder');
     action = live && (!tool.status || tool.status === 'running') ? 'Exploring' : 'Explored';
     target = args.path || args.DirectoryPath || args.pattern || 'workspace';
     isMutation = false;
+  } else if (name === 'grep') {
+    category = 'search';
+    icon = getLogIconSvg('search');
+    action = live && (!tool.status || tool.status === 'running') ? 'Searching' : 'Searched';
+    const cleanPat = String(args.pattern || args.query || tool.rawArgs || '').replace(/\\\\\|/g, '|').replace(/\\\|/g, '|');
+    const shortPat = cleanPat.length > 36 ? `${cleanPat.slice(0, 33)}…` : cleanPat;
+    const scopeParts = [];
+    if (args.path) scopeParts.push(`in ${formatToolTargetPath(args.path)}`);
+    if (args.include) scopeParts.push(`(${args.include})`);
+    const scope = scopeParts.length ? ` ${scopeParts.join(' ')}` : '';
+    target = shortPat ? `"${shortPat}"${scope}` : (scope.trim() || 'files');
+    isMutation = false;
+    if (tool.response) {
+      const count = parseToolResultCount(name, tool.response);
+      if (count !== null) {
+        suffix = ` ${count} file${count === 1 ? '' : 's'}`;
+      }
+    }
   } else if (
     name === 'search_codebase' ||
     name === 'grep_search' ||
@@ -923,6 +981,51 @@ function formatToolLogDescriptor(tool, { live = false } = {}) {
         suffix = ` ${count} result${count === 1 ? '' : 's'}`;
       }
     }
+  } else if (name === 'invoke_skill') {
+    category = 'file';
+    icon = getLogIconSvg('file');
+    action = live && (!tool.status || tool.status === 'running') ? 'Loading skill' : 'Loaded skill';
+    target = String(args.name || args.skill || 'skill');
+    isMutation = false;
+  } else if (name === 'task_tracker') {
+    category = 'other';
+    icon = getLogIconSvg('file');
+    action = live && (!tool.status || tool.status === 'running') ? 'Planning' : 'Updated tasks';
+    target = args.active_task
+      ? `${args.active_task}${args.task_count ? ` (${args.task_count})` : ''}`
+      : (args.task_count ? `${args.task_count} tasks` : 'task checklist');
+    isMutation = false;
+  } else if (name === 'update_plan_step') {
+    category = 'other';
+    icon = getLogIconSvg('file');
+    action = 'Plan step';
+    target = args.step !== undefined ? `#${args.step} → ${args.status || 'updated'}` : String(args.status || 'updated');
+    isMutation = false;
+  } else if (name === 'http_probe') {
+    category = 'file';
+    icon = getLogIconSvg('webpage');
+    action = live && (!tool.status || tool.status === 'running') ? 'Probing' : 'Probed';
+    target = `${String(args.method || 'GET').toUpperCase()} ${formatToolTargetPath(args.url || '') || 'endpoint'}`;
+    isMutation = false;
+  } else if (name === 'ask_user') {
+    category = 'other';
+    icon = getLogIconSvg('gear');
+    action = live && (!tool.status || tool.status === 'running') ? 'Asking' : 'Asked';
+    const q = String(args.question || 'user').trim();
+    target = q.length > 56 ? `${q.slice(0, 53)}…` : q;
+    isMutation = false;
+  } else if (name === 'think') {
+    category = 'other';
+    icon = getLogIconSvg('gear');
+    action = 'Thought';
+    target = 'reasoning step';
+    isMutation = false;
+  } else if (name === 'finish') {
+    category = 'other';
+    icon = getLogIconSvg('gear');
+    action = 'Finished';
+    target = 'response';
+    isMutation = false;
   } else if (name === 'tune_feed_algorithm') {
     category = 'edit';
     icon = getLogIconSvg('edit');
@@ -985,11 +1088,11 @@ function formatToolLogDescriptor(tool, { live = false } = {}) {
     category = 'command';
     icon = getLogIconSvg('command');
     action = live && (!tool.status || tool.status === 'running') ? 'Running' : 'Ran';
-    const cmd = String(args.command || args.CommandLine || tool.rawArgs || rawName);
+    const cmd = String(args.command || args.CommandLine || tool.rawArgs || name);
     target = summarizeTerminalCommand(cmd);
   } else if (tool.rawArgs) {
     const trimmedArgs = String(tool.rawArgs).trim();
-    target = `${rawName}(${trimmedArgs.length > 44 ? `${trimmedArgs.slice(0, 41)}...` : trimmedArgs})`;
+    target = `${name}(${trimmedArgs.length > 44 ? `${trimmedArgs.slice(0, 41)}...` : trimmedArgs})`;
   }
 
   const isRunning = Boolean(live && (!tool.status || tool.status === 'running'));

@@ -131,6 +131,10 @@ class HarnessGearingTests(unittest.TestCase):
         loaded = program_config.load_agents_md()
         self.assertIn("No pathetic building", loaded)
         self.assertNotIn("<!-- Tip:", loaded)
+        self.assertNotIn("argument-hint:", loaded)
+
+        disabled = openhands_harness.compute_disabled_project_skills(str(SANCTUARY_DIR.parent), "fix bug")
+        self.assertIn("agents", disabled)
 
         runner = BaseProgramRunner.__new__(BaseProgramRunner)
         runner.program_id = "sebile"
@@ -143,9 +147,7 @@ class HarnessGearingTests(unittest.TestCase):
         with patch("core.program_config.is_story_mode", return_value=False):
             msgs = OsHistoryAdapter(runner, "s_agents", None, None, None).get_openai_messages("sys", "", cloud_gear=True)
             joined = "\n".join(str(m.get("content") or "") for m in msgs)
-            self.assertIn("# WORKSPACE AGENTS.MD", joined)
-            self.assertIn("No pathetic building", joined)
-            self.assertIn("Keep your natural personality and voice", joined)
+            self.assertNotIn("# WORKSPACE AGENTS.MD", joined)
 
         runner.sessions_history["s_casual"] = [{"id": "usr_1", "role": "user", "text": "Good morning!"}]
         with patch("core.program_config.is_story_mode", return_value=False):

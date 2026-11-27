@@ -5,6 +5,7 @@ import { createReplyContextBlock } from '../components/PostCard.js';
 import { createClassicModalDialog, showAlert } from '../components/sanctuary/SanctuaryDialog.js';
 import { DEFAULT_AVATAR_DATA_URI } from '../constants/avatars.js';
 import { BLUESKY_MAX_GRAPHEMES, MASTODON_MAX_CHARS } from '../constants/endpoints.js';
+import { shrinkImageBlobForCrosspost } from './crosspostImageResize.js';
 import { buildSynthesizedReplyContext, toUnifiedItem } from '../core/schema/unifiedItem.js';
 import { createBskyPost, searchBskyActors, uploadBskyBlob } from '../queries/bluesky.js';
 import { searchFediverse } from '../queries/fediverse.js';
@@ -139,6 +140,14 @@ async function resolveAttachmentBlob(att) {
   return null;
 }
 
+async function resolveCrosspostAttachmentBlob(att) {
+  const blob = await resolveAttachmentBlob(att);
+  if (!blob) return null;
+  const shrunk = await shrinkImageBlobForCrosspost(blob);
+  if (shrunk === blob) return { blob, mimeType: att.mimeType || blob.type || '' };
+  return { blob: shrunk, mimeType: 'image/jpeg' };
+}
+
 /**
  * Publish a post (or multi-post thread) organically across connected networks.
  */
@@ -186,8 +195,14 @@ export async function publishOrganicPost({
 
   const preparedAttachments = [];
   for (const att of attachments) {
-    const blob = await resolveAttachmentBlob(att);
-    preparedAttachments.push({ ...att, blob });
+    const prepared = await resolveCrosspostAttachmentBlob(att);
+    if (!prepared?.blob) continue;
+    preparedAttachments.push({
+      ...att,
+      file: prepared.blob,
+      blob: prepared.blob,
+      mimeType: prepared.mimeType,
+    });
   }
 
   if (isReply) {

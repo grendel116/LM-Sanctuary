@@ -365,6 +365,85 @@ def _has_prior_turn_tool_error(history: list) -> bool:
     return False
 
 
+_CODING_TOOL_NAMES = frozenset({
+    "file_editor",
+    "grep",
+    "glob",
+    "terminal",
+    "task",
+    "task_tracker",
+    "invoke_skill",
+    "update_plan_step",
+    "delegate_coding",
+})
+
+
+def _has_prior_coding_turn(history: list) -> bool:
+    """Return True if either of the last 2 non-greeting program turns used coding tools or proposed a plan."""
+    if not history:
+        return False
+    inspected = 0
+    seen_program = False
+    for msg in reversed(history):
+        if not isinstance(msg, dict):
+            continue
+        msg_id = str(msg.get("id") or "")
+        if _is_hidden_turn_artifact(msg) or msg_id.startswith(("first_mes_", "sys_", "port_", "quest_")):
+            continue
+        role = msg.get("role")
+        if role == "user":
+            if seen_program:
+                continue
+            continue
+        if role != "program":
+            continue
+        seen_program = True
+        inspected += 1
+        if _extract_fenced_sanctuary_plan(str(msg.get("text") or "")):
+            return True
+        for tc in msg.get("tool_calls") or []:
+            if not isinstance(tc, dict):
+                continue
+            raw_name = str(tc.get("name") or "")
+            clean_name = raw_name.removeprefix("openhands:").removeprefix("antigravity:")
+            if clean_name in _CODING_TOOL_NAMES:
+                return True
+        if inspected >= 2:
+            break
+    return False
+
+
+def _collect_prior_coding_files(history: list) -> list[str]:
+    """Collect up to 12 unique file/search paths from the last 4 program turns' coding tool calls."""
+    if not history or len(history) < 2:
+        return []
+    paths: list[str] = []
+    seen: set[str] = set()
+    inspected = 0
+    for msg in reversed(history[:-1]):
+        if not isinstance(msg, dict) or msg.get("role") != "program":
+            continue
+        inspected += 1
+        for tc in msg.get("tool_calls") or []:
+            if not isinstance(tc, dict) or tc.get("type") == "response":
+                continue
+            raw_name = str(tc.get("name") or "")
+            clean_name = raw_name.removeprefix("openhands:").removeprefix("antigravity:")
+            if clean_name not in ("file_editor", "grep", "glob"):
+                continue
+            args = tc.get("args")
+            if isinstance(args, dict):
+                p = str(args.get("path") or "").strip()
+                if p and p not in seen:
+                    seen.add(p)
+                    paths.append(p)
+                    if len(paths) >= 12:
+                        return paths
+        if inspected >= 4:
+            break
+    return paths
+
+
 def _extract_fenced_sanctuary_plan(text: str) -> str:
     """Extract the body of a ```sanctuary-plan fenced block without regex."""
     lower = text.lower()
@@ -410,6 +489,7 @@ def _assess_cloud_gear_escalation(
         is_plan_turn=utterance.lower().startswith("/plan"),
         is_proceed_turn=("proceed with the implementation plan" in utterance.lower() or "[approved_sanctuary_plan]" in utterance.lower()),
         prior_tool_error=_has_prior_turn_tool_error(history),
+        prior_coding_turn=_has_prior_coding_turn(history),
         has_active_research=has_active_research,
     )
     return ctrl.throttle_tier, ctrl.throttle_reason
@@ -913,6 +993,7 @@ class BaseProgramRunner:
             is_proceed_turn=is_proceed_turn,
             active_story_mode=active_story_mode,
             prior_tool_error=_has_prior_turn_tool_error(history_now),
+            prior_coding_turn=(_has_prior_coding_turn(history_now) and not active_story_mode),
             has_active_research=bool(all_tool_calls),
             has_active_plan=(has_active_plan(mem_meta) and not active_story_mode),
             routing_policy=cloud_cfg.get("routing_policy", "auto"),
@@ -950,49 +1031,80 @@ class BaseProgramRunner:
             if cloud_reason.startswith("vault locked") and transmission.throttle_tier:
                 vault_note = "Note for this reply: Cloud research is unavailable because the Sanctuary Vault is locked; briefly tell the user to unlock the vault for cloud research."
                 eff_directive = f"{eff_directive}\n\n{vault_note}".strip() if eff_directive else vault_note
-            messages = adapter.get_openai_messages(
-                sys_instructions,
-                rag_context,
-                memory_context=memory_block,
-                turn_directive=eff_directive,
-                cloud_gear=(shift.gear != "park"),
-            )
-            if (
-                iteration == 1
-                and shift.gear != "openhands"
-                and not active_story_mode
-                and any(r.get("name") == "auto_programming" for r in (getattr(adapter, "matched_skill_records", None) or []))
-            ):
-                transmission.coding_engaged = True
-                shift = transmission.shift(
-                    iteration=iteration,
-                    estimated_tokens=est_tokens,
-                    local_budget=adapter._get_chat_budget(),
-                    has_vision_attachment=has_vision_attachment,
-                    cloud_available=not cloud_reason,
-                )
-
-            if shift.gear == "openhands":
-                from core import openhands_harness
-                from core.banned_words import replace_banned_words_async
-
-                temperature = self._load_temperature_setting()
-                oh_messages = adapter.get_openai_messages(
+            if shift.gear != "openhands":
+                messages = adapter.get_openai_messages(
                     sys_instructions,
                     rag_context,
                     memory_context=memory_block,
                     turn_directive=eff_directive,
-                    cloud_gear=(not cloud_reason),
+                    cloud_gear=(shift.gear != "park"),
                 )
-                persona_text = str(oh_messages[0].get("content") or "") if oh_messages else sys_instructions
-                prior_turns = [
-                    f"{m.get('role')}: {m.get('content')}"
-                    for m in oh_messages[1:-1]
-                    if isinstance(m.get("content"), str) and m.get("content")
-                ][-6:]
-                oh_instruction = str(oh_messages[-1].get("content") or new_message_text) if len(oh_messages) > 1 else new_message_text
+                if (
+                    iteration == 1
+                    and not active_story_mode
+                    and any(r.get("name") == "auto_programming" for r in (getattr(adapter, "matched_skill_records", None) or []))
+                ):
+                    transmission.coding_engaged = True
+                    shift = transmission.shift(
+                        iteration=iteration,
+                        estimated_tokens=est_tokens,
+                        local_budget=adapter._get_chat_budget(),
+                        has_vision_attachment=has_vision_attachment,
+                        cloud_available=not cloud_reason,
+                    )
+
+            if shift.gear == "openhands":
+                from core import openhands_harness
+                from core.banned_words import replace_banned_words_async
+                from core.plan_state import format_coding_state_block
+                from core.program_config import compile_coding_voice_instructions, replace_placeholders
+
+                temperature = self._load_temperature_setting()
+                voice_inst = compile_coding_voice_instructions(speaker_id or self.program_id)
+                persona_parts = [voice_inst.strip()] if voice_inst and voice_inst.strip() else []
+                if memory_block and memory_block.strip():
+                    persona_parts.append(memory_block.strip())
+                if turn_directive and turn_directive.strip() and not is_plan_turn:
+                    persona_parts.append(turn_directive.strip())
+                persona_text = "\n\n".join(persona_parts)
+
+                prior_turns = []
+                for m in self.sessions_history.get(session_id, [])[:-1]:
+                    if (
+                        isinstance(m, dict)
+                        and m.get("role") in ("user", "program")
+                        and not _is_hidden_turn_artifact(m)
+                        and not str(m.get("id") or "").startswith(("sys_", "port_", "quest_"))
+                    ):
+                        clean_m = replace_placeholders(str(m.get("text") or "").strip())
+                        if m.get("role") == "program" and "[list_" in clean_m:
+                            clean_m = "\n".join(
+                                ln for ln in clean_m.splitlines() if not ln.lstrip().startswith("[list_")
+                            ).strip()
+                        if clean_m:
+                            role_label = "user" if m.get("role") == "user" else "assistant"
+                            prior_turns.append(f"{role_label}: {clean_m[:2400]}")
+                prior_turns = prior_turns[-6:]
+
+                oh_instruction = replace_placeholders(new_message_text or "").strip()
+                if has_active_plan(mem_meta) or is_proceed_turn:
+                    coding_state_blk = format_coding_state_block(mem_meta)
+                    if coding_state_blk:
+                        oh_instruction = f"{coding_state_blk}\n\n{oh_instruction}"
+                prior_files = _collect_prior_coding_files(history_now)
+                prefix_blocks: list[str] = []
                 if prior_turns:
-                    oh_instruction = "Recent conversation context:\n" + "\n\n".join(prior_turns) + "\n\nCurrent request:\n" + oh_instruction
+                    prefix_blocks.append("Recent conversation context:\n" + "\n\n".join(prior_turns))
+                if prior_files:
+                    prefix_blocks.append("Previously inspected/edited paths: " + ", ".join(prior_files))
+                if prefix_blocks:
+                    oh_instruction = "\n\n".join(prefix_blocks) + "\n\nCurrent request:\n" + oh_instruction
+
+                recent_user_queries = "\n".join(
+                    str(m.get("text") or "")[:500]
+                    for m in history_now[-6:]
+                    if isinstance(m, dict) and m.get("role") == "user" and not _is_hidden_turn_artifact(m)
+                ).strip()
 
                 def _on_oh_progress(tc_pairs: list[dict]) -> None:
                     adapter.append_assistant_message("", tc_pairs, invocation_id, intermediate=True, speaker_id=speaker_id)
@@ -1016,6 +1128,7 @@ class BaseProgramRunner:
                             has_active_plan=has_active_plan(mem_meta),
                             temperature=temperature,
                             on_progress=_on_oh_progress,
+                            task_query=recent_user_queries or utterance,
                         ),
                     )
                 except InterruptedError as cancel_exc:

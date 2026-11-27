@@ -11,6 +11,7 @@ if PARENT_DIR not in sys.path:
 
 _SETTINGS_LOCK = threading.RLock()
 _settings_cache: dict | None = None
+_settings_cached_path: str = ""
 _settings_mtime: float = 0.0
 
 def _get_settings_path() -> str:
@@ -47,7 +48,7 @@ def _migrate_legacy_folders(data: dict) -> bool:
 
 
 def _load_settings() -> dict:
-    global _settings_cache, _settings_mtime
+    global _settings_cache, _settings_cached_path, _settings_mtime
     path = _get_settings_path()
     with _SETTINGS_LOCK:
         if os.path.exists(path):
@@ -55,7 +56,7 @@ def _load_settings() -> dict:
             for attempt in range(3):
                 try:
                     mtime = os.path.getmtime(path)
-                    if _settings_cache is not None and mtime == _settings_mtime:
+                    if _settings_cache is not None and _settings_cached_path == path and mtime == _settings_mtime:
                         return dict(_settings_cache)
                     with open(path, "r", encoding="utf-8") as f:
                         loaded = json.load(f)
@@ -63,6 +64,7 @@ def _load_settings() -> dict:
                         _save_settings(loaded)
                     else:
                         _settings_cache = dict(loaded)
+                        _settings_cached_path = path
                         _settings_mtime = mtime
                     return dict(_settings_cache)
                 except OSError as e:
@@ -74,13 +76,13 @@ def _load_settings() -> dict:
                     break
             if last_err is not None:
                 print(f"Error loading project settings: {last_err}")
-                if _settings_cache is not None:
+                if _settings_cache is not None and _settings_cached_path == path:
                     return dict(_settings_cache)
         return {}
 
 
 def _save_settings(settings: dict):
-    global _settings_cache, _settings_mtime
+    global _settings_cache, _settings_cached_path, _settings_mtime
     path = _get_settings_path()
     with _SETTINGS_LOCK:
         temp_path = f"{path}.{os.getpid()}.{threading.get_ident()}.tmp"
@@ -97,6 +99,7 @@ def _save_settings(settings: dict):
                         raise
                     time.sleep(0.02)
             _settings_cache = dict(settings)
+            _settings_cached_path = path
             _settings_mtime = os.path.getmtime(path)
         except Exception as e:
             print(f"Error saving project settings: {e}")

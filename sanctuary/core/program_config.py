@@ -247,6 +247,28 @@ def load_static_instructions() -> str:
     return instruction_content
 
 
+def compile_coding_voice_instructions(program_id: str | None = None) -> str:
+    """Compile concise companion voice directives for OpenHands without roleplay scenario or emulated toolbelt."""
+    active_program = program_id or get_active_program()
+    card = _load_card_data(active_program)
+    if not card:
+        return f"# IDENTITY: {active_program.title()}\n"
+
+    name = card.get("name", active_program.title())
+    parts = [f"# IDENTITY: {name}"]
+    description = card.get("description", "").strip()
+    if description:
+        parts.append(f"## CHARACTER\n{description}")
+    personality = card.get("personality", "").strip()
+    if personality:
+        parts.append(f"## PERSONALITY\n{personality}")
+    system_prompt = card.get("system_prompt", "").strip()
+    if system_prompt:
+        parts.append(f"## RESPONSE INSTRUCTIONS\n{system_prompt}")
+    parts.append(get_message_formatting(False).strip())
+    return replace_placeholders("\n\n".join(parts), program_id=active_program)
+
+
 def _format_span(seconds: float) -> str:
     """Renders a duration as a compact human span, e.g. '2 days 3 hours' or '45 minutes'."""
     minutes = int(abs(seconds) // 60)

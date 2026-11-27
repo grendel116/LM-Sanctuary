@@ -7,7 +7,9 @@ import os
 os.environ.setdefault("OPENHANDS_SUPPRESS_BANNER", "1")
 os.environ.setdefault("OH_TELEMETRY_CONSENT", "false")
 
+import fnmatch
 import json
+import shlex
 import shutil
 import subprocess
 import sys
@@ -16,6 +18,7 @@ import threading
 import time
 import uuid
 from collections.abc import Callable, Sequence
+from pathlib import Path
 from typing import Any
 
 from pydantic import Field
@@ -31,12 +34,12 @@ from openhands.sdk.subagent import (
     agent_definition_to_factory,
     get_registered_agent_definitions,
     load_project_agents,
-    load_user_agents,
     register_agent_if_absent,
 )
 from openhands.sdk.subagent.schema import AgentDefinition
 from openhands.sdk.tool import (
     Action,
+    DeclaredResources,
     Observation,
     ToolAnnotations,
     ToolDefinition,
@@ -44,10 +47,12 @@ from openhands.sdk.tool import (
 )
 from openhands.tools.ask_user import AskUserTool
 from openhands.tools.file_editor import FileEditorTool
-from openhands.tools.glob import GlobTool
-from openhands.tools.grep import GrepTool
+from openhands.tools.glob.definition import GlobAction, GlobObservation, GlobTool
+from openhands.tools.glob.impl import GlobExecutor, _expand_braces
+from openhands.tools.grep.definition import GrepAction, GrepObservation, GrepTool
 from openhands.tools.preset.default import register_builtins_agents
 from openhands.tools.task import TaskToolSet
+from openhands.tools.task_tracker import TaskTrackerTool
 from openhands.tools.terminal.definition import (
     TerminalAction,
     TerminalObservation,
@@ -390,6 +395,454 @@ class GitBashTerminalTool(TerminalTool):
         ]
 
 
+_SKIP_SEARCH_DIRS = frozenset({
+    ".git",
+    ".venv",
+    "node_modules",
+    "gecko_profile",
+    "webview_data",
+    "models",
+    "__pycache__",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".mypy_cache",
+})
+_SEARCH_TIMEOUT_SECONDS = 15.0
+_MAX_SEARCH_MATCHES = 100
+
+
+def _is_git_worktree(path: str) -> bool:
+    cur = os.path.abspath(path)
+    while True:
+        if os.path.exists(os.path.join(cur, ".git")):
+            return True
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            return False
+        cur = parent
+
+
+def _run_bounded_git(
+    args: list[str],
+    cwd: str,
+    timeout: float = _SEARCH_TIMEOUT_SECONDS,
+    session_id: str | None = None,
+    cancelled_event: threading.Event | None = None,
+) -> tuple[int, str, str]:
+    try:
+        from runners.runner import cancelled_sessions
+    except Exception:
+        cancelled_sessions = set()
+
+    deadline = time.monotonic() + max(1.0, float(timeout))
+    cancelled = False
+    timed_out = False
+
+    with tempfile.TemporaryFile() as out_f, tempfile.TemporaryFile() as err_f:
+        proc = subprocess.Popen(
+            ["git", *args],
+            cwd=cwd,
+            stdin=subprocess.DEVNULL,
+            stdout=out_f,
+            stderr=err_f,
+            **lifecycle.group_popen_kwargs(),
+        )
+        try:
+            while proc.poll() is None:
+                if (cancelled_event is not None and cancelled_event.is_set()) or (
+                    session_id and session_id in cancelled_sessions
+                ):
+                    cancelled = True
+                    lifecycle.kill_process_tree(proc)
+                    break
+                if time.monotonic() >= deadline:
+                    timed_out = True
+                    lifecycle.kill_process_tree(proc)
+                    break
+                time.sleep(0.05)
+            try:
+                proc.wait(timeout=2)
+            except Exception:
+                pass
+        finally:
+            if proc.poll() is None:
+                lifecycle.kill_process_tree(proc)
+
+        out_f.seek(0)
+        err_f.seek(0)
+        raw_out = out_f.read()
+        raw_err = err_f.read()
+
+    out_s = (raw_out or b"").decode("utf-8", errors="replace")
+    err_s = (raw_err or b"").decode("utf-8", errors="replace")
+    if cancelled:
+        return -2, "", "Cancelled by user."
+    if timed_out:
+        return -1, "", f"Search timed out after {int(timeout)}s."
+    return int(proc.returncode or 0), out_s, err_s
+
+
+def _glob_match_variants(raw_pattern: str) -> list[str]:
+    norm = str(raw_pattern or "").strip().replace("\\", "/")
+    while norm.startswith("./"):
+        norm = norm[2:]
+    if not norm:
+        norm = "*"
+
+    variants: list[str] = []
+    seen: set[str] = set()
+
+    def _add(pat: str) -> None:
+        if pat and pat not in seen:
+            seen.add(pat)
+            variants.append(pat)
+
+    for expanded in _expand_braces(norm):
+        seed = [expanded]
+        for item in list(seed):
+            if "/**/" in item:
+                seed.append(item.replace("/**/", "/"))
+            if item.startswith("**/"):
+                seed.append(item[3:])
+            if item.endswith("/**"):
+                seed.append(item[:-3] + "/*")
+        for item in seed:
+            collapsed = item.replace("**", "*")
+            _add(collapsed)
+            if "/" not in collapsed:
+                _add(f"*/{collapsed}")
+            elif not collapsed.startswith("*"):
+                _add(f"*/{collapsed}")
+    return variants
+
+
+def _matches_glob_pattern(rel_posix: str, raw_pattern: str) -> bool:
+    return any(fnmatch.fnmatchcase(rel_posix, v) for v in _glob_match_variants(raw_pattern))
+
+
+class SanctuaryGrepExecutor(ToolExecutor[GrepAction, GrepObservation]):
+    """Fast git-backed content search that honors .gitignore and skips binary/model weights."""
+
+    def __init__(self, working_dir: str) -> None:
+        self.working_dir = Path(working_dir).resolve()
+
+    def __call__(self, action: GrepAction, conversation: Any = None) -> GrepObservation:
+        try:
+            raw_target = Path(action.path).resolve() if action.path else self.working_dir
+            if raw_target.is_file():
+                cwd_dir = raw_target.parent
+                path_spec = raw_target.name
+                single_file_mode = True
+            elif raw_target.is_dir():
+                cwd_dir = raw_target
+                path_spec = "."
+                single_file_mode = False
+            else:
+                return GrepObservation.from_text(
+                    text=f"Search path '{action.path or raw_target}' does not exist",
+                    matches=[],
+                    pattern=action.pattern,
+                    search_path=str(raw_target),
+                    include_pattern=action.include,
+                    is_error=True,
+                )
+
+            clean_pat = str(action.pattern or "")
+            if not clean_pat:
+                return GrepObservation.from_text(
+                    text="Invalid regex pattern: empty pattern",
+                    matches=[],
+                    pattern=clean_pat,
+                    search_path=str(raw_target),
+                    include_pattern=action.include,
+                    is_error=True,
+                )
+
+            try:
+                from tools import tools as tools_mod
+
+                sess_id = tools_mod.current_session_id.get()
+            except Exception:
+                sess_id = None
+
+            if _is_git_worktree(str(cwd_dir)):
+                git_args = ["grep", "-H", "-n", "-E", "-I", "-i", "--untracked", "-e", clean_pat, "--", path_spec]
+            else:
+                git_args = [
+                    "grep",
+                    "--no-index",
+                    "-H",
+                    "-n",
+                    "-E",
+                    "-I",
+                    "-i",
+                    "-e",
+                    clean_pat,
+                    "--",
+                    path_spec,
+                ]
+                if not single_file_mode:
+                    git_args.extend(f":(exclude){d}" for d in sorted(_SKIP_SEARCH_DIRS))
+
+            rc, stdout, stderr = _run_bounded_git(git_args, cwd=str(cwd_dir), session_id=sess_id)
+            if rc not in (0, 1):
+                return GrepObservation.from_text(
+                    text=(stderr.strip() or f"grep failed (code {rc})"),
+                    matches=[],
+                    pattern=clean_pat,
+                    search_path=str(raw_target),
+                    include_pattern=action.include,
+                    is_error=True,
+                )
+
+            mtimes: dict[str, float] = {}
+            snippets_by_file: dict[str, list[str]] = {}
+            for raw_line in stdout.splitlines():
+                parts = raw_line.split(":", 2)
+                if len(parts) < 3 or not parts[1].isdigit():
+                    continue
+                rel_posix = parts[0].strip().replace("\\", "/")
+                while rel_posix.startswith("./"):
+                    rel_posix = rel_posix[2:]
+                if not rel_posix:
+                    continue
+                if not single_file_mode:
+                    if any(part.startswith(".") for part in rel_posix.split("/")):
+                        continue
+                    if action.include and not _matches_glob_pattern(rel_posix, action.include):
+                        continue
+                abs_path = str((cwd_dir / rel_posix).resolve())
+                if abs_path not in mtimes:
+                    if not os.path.isfile(abs_path):
+                        continue
+                    try:
+                        mtimes[abs_path] = os.path.getmtime(abs_path)
+                    except OSError:
+                        mtimes[abs_path] = float("-inf")
+                    snippets_by_file[abs_path] = []
+                file_snips = snippets_by_file[abs_path]
+                if len(file_snips) < 4:
+                    preview = parts[2].strip()[:140]
+                    file_snips.append(f"  L{parts[1]}: {preview}")
+
+            scored = sorted(
+                ((mtime, p) for p, mtime in mtimes.items()),
+                key=lambda item: item[0],
+                reverse=True,
+            )
+            truncated = len(scored) > _MAX_SEARCH_MATCHES
+            matches = [p for _, p in scored[:_MAX_SEARCH_MATCHES]]
+
+            include_info = f" (filtered by '{action.include}')" if action.include else ""
+            if not matches:
+                out = f"No files found containing pattern '{clean_pat}' in '{raw_target}'{include_info}"
+            else:
+                lines = [f"Found {len(matches)} file(s) containing pattern '{clean_pat}' in '{raw_target}'{include_info}:"]
+                for idx, abs_path in enumerate(matches):
+                    lines.append(abs_path)
+                    if idx < 25:
+                        lines.extend(snippets_by_file.get(abs_path, ()))
+                out = "\n".join(lines)
+                if truncated:
+                    out += "\n\n[Results truncated to first 100 files. Consider using a more specific pattern.]"
+
+            return GrepObservation.from_text(
+                text=out,
+                matches=matches,
+                pattern=clean_pat,
+                search_path=str(raw_target),
+                include_pattern=action.include,
+                truncated=truncated,
+            )
+        except Exception as exc:
+            return GrepObservation.from_text(
+                text=str(exc),
+                matches=[],
+                pattern=str(getattr(action, "pattern", "") or ""),
+                search_path=str(self.working_dir),
+                include_pattern=getattr(action, "include", None),
+                is_error=True,
+            )
+
+
+class SanctuaryGrepTool(GrepTool):
+    """OpenHands GrepTool backed by bounded git grep."""
+
+    name = "grep"
+
+    def declared_resources(self, action: Action) -> DeclaredResources:
+        if not isinstance(action, GrepAction):
+            raise TypeError(f"Expected GrepAction, got {type(action).__name__}")
+        return DeclaredResources(keys=(), declared=True)
+
+    @classmethod
+    def create(cls, conv_state: ConversationState) -> Sequence["SanctuaryGrepTool"]:
+        working_dir = conv_state.workspace.working_dir
+        if not os.path.isdir(working_dir):
+            raise ValueError(f"working_dir '{working_dir}' is not a valid directory")
+        return [
+            cls(
+                description=(
+                    "Fast git-aware content search tool.\n"
+                    f"Your current working directory is: {working_dir}"
+                ),
+                action_type=GrepAction,
+                observation_type=GrepObservation,
+                annotations=ToolAnnotations(
+                    title="grep",
+                    readOnlyHint=True,
+                    destructiveHint=False,
+                    idempotentHint=True,
+                    openWorldHint=False,
+                ),
+                executor=SanctuaryGrepExecutor(working_dir),
+            )
+        ]
+
+
+class SanctuaryGlobExecutor(ToolExecutor[GlobAction, GlobObservation]):
+    """Fast git-ls-files / pruned-walk globbing that never calls os.chdir()."""
+
+    def __init__(self, working_dir: str) -> None:
+        self.working_dir = Path(working_dir).resolve()
+
+    def __call__(self, action: GlobAction, conversation: Any = None) -> GlobObservation:
+        try:
+            original_pattern = str(action.pattern or "")
+            if action.path:
+                search_path = Path(action.path).resolve()
+                pattern = original_pattern
+            else:
+                extracted_path, pattern = GlobExecutor._extract_search_path_from_pattern(original_pattern)
+                search_path = extracted_path if extracted_path is not None else self.working_dir
+
+            if not search_path.is_dir():
+                return GlobObservation.from_text(
+                    text=f"Search path '{search_path}' is not a valid directory",
+                    files=[],
+                    pattern=original_pattern,
+                    search_path=str(search_path),
+                    is_error=True,
+                )
+
+            try:
+                from tools import tools as tools_mod
+
+                sess_id = tools_mod.current_session_id.get()
+            except Exception:
+                sess_id = None
+
+            if _is_git_worktree(str(search_path)):
+                rc, stdout, stderr = _run_bounded_git(
+                    ["ls-files", "--cached", "--others", "--exclude-standard"],
+                    cwd=str(search_path),
+                    session_id=sess_id,
+                )
+                if rc < 0:
+                    return GlobObservation.from_text(
+                        text=(stderr.strip() or f"glob failed (code {rc})"),
+                        files=[],
+                        pattern=original_pattern,
+                        search_path=str(search_path),
+                        is_error=True,
+                    )
+                rel_candidates = [
+                    ln.strip().replace("\\", "/").lstrip("./")
+                    for ln in stdout.splitlines()
+                    if ln.strip()
+                ]
+            else:
+                rel_candidates = []
+                for root, dirs, files in os.walk(search_path):
+                    dirs[:] = [d for d in dirs if not d.startswith(".") and d not in _SKIP_SEARCH_DIRS]
+                    for fname in files:
+                        full = Path(root) / fname
+                        try:
+                            rel_candidates.append(full.relative_to(search_path).as_posix())
+                        except ValueError:
+                            continue
+
+            allow_dot = pattern.startswith(".") or "/." in pattern
+            scored: list[tuple[float, str]] = []
+            seen_abs: set[str] = set()
+            for rel_posix in rel_candidates:
+                if not allow_dot and any(seg.startswith(".") for seg in rel_posix.split("/")):
+                    continue
+                if not _matches_glob_pattern(rel_posix, pattern):
+                    continue
+                abs_path = str((search_path / rel_posix).resolve())
+                if abs_path in seen_abs or not os.path.isfile(abs_path):
+                    continue
+                seen_abs.add(abs_path)
+                try:
+                    mtime = os.path.getmtime(abs_path)
+                except OSError:
+                    mtime = float("-inf")
+                scored.append((mtime, abs_path))
+
+            scored.sort(key=lambda item: item[0], reverse=True)
+            truncated = len(scored) > _MAX_SEARCH_MATCHES
+            files = [p for _, p in scored[:_MAX_SEARCH_MATCHES]]
+
+            if not files:
+                content = f"No files found matching pattern '{original_pattern}' in directory '{search_path}'"
+            else:
+                content = f"Found {len(files)} file(s) matching pattern '{original_pattern}' in '{search_path}':\n" + "\n".join(files)
+                if truncated:
+                    content += "\n\n[Results truncated to first 100 files. Consider using a more specific pattern.]"
+
+            return GlobObservation.from_text(
+                text=content,
+                files=files,
+                pattern=original_pattern,
+                search_path=str(search_path),
+                truncated=truncated,
+            )
+        except Exception as exc:
+            return GlobObservation.from_text(
+                text=str(exc),
+                files=[],
+                pattern=str(getattr(action, "pattern", "") or ""),
+                search_path=str(self.working_dir),
+                is_error=True,
+            )
+
+
+class SanctuaryGlobTool(GlobTool):
+    """OpenHands GlobTool backed by bounded git ls-files / pruned walk."""
+
+    name = "glob"
+
+    def declared_resources(self, action: Action) -> DeclaredResources:
+        if not isinstance(action, GlobAction):
+            raise TypeError(f"Expected GlobAction, got {type(action).__name__}")
+        return DeclaredResources(keys=(), declared=True)
+
+    @classmethod
+    def create(cls, conv_state: ConversationState) -> Sequence["SanctuaryGlobTool"]:
+        working_dir = conv_state.workspace.working_dir
+        if not os.path.isdir(working_dir):
+            raise ValueError(f"working_dir '{working_dir}' is not a valid directory")
+        return [
+            cls(
+                description=(
+                    "Fast git-aware file pattern matching tool.\n"
+                    f"Your current working directory is: {working_dir}"
+                ),
+                action_type=GlobAction,
+                observation_type=GlobObservation,
+                annotations=ToolAnnotations(
+                    title="glob",
+                    readOnlyHint=True,
+                    destructiveHint=False,
+                    idempotentHint=True,
+                    openWorldHint=False,
+                ),
+                executor=SanctuaryGlobExecutor(working_dir),
+            )
+        ]
+
+
 # --- Sanctuary in-process research & plan tools registered with OpenHands ---
 
 
@@ -405,7 +858,8 @@ class _WebSearchExecutor(ToolExecutor[WebSearchAction, WebSearchObservation]):
     def __call__(self, action: WebSearchAction, conversation: Any = None) -> WebSearchObservation:
         from tools import tools as tools_mod
 
-        out = str(tools_mod.web_search(action.query) or "")
+        fn = getattr(tools_mod.web_search, "__wrapped__", tools_mod.web_search)
+        out = str(fn(action.query) or "")
         return WebSearchObservation.from_text(out, is_error=out.startswith("Error:"))
 
 
@@ -437,7 +891,8 @@ class _ReadWebpageExecutor(ToolExecutor[ReadWebpageAction, ReadWebpageObservatio
     def __call__(self, action: ReadWebpageAction, conversation: Any = None) -> ReadWebpageObservation:
         from tools import tools as tools_mod
 
-        out = str(tools_mod.read_webpage(action.url) or "")
+        fn = getattr(tools_mod.read_webpage, "__wrapped__", tools_mod.read_webpage)
+        out = str(fn(action.url) or "")
         return ReadWebpageObservation.from_text(out, is_error=out.startswith("Error:"))
 
 
@@ -530,14 +985,23 @@ _REG_LOCK = threading.Lock()
 
 
 def register_sanctuary_openhands_tools() -> None:
-    """Register GitBashTerminalTool (`terminal`) and Sanctuary web/plan tools with OpenHands SDK."""
+    """Register GitBashTerminalTool (`terminal`), bounded `grep`/`glob`, and Sanctuary web/plan tools."""
     global _TOOLS_REGISTERED
     with _REG_LOCK:
         if _TOOLS_REGISTERED:
             return
-        # Ensure built-in OpenHands tool modules are imported before overriding `terminal`
-        _ = (FileEditorTool.name, GrepTool.name, GlobTool.name, AskUserTool.name, TaskToolSet.name)
+        # Ensure built-in OpenHands tool modules are imported before overriding `terminal`/`grep`/`glob`
+        _ = (
+            FileEditorTool.name,
+            GrepTool.name,
+            GlobTool.name,
+            TaskTrackerTool.name,
+            AskUserTool.name,
+            TaskToolSet.name,
+        )
         register_tool(TerminalTool.name, GitBashTerminalTool)
+        register_tool(GrepTool.name, SanctuaryGrepTool)
+        register_tool(GlobTool.name, SanctuaryGlobTool)
         register_tool(WebSearchTool.name, WebSearchTool)
         register_tool(ReadWebpageTool.name, ReadWebpageTool)
         register_tool(HttpProbeTool.name, HttpProbeTool)
@@ -816,14 +1280,6 @@ def register_sanctuary_subagents(cwd: str, fast_model: str = "") -> list[str]:
         ):
             registered.append(agent_def.name)
 
-    for agent_def in load_user_agents():
-        if register_agent_if_absent(
-            name=agent_def.name,
-            factory_func=agent_definition_to_factory(agent_def, work_dir=work_dir),
-            description=agent_def,
-        ):
-            registered.append(agent_def.name)
-
     registered.extend(register_builtins_agents(enable_browser=False))
     return registered
 
@@ -843,12 +1299,14 @@ def compute_disabled_project_skills(
 
     haystack = f"{task_text or ''}\n{focus_path or ''}".lower()
     leaf_subagent = (subagent_name or "").strip().lower() in ("researcher", "implementer", "verifier")
-    disabled: list[str] = []
+    # Suppress OpenHands' raw third-party `agents` <REPO_CONTEXT> dump; `run_coding_turn`
+    # injects cleaned `program_config.load_agents_md(cwd)` into `system_message_suffix`.
+    disabled: list[str] = ["agents"]
 
     try:
         entries = sorted(os.listdir(skills_dir))
     except OSError:
-        return []
+        return disabled
 
     for entry in entries:
         skill_md = os.path.join(skills_dir, entry, "SKILL.md")
@@ -889,6 +1347,10 @@ def compute_disabled_project_skills(
 _READONLY_TOOL_NAMES = frozenset({
     "grep",
     "glob",
+    "invoke_skill",
+    "think",
+    "inspect_image_with_vision",
+    "task_tracker",
     "web_search",
     "read_webpage",
     "http_probe",
@@ -898,25 +1360,92 @@ _READONLY_TOOL_NAMES = frozenset({
 })
 _READONLY_GIT_SUBCMDS = frozenset({"status", "diff", "log", "show", "branch", "rev-parse", "grep", "ls-files"})
 _READONLY_BIN_NAMES = frozenset({
-    "cd", "rg", "grep", "dir", "ls", "pwd", "cat", "head", "tail", "wc", "which", "findstr",
+    "cd", "echo", "rg", "grep", "dir", "ls", "pwd", "cat", "head", "tail", "wc", "which", "findstr",
 })
 
 
-def _is_readonly_shell_cmd(cmd: str) -> bool:
-    clean = (cmd or "").strip()
+def _split_readonly_shell_segments(cmd: str) -> list[str] | None:
+    """Split shell command on unquoted `;` and `|`, rejecting unquoted redirection or chaining."""
+    clean = (cmd or "").replace("2>/dev/null", " ").strip()
     if not clean:
-        return False
-    for bad in (">", "`", "$(", "&&", "||"):
-        if bad in clean:
-            return False
-    segments = [seg.strip() for seg in clean.replace("|", ";").split(";") if seg.strip()]
+        return None
+    segments: list[str] = []
+    buf: list[str] = []
+    in_single = False
+    in_double = False
+    escaped = False
+    i = 0
+    n = len(clean)
+    while i < n:
+        ch = clean[i]
+        if escaped:
+            buf.append(ch)
+            escaped = False
+            i += 1
+            continue
+        if ch == "\\" and not in_single:
+            buf.append(ch)
+            escaped = True
+            i += 1
+            continue
+        if ch == "'" and not in_double:
+            in_single = not in_single
+            buf.append(ch)
+            i += 1
+            continue
+        if ch == '"' and not in_single:
+            in_double = not in_double
+            buf.append(ch)
+            i += 1
+            continue
+        if not in_single and not in_double:
+            nxt = clean[i + 1] if i + 1 < n else ""
+            if ch in (">", "`"):
+                return None
+            if ch == "$" and nxt == "(":
+                return None
+            if ch == "&":
+                return None
+            if ch == "|" and nxt == "|":
+                return None
+            if ch in (";", "|"):
+                seg = "".join(buf).strip()
+                if seg:
+                    segments.append(seg)
+                buf = []
+                i += 1
+                continue
+        buf.append(ch)
+        i += 1
+    if in_single or in_double or escaped:
+        return None
+    tail = "".join(buf).strip()
+    if tail:
+        segments.append(tail)
+    return segments or None
+
+
+def _is_readonly_shell_cmd(cmd: str) -> bool:
+    segments = _split_readonly_shell_segments(cmd)
     if not segments:
         return False
     for seg in segments:
-        parts = seg.split()
+        try:
+            parts = shlex.split(seg, posix=True)
+        except ValueError:
+            return False
+        if not parts:
+            continue
         head = parts[0].lower()
         if head in _READONLY_BIN_NAMES:
             continue
+        if head == "sed":
+            flags = parts[1:]
+            has_n = "-n" in flags
+            has_inplace = any(p == "-i" or p.startswith("-i") or p.startswith("--in-place") for p in flags)
+            if has_n and not has_inplace:
+                continue
+            return False
         if head == "git" and len(parts) >= 2 and parts[1].lower() in _READONLY_GIT_SUBCMDS:
             continue
         if head in ("python", "python3") and len(parts) >= 3 and parts[1] == "-m" and parts[2] == "py_compile":
@@ -951,18 +1480,53 @@ def _summarize_action_args(tool_name: str, action: Any) -> dict[str, Any]:
         raw = {"value": str(action)}
 
     summary: dict[str, Any] = {}
-    for key in ("command", "path", "pattern", "query", "url", "subagent_type", "description", "question", "view_range", "insert_line", "step", "status"):
+    for key in (
+        "command",
+        "path",
+        "pattern",
+        "include",
+        "name",
+        "query",
+        "url",
+        "method",
+        "subagent_type",
+        "description",
+        "question",
+        "view_range",
+        "insert_line",
+        "step",
+        "status",
+        "note",
+    ):
         if key in raw and raw[key] is not None:
             val = raw[key]
             summary[key] = val[:400] if isinstance(val, str) and len(val) > 400 else val
     if tool_name == "file_editor":
-        for text_key in ("old_str", "new_str", "file_text"):
-            if text_key in raw and isinstance(raw[text_key], str):
-                summary[f"{text_key}_len"] = len(raw[text_key])
+        for text_key, line_key in (("old_str", "old_lines"), ("new_str", "new_lines"), ("file_text", "file_lines")):
+            val = raw.get(text_key)
+            if isinstance(val, str):
+                summary[f"{text_key}_len"] = len(val)
+                if val:
+                    summary[line_key] = len(val.splitlines())
+    elif tool_name == "task_tracker" and isinstance(raw.get("task_list"), list):
+        items = raw["task_list"]
+        summary["task_count"] = len(items)
+        active = next(
+            (item for item in items if isinstance(item, dict) and item.get("status") == "in_progress" and item.get("title")),
+            None,
+        )
+        if active is None:
+            active = next((item for item in items if isinstance(item, dict) and item.get("title")), None)
+        if active is not None:
+            summary["active_task"] = str(active["title"])[:120]
+    elif tool_name == "finish" and isinstance(raw.get("message"), str) and raw["message"].strip():
+        summary["message"] = raw["message"].strip()[:160]
     elif tool_name == "task" and isinstance(raw.get("prompt"), str):
         summary["prompt"] = raw["prompt"][:300]
     elif not summary:
         for k, v in raw.items():
+            if k == "kind":
+                continue
             summary[k] = v[:300] if isinstance(v, str) and len(v) > 300 else v
     return summary
 
@@ -1042,10 +1606,11 @@ def run_coding_turn(
     is_plan_turn: bool = False,
     has_active_plan: bool = False,
     temperature: float | None = None,
-    max_iterations: int = 35,
+    max_iterations: int = 50,
     on_progress: Callable[[list[dict[str, Any]]], None] | None = None,
     settings_path: str | None = None,
     persistence_dir: str | None = None,
+    task_query: str = "",
 ) -> tuple[str, list[dict[str, Any]]]:
     """Run an in-process OpenHands Conversation as the active Program and return `(final_text, tool_pairs)`."""
     from tools import tools as tools_mod
@@ -1075,6 +1640,7 @@ def run_coding_turn(
         Tool(name=GrepTool.name),
         Tool(name=GlobTool.name),
         Tool(name=TerminalTool.name),
+        Tool(name=TaskTrackerTool.name),
         Tool(name=WebSearchTool.name),
         Tool(name=ReadWebpageTool.name),
         Tool(name=HttpProbeTool.name),
@@ -1107,13 +1673,24 @@ def run_coding_turn(
         )
     else:
         suffix_parts.append(
-            "Follow workspace AGENTS.md rules: trace call sites before editing, keep edits consolidated, "
-            "verify touched code via `terminal` (`" + workspace_python(cwd) + "` / `node --test`), "
+            "Verify touched code via `terminal` (`" + workspace_python(cwd) + "` / `node --test`), "
             "and call `finish` with your concise user-facing response in character."
+        )
+    from core.program_config import load_agents_md
+
+    agents_md = load_agents_md(cwd)
+    if agents_md:
+        suffix_parts.append(f"# WORKSPACE AGENTS.MD\n{agents_md}")
+    if persona and persona.strip():
+        suffix_parts.append(
+            "# COMPANION VOICE (apply ONLY to your final `finish` message and `ask_user` questions; "
+            "during tool calls, act as a direct, decisive software engineer — once you locate the target code, "
+            "edit it immediately with `file_editor` rather than over-exploring)\n"
+            + persona.strip()
         )
 
     disabled_skills = compute_disabled_project_skills(
-        cwd, clean_task, focus_path=focus_rel, subagent_name=subagent or None
+        cwd, task_query.strip() or clean_task, focus_path=focus_rel, subagent_name=subagent or None
     )
     agent_context = AgentContext(
         system_message_suffix="\n".join(suffix_parts),
@@ -1124,10 +1701,10 @@ def run_coding_turn(
 
     agent = Agent(
         llm=active_llm,
-        persona=persona.strip() or None,
+        persona=None,
         tools=agent_tools,
         agent_context=agent_context,
-        condenser=LLMSummarizingCondenser(llm=fast_llm, max_size=60, keep_first=4),
+        condenser=LLMSummarizingCondenser(llm=fast_llm, max_size=240, keep_first=4),
     )
 
     cancel_event = threading.Event()
@@ -1144,7 +1721,7 @@ def run_coding_turn(
             if call_id in seen_calls:
                 return
             seen_calls.add(call_id)
-            t_name = f"openhands:{event.tool_name}"
+            t_name = str(event.tool_name or "tool")
             args = _summarize_action_args(event.tool_name, event.action)
             pending_args[call_id] = args
             if session_id:
@@ -1174,7 +1751,7 @@ def run_coding_turn(
             is_err = bool(isinstance(event, UserRejectObservation) or is_agent_err or getattr(obs, "is_error", False))
             if is_err and out_text:
                 last_error = out_text
-            t_name = f"openhands:{getattr(event, 'tool_name', 'error')}"
+            t_name = str(getattr(event, "tool_name", "error") or "error")
             args = pending_args.pop(call_id, {})
 
             if session_id:
@@ -1207,35 +1784,46 @@ def run_coding_turn(
                 except Exception:
                     pass
 
+    max_steps = max(5, int(max_iterations))
     conv_kwargs: dict[str, Any] = {
         "agent": agent,
         "workspace": cwd,
         "callbacks": [on_event],
         "visualizer": None,
         "stuck_detection": True,
-        "max_iteration_per_run": max(5, int(max_iterations)),
+        "max_iteration_per_run": max_steps,
         "delete_on_close": not bool(persistence_dir),
     }
     if persistence_dir:
         os.makedirs(persistence_dir, exist_ok=True)
         conv_kwargs["persistence_dir"] = persistence_dir
 
-    conversation = Conversation(**conv_kwargs)
-    use_always_confirm = is_plan_turn or cfg["security_preset"] == "ask_always"
-    conversation.set_confirmation_policy(AlwaysConfirm() if use_always_confirm else NeverConfirm())
-
-    run_entry = {"conv": conversation, "cancel_event": cancel_event}
-    _register_run(session_id, run_entry)
     try:
         from runners.runner import cancelled_sessions
     except Exception:
         cancelled_sessions = set()
 
+    conversation: Any = None
+    run_entry: dict[str, Any] | None = None
     final_text = ""
     exec_status = ConversationExecutionStatus.FINISHED
     try:
+        conversation = Conversation(**conv_kwargs)
+        use_always_confirm = is_plan_turn or cfg["security_preset"] == "ask_always"
+        conversation.set_confirmation_policy(AlwaysConfirm() if use_always_confirm else NeverConfirm())
+
+        run_entry = {"conv": conversation, "cancel_event": cancel_event}
+        _register_run(session_id, run_entry)
         conversation.send_message(clean_task)
+        step_count = 0
+        readonly_streak = 0
         while not cancel_event.is_set() and not (session_id and session_id in cancelled_sessions):
+            step_count += 1
+            if step_count > max_steps:
+                exec_status = ConversationExecutionStatus.ERROR
+                last_error = f"Agent reached maximum step limit ({max_steps}) without calling finish."
+                break
+
             conversation.run()
             if cancel_event.is_set() or (session_id and session_id in cancelled_sessions):
                 raise InterruptedError("Coding session cancelled by user request.")
@@ -1245,6 +1833,14 @@ def run_coding_turn(
                 pending = ConversationState.get_unmatched_actions(conversation.state.events)
                 mutating = [act for act in pending if not is_readonly_action(act)]
                 if not mutating:
+                    readonly_streak += 1
+                    if not is_plan_turn and max_steps >= 20 and readonly_streak >= 12:
+                        readonly_streak = 0
+                        conversation.reject_pending_actions(
+                            "Exploration limit reached (12 consecutive read-only batches without editing). "
+                            "Stop searching — apply your changes now with `file_editor`, run targeted verification "
+                            "via `terminal`, and call `finish` (or call `finish` directly if no edit is required)."
+                        )
                     continue
                 if is_plan_turn:
                     bad = "; ".join(
@@ -1257,10 +1853,11 @@ def run_coding_turn(
                     )
                     continue
 
+                readonly_streak = 0
                 approved_all = True
                 for act in mutating:
                     details = json.dumps(_summarize_action_args(act.tool_name, act.action), ensure_ascii=False)
-                    if not tools_mod.confirm_tool_execution(f"openhands:{act.tool_name}", details):
+                    if not tools_mod.confirm_tool_execution(str(act.tool_name or "tool"), details):
                         approved_all = False
                         break
                 if cancel_event.is_set() or (session_id and session_id in cancelled_sessions):
@@ -1274,7 +1871,7 @@ def run_coding_turn(
                 choice = tools_mod.request_user_choice(
                     question=pending_ask.question,
                     options=list(pending_ask.option_labels),
-                    tool_name="openhands:ask_user",
+                    tool_name="ask_user",
                 )
                 u_idx = choice.get("option_index")
                 u_txt = str(choice.get("answer_text") or "").strip() or None
@@ -1296,11 +1893,13 @@ def run_coding_turn(
             raise InterruptedError("Coding session cancelled by user request.") from exc
         return f"Error: [OpenHands] {type(exc).__name__}: {exc}", recorded_pairs
     finally:
-        _unregister_run(session_id, run_entry)
-        try:
-            conversation.close()
-        except Exception:
-            pass
+        if run_entry is not None:
+            _unregister_run(session_id, run_entry)
+        if conversation is not None:
+            try:
+                conversation.close()
+            except Exception:
+                pass
 
     if cancel_event.is_set() or (session_id and session_id in cancelled_sessions):
         raise InterruptedError("Coding session cancelled by user request.")

@@ -8,6 +8,11 @@ import { createAppShell } from '../web/app/_layout.js';
 import { mountActivityScreen } from '../web/app/activity.js';
 import { mountBrowserScreen } from '../web/app/browser.js';
 import { mountComposeModal, publishOrganicPost } from '../web/app/composeModal.js';
+import {
+  CROSSPOST_IMAGE_MAX_BYTES,
+  shouldShrinkImageBlob,
+  shrinkImageBlobForCrosspost,
+} from '../web/app/crosspostImageResize.js';
 import { mountFeedScreen } from '../web/app/feed.js';
 import { mountMessagesScreen } from '../web/app/messages.js';
 import { renderPostThreadView } from '../web/app/postThread.js';
@@ -2811,6 +2816,165 @@ test('PostCard grays out and disables reaction and share buttons when authStore 
     assert.equal(card.querySelector('.post-action-sanctuary').dataset.needsUnlock, undefined);
   } finally {
     resetAuthStoreForTests();
+    dom.restore();
+  }
+});
+
+test('crosspostImageResize shrinks >950KB images via canvas/JPEG ladder, skips small/GIF/video blobs, and covers cross-posts and Mastodon replies', async () => {
+  const smallPng = new Blob([new Uint8Array(120_000)], { type: 'image/png' });
+  const bigGif = new Blob([new Uint8Array(1_300_000)], { type: 'image/gif' });
+  const bigVideo = new Blob([new Uint8Array(2_000_000)], { type: 'video/mp4' });
+  assert.equal(shouldShrinkImageBlob(smallPng), false);
+  assert.equal(shouldShrinkImageBlob(bigGif), false);
+  assert.equal(shouldShrinkImageBlob(bigVideo), false);
+  assert.equal(await shrinkImageBlobForCrosspost(smallPng), smallPng);
+  assert.equal(await shrinkImageBlobForCrosspost(bigGif), bigGif);
+  assert.equal(await shrinkImageBlobForCrosspost(bigVideo), bigVideo);
+
+  const dom = installMockDom();
+  const prevCreateObjectUrl = globalThis.URL.createObjectURL;
+  const prevRevokeObjectUrl = globalThis.URL.revokeObjectURL;
+  const prevFetch = globalThis.fetch;
+  const origCreateElement = dom.document.createElement.bind(dom.document);
+
+  const revokedUrls = [];
+  const encodeCalls = [];
+  let drawnDims = null;
+  let fillColor = null;
+
+  globalThis.URL.createObjectURL = () => 'blob:sanctuary-test/big-img';
+  globalThis.URL.revokeObjectURL = (url) => {
+    revokedUrls.push(url);
+  };
+
+  dom.document.createElement = (tag, ...rest) => {
+    const lower = String(tag || '').toLowerCase();
+    if (lower === 'img') {
+      const img = origCreateElement('img', ...rest);
+      img.naturalWidth = 3200;
+      img.naturalHeight = 2400;
+      let srcVal = '';
+      Object.defineProperty(img, 'src', {
+        configurable: true,
+        get: () => srcVal,
+        set: (v) => {
+          srcVal = v;
+          queueMicrotask(() => img.onload?.());
+        },
+      });
+      return img;
+    }
+    if (lower === 'canvas') {
+      const canvas = origCreateElement('canvas', ...rest);
+      canvas.getContext = () => ({
+        set fillStyle(val) {
+          fillColor = val;
+        },
+        fillRect: () => {},
+        drawImage: (_img, _x, _y, w, h) => {
+          drawnDims = { w, h };
+        },
+      });
+      canvas.toBlob = (cb, mime, quality) => {
+        encodeCalls.push({ mime, quality });
+        const size = quality >= 0.8 ? 1_100_000 : 620_000;
+        cb(new Blob([new Uint8Array(size)], { type: mime }));
+      };
+      return canvas;
+    }
+    return origCreateElement(tag, ...rest);
+  };
+
+  try {
+    resetMemoryStorageForTests();
+    resetAuthStoreForTests();
+
+    const bigPng = new Blob([new Uint8Array(1_400_000)], { type: 'image/png' });
+    assert.equal(shouldShrinkImageBlob(bigPng), true);
+
+    const shrunk = await shrinkImageBlobForCrosspost(bigPng);
+    assert.equal(shrunk.size, 620_000);
+    assert.ok(shrunk.size <= CROSSPOST_IMAGE_MAX_BYTES);
+    assert.equal(shrunk.type, 'image/jpeg');
+    assert.deepEqual(drawnDims, { w: 2048, h: 1536 });
+    assert.equal(fillColor, '#ffffff');
+    assert.deepEqual(encodeCalls.map((c) => c.quality), [0.85, 0.7]);
+    assert.deepEqual(revokedUrls, ['blob:sanctuary-test/big-img']);
+
+    await upsertSocialAccount(
+      {
+        id: 'fediverse:alice@mastodon.social',
+        platform: 'fediverse',
+        instanceUrl: 'https://mastodon.social',
+        handle: 'alice',
+        acct: 'alice@mastodon.social',
+        displayName: 'Alice',
+        userId: '1',
+      },
+      { accessToken: 'tok_fedi' }
+    );
+    await upsertSocialAccount(
+      {
+        id: 'bluesky:did:plc:123',
+        platform: 'bluesky',
+        serviceUrl: 'https://bsky.social',
+        did: 'did:plc:123',
+        handle: 'alice.bsky.social',
+        displayName: 'Alice Bsky',
+      },
+      { accessJwt: 'jwt_a', refreshJwt: 'jwt_r' }
+    );
+
+    const uploadedMastoSizes = [];
+    const uploadedBskySizes = [];
+    globalThis.fetch = async (url, init) => {
+      const target = String(url);
+      if (target.includes('/api/v2/media')) {
+        const uploadedFile = init?.body?.get?.('file');
+        uploadedMastoSizes.push(uploadedFile?.size ?? -1);
+        return new Response(JSON.stringify({ id: 'med_1', url: 'https://mastodon.social/media/1.jpg' }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      if (target.includes('/api/v1/statuses')) {
+        return new Response(JSON.stringify({ id: 'fedi_p1', content: '<p>ok</p>', account: { id: 'a1', acct: 'alice@mastodon.social' } }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      if (target.includes('com.atproto.repo.uploadBlob')) {
+        uploadedBskySizes.push(init?.body?.size ?? -1);
+        return new Response(JSON.stringify({ blob: { $type: 'blob', ref: { $link: 'bafy1' }, mimeType: 'image/jpeg', size: 620_000 } }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      if (target.includes('com.atproto.repo.createRecord')) {
+        return new Response(JSON.stringify({ uri: 'at://did:plc:123/app.bsky.feed.post/2', cid: 'cid_2' }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
+    };
+
+    const bigAtt = { file: bigPng, mimeType: 'image/png', altText: 'chart' };
+    await publishOrganicPost({ text: 'Crosspost pic', mediaAttachments: [bigAtt] });
+    await publishOrganicPost({
+      text: 'Reply pic',
+      mediaAttachments: [bigAtt],
+      replyTo: { id: 'mastodon:99', protocol: 'mastodon', _meta: { mastodon: { statusId: '99' } } },
+    });
+
+    assert.deepEqual(uploadedMastoSizes, [620_000, 620_000]);
+    assert.deepEqual(uploadedBskySizes, [620_000]);
+  } finally {
+    globalThis.URL.createObjectURL = prevCreateObjectUrl;
+    globalThis.URL.revokeObjectURL = prevRevokeObjectUrl;
+    globalThis.fetch = prevFetch;
+    resetAuthStoreForTests();
+    resetMemoryStorageForTests();
     dom.restore();
   }
 });

@@ -109,6 +109,33 @@ def verify_readonly_action_and_skills_filtering() -> None:
         except ValueError:
             pass
 
+    import time
+    from openhands.tools.glob.definition import GlobAction
+    from openhands.tools.grep.definition import GrepAction
+
+    assert "re" not in openhands_harness.__dict__
+    orig_cwd = os.getcwd()
+    grep_exec = openhands_harness.SanctuaryGrepExecutor(str(REPO_ROOT))
+    t0 = time.perf_counter()
+    grep_obs = grep_exec(GrepAction(pattern="upload_media"))
+    assert (time.perf_counter() - t0) < 5.0
+    assert not grep_obs.is_error
+    assert any(p.endswith("media.py") for p in grep_obs.matches), grep_obs.matches
+
+    glob_exec = openhands_harness.SanctuaryGlobExecutor(str(REPO_ROOT))
+    t1 = time.perf_counter()
+    glob_obs_1 = glob_exec(GlobAction(pattern="sanctuary/routes/social_bridge.py"))
+    assert (time.perf_counter() - t1) < 5.0
+    assert not glob_obs_1.is_error
+    assert any(p.endswith("social_bridge.py") for p in glob_obs_1.files), glob_obs_1.files
+
+    t2 = time.perf_counter()
+    glob_obs_2 = glob_exec(GlobAction(pattern="*.py", path=str(SANCTUARY_DIR / "core")))
+    assert (time.perf_counter() - t2) < 5.0
+    assert not glob_obs_2.is_error
+    assert any(p.endswith("openhands_harness.py") for p in glob_obs_2.files), glob_obs_2.files
+    assert os.getcwd() == orig_cwd
+
 
 def verify_plan_readonly_ask_always_and_isolate_worktree() -> None:
     tmp = Path(tempfile.mkdtemp(prefix="oh_inproc_"))
@@ -290,8 +317,60 @@ def verify_plan_readonly_ask_always_and_isolate_worktree() -> None:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def verify_grep_single_file_and_readonly_shell():
+    from openhands.tools.grep.definition import GrepAction
+
+    tmp = Path(tempfile.mkdtemp(prefix="sanctuary_grep_test_"))
+    try:
+        sample = tmp / "sample_media.py"
+        sample.write_text(
+            "def helper():\n    return 1\n\ndef upload_media(payload):\n    return payload\n",
+            encoding="utf-8",
+        )
+        executor = openhands_harness.SanctuaryGrepExecutor(str(tmp))
+        obs = executor(GrepAction(pattern="upload_media", path=str(sample)))
+        assert not obs.is_error, obs.text
+        assert str(sample.resolve()) in obs.matches
+        assert "L4: def upload_media(payload):" in obs.text, obs.text
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    assert openhands_harness._is_readonly_shell_cmd(
+        'grep -n "upload_media\\|def upload" "C:/LLM/LM-Sanctuary/sanctuary/routes/media.py" | head -40'
+    )
+    assert openhands_harness._is_readonly_shell_cmd("sed -n '440,470p' \"web/app/postThread.js\"")
+    assert openhands_harness._is_readonly_shell_cmd('ls "web/utils" 2>/dev/null')
+    assert not openhands_harness._is_readonly_shell_cmd("sed -i 's/a/b/' file.js")
+    assert not openhands_harness._is_readonly_shell_cmd("echo hi > out.txt")
+    assert not openhands_harness._is_readonly_shell_cmd("rm -rf tmp")
+
+    skill_ev = type("ActionEv", (), {"tool_name": "invoke_skill", "action": None})()
+    assert openhands_harness.is_readonly_action(skill_ev)
+
+    from core import program_config
+    from openhands.sdk import LLM, Agent, AgentContext, Tool
+    from openhands.tools.file_editor import FileEditorTool
+
+    voice = program_config.compile_coding_voice_instructions("sebile")
+    assert "Sebile" in voice
+    assert "[list_tools" not in voice
+    assert "## APPEARANCE" not in voice
+
+    dummy_llm = LLM(model="openai/glm-5.3", api_key="sk-test", base_url="https://api.greenpt.ai/v1", stream=False)
+    agent = Agent(
+        llm=dummy_llm,
+        persona=None,
+        tools=[Tool(name=FileEditorTool.name)],
+        agent_context=AgentContext(system_message_suffix=f"# COMPANION VOICE\n{voice}"),
+    )
+    assert "<EFFICIENCY>" in agent.static_system_message
+    assert "<FILE_SYSTEM_GUIDELINES>" in agent.static_system_message
+    assert "COMPANION VOICE" in (agent.agent_context.system_message_suffix or "")
+
+
 if __name__ == "__main__":
     verify_in_process_architecture_and_cleanup()
     verify_readonly_action_and_skills_filtering()
     verify_plan_readonly_ask_always_and_isolate_worktree()
+    verify_grep_single_file_and_readonly_shell()
     print("ALL test_openhands_bridge CHECKS PASSED")

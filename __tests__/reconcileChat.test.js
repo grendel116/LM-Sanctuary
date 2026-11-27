@@ -577,6 +577,7 @@ test('ToolApprovalCard renders interactive choice buttons when ask_user escalate
     dom.document.body.appendChild(card);
 
     assert.equal(card.querySelector('.tool-approval-badge')?.textContent, 'Decision Requested');
+    assert.equal(card.querySelector('.tool-approval-name')?.textContent, 'Question');
     const optBtns = card.querySelectorAll('.tool-choice-option-btn');
     assert.equal(optBtns.length, 2);
     optBtns[1].click();
@@ -589,9 +590,84 @@ test('ToolApprovalCard renders interactive choice buttons when ask_user escalate
       answer_text: 'Self-hosted Forgejo',
     });
     assert.equal(resolvedStatus, 'approved');
+
+    const termCard = createToolApprovalCard({
+      callId: 'term_42',
+      kind: 'approval',
+      toolName: 'openhands:terminal',
+      details: JSON.stringify({ command: 'pytest -q', kind: 'TerminalAction' }),
+    });
+    assert.equal(termCard.querySelector('.tool-approval-name')?.textContent, 'Terminal');
+    assert.equal(termCard.querySelector('.tool-approval-details')?.textContent, 'pytest -q');
   } finally {
     connectionStore.set({ nodeUrl: prevNodeUrl });
     globalThis.fetch = origFetch;
+    dom.restore();
+  }
+});
+
+test('renderLiveToolLogs formats grep, glob, invoke_skill, sed, and strips openhands: prefix', () => {
+  const dom = installMockDom();
+  try {
+    const bubble = dom.document.createElement('div');
+    bubble.className = 'message program';
+
+    renderLiveToolLogs(bubble, [
+      {
+        id: 'g1',
+        name: 'grep',
+        args: { pattern: 'uploadMedia', path: 'C:/LLM/LM-Sanctuary/web', include: '*.js' },
+        status: 'done',
+        duration: 0.25,
+        response: 'Found 3 file(s) containing pattern ...',
+      },
+      {
+        id: 'gl1',
+        name: 'glob',
+        args: { pattern: '**/*.js', path: 'C:/LLM/LM-Sanctuary/web/queries' },
+        status: 'done',
+        duration: 0.12,
+        response: 'Found 5 file(s) matching pattern ...',
+      },
+      {
+        id: 'sk1',
+        name: 'openhands:invoke_skill',
+        args: { name: 'sanctuary-architecture' },
+        status: 'done',
+        duration: 0.04,
+      },
+      {
+        id: 't1',
+        name: 'terminal',
+        args: { command: 'grep -n "upload_media\\|def upload" "C:/LLM/LM-Sanctuary/sanctuary/routes/media.py" | head -40' },
+        status: 'done',
+        duration: 0.1,
+      },
+      {
+        id: 't2',
+        name: 'terminal',
+        args: { command: "sed -n '440,470p' \"C:/LLM/LM-Sanctuary/web/app/postThread.js\"" },
+        status: 'done',
+        duration: 0.08,
+      },
+    ]);
+
+    assert.doesNotMatch(bubble.textContent, /openhands:/i);
+    const actions = Array.from(bubble.querySelectorAll('.ag-log-action')).map((el) => el.textContent);
+    const targets = Array.from(bubble.querySelectorAll('.ag-log-target')).map((el) => el.textContent);
+    const suffixes = Array.from(bubble.querySelectorAll('.ag-log-suffix')).map((el) => el.textContent);
+
+    assert.ok(actions.includes('Searched'));
+    assert.ok(actions.includes('Matched'));
+    assert.ok(actions.includes('Loaded skill'));
+    assert.ok(targets.some((t) => t === '"uploadMedia" in web (*.js)'));
+    assert.ok(targets.some((t) => t === '**/*.js in queries'));
+    assert.ok(targets.some((t) => t === 'sanctuary-architecture'));
+    assert.ok(targets.some((t) => t === 'search "upload_media|def upload" in media.py'));
+    assert.ok(targets.some((t) => t === 'read postThread.js #L440-470'));
+    assert.ok(suffixes.some((s) => s.includes('3 files')));
+    assert.ok(suffixes.some((s) => s.includes('5 files')));
+  } finally {
     dom.restore();
   }
 });

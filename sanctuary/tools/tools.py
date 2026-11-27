@@ -323,7 +323,7 @@ def confirm_tool_execution(tool_name: str, details: str) -> bool:
         'session_id': sess_id,
     }
     
-    timeout = 90.0  # Allow up to 90 seconds for confirmation
+    timeout = 300.0  # Allow up to 5 minutes for human confirmation
     event.wait(timeout)
     
     info = pending_tool_calls.get(call_id)
@@ -344,7 +344,7 @@ def confirm_tool_execution(tool_name: str, details: str) -> bool:
 def request_user_choice(
     question: str,
     options: list[str] | None = None,
-    tool_name: str = "openhands:ask_user",
+    tool_name: str = "ask_user",
     timeout: float = 120.0,
 ) -> dict:
     """Surface an interactive multiple-choice question card in the active Sanctuary chat session."""

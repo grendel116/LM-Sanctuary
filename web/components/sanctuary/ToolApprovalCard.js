@@ -5,6 +5,54 @@ import {
 } from '../../queries/sanctuary.js';
 import { renderLiveToolLogs } from './MessageRow.js';
 
+const APPROVAL_TOOL_TITLES = Object.freeze({
+  terminal: 'Terminal',
+  file_editor: 'File Editor',
+  ask_user: 'Question',
+  invoke_skill: 'Load Skill',
+  task: 'Subagent',
+});
+
+function formatApprovalToolTitle(cleanToolName) {
+  return APPROVAL_TOOL_TITLES[cleanToolName] || cleanToolName.replace(/_/g, ' ');
+}
+
+function formatApprovalDetails(cleanToolName, details) {
+  if (details === null || details === undefined) return '';
+  let parsed = null;
+  if (typeof details === 'object' && !Array.isArray(details)) {
+    parsed = { ...details };
+  } else if (typeof details === 'string') {
+    const trimmed = details.trim();
+    if (trimmed.startsWith('{')) {
+      try {
+        const obj = JSON.parse(trimmed);
+        if (obj && typeof obj === 'object' && !Array.isArray(obj)) {
+          parsed = { ...obj };
+        }
+      } catch {
+        // Keep raw string when not valid JSON
+      }
+    }
+    if (!parsed) return details;
+  } else {
+    return String(details);
+  }
+
+  if (cleanToolName === 'terminal' && typeof parsed.command === 'string') {
+    return parsed.command;
+  }
+  if (cleanToolName === 'file_editor' && parsed.path) {
+    const cmd = String(parsed.command || 'edit');
+    const added = Number(parsed.file_lines || parsed.new_lines || 0);
+    const removed = Number(parsed.old_lines || 0);
+    const diff = added || removed ? ` (+${added} -${removed})` : '';
+    return `${cmd}: ${parsed.path}${diff}`;
+  }
+  delete parsed.kind;
+  return JSON.stringify(parsed, null, 2);
+}
+
 /**
  * Inline Human-in-the-Loop approval card mounted inside the live Program thread
  * whenever a mutation or shell tool awaits explicit confirmation.
@@ -22,6 +70,7 @@ export function createToolApprovalCard({
     ? options.map((o) => String(o || '').trim()).filter(Boolean)
     : [];
   const isChoice = kind === 'choice' || choiceOptions.length > 0;
+  const cleanToolName = String(toolName || (isChoice ? 'ask_user' : 'tool')).replace(/^(?:openhands|antigravity):/i, '');
 
   const card = doc.createElement('div');
   card.className = `tool-approval-card${isChoice ? ' tool-choice-card' : ''}`;
@@ -30,8 +79,8 @@ export function createToolApprovalCard({
   card.setAttribute(
     'aria-label',
     isChoice
-      ? `Decision requested for ${toolName || 'agent'}`
-      : `Tool approval required for ${toolName || 'tool'}`
+      ? `Decision requested for ${cleanToolName}`
+      : `Tool approval required for ${cleanToolName}`
   );
 
   const header = doc.createElement('div');
@@ -43,7 +92,7 @@ export function createToolApprovalCard({
 
   const nameEl = doc.createElement('strong');
   nameEl.className = 'tool-approval-name';
-  nameEl.textContent = String(toolName || 'tool');
+  nameEl.textContent = formatApprovalToolTitle(cleanToolName);
 
   header.appendChild(badge);
   header.appendChild(nameEl);
@@ -51,7 +100,7 @@ export function createToolApprovalCard({
 
   const pre = doc.createElement('pre');
   pre.className = 'tool-approval-details';
-  pre.textContent = typeof details === 'string' ? details : JSON.stringify(details || {}, null, 2);
+  pre.textContent = formatApprovalDetails(cleanToolName, details);
   card.appendChild(pre);
 
   const interactiveControls = [];

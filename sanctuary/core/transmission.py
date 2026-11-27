@@ -101,6 +101,7 @@ class TransmissionController:
         is_proceed_turn: bool = False,
         active_story_mode: bool = False,
         prior_tool_error: bool = False,
+        prior_coding_turn: bool = False,
         has_active_research: bool = False,
         has_active_plan: bool = False,
         routing_policy: str = "auto",
@@ -110,6 +111,7 @@ class TransmissionController:
         self.is_proceed_turn = bool(is_proceed_turn)
         self.active_story_mode = bool(active_story_mode)
         self.prior_tool_error = bool(prior_tool_error)
+        self.prior_coding_turn = bool(prior_coding_turn)
         self.has_active_research = bool(has_active_research)
         self.has_active_plan = bool(has_active_plan)
         self.routing_policy = (routing_policy or "auto").strip().lower()
@@ -147,8 +149,9 @@ class TransmissionController:
         if self.utterance:
             scores = score_utterance_pedals(self.utterance)
             casual_score = scores.get("casual", 0.0)
+            coding_score = scores.get("coding_intent", 0.0)
             candidates = (
-                ("coding_intent", "deep", scores.get("coding_intent", 0.0)),
+                ("coding_intent", "deep", coding_score),
                 ("urgency_or_correction", "deep", scores.get("urgency_or_correction", 0.0)),
                 ("complex_topic", "deep", scores.get("complex_topic", 0.0)),
                 ("accuracy_or_research", "fast", scores.get("accuracy_or_research", 0.0)),
@@ -157,11 +160,21 @@ class TransmissionController:
             if best_score >= 0.42 and (best_score - casual_score) >= 0.08:
                 self.throttle_tier = best_tier
                 self.throttle_reason = best_reason
-                if best_reason == "coding_intent":
+                if best_reason == "coding_intent" or (
+                    self.prior_coding_turn and best_reason in ("urgency_or_correction", "complex_topic")
+                ):
                     self.coding_engaged = True
+                    self.throttle_tier = "deep"
                 elif best_reason == "urgency_or_correction":
                     self.kickdown = True
                 return
+            if self.prior_coding_turn:
+                is_casual_pivot = casual_score >= 0.48 and (casual_score - coding_score) >= 0.25
+                if not is_casual_pivot:
+                    self.throttle_tier = "deep"
+                    self.throttle_reason = "coding_followup"
+                    self.coding_engaged = True
+                    return
 
         if self.has_active_research:
             self.throttle_tier = "fast"
